@@ -164,7 +164,7 @@ mod tests {
     use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_Gaussian_accuracy() {
+    fn test_gaussian_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
@@ -178,7 +178,7 @@ mod tests {
         };
         let input = GaussianInput::new(close_prices, params);
 
-        let Gaussian_result =
+        let gaussian_result =
             calculate_gaussian(&input).expect("Failed to calculate Gaussian filter");
 
         let expected_last_five = [
@@ -189,11 +189,11 @@ mod tests {
             59085.36983209433,
         ];
 
-        let len = Gaussian_result.values.len();
+        let len = gaussian_result.values.len();
         assert!(len >= 5, "Not enough Gaussian filter values for the test");
 
         let start_index = len - 5;
-        let last_five = &Gaussian_result.values[start_index..];
+        let last_five = &gaussian_result.values[start_index..];
 
         for (i, &val) in last_five.iter().enumerate() {
             let exp = expected_last_five[i];
@@ -207,7 +207,7 @@ mod tests {
         }
 
         let skip = input.get_poles();
-        for val in Gaussian_result.values.iter().skip(skip) {
+        for val in gaussian_result.values.iter().skip(skip) {
             assert!(
                 val.is_finite(),
                 "Gaussian output should be finite once settled."

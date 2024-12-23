@@ -27,7 +27,7 @@ use my_project::indicators::{
     highpass::{calculate_highpass, HighPassInput},
     highpass_2_pole::{calculate_high_pass_2_pole, HighPass2Input},
     hma::{calculate_hma, HmaInput},
-    ht_trendline::{calculate_ehlers_itrend, EhlersITrendInput},
+    ht_trendline::{calculate_ht_trendline, EhlersITrendInput},
     jma::{calculate_jma, JmaInput},
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
@@ -68,7 +68,7 @@ fn benchmark_indicators(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("HT_TRENDLINE", 0), |b| {
         let input = EhlersITrendInput::with_default_params(close_prices);
         b.iter(|| {
-            calculate_ehlers_itrend(black_box(&input)).expect("Failed to calculate HT_TRENDLINE")
+            calculate_ht_trendline(black_box(&input)).expect("Failed to calculate HT_TRENDLINE")
         })
     });
 
@@ -91,7 +91,7 @@ fn benchmark_indicators(c: &mut Criterion) {
     });
 
     // High Pass 2 Pole
-    group.bench_function(BenchmarkId::new("HIGHPASS2", 0), |b| {
+    group.bench_function(BenchmarkId::new("HIGHPASS_2Pole", 0), |b| {
         let input = HighPass2Input::with_default_params(close_prices);
         b.iter(|| {
             calculate_high_pass_2_pole(black_box(&input)).expect("Failed to calculate HIGHPASS2")
@@ -99,7 +99,7 @@ fn benchmark_indicators(c: &mut Criterion) {
     });
 
     // High Pass
-    group.bench_function(BenchmarkId::new("HIGHPASS", 0), |b| {
+    group.bench_function(BenchmarkId::new("HIGHPASS_1Pole", 0), |b| {
         let input = HighPassInput::with_default_params(close_prices);
         b.iter(|| calculate_highpass(black_box(&input)).expect("Failed to calculate HIGHPASS"))
     });

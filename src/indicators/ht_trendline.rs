@@ -54,7 +54,7 @@ pub struct EhlersITrendOutput {
     pub values: Vec<f64>,
 }
 
-pub fn calculate_ehlers_itrend(
+pub fn calculate_ht_trendline(
     input: &EhlersITrendInput,
 ) -> Result<EhlersITrendOutput, Box<dyn Error>> {
     let src = input.data;
@@ -67,11 +67,6 @@ pub fn calculate_ehlers_itrend(
     let max_dc = input.get_max_dc_period().max(1);
 
     let mut out_eit = vec![0.0; length];
-
-    #[inline(always)]
-    fn ring_idx(base: usize) -> usize {
-        base % 7
-    }
 
     let mut fir_buf = [0.0; 7];
     let mut det_buf = [0.0; 7];
@@ -233,7 +228,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let input = EhlersITrendInput::with_default_params(close_prices);
-        let eit_result = calculate_ehlers_itrend(&input).expect("EIT calculation failed");
+        let eit_result = calculate_ht_trendline(&input).expect("EIT calculation failed");
 
         assert!(
             eit_result.values.len() >= 5,
