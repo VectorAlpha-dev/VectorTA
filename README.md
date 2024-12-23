@@ -1,3 +1,3 @@
 # Rust-Backtester
 
-work-in progress
+work in progress
