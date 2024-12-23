@@ -16,8 +16,9 @@ impl Default for AoParams {
 }
 
 #[derive(Debug, Clone)]
+// Should use HL2 price input.
 pub struct AoInput<'a> {
-    pub data: &'a [f64],    // HL2 array
+    pub data: &'a [f64],
     pub params: AoParams,
 }
 
@@ -89,8 +90,8 @@ pub fn calculate_ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
 
         if i >= (long - 1) {
             let short_sma = short_sum / (short as f64);
-            let long_sma  = long_sum  / (long as f64);
-            ao_values[i]  = short_sma - long_sma;
+            let long_sma = long_sum / (long as f64);
+            ao_values[i] = short_sma - long_sma;
         }
     }
 
@@ -137,7 +138,10 @@ mod tests {
         }
 
         for val in result.values.iter().skip(input.get_long_period() - 1) {
-            assert!(val.is_finite(), "AO output should be finite at valid indices");
+            assert!(
+                val.is_finite(),
+                "AO output should be finite at valid indices"
+            );
         }
     }
 }

@@ -89,7 +89,6 @@ pub fn calculate_sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Err
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -50,7 +50,6 @@ pub fn calculate_highpass(input: &HighPassInput) -> Result<HighPassOutput, Box<d
         return Err("No data available for highpass calculation.".into());
     }
 
-    // Compute alpha
     let k = 1.0;
     let two_pi_k_div = 2.0 * PI * k / (period as f64);
     let sin_val = two_pi_k_div.sin();

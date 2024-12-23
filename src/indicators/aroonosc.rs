@@ -83,12 +83,9 @@ pub fn calculate_aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<
         let offset_highest = i - highest_idx;
         let offset_lowest = i - lowest_idx;
 
-        // Aroon Up = ((length - offset_highest)/length)*100
-        // Aroon Down = ((length - offset_lowest)/length)*100
         let up = (length as f64 - offset_highest as f64) * inv_length * 100.0;
         let down = (length as f64 - offset_lowest as f64) * inv_length * 100.0;
 
-        // Aroon Oscillator = up - down
         values[i] = up - down;
     }
 
@@ -107,7 +104,6 @@ mod tests {
         let input = AroonOscInput::with_default_params(&candles);
         let result = calculate_aroon_osc(&input).expect("Failed to calculate Aroon Osc");
 
-        // Provided test values for the last 5: -50.00, -50.00, -50.00, -50.00, -42.8571
         let expected_last_five = [-50.0, -50.0, -50.0, -50.0, -42.8571];
 
         assert!(result.values.len() >= 5, "Not enough Aroon Osc values");
@@ -125,7 +121,6 @@ mod tests {
         }
 
         let length = input.get_length();
-        // After length bars, should be finite if not NaN
         for val in result.values.iter().skip(length) {
             if !val.is_nan() {
                 assert!(

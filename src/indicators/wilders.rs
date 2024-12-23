@@ -7,9 +7,7 @@ pub struct WildersParams {
 
 impl Default for WildersParams {
     fn default() -> Self {
-        WildersParams {
-            period: Some(5),
-        }
+        WildersParams { period: Some(5) }
     }
 }
 
@@ -108,7 +106,8 @@ mod tests {
         let start_idx = out_vals.len() - 5;
         let actual_last_five = &out_vals[start_idx..];
 
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate()
+        for (i, (&actual, &expected)) in
+            actual_last_five.iter().zip(&expected_last_five).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(

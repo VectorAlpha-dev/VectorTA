@@ -27,9 +27,17 @@ name = "my_project"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = 3      # Maximum optimization level
-lto = false        # Enable link-time optimization
+lto = true
+opt-level = 3
 codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+lto = true
+opt-level = 3
+codegen-units = 1
+debug = false
+incremental = false
 
 [build]
 rustflags = ["-C", "target-cpu=native","-Z", "threads=16"]

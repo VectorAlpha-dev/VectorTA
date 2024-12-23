@@ -23,16 +23,24 @@ use my_project::indicators::{
     dema::{calculate_dema, DemaInput},
     ema::{calculate_ema, EmaInput},
     fwma::{calculate_fwma, FwmaInput},
+    gaussian::{calculate_gaussian, GaussianInput},
     highpass::{calculate_highpass, HighPassInput},
+    highpass_2_pole::{calculate_high_pass_2_pole, HighPass2Input},
     hma::{calculate_hma, HmaInput},
+    ht_trendline::{calculate_ehlers_itrend, EhlersITrendInput},
+    jma::{calculate_jma, JmaInput},
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
     mama::{calculate_mama, MamaInput},
+    reflex::{calculate_reflex, ReflexInput},
     rsi::{calculate_rsi, RsiInput},
     sinwma::{calculate_sinwma, SinWmaInput},
     sma::{calculate_sma, SmaInput},
-    t3::{calculate_t3, T3Input},
+    smma::{calculate_smma, SmmaInput},
+    supersmoother::{calculate_supersmoother, SuperSmootherInput},
+    supersmoother_3_pole::{calculate_supersmoother_3_pole, SuperSmoother3PoleInput},
     tema::{calculate_tema, TemaInput},
+    tilson::{calculate_t3, T3Input},
     trima::{calculate_trima, TrimaInput},
     wilders::{calculate_wilders, WildersInput},
     wma::{calculate_wma, WmaInput},
@@ -55,6 +63,69 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // HT Trendline
+    group.bench_function(BenchmarkId::new("HT_TRENDLINE", 0), |b| {
+        let input = EhlersITrendInput::with_default_params(close_prices);
+        b.iter(|| {
+            calculate_ehlers_itrend(black_box(&input)).expect("Failed to calculate HT_TRENDLINE")
+        })
+    });
+
+    // SMMA
+    group.bench_function(BenchmarkId::new("SMMA", 0), |b| {
+        let input = SmmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_smma(black_box(&input)).expect("Failed to calculate SMMA"))
+    });
+
+    // Reflex
+    group.bench_function(BenchmarkId::new("REFLEX", 0), |b| {
+        let input = ReflexInput::with_default_params(close_prices);
+        b.iter(|| calculate_reflex(black_box(&input)).expect("Failed to calculate REFLEX"))
+    });
+
+    // JMA
+    group.bench_function(BenchmarkId::new("JMA", 0), |b| {
+        let input = JmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_jma(black_box(&input)).expect("Failed to calculate JMA"))
+    });
+
+    // High Pass 2 Pole
+    group.bench_function(BenchmarkId::new("HIGHPASS2", 0), |b| {
+        let input = HighPass2Input::with_default_params(close_prices);
+        b.iter(|| {
+            calculate_high_pass_2_pole(black_box(&input)).expect("Failed to calculate HIGHPASS2")
+        })
+    });
+
+    // High Pass
+    group.bench_function(BenchmarkId::new("HIGHPASS", 0), |b| {
+        let input = HighPassInput::with_default_params(close_prices);
+        b.iter(|| calculate_highpass(black_box(&input)).expect("Failed to calculate HIGHPASS"))
+    });
+
+    // Gaussian
+    group.bench_function(BenchmarkId::new("GAUSSIAN", 0), |b| {
+        let input = GaussianInput::with_default_params(close_prices);
+        b.iter(|| calculate_gaussian(black_box(&input)).expect("Failed to calculate GAUSSIAN"))
+    });
+
+    // Super Smoother 3 Pole
+    group.bench_function(BenchmarkId::new("SUPERSMOOTHER3POLE", 0), |b| {
+        let input = SuperSmoother3PoleInput::with_default_params(close_prices);
+        b.iter(|| {
+            calculate_supersmoother_3_pole(black_box(&input))
+                .expect("Failed to calculate SUPERSMOOTHER3POLE")
+        })
+    });
+
+    // Super Smoother
+    group.bench_function(BenchmarkId::new("SUPERSMOOTHER", 0), |b| {
+        let input = SuperSmootherInput::with_default_params(close_prices);
+        b.iter(|| {
+            calculate_supersmoother(black_box(&input)).expect("Failed to calculate SUPERSMOOTHER")
+        })
+    });
 
     // SinWMA
     group.bench_function(BenchmarkId::new("SINWMA", 0), |b| {

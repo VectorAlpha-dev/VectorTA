@@ -20,7 +20,6 @@ pub struct Candles {
 }
 
 impl Candles {
-    // Constructor to create a new Candles instance
     pub fn new(
         timestamp: Vec<f64>,
         open: Vec<f64>,
@@ -41,7 +40,6 @@ impl Candles {
 
     pub fn select_candle_field(&self, field: &str) -> Result<&[f64], Box<dyn Error>> {
         match field.to_lowercase().as_str() {
-            // Standard fields return references (O(1) operation)
             "timestamp" => Ok(&self.timestamp),
             "open" => Ok(&self.open),
             "high" => Ok(&self.high),
@@ -62,7 +60,6 @@ impl Candles {
         }
     }
 
-    // Calculate HL2: (High + Low) / 2
     pub fn hl2(&self) -> Vec<f64> {
         self.high
             .iter()
@@ -71,7 +68,6 @@ impl Candles {
             .collect()
     }
 
-    // Calculate HLC3: (High + Low + Close) / 3
     pub fn hlc3(&self) -> Vec<f64> {
         self.high
             .iter()
@@ -81,7 +77,6 @@ impl Candles {
             .collect()
     }
 
-    // Calculate OHLC4: (Open + High + Low + Close) / 4
     pub fn ohlc4(&self) -> Vec<f64> {
         self.open
             .iter()
@@ -92,7 +87,6 @@ impl Candles {
             .collect()
     }
 
-    // Calculate HLCC4: (High + Low + Close + Close) / 4
     pub fn hlcc4(&self) -> Vec<f64> {
         self.high
             .iter()

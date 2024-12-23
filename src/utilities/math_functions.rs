@@ -34,8 +34,8 @@ pub fn fast_sin_f64(mut x: f64) -> f64 {
     } else if x > std::f64::consts::PI {
         x -= TWO_PI;
     }
-    const FOUROVERPI: f64 = 1.2732395447351627;      // 4 / π
-    const FOUROVERPISQ: f64 = 0.40528473456935109;   // 4 / π²
+    const FOUROVERPI: f64 = 1.2732395447351627;
+    const FOUROVERPISQ: f64 = 0.40528473456935109;
     const Q: f64 = 0.77633023248007499;
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();

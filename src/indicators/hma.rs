@@ -55,13 +55,11 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         return Ok(HmaOutput { values });
     }
 
-    // floor(sqrt(period))
     let sqrtp = (period as f64).sqrt().floor() as usize;
     if sqrtp == 0 {
         return Ok(HmaOutput { values });
     }
 
-    // Precompute denominators for WMA
     let sum_w_half = (half * (half + 1)) >> 1;
     let denom_half = sum_w_half as f64;
 
@@ -78,11 +76,9 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
     let period_f = period as f64;
     let sqrtp_f = sqrtp as f64;
 
-    // Buffers for WMA half & full
     let mut wma_half = vec![f64::NAN; len];
     let mut wma_full = vec![f64::NAN; len];
 
-    // Prepare partial sums for half
     let mut period_sub_half = 0.0;
     let mut period_sum_half = 0.0;
     let mut in_idx = 0;
@@ -95,7 +91,6 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         i_half += 1;
     }
 
-    // Prepare partial sums for full
     let mut period_sub_full = 0.0;
     let mut period_sum_full = 0.0;
     let mut in_idx_full = 0;
@@ -108,25 +103,19 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         i_full += 1;
     }
 
-    // Start processing half & full
     if in_idx < len {
-        // finalize the WMA half at index = lookback_half
         let val = data[in_idx];
         in_idx += 1;
         period_sub_half += val;
         period_sum_half += val * half_f;
 
-        // store it
         wma_half[lookback_half] = period_sum_half / denom_half;
-        // pop the sums
         period_sum_half -= period_sub_half;
 
-        // trailing
         let mut trailing_idx_half = 1;
         let mut trailing_value_half = data[0];
 
         if in_idx_full < len {
-            // finalize the WMA full at index = lookback_full
             let valf = data[in_idx_full];
             in_idx_full += 1;
             period_sub_full += valf;
@@ -138,9 +127,7 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
             let mut trailing_idx_full = 1;
             let mut trailing_value_full = data[0];
 
-            // Main loop: keep updating half & full
             while in_idx < len || in_idx_full < len {
-                // WMA half
                 if in_idx < len {
                     let new_val = data[in_idx];
                     in_idx += 1;
@@ -156,7 +143,6 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
                     period_sum_half -= period_sub_half;
                 }
 
-                // WMA full
                 if in_idx_full < len {
                     let new_valf = data[in_idx_full];
                     in_idx_full += 1;
@@ -175,18 +161,15 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         }
     }
 
-    // Now diff = 2*wma_half - wma_full
     let mut diff = vec![f64::NAN; len];
     for i in 0..len {
         let a = wma_half[i];
         let b = wma_full[i];
-        // If your data is guaranteed finite, remove these checks:
         if a.is_finite() && b.is_finite() {
             diff[i] = 2.0 * a - b;
         }
     }
 
-    // WMA of diff with sqrtp
     let mut wma_sqrt = vec![f64::NAN; len];
     {
         let lookback_sqrt = sqrtp - 1;
@@ -195,7 +178,6 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         let mut in_idx_sqrt = 0;
         let mut i_s = 1;
 
-        // Prefill sqrt WMA window
         while in_idx_sqrt < lookback_sqrt {
             let val = diff[in_idx_sqrt];
             if val.is_finite() {
@@ -251,7 +233,6 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         }
     }
 
-    // Final HMA output
     for i in 0..len {
         values[i] = wma_sqrt[i];
     }

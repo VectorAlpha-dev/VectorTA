@@ -1,6 +1,6 @@
+use crate::utilities::math_functions::atan64;
 use std::error::Error;
 use std::f64::consts::PI;
-use crate::utilities::math_functions::atan64;
 
 #[derive(Debug, Clone)]
 pub struct MamaParams {

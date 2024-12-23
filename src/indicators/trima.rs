@@ -7,7 +7,6 @@ pub struct TrimaParams {
 
 impl Default for TrimaParams {
     fn default() -> Self {
-        // Default to a 14-period TRIMA if not specified
         TrimaParams { period: Some(14) }
     }
 }
@@ -144,7 +143,6 @@ mod tests {
         let input = TrimaInput::new(close_prices, params);
         let trima_result = calculate_trima(&input).expect("Failed to calculate TRIMA");
 
-        // Corrected test values
         let expected_last_five_trima = [
             59957.916666666664,
             59846.770833333336,
@@ -171,7 +169,6 @@ mod tests {
             );
         }
 
-        // Test default params (14)
         let default_input = TrimaInput::with_default_params(close_prices);
         let default_trima_result =
             calculate_trima(&default_input).expect("Failed to calculate TRIMA with defaults");

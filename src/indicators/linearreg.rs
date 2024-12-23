@@ -7,9 +7,7 @@ pub struct LinRegParams {
 
 impl Default for LinRegParams {
     fn default() -> Self {
-        Self {
-            period: Some(14),
-        }
+        Self { period: Some(14) }
     }
 }
 
@@ -80,8 +78,8 @@ pub fn calculate_linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Err
 
     for i in (period - 1)..size {
         let val = data[i];
-        xy += val * (period as f64); 
-        y  += val;
+        xy += val * (period as f64);
+        y += val;
 
         let b = (period_f * xy - x_f * y) * bd;
 
@@ -93,7 +91,6 @@ pub fn calculate_linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Err
         let oldest_idx = i - (period - 1);
         let oldest_val = data[oldest_idx];
         y -= oldest_val;
-
     }
 
     Ok(LinRegOutput { values })
@@ -115,7 +112,8 @@ mod tests {
         let params = LinRegParams { period: Some(14) };
         let input = LinRegInput::new(&close_prices, params);
 
-        let linreg_result = calculate_linreg(&input).expect("Failed to calculate Linear Regression");
+        let linreg_result =
+            calculate_linreg(&input).expect("Failed to calculate Linear Regression");
 
         let expected_last_five = [
             58929.37142857143,

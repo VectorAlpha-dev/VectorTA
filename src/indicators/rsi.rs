@@ -113,7 +113,6 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        // Specify a custom period
         let params = RsiParams { period: Some(14) };
         let input = RsiInput::new(close_prices, params);
         let rsi_result = calculate_rsi(&input).expect("Failed to calculate RSI");
