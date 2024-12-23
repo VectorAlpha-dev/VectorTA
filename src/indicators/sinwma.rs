@@ -65,7 +65,7 @@ pub fn calculate_sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Err
     let mut sum_sines = 0.0;
     for k in 0..period {
         let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
-        let val = angle.sin();
+        let val = fast_sin_f64(angle);
         sum_sines += val;
         sines.push(val);
     }
