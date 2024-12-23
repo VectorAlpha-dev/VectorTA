@@ -133,16 +133,14 @@ mod tests {
             power: Some(2),
         };
 
-        let input = JmaInput::new(&close_prices, jma_params);
+        let input = JmaInput::new(close_prices, jma_params);
         let jma_result = calculate_jma(&input).expect("Failed to calculate JMA");
 
-        let expected_last_five = vec![
-            59305.04794668568,
+        let expected_last_five = [59305.04794668568,
             59261.270455005455,
             59156.791263606865,
             59128.30656791065,
-            58918.89223153998,
-        ];
+            58918.89223153998];
 
         assert!(
             jma_result.values.len() >= 5,

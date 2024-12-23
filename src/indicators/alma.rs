@@ -115,10 +115,10 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let input = AlmaInput::with_default_params(&close_prices);
+        let input = AlmaInput::with_default_params(close_prices);
         let result = calculate_alma(&input).expect("Failed to calculate ALMA");
 
-        let expected_last_five = vec![59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];
+        let expected_last_five = [59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];
 
         assert!(
             result.values.len() >= 5,

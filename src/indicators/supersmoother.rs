@@ -96,7 +96,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SuperSmootherParams { period: Some(14) };
-        let input = SuperSmootherInput::new(&close_prices, params);
+        let input = SuperSmootherInput::new(close_prices, params);
 
         let result = calculate_supersmoother(&input).expect("Failed to calculate SuperSmoother");
         let out_vals = &result.values;

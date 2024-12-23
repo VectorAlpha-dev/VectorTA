@@ -92,7 +92,7 @@ pub fn calculate_sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Err
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::{read_candles_from_csv, Candles};
+    use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_sinwma_accuracy() {
@@ -103,16 +103,14 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SinWmaParams { period: Some(14) };
-        let input = SinWmaInput::new(&close_prices, params);
+        let input = SinWmaInput::new(close_prices, params);
         let sinwma_result = calculate_sinwma(&input).expect("Failed to calculate SINWMA");
 
-        let expected_last_five = vec![
-            59376.72903536103,
+        let expected_last_five = [59376.72903536103,
             59300.76862770367,
             59229.27622157621,
             59178.48781774477,
-            59154.66580703081,
-        ];
+            59154.66580703081];
 
         assert!(
             sinwma_result.values.len() >= 5,

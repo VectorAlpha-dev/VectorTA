@@ -106,7 +106,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SuperSmoother3PoleParams { period: Some(14) };
-        let input = SuperSmoother3PoleInput::new(&close_prices, params);
+        let input = SuperSmoother3PoleInput::new(close_prices, params);
 
         let result = calculate_supersmoother_3_pole(&input)
             .expect("Failed to calculate 3-pole SuperSmoother");

@@ -110,7 +110,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::new(&close_prices, params);
+        let input = LinRegInput::new(close_prices, params);
 
         let linreg_result =
             calculate_linreg(&input).expect("Failed to calculate Linear Regression");

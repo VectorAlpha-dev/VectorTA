@@ -123,7 +123,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = ReflexParams { period: Some(20) };
-        let input = ReflexInput::new(&close_prices, params);
+        let input = ReflexInput::new(close_prices, params);
 
         let result = calculate_reflex(&input).expect("Failed to calculate Reflex");
         let reflex_vals = &result.values;

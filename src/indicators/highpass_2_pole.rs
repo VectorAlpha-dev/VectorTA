@@ -98,7 +98,7 @@ pub fn calculate_high_pass_2_pole(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::{read_candles_from_csv, Candles};
+    use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_high_pass_2_pole_accuracy() {
@@ -112,17 +112,15 @@ mod tests {
             period: Some(48),
             k: Some(0.707),
         };
-        let input = HighPass2Input::new(&close_prices, params);
+        let input = HighPass2Input::new(close_prices, params);
         let result = calculate_high_pass_2_pole(&input)
             .expect("Failed to calculate 2-pole high pass filter");
 
-        let expected_last_five = vec![
-            445.29073821108943,
+        let expected_last_five = [445.29073821108943,
             359.51467478973296,
             250.7236793408186,
             394.04381266217234,
-            -52.65414073315134,
-        ];
+            -52.65414073315134];
 
         assert!(
             result.values.len() >= 5,

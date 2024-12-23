@@ -85,7 +85,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = WildersParams { period: Some(5) };
-        let input = WildersInput::new(&close_prices, params);
+        let input = WildersInput::new(close_prices, params);
 
         let wilder_result = calculate_wilders(&input).expect("Wilder's calculation failed");
         let out_vals = &wilder_result.values;
@@ -95,7 +95,7 @@ mod tests {
             59277.94525295273,
             59230.15620236219,
             59215.12496188975,
-            59103.09996951180,
+            59_103.099_969_511_8,
         ];
 
         assert!(
@@ -120,7 +120,7 @@ mod tests {
             );
         }
 
-        let default_input = WildersInput::with_default_params(&close_prices);
+        let default_input = WildersInput::with_default_params(close_prices);
         let default_output =
             calculate_wilders(&default_input).expect("Wilder's default calculation failed");
         assert!(

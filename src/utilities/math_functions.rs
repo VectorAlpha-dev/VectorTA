@@ -28,15 +28,15 @@ pub fn atan64(x: f64) -> f64 {
 #[inline]
 pub fn fast_sin_f64(mut x: f64) -> f64 {
     const TWO_PI: f64 = std::f64::consts::PI * 2.0;
-    x = x % TWO_PI;
+    x %= TWO_PI;
     if x < -std::f64::consts::PI {
         x += TWO_PI;
     } else if x > std::f64::consts::PI {
         x -= TWO_PI;
     }
     const FOUROVERPI: f64 = 1.2732395447351627;
-    const FOUROVERPISQ: f64 = 0.40528473456935109;
-    const Q: f64 = 0.77633023248007499;
+    const FOUROVERPISQ: f64 = 0.405_284_734_569_351_1;
+    const Q: f64 = 0.776_330_232_480_075;
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
 

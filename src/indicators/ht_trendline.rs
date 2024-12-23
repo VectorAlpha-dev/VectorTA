@@ -202,8 +202,8 @@ pub fn calculate_ehlers_itrend(
         let eit_val = if i < warmup_bars {
             x0
         } else {
-            let tmp = (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0;
-            tmp
+            
+            (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0
         };
 
         prev_it3 = prev_it2;
@@ -232,7 +232,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let input = EhlersITrendInput::with_default_params(&close_prices);
+        let input = EhlersITrendInput::with_default_params(close_prices);
         let eit_result = calculate_ehlers_itrend(&input).expect("EIT calculation failed");
 
         assert!(

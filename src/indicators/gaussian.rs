@@ -176,7 +176,7 @@ mod tests {
             period: Some(14),
             poles: Some(4),
         };
-        let input = GaussianInput::new(&close_prices, params);
+        let input = GaussianInput::new(close_prices, params);
 
         let Gaussian_result =
             calculate_gaussian(&input).expect("Failed to calculate Gaussian filter");

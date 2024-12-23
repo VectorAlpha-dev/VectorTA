@@ -76,7 +76,7 @@ pub fn calculate_smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::{read_candles_from_csv, Candles};
+    use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_smma_accuracy() {
@@ -87,7 +87,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SmmaParams { period: Some(7) };
-        let input = SmmaInput::new(&close_prices, params);
+        let input = SmmaInput::new(close_prices, params);
 
         let result = calculate_smma(&input).expect("Failed to calculate SMMA");
 
@@ -97,7 +97,7 @@ mod tests {
             "SMMA output length does not match input length!"
         );
 
-        let expected_last_five = vec![59434.4, 59398.2, 59346.9, 59319.4, 59224.5];
+        let expected_last_five = [59434.4, 59398.2, 59346.9, 59319.4, 59224.5];
 
         assert!(
             result.values.len() >= 5,
