@@ -47,10 +47,8 @@ pub fn calculate_acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>
         return Err("Not enough data points to calculate AC oscillator".into());
     }
 
-    let output_len = len - REQUIRED_LENGTH + 1;
-
-    let mut osc = Vec::with_capacity(output_len);
-    let mut change = Vec::with_capacity(output_len);
+    let mut osc = vec![f64::NAN; len];
+    let mut change = vec![f64::NAN; len];
 
     let mut queue_sma5 = [0.0; PERIOD_SMA5];
     let mut queue_sma34 = [0.0; PERIOD_SMA34];
@@ -101,7 +99,6 @@ pub fn calculate_acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>
         queue_sma5_ao[idx_sma5_ao] = ao;
         idx_sma5_ao += 1;
     }
-
     if idx_sma5_ao == PERIOD_SMA5 {
         idx_sma5_ao = 0;
     }
@@ -139,12 +136,11 @@ pub fn calculate_acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>
         let sma5_ao = sum_sma5_ao * INV_PERIOD_SMA5;
 
         let res = ao - sma5_ao;
-
-        let mom: f64 = res - prev_res;
+        let mom = res - prev_res;
         prev_res = res;
 
-        osc.push(res);
-        change.push(mom);
+        osc[i] = res;
+        change[i] = mom;
     }
 
     Ok(AcoscOutput { osc, change })
@@ -163,17 +159,22 @@ mod tests {
         let input = AcoscInput::with_default_params(&candles);
         let acosc_result = calculate_acosc(&input).expect("Failed to calculate acosc");
 
+        assert_eq!(
+            acosc_result.osc.len(),
+            candles.close.len(),
+            "ACOSC output length (osc) does not match input length"
+        );
+        assert_eq!(
+            acosc_result.change.len(),
+            candles.close.len(),
+            "ACOSC output length (change) does not match input length"
+        );
+
         let expected_last_five_acosc_osc = [273.30, 383.72, 357.7, 291.25, 176.84];
         let expected_last_five_acosc_change = [49.6, 110.4, -26.0, -66.5, -114.4];
 
-        assert!(
-            acosc_result.osc.len() >= 5,
-            "Not enough acosc osc values for the test"
-        );
-        assert!(
-            acosc_result.change.len() >= 5,
-            "Not enough acosc change values for the test"
-        );
+        assert!(acosc_result.osc.len() >= 5);
+        assert!(acosc_result.change.len() >= 5);
 
         let start_index_osc = acosc_result.osc.len().saturating_sub(5);
         let result_last_five_acosc_osc = &acosc_result.osc[start_index_osc..];

@@ -107,6 +107,11 @@ mod tests {
         let expected_last_five = [-50.0, -50.0, -50.0, -50.0, -42.8571];
 
         assert!(result.values.len() >= 5, "Not enough Aroon Osc values");
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "Aroon Osc output length does not match input length!"
+        );
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
 

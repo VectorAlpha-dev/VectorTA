@@ -37,6 +37,9 @@ pub fn calculate_ad(input: &AdInput) -> Result<AdOutput, Box<dyn Error>> {
     let volume: &[f64] = candles.select_candle_field("volume")?;
 
     let size: usize = high.len();
+    if size < 1 {
+        return Err("Not enough data points to calculate AD.".into());
+    }
     let mut output: Vec<f64> = Vec::with_capacity(size);
     let mut sum: f64 = 0.0;
 
@@ -71,13 +74,18 @@ mod tests {
         let input = AdInput::with_default_params(&candles);
         let ad_result = calculate_ad(&input).expect("Failed to calculate AD");
 
+        assert_eq!(
+            ad_result.values.len(),
+            candles.close.len(),
+            "AD output length does not match input length"
+        );
+
         let expected_last_five_ad = [1645918.16, 1645876.11, 1645824.27, 1645828.87, 1645728.78];
 
         assert!(
             ad_result.values.len() >= 5,
             "Not enough AD values for the test"
         );
-
         let start_index = ad_result.values.len() - 5;
         let result_last_five_ad = &ad_result.values[start_index..];
 

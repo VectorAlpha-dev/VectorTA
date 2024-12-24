@@ -124,6 +124,12 @@ mod tests {
             "Not enough AO values for the test"
         );
 
+        assert_eq!(
+            result.values.len(),
+            hl2_values.len(),
+            "AO output length does not match input length"
+        );
+
         let start_index = result.values.len().saturating_sub(5);
         let result_last_five = &result.values[start_index..];
 

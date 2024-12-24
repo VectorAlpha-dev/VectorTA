@@ -214,6 +214,24 @@ mod tests {
         let result_last_five_teeth = &result.teeth[start_index..];
         let result_last_five_lips = &result.lips[start_index..];
 
+        assert_eq!(
+            result.jaw.len(),
+            hl2_prices.len(),
+            "Alligator jaw output length does not match input length"
+        );
+
+        assert_eq!(
+            result.teeth.len(),
+            hl2_prices.len(),
+            "Alligator teeth output length does not match input length"
+        );
+
+        assert_eq!(
+            result.lips.len(),
+            hl2_prices.len(),
+            "Alligator lips output length does not match input length"
+        );
+
         for (i, &value) in result_last_five_jaws.iter().enumerate() {
             let expected_value = expected_last_five_jaw_result[i];
             assert!(

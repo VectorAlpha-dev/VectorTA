@@ -120,6 +120,12 @@ mod tests {
 
         let expected_last_five = [59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];
 
+        assert_eq!(
+            result.values.len(),
+            close_prices.len(),
+            "ALMA output length does not match input length!"
+        );
+
         assert!(
             result.values.len() >= 5,
             "Not enough ALMA values for the test"

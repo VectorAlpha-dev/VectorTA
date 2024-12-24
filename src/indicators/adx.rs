@@ -55,33 +55,34 @@ pub fn calculate_adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
     if period == 0 || period > len {
         return Err("Invalid period specified for ADX calculation.".into());
     }
-
     if len < period + 1 {
         return Err("Not enough data points to calculate ADX.".into());
     }
+
+    let mut adx_vals = vec![f64::NAN; len];
+
+    let mut tr_sum = 0.0;
+    let mut plus_dm_sum = 0.0;
+    let mut minus_dm_sum = 0.0;
 
     let period_f64 = period as f64;
     let reciprocal_period = 1.0 / period_f64;
     let one_minus_rp = 1.0 - reciprocal_period;
     let period_minus_one = period_f64 - 1.0;
 
-    let mut tr_sum = 0.0;
-    let mut plus_dm_sum = 0.0;
-    let mut minus_dm_sum = 0.0;
-
     for i in 1..=period {
-        let current_high = high[i];
-        let current_low = low[i];
+        let curr_high = high[i];
+        let curr_low = low[i];
         let prev_close = close[i - 1];
         let prev_high = high[i - 1];
         let prev_low = low[i - 1];
 
-        let tr = (current_high - current_low)
-            .max((current_high - prev_close).abs())
-            .max((current_low - prev_close).abs());
+        let tr = (curr_high - curr_low)
+            .max((curr_high - prev_close).abs())
+            .max((curr_low - prev_close).abs());
 
-        let up_move = current_high - prev_high;
-        let down_move = prev_low - current_low;
+        let up_move = curr_high - prev_high;
+        let down_move = prev_low - curr_low;
 
         if up_move > down_move && up_move > 0.0 {
             plus_dm_sum += up_move;
@@ -109,24 +110,22 @@ pub fn calculate_adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
 
     let mut dx_sum = initial_dx;
     let mut dx_count = 1;
-    let mut adx = Vec::with_capacity(len - period);
-
     let mut last_adx = 0.0;
     let mut have_adx = false;
 
     for i in (period + 1)..len {
-        let current_high = high[i];
-        let current_low = low[i];
+        let curr_high = high[i];
+        let curr_low = low[i];
         let prev_close = close[i - 1];
         let prev_high = high[i - 1];
         let prev_low = low[i - 1];
 
-        let tr = (current_high - current_low)
-            .max((current_high - prev_close).abs())
-            .max((current_low - prev_close).abs());
+        let tr = (curr_high - curr_low)
+            .max((curr_high - prev_close).abs())
+            .max((curr_low - prev_close).abs());
 
-        let up_move = current_high - prev_high;
-        let down_move = prev_low - current_low;
+        let up_move = curr_high - prev_high;
+        let down_move = prev_low - curr_low;
 
         let plus_dm = if up_move > down_move && up_move > 0.0 {
             up_move
@@ -159,17 +158,17 @@ pub fn calculate_adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
             dx_count += 1;
             if dx_count == period {
                 last_adx = dx_sum * reciprocal_period;
-                adx.push(last_adx);
+                adx_vals[i] = last_adx;
                 have_adx = true;
             }
         } else if have_adx {
             let adx_current = ((last_adx * period_minus_one) + dx) * reciprocal_period;
-            adx.push(adx_current);
+            adx_vals[i] = adx_current;
             last_adx = adx_current;
         }
     }
 
-    Ok(AdxOutput { values: adx })
+    Ok(AdxOutput { values: adx_vals })
 }
 
 #[cfg(test)]
@@ -178,29 +177,35 @@ mod tests {
     use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_ad_accuracy() {
+    fn test_adx_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let params = AdxParams { period: Some(14) };
         let input = AdxInput::new(&candles, params);
-        let ad_result = calculate_adx(&input).expect("Failed to calculate adx");
+        let adx_result = calculate_adx(&input).expect("Failed to calculate ADX");
+
+        assert_eq!(
+            adx_result.values.len(),
+            candles.close.len(),
+            "ADX output length does not match input length"
+        );
 
         let expected_last_five_adx = [36.14, 36.52, 37.01, 37.46, 38.47];
 
         assert!(
-            ad_result.values.len() >= 5,
-            "Not enough adx values for the test"
+            adx_result.values.len() >= 5,
+            "Not enough ADX values for the test"
         );
 
-        let start_index = ad_result.values.len() - 5;
-        let result_last_five_ad = &ad_result.values[start_index..];
+        let start_index = adx_result.values.len().saturating_sub(5);
+        let result_last_five_ad = &adx_result.values[start_index..];
 
         for (i, &value) in result_last_five_ad.iter().enumerate() {
             let expected_value = expected_last_five_adx[i];
             assert!(
                 (value - expected_value).abs() < 1e-1,
-                "adx value mismatch at index {}: expected {}, got {}",
+                "ADX value mismatch at index {}: expected {}, got {}",
                 i,
                 expected_value,
                 value

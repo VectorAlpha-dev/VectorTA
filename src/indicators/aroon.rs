@@ -116,6 +116,19 @@ mod tests {
             result.aroon_up.len() >= 5 && result.aroon_down.len() >= 5,
             "Not enough Aroon values"
         );
+
+        assert_eq!(
+            result.aroon_up.len(),
+            result.aroon_down.len(),
+            "Aroon Up and Down lengths mismatch"
+        );
+
+        assert_eq!(
+            result.aroon_up.len(),
+            candles.close.len(),
+            "Aroon output length does not match input length"
+        );
+        
         let start_index = result.aroon_up.len().saturating_sub(5);
 
         let up_last_five = &result.aroon_up[start_index..];

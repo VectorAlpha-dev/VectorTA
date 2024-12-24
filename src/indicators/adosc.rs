@@ -61,16 +61,14 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
     if short == 0 || long == 0 {
         return Err("Invalid period specified for ADOSC calculation.".into());
     }
-
     if short >= long {
         return Err("Short period must be less than the long period for ADOSC.".into());
     }
 
     let len = candles.close.len();
-    if len == 0 {
+    if len < 1 {
         return Err("No candles available.".into());
     }
-
     if long > len {
         return Err("Not enough data points to calculate ADOSC.".into());
     }
@@ -84,6 +82,7 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
     let alpha_long = 2.0 / (long as f64 + 1.0);
 
     let mut adosc_values = vec![0.0; len];
+
     let mut sum_ad = 0.0;
 
     {
@@ -91,6 +90,7 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
         let l = low[0];
         let c = close[0];
         let v = volume[0];
+
         let hl = h - l;
         let mfm = if hl != 0.0 {
             ((c - l) - (h - c)) / hl
@@ -100,13 +100,9 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
         let mfv = mfm * v;
         sum_ad += mfv;
 
-        let short_ema = sum_ad;
-        let long_ema = sum_ad;
-        let adosc = short_ema - long_ema;
-        adosc_values[0] = adosc;
-
-        let mut short_ema = short_ema;
-        let mut long_ema = long_ema;
+        let mut short_ema = sum_ad;
+        let mut long_ema = sum_ad;
+        adosc_values[0] = short_ema - long_ema;
 
         for i in 1..len {
             let h = high[i];
@@ -126,8 +122,7 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
             short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
             long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
 
-            let adosc = short_ema - long_ema;
-            adosc_values[i] = adosc;
+            adosc_values[i] = short_ema - long_ema;
         }
     }
 
@@ -149,8 +144,13 @@ mod tests {
         let input = AdoscInput::with_default_params(&candles);
         let result = calculate_adosc(&input).expect("Failed to calculate ADOSC");
 
-        let expected_last_five = [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772];
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "ADOSC output length does not match input length"
+        );
 
+        let expected_last_five = [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772];
         assert!(
             result.values.len() >= 5,
             "Not enough ADOSC values for the test"
@@ -159,18 +159,24 @@ mod tests {
         let start_index = result.values.len().saturating_sub(5);
         let result_last_five = &result.values[start_index..];
 
-        for (i, &value) in result_last_five.iter().enumerate() {
+        for (i, &actual) in result_last_five.iter().enumerate() {
+            let expected = expected_last_five[i];
             assert!(
-                (value - expected_last_five[i]).abs() < 1e-1,
+                (actual - expected).abs() < 1e-1,
                 "ADOSC value mismatch at index {}: expected {}, got {}",
                 i,
-                expected_last_five[i],
-                value
+                expected,
+                actual
             );
         }
 
-        for val in result.values.iter() {
-            assert!(val.is_finite(), "ADOSC output should be finite");
+        for (i, &val) in result.values.iter().enumerate() {
+            assert!(
+                val.is_finite(),
+                "ADOSC output at index {} should be finite, got {}",
+                i,
+                val
+            );
         }
     }
 }
