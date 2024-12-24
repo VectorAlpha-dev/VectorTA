@@ -82,23 +82,21 @@ fn build_symmetric_triangle(n: usize) -> Vec<f64> {
 
     let triangle: Vec<f64> = if n == 2 {
         vec![1.0, 1.0]
+    } else if n % 2 == 0 {
+        let half = n / 2;
+        let mut front: Vec<f64> = (1..=half).map(|x| x as f64).collect();
+        let mut back = front.clone();
+        back.reverse();
+        front.extend(back);
+        front
     } else {
-        if n % 2 == 0 {
-            let half = n / 2;
-            let mut front: Vec<f64> = (1..=half).map(|x| x as f64).collect();
-            let mut back = front.clone();
-            back.reverse();
-            front.extend(back);
-            front
-        } else {
-            let half_plus = ((n + 1) as f64 / 2.0).floor() as usize;
-            let mut front: Vec<f64> = (1..=half_plus).map(|x| x as f64).collect();
-            let mut tri = front.clone();
-            front.pop();
-            front.reverse();
-            tri.extend(front);
-            tri
-        }
+        let half_plus = ((n + 1) as f64 / 2.0).floor() as usize;
+        let mut front: Vec<f64> = (1..=half_plus).map(|x| x as f64).collect();
+        let mut tri = front.clone();
+        front.pop();
+        front.reverse();
+        tri.extend(front);
+        tri
     };
 
     let sum: f64 = triangle.iter().sum();

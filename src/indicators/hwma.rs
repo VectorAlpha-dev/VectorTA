@@ -95,7 +95,7 @@ mod tests {
             nb: 0.1,
             nc: 0.1,
         };
-        let input = HwmaInput::new(&close_prices, params);
+        let input = HwmaInput::new(close_prices, params);
         let result = calculate_hwma(&input).expect("Failed to calculate HWMA");
 
         let len = result.values.len();

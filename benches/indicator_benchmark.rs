@@ -79,7 +79,7 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // VWAP
     group.bench_function(BenchmarkId::new("VWAP", 0), |b| {
-        let input = VwapInput::with_default_params(&timestamps, &hl3_prices, &volume);
+        let input = VwapInput::with_default_params(timestamps, &hl3_prices, volume);
         b.iter(|| calculate_vwap(black_box(&input)).expect("Failed to calculate VWAP"))
     });
 

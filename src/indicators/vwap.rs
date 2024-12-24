@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, TimeZone, Datelike, Timelike, Utc};
+use chrono::{NaiveDateTime, Datelike, Utc};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -215,7 +215,7 @@ mod tests {
         let params = VwapParams {
             anchor: Some("1D".to_string()),
         };
-        let input = VwapInput::new(&timestamps, &prices, &volumes, params);
+        let input = VwapInput::new(timestamps, &prices, volumes, params);
 
         let result = calculate_vwap(&input).expect("Failed to calculate VWAP");
         assert_eq!(
