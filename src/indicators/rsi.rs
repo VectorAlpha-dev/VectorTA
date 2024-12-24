@@ -103,7 +103,7 @@ pub fn calculate_rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_rsi_accuracy() {

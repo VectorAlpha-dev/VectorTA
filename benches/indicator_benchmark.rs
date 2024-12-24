@@ -3,7 +3,7 @@ extern crate lazy_static;
 extern crate my_project;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use my_project::indicators::data_loader::read_candles_from_csv;
+use my_project::utilities::data_loader::read_candles_from_csv;
 
 use my_project::indicators::{
     acosc::{calculate_acosc, AcoscInput},
@@ -46,6 +46,7 @@ use my_project::indicators::{
     tilson::{calculate_t3, T3Input},
     trendflex::{calculate_trendflex, TrendFlexInput},
     trima::{calculate_trima, TrimaInput},
+    vwap::{calculate_vwap, VwapInput},
     vwma::{calculate_vwma, VwmaInput},
     wilders::{calculate_wilders, WildersInput},
     wma::{calculate_wma, WmaInput},
@@ -58,16 +59,29 @@ fn benchmark_indicators(c: &mut Criterion) {
         read_candles_from_csv("src/data/bitfinex btc-usd 100,000 candles ends 09-01-24.csv")
             .expect("Failed to load candles");
 
+    let timestamps = candles
+        .get_timestamp()
+        .expect("Failed to extract timestamps");
     let close_prices = candles
         .select_candle_field("close")
         .expect("Failed to extract close prices");
+    let volume = candles
+        .select_candle_field("volume")
+        .expect("Failed to extract volume");
     let hl2_prices = candles
         .get_calculated_field("hl2")
         .expect("Failed to extract hl2 prices");
+    let hl3_prices = candles.get_calculated_field("hlc3").unwrap();
 
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // VWAP
+    group.bench_function(BenchmarkId::new("VWAP", 0), |b| {
+        let input = VwapInput::with_default_params(&timestamps, &hl3_prices, &volume);
+        b.iter(|| calculate_vwap(black_box(&input)).expect("Failed to calculate VWAP"))
+    });
 
     // HWMA
     group.bench_function(BenchmarkId::new("HWMA", 0), |b| {

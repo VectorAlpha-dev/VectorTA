@@ -1,4 +1,4 @@
-use crate::indicators::data_loader::Candles;
+use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -175,8 +175,7 @@ pub fn calculate_adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
                 have_adx = true;
             }
         } else if have_adx {
-            let adx_current =
-                ((last_adx * (period_f64 - 1.0)) + dx) * reciprocal_period;
+            let adx_current = ((last_adx * (period_f64 - 1.0)) + dx) * reciprocal_period;
             adx_vals[i] = adx_current;
             last_adx = adx_current;
         }
@@ -198,7 +197,7 @@ pub fn calculate_adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_adxr_accuracy() {

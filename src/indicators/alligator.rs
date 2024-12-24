@@ -192,7 +192,7 @@ pub fn calculate_alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_alligator_accuracy() {

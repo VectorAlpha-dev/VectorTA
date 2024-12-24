@@ -1,4 +1,4 @@
-use crate::indicators::data_loader::Candles;
+use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -59,12 +59,11 @@ pub fn calculate_avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::Candles;
 
     #[test]
     fn test_avgprice_accuracy() {
         let candles = Candles {
-            timestamp: vec![1., 2., 3., 4., 5.],
+            timestamp: vec![1, 2, 3, 4, 5],
             open: vec![100., 101., 102., 103., 104.],
             high: vec![110., 111., 112., 113., 114.],
             low: vec![90., 91., 92., 93., 94.],

@@ -1,4 +1,4 @@
-use crate::indicators::data_loader::Candles;
+use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ pub fn calculate_aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_aroon_accuracy() {
@@ -128,7 +128,7 @@ mod tests {
             candles.close.len(),
             "Aroon output length does not match input length"
         );
-        
+
         let start_index = result.aroon_up.len().saturating_sub(5);
 
         let up_last_five = &result.aroon_up[start_index..];

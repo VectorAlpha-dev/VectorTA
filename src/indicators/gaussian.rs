@@ -161,7 +161,7 @@ fn gaussian_poles4(data: &[f64], n: usize, alpha: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_gaussian_accuracy() {

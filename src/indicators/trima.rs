@@ -131,7 +131,7 @@ pub fn calculate_trima(input: &TrimaInput) -> Result<TrimaOutput, Box<dyn Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_trima_accuracy() {

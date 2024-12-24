@@ -151,7 +151,7 @@ pub fn calculate_bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_bandpass_accuracy() {
@@ -230,7 +230,7 @@ mod tests {
             candles.close.len(),
             "Trigger output length does not match input length"
         );
-        
+
         for (i, &value) in bp_last_five.iter().enumerate() {
             assert!(
                 (value - expected_bp_last_five[i]).abs() < 1e-1,

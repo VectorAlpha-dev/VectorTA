@@ -1,4 +1,4 @@
-use crate::indicators::data_loader::Candles;
+use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,6 @@ impl Default for VwmaParams {
         VwmaParams { period: Some(20) }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct VwmaInput<'a> {
@@ -47,7 +46,6 @@ pub struct VwmaOutput {
 pub fn calculate_vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
     let period = input.get_period();
     let candles = input.candles;
-
     let price = candles.select_candle_field("close")?;
     let volume = candles.select_candle_field("volume")?;
 
@@ -80,24 +78,23 @@ pub fn calculate_vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
         vwma_values[i] = sum / vsum;
     }
 
-    Ok(VwmaOutput { values: vwma_values })
+    Ok(VwmaOutput {
+        values: vwma_values,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_vwma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-
         let params = VwmaParams { period: Some(20) };
         let input = VwmaInput::new(&candles, params);
         let vwma_result = calculate_vwma(&input).expect("Failed to calculate VWMA");

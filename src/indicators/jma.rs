@@ -117,7 +117,7 @@ pub fn calculate_jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_jma_accuracy() {
@@ -136,11 +136,13 @@ mod tests {
         let input = JmaInput::new(close_prices, jma_params);
         let jma_result = calculate_jma(&input).expect("Failed to calculate JMA");
 
-        let expected_last_five = [59305.04794668568,
+        let expected_last_five = [
+            59305.04794668568,
             59261.270455005455,
             59156.791263606865,
             59128.30656791065,
-            58918.89223153998];
+            58918.89223153998,
+        ];
 
         assert!(
             jma_result.values.len() >= 5,
@@ -152,7 +154,7 @@ mod tests {
             close_prices.len(),
             "JMA values count should match input data count"
         );
-        
+
         let start_index = jma_result.values.len() - 5;
         let result_last_five = &jma_result.values[start_index..];
 

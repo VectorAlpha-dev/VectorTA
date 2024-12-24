@@ -171,7 +171,7 @@ pub fn calculate_t3(input: &T3Input) -> Result<T3Output, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_t3_accuracy() {

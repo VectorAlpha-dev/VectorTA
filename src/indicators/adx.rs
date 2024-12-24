@@ -1,4 +1,4 @@
-use crate::indicators::data_loader::Candles;
+use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -174,7 +174,7 @@ pub fn calculate_adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_adx_accuracy() {

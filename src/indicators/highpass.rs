@@ -74,7 +74,7 @@ pub fn calculate_highpass(input: &HighPassInput) -> Result<HighPassOutput, Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_highpass_accuracy() {

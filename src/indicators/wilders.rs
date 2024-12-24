@@ -68,15 +68,13 @@ pub fn calculate_wilders(input: &WildersInput) -> Result<WildersOutput, Box<dyn 
         out_values[i] = val;
     }
 
-    Ok(WildersOutput {
-        values: out_values,
-    })
+    Ok(WildersOutput { values: out_values })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_wilders_accuracy() {

@@ -199,7 +199,6 @@ pub fn calculate_ht_trendline(
         let eit_val = if i < warmup_bars {
             x0
         } else {
-            
             (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0
         };
 
@@ -218,7 +217,7 @@ pub fn calculate_ht_trendline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_ehlers_itrend_accuracy() {

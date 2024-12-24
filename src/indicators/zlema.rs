@@ -74,7 +74,7 @@ pub fn calculate_zlema(input: &ZlemaInput) -> Result<ZlemaOutput, Box<dyn std::e
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_zlema_accuracy() {

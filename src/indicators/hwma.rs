@@ -41,7 +41,6 @@ pub struct HwmaOutput {
     pub values: Vec<f64>,
 }
 
-
 #[inline(always)]
 pub fn calculate_hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
     let HwmaParams { na, nb, nc } = input.params;
@@ -82,7 +81,7 @@ pub fn calculate_hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_hwma_accuracy() {
