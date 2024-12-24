@@ -28,6 +28,7 @@ use my_project::indicators::{
     highpass_2_pole::{calculate_high_pass_2_pole, HighPass2Input},
     hma::{calculate_hma, HmaInput},
     ht_trendline::{calculate_ht_trendline, EhlersITrendInput},
+    hwma::{calculate_hwma, HwmaInput},
     jma::{calculate_jma, JmaInput},
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
@@ -40,6 +41,7 @@ use my_project::indicators::{
     smma::{calculate_smma, SmmaInput},
     supersmoother::{calculate_supersmoother, SuperSmootherInput},
     supersmoother_3_pole::{calculate_supersmoother_3_pole, SuperSmoother3PoleInput},
+    swma::{calculate_swma, SwmaInput},
     tema::{calculate_tema, TemaInput},
     tilson::{calculate_t3, T3Input},
     trendflex::{calculate_trendflex, TrendFlexInput},
@@ -66,6 +68,18 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // HWMA
+    group.bench_function(BenchmarkId::new("HWMA", 0), |b| {
+        let input = HwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_hwma(black_box(&input)).expect("Failed to calculate HWMA"))
+    });
+
+    // SWMA
+    group.bench_function(BenchmarkId::new("SWMA", 0), |b| {
+        let input = SwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_swma(black_box(&input)).expect("Failed to calculate SWMA"))
+    });
 
     // TrendFlex
     group.bench_function(BenchmarkId::new("TRENDFLEX", 0), |b| {

@@ -41,3 +41,5 @@ pub mod zlema;
 pub mod vwma;
 pub mod pwma;
 pub mod trendflex;
+pub mod swma;
+pub mod hwma;
