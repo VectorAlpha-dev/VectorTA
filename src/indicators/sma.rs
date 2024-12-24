@@ -50,16 +50,20 @@ pub fn calculate_sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
         return Err("Invalid period specified for SMA calculation.".into());
     }
 
-    let output_len = data.len() - period + 1;
-    let mut sma_values = Vec::with_capacity(output_len);
+    let len = data.len();
+    let mut sma_values = vec![f64::NAN; len];
 
     let inv_period = 1.0 / period as f64;
-    let mut sum: f64 = data[..period].iter().sum();
-    sma_values.push(sum * inv_period);
+    let mut sum: f64 = 0.0;
 
-    for i in period..data.len() {
+    for i in 0..period {
+        sum += data[i];
+    }
+    sma_values[period - 1] = sum * inv_period;
+
+    for i in period..len {
         sum += data[i] - data[i - period];
-        sma_values.push(sum * inv_period);
+        sma_values[i] = sum * inv_period;
     }
 
     Ok(SmaOutput { values: sma_values })
@@ -82,8 +86,13 @@ mod tests {
         let input = SmaInput::new(close_prices, params);
         let sma_result = calculate_sma(&input).expect("Failed to calculate SMA");
 
-        let expected_last_five_sma = [59180.8, 59175.0, 59129.4, 59085.4, 59133.7];
+        assert_eq!(
+            sma_result.values.len(),
+            close_prices.len(),
+            "SMA values count should match the input data length"
+        );
 
+        let expected_last_five_sma = [59180.8, 59175.0, 59129.4, 59085.4, 59133.7];
         assert!(
             sma_result.values.len() >= 5,
             "Not enough SMA values for the test"
@@ -100,6 +109,17 @@ mod tests {
                 i,
                 expected_value,
                 value
+            );
+        }
+
+        let period = input.get_period();
+        for i in 0..(period - 1) {
+            let val = sma_result.values[i];
+            assert!(
+                val.is_nan(),
+                "Expected NaN for early index {}, got {}",
+                i,
+                val
             );
         }
 

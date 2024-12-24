@@ -74,7 +74,11 @@ mod tests {
 
         let input = AvgPriceInput::with_default_params(&candles);
         let result = calculate_avgprice(&input).expect("Failed to calculate avgprice");
-
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "Output length should match input length"
+        );
         let expected = [101.25, 102.25, 103.25, 104.25, 105.25];
 
         assert_eq!(result.values.len(), 5);

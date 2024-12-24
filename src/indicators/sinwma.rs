@@ -71,17 +71,18 @@ pub fn calculate_sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Err
     }
 
     let inv_sum = 1.0 / sum_sines;
-    for s in &mut sines {
-        *s *= inv_sum;
+    for w in &mut sines {
+        *w *= inv_sum;
     }
 
-    let output_len = data.len().saturating_sub(period).saturating_add(1);
-    let mut sinwma_values = Vec::with_capacity(output_len);
+    let len = data.len();
+    let mut sinwma_values = vec![f64::NAN; len];
 
-    for start_idx in 0..output_len {
-        let data_window = &data[start_idx..start_idx + period];
+    for i in (period - 1)..len {
+        let start_idx = i + 1 - period;
+        let data_window = &data[start_idx..(start_idx + period)];
         let value = dot_product(data_window, &sines);
-        sinwma_values.push(value);
+        sinwma_values[i] = value;
     }
 
     Ok(SinWmaOutput {
@@ -106,16 +107,24 @@ mod tests {
         let input = SinWmaInput::new(close_prices, params);
         let sinwma_result = calculate_sinwma(&input).expect("Failed to calculate SINWMA");
 
-        let expected_last_five = [59376.72903536103,
+        assert_eq!(
+            sinwma_result.values.len(),
+            close_prices.len(),
+            "SINWMA output length should match input data length"
+        );
+
+        let expected_last_five = [
+            59376.72903536103,
             59300.76862770367,
             59229.27622157621,
             59178.48781774477,
-            59154.66580703081];
-
+            59154.66580703081,
+        ];
         assert!(
             sinwma_result.values.len() >= 5,
             "Not enough SINWMA values for the test"
         );
+
         let start_index = sinwma_result.values.len() - 5;
         let result_last_five = &sinwma_result.values[start_index..];
 
@@ -123,7 +132,7 @@ mod tests {
             let expected_value = expected_last_five[i];
             assert!(
                 (value - expected_value).abs() < 1e-6,
-                "SINWMA mismatch at index {}: expected {}, got {}",
+                "SINWMA mismatch at last 5 index {}: expected {}, got {}",
                 i,
                 expected_value,
                 value

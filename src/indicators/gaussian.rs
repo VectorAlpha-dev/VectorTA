@@ -191,7 +191,11 @@ mod tests {
 
         let len = gaussian_result.values.len();
         assert!(len >= 5, "Not enough Gaussian filter values for the test");
-
+        assert_eq!(
+            len,
+            close_prices.len(),
+            "Gaussian filter output length does not match input length"
+        );
         let start_index = len - 5;
         let last_five = &gaussian_result.values[start_index..];
 

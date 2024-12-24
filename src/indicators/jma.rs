@@ -146,6 +146,13 @@ mod tests {
             jma_result.values.len() >= 5,
             "Not enough JMA values for the test"
         );
+
+        assert_eq!(
+            jma_result.values.len(),
+            close_prices.len(),
+            "JMA values count should match input data count"
+        );
+        
         let start_index = jma_result.values.len() - 5;
         let result_last_five = &jma_result.values[start_index..];
 

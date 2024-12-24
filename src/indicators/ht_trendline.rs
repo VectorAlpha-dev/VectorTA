@@ -244,6 +244,12 @@ mod tests {
             "Not enough values to check last 5 Ehlers ITrend outputs"
         );
 
+        assert_eq!(
+            eit_result.values.len(),
+            close_prices.len(),
+            "Ehlers ITrend output length does not match input length"
+        );
+
         let start_index = eit_result.values.len() - 5;
         let actual_last_five = &eit_result.values[start_index..];
 

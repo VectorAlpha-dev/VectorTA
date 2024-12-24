@@ -124,6 +124,12 @@ mod tests {
             "Not enough RSI values for the test"
         );
 
+        assert_eq!(
+            rsi_result.values.len(),
+            close_prices.len(),
+            "RSI values count should match input data count"
+        );
+
         let start_index = rsi_result.values.len().saturating_sub(5);
         let result_last_five_rsi = &rsi_result.values[start_index..];
 

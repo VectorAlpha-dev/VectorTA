@@ -93,7 +93,11 @@ mod tests {
             result.values.len() >= 5,
             "Not enough EMA values for the test"
         );
-
+        assert_eq!(
+            result.values.len(),
+            close_prices.len(),
+            "ZLEMA values count should match the input data length"
+        );
         let start_index = result.values.len().saturating_sub(5);
         let result_last_five = &result.values[start_index..];
 

@@ -198,6 +198,11 @@ mod tests {
         ];
 
         assert!(t3_result.values.len() >= 5);
+        assert_eq!(
+            t3_result.values.len(),
+            close_prices.len(),
+            "T3 output length does not match input length"
+        );
         let start_index = t3_result.values.len() - 5;
         let result_last_five_t3 = &t3_result.values[start_index..];
 

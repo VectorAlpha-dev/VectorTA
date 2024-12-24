@@ -50,12 +50,11 @@ pub fn calculate_trima(input: &TrimaInput) -> Result<TrimaOutput, Box<dyn Error>
     if period > n {
         return Err("Not enough data points to calculate TRIMA.".into());
     }
-
     if period <= 3 {
         return Err("TRIMA period must be greater than 3.".into());
     }
 
-    let mut out = Vec::with_capacity(n);
+    let mut out = vec![f64::NAN; n];
 
     let sum_of_weights = if period % 2 == 1 {
         let half = period / 2 + 1;
@@ -107,16 +106,19 @@ pub fn calculate_trima(input: &TrimaInput) -> Result<TrimaOutput, Box<dyn Error>
 
         weight_sum += val;
 
-        out.push(weight_sum * inv_weights);
+        out[i] = weight_sum * inv_weights;
 
         lead_sum += val;
-
         weight_sum += lead_sum;
         weight_sum -= trail_sum;
 
-        lead_sum -= data[lsi as usize];
-        trail_sum += data[tsi1 as usize];
-        trail_sum -= data[tsi2 as usize];
+        let lsi_idx = lsi as usize;
+        let tsi1_idx = tsi1 as usize;
+        let tsi2_idx = tsi2 as usize;
+
+        lead_sum -= data[lsi_idx];
+        trail_sum += data[tsi1_idx];
+        trail_sum -= data[tsi2_idx];
 
         lsi += 1;
         tsi1 += 1;
@@ -143,6 +145,12 @@ mod tests {
         let input = TrimaInput::new(close_prices, params);
         let trima_result = calculate_trima(&input).expect("Failed to calculate TRIMA");
 
+        assert_eq!(
+            trima_result.values.len(),
+            close_prices.len(),
+            "TRIMA output length should match input data length"
+        );
+
         let expected_last_five_trima = [
             59957.916666666664,
             59846.770833333336,
@@ -150,11 +158,11 @@ mod tests {
             59665.2125,
             59581.612499999996,
         ];
-
         assert!(
             trima_result.values.len() >= 5,
             "Not enough TRIMA values for the test"
         );
+
         let start_index = trima_result.values.len() - 5;
         let result_last_five_trima = &trima_result.values[start_index..];
 
@@ -166,6 +174,16 @@ mod tests {
                 i,
                 expected_value,
                 value
+            );
+        }
+
+        let period = input.get_period();
+        for i in 0..(period - 1) {
+            assert!(
+                trima_result.values[i].is_nan(),
+                "Expected NaN at early index {} for TRIMA, got {}",
+                i,
+                trima_result.values[i]
             );
         }
 

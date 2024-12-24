@@ -108,6 +108,11 @@ mod tests {
         let expected_last_five = [916.89, 874.33, 838.45, 801.92, 811.57];
 
         assert!(result.values.len() >= 5, "Not enough ATR values");
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "ATR output length does not match input length!"
+        );
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
 

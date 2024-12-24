@@ -207,6 +207,30 @@ mod tests {
         let signal_last_five = &result.signal[start_sig..];
         let trigger_last_five = &result.trigger[start_trg..];
 
+        assert_eq!(
+            result.bp.len(),
+            candles.close.len(),
+            "BandPass output length does not match input length"
+        );
+
+        assert_eq!(
+            result.bp_normalized.len(),
+            candles.close.len(),
+            "BandPass Normalized output length does not match input length"
+        );
+
+        assert_eq!(
+            result.signal.len(),
+            candles.close.len(),
+            "Signal output length does not match input length"
+        );
+
+        assert_eq!(
+            result.trigger.len(),
+            candles.close.len(),
+            "Trigger output length does not match input length"
+        );
+        
         for (i, &value) in bp_last_five.iter().enumerate() {
             assert!(
                 (value - expected_bp_last_five[i]).abs() < 1e-1,

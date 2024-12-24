@@ -127,6 +127,12 @@ mod tests {
             "Not enough high-pass 2 pole values for test"
         );
 
+        assert_eq!(
+            result.values.len(),
+            close_prices.len(),
+            "High-pass 2 pole output length does not match input length"
+        );
+        
         let start_index = result.values.len() - 5;
         let actual_last_five = &result.values[start_index..];
 

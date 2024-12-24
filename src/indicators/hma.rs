@@ -259,6 +259,11 @@ mod tests {
             58803.44444447962,
         ];
         assert!(result.values.len() >= 5);
+        assert_eq!(
+            result.values.len(),
+            data.len(),
+            "HMA values count should match input data count"
+        );
         let start = result.values.len() - 5;
         let last_five = &result.values[start..];
         for (i, &val) in last_five.iter().enumerate() {

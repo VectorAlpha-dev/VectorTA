@@ -110,6 +110,11 @@ mod tests {
         ];
 
         assert!(out_vals.len() >= 5, "Not enough data for test");
+        assert_eq!(
+            out_vals.len(),
+            close_prices.len(),
+            "Output count should match input data count",
+        );
         let start_idx = out_vals.len() - 5;
         let actual_last_five = &out_vals[start_idx..];
 

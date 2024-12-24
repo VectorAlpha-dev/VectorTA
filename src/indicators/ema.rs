@@ -88,7 +88,11 @@ mod tests {
             ema_result.values.len() >= 5,
             "Not enough EMA values for the test"
         );
-
+        assert_eq!(
+            ema_result.values.len(),
+            close_prices.len(),
+            "EMA values count should match input data count"
+        );
         let start_index = ema_result.values.len().saturating_sub(5);
         let result_last_five_ema = &ema_result.values[start_index..];
 

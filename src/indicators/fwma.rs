@@ -100,6 +100,11 @@ mod tests {
             58940.333333333336,
         ];
         assert!(result.values.len() >= 5);
+        assert_eq!(
+            result.values.len(),
+            data.len(),
+            "FWMA values count should match input data count"
+        );
         let start_index = result.values.len() - 5;
         let last_five = &result.values[start_index..];
         for (i, &val) in last_five.iter().enumerate() {

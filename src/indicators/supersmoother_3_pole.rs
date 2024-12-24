@@ -97,7 +97,7 @@ mod tests {
     use crate::indicators::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_supersmoother_3pole_accuracy() {
+    fn test_supersmoother_3_pole_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
@@ -123,6 +123,11 @@ mod tests {
         assert!(
             values.len() >= 5,
             "Not enough 3-pole SS output to compare final 5 values"
+        );
+        assert_eq!(
+            values.len(),
+            close_prices.len(),
+            "3-pole SuperSmoother output length does not match input length"
         );
 
         let start_idx = values.len() - 5;

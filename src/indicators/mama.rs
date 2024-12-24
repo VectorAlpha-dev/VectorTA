@@ -215,7 +215,7 @@ pub fn calculate_mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::data_loader::read_candles_from_csv;
+    use crate::indicators::{data_loader::read_candles_from_csv, mama};
 
     #[test]
     fn test_mama_accuracy_with_tolerance() {
@@ -244,7 +244,16 @@ mod tests {
             (59153.59019034539, 59691.27443288086),
             (59128.66068082812, 59677.20908907954),
         ];
-
+        assert_eq!(
+            mama_vals.len(),
+            close_prices.len(),
+            "MAMA values count should match input data count"
+        );
+        assert_eq!(
+            fama_vals.len(),
+            close_prices.len(),
+            "FAMA values count should match input data count"
+        );
         for (i, &(exp_mama, exp_fama)) in expected.iter().enumerate() {
             let got_mama = mama_vals[last_idx + i];
             let got_fama = fama_vals[last_idx + i];

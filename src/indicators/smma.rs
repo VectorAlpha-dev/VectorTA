@@ -104,6 +104,11 @@ mod tests {
             "Not enough SMMA values for the test"
         );
 
+        assert_eq!(
+            result.values.len(),
+            close_prices.len(),
+            "SMMA values count should match input data count"
+        );
         let start_index = result.values.len() - 5;
         let actual_last_five = &result.values[start_index..];
 

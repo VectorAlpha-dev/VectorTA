@@ -128,7 +128,13 @@ mod tests {
         let result = calculate_reflex(&input).expect("Failed to calculate Reflex");
         let reflex_vals = &result.values;
         let len = reflex_vals.len();
-
+        assert_eq!(
+            reflex_vals.len(),
+            close_prices.len(),
+            "Output size mismatch. Got {} expected {}",
+            len,
+            close_prices.len()
+        );
         let expected_last_five = [
             0.8085220962465361,
             0.445264715886137,

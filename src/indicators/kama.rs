@@ -138,6 +138,11 @@ mod tests {
             59992.79386218023,
         ];
         assert!(result.values.len() >= 5);
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "KAMA output length does not match input length"
+        );
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
         for (i, &val) in last_five.iter().enumerate() {

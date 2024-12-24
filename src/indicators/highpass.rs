@@ -95,6 +95,11 @@ mod tests {
         ];
 
         assert!(result.values.len() >= 5, "Not enough highpass values");
+        assert_eq!(
+            result.values.len(),
+            data.len(),
+            "Highpass output length should match input length"
+        );
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
 

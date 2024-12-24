@@ -127,6 +127,11 @@ mod tests {
             linreg_result.values.len() >= 5,
             "Not enough LMA values for the test"
         );
+        assert_eq!(
+            linreg_result.values.len(),
+            close_prices.len(),
+            "LMA values count should match input data count"
+        );
         let start_index = linreg_result.values.len() - 5;
         let result_last_five = &linreg_result.values[start_index..];
 
