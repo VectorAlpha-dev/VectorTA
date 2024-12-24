@@ -38,3 +38,6 @@ pub mod trima;
 pub mod wilders;
 pub mod wma;
 pub mod zlema;
+pub mod vwma;
+pub mod pwma;
+pub mod trendflex;

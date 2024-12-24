@@ -32,6 +32,7 @@ use my_project::indicators::{
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
     mama::{calculate_mama, MamaInput},
+    pwma::{calculate_pwma, PwmaInput},
     reflex::{calculate_reflex, ReflexInput},
     rsi::{calculate_rsi, RsiInput},
     sinwma::{calculate_sinwma, SinWmaInput},
@@ -41,7 +42,9 @@ use my_project::indicators::{
     supersmoother_3_pole::{calculate_supersmoother_3_pole, SuperSmoother3PoleInput},
     tema::{calculate_tema, TemaInput},
     tilson::{calculate_t3, T3Input},
+    trendflex::{calculate_trendflex, TrendFlexInput},
     trima::{calculate_trima, TrimaInput},
+    vwma::{calculate_vwma, VwmaInput},
     wilders::{calculate_wilders, WildersInput},
     wma::{calculate_wma, WmaInput},
     zlema::{calculate_zlema, ZlemaInput},
@@ -63,6 +66,24 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // TrendFlex
+    group.bench_function(BenchmarkId::new("TRENDFLEX", 0), |b| {
+        let input = TrendFlexInput::with_default_params(close_prices);
+        b.iter(|| calculate_trendflex(black_box(&input)).expect("Failed to calculate TRENDFLEX"))
+    });
+
+    // VWMA
+    group.bench_function(BenchmarkId::new("VWMA", 0), |b| {
+        let input = VwmaInput::with_default_params(&candles);
+        b.iter(|| calculate_vwma(black_box(&input)).expect("Failed to calculate VWMA"))
+    });
+
+    // PWMA
+    group.bench_function(BenchmarkId::new("PWMA", 0), |b| {
+        let input = PwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_pwma(black_box(&input)).expect("Failed to calculate PWMA"))
+    });
 
     // HT Trendline
     group.bench_function(BenchmarkId::new("HT_TRENDLINE", 0), |b| {
