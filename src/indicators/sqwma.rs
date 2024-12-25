@@ -99,7 +99,7 @@ pub fn calculate_sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>
     }
 
     for j in (period + 1)..n {
-        let my_sum = sqwma_sum(&data, j, &weights);
+        let my_sum = sqwma_sum(data, j, &weights);
         output[j] = my_sum / weight_sum;
     }
 
