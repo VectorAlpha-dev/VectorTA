@@ -24,6 +24,7 @@ use my_project::indicators::{
     dema::{calculate_dema, DemaInput},
     edcf::{calculate_edcf, EdcfInput},
     ema::{calculate_ema, EmaInput},
+    epma::{calculate_epma, EpmaInput},
     fwma::{calculate_fwma, FwmaInput},
     gaussian::{calculate_gaussian, GaussianInput},
     highpass::{calculate_highpass, HighPassInput},
@@ -85,6 +86,12 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // EPMA
+    group.bench_function(BenchmarkId::new("EPMA", 0), |b| {
+        let input = EpmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_epma(black_box(&input)).expect("Failed to calculate EPMA"))
+    });
 
     // JSA
     group.bench_function(BenchmarkId::new("JSA", 0), |b| {

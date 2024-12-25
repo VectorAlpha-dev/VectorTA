@@ -4,7 +4,6 @@ pub mod adosc;
 pub mod adx;
 pub mod adxr;
 pub mod alligator;
-pub mod alma;
 pub mod ao;
 pub mod apo;
 pub mod aroon;
@@ -12,43 +11,48 @@ pub mod aroonosc;
 pub mod atr;
 pub mod avgprice;
 pub mod bandpass;
-pub mod dema;
-pub mod edcf;
-pub mod ema;
-pub mod fwma;
-pub mod gaussian;
-pub mod highpass;
-pub mod highpass_2_pole;
-pub mod hma;
-pub mod ht_trendline;
-pub mod hwma;
-pub mod jma;
-pub mod kama;
-pub mod linearreg;
-pub mod mama;
-pub mod nma;
-pub mod pwma;
-pub mod reflex;
+pub mod moving_averages;
 pub mod rsi;
-pub mod sinwma;
-pub mod sma;
-pub mod smma;
-pub mod supersmoother;
-pub mod supersmoother_3_pole;
-pub mod swma;
-pub mod tema;
-pub mod tilson;
-pub mod trendflex;
-pub mod trima;
-pub mod vwap;
-pub mod vwma;
-pub mod wilders;
-pub mod wma;
-pub mod zlema;
-pub mod mwdx;
-pub mod maaq;
-pub mod srwma;
-pub mod sqwma;
-pub mod vpwma;
-pub mod cwma;
-pub mod jsa;
+pub use moving_averages::{
+    alma,
+    cwma,
+    dema,
+    edcf,
+    ema,
+    epma,
+    fwma,
+    gaussian,
+    highpass,
+    highpass_2_pole,
+    hma,
+    ht_trendline,
+    hwma,
+    jma,
+    jsa,
+    kama,
+    linearreg,
+    maaq,
+    mama,
+    mwdx,
+    nma,
+    pwma,
+    reflex,
+    sinwma,
+    sma,
+    smma,
+    sqwma,
+    srwma,
+    supersmoother,
+    supersmoother_3_pole,
+    swma,
+    tema,
+    tilson, // T3
+    trendflex,
+    trima,
+    vpwma,
+    vwap,
+    vwma,
+    wilders,
+    wma,
+    zlema,
+};
