@@ -42,7 +42,7 @@ pub struct VwmaOutput {
     pub values: Vec<f64>,
 }
 
-#[inline(always)]
+#[inline]
 pub fn calculate_vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
     let period = input.get_period();
     let candles = input.candles;

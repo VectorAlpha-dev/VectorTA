@@ -41,7 +41,7 @@ pub struct HwmaOutput {
     pub values: Vec<f64>,
 }
 
-#[inline(always)]
+#[inline]
 pub fn calculate_hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
     let HwmaParams { na, nb, nc } = input.params;
 

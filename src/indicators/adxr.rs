@@ -42,7 +42,7 @@ pub struct AdxrOutput {
     pub values: Vec<f64>,
 }
 
-#[inline(always)]
+#[inline]
 pub fn calculate_adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
     let candles = input.candles;
     let period = input.get_period();

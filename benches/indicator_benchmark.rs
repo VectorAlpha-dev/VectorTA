@@ -21,6 +21,7 @@ use my_project::indicators::{
     avgprice::{calculate_avgprice, AvgPriceInput},
     bandpass::{calculate_bandpass, BandPassInput},
     dema::{calculate_dema, DemaInput},
+    edcf::{calculate_edcf, EdcfInput},
     ema::{calculate_ema, EmaInput},
     fwma::{calculate_fwma, FwmaInput},
     gaussian::{calculate_gaussian, GaussianInput},
@@ -33,6 +34,8 @@ use my_project::indicators::{
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
     mama::{calculate_mama, MamaInput},
+    mwdx::{calculate_mwdx, MwdxInput},
+    nma::{calculate_nma, NmaInput},
     pwma::{calculate_pwma, PwmaInput},
     reflex::{calculate_reflex, ReflexInput},
     rsi::{calculate_rsi, RsiInput},
@@ -76,6 +79,24 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // MWDX
+    group.bench_function(BenchmarkId::new("MWDX", 0), |b| {
+        let input = MwdxInput::with_default_params(close_prices);
+        b.iter(|| calculate_mwdx(black_box(&input)).expect("Failed to calculate MWDX"))
+    });
+
+    // NMA
+    group.bench_function(BenchmarkId::new("NMA", 0), |b| {
+        let input = NmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_nma(black_box(&input)).expect("Failed to calculate NMA"))
+    });
+
+    // EDCF
+    group.bench_function(BenchmarkId::new("EDCF", 0), |b| {
+        let input = EdcfInput::with_default_params(&hl2_prices);
+        b.iter(|| calculate_edcf(black_box(&input)).expect("Failed to calculate EDCF"))
+    });
 
     // VWAP
     group.bench_function(BenchmarkId::new("VWAP", 0), |b| {

@@ -49,6 +49,7 @@ pub struct GaussianOutput {
     pub values: Vec<f64>,
 }
 
+#[inline]
 pub fn calculate_gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
     let data = input.data;
     let n = data.len();

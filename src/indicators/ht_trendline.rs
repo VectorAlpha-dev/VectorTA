@@ -55,7 +55,7 @@ pub struct EhlersITrendOutput {
 }
 
 // Differs from Ehler's original implementation. Requires refactoring.
-#[inline(always)]
+#[inline]
 pub fn calculate_ht_trendline(
     input: &EhlersITrendInput,
 ) -> Result<EhlersITrendOutput, Box<dyn Error>> {
