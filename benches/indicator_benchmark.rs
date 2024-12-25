@@ -20,6 +20,7 @@ use my_project::indicators::{
     atr::{calculate_atr, AtrInput},
     avgprice::{calculate_avgprice, AvgPriceInput},
     bandpass::{calculate_bandpass, BandPassInput},
+    cwma::{calculate_cwma, CwmaInput},
     dema::{calculate_dema, DemaInput},
     edcf::{calculate_edcf, EdcfInput},
     ema::{calculate_ema, EmaInput},
@@ -31,6 +32,7 @@ use my_project::indicators::{
     ht_trendline::{calculate_ht_trendline, EhlersITrendInput},
     hwma::{calculate_hwma, HwmaInput},
     jma::{calculate_jma, JmaInput},
+    jsa::{calculate_jsa, JsaInput},
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
     maaq::{calculate_maaq, MaaqInput},
@@ -52,6 +54,7 @@ use my_project::indicators::{
     tilson::{calculate_t3, T3Input},
     trendflex::{calculate_trendflex, TrendFlexInput},
     trima::{calculate_trima, TrimaInput},
+    vpwma::{calculate_vpwma, VpwmaInput},
     vwap::{calculate_vwap, VwapInput},
     vwma::{calculate_vwma, VwmaInput},
     wilders::{calculate_wilders, WildersInput},
@@ -82,6 +85,24 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // JSA
+    group.bench_function(BenchmarkId::new("JSA", 0), |b| {
+        let input = JsaInput::with_default_params(close_prices);
+        b.iter(|| calculate_jsa(black_box(&input)).expect("Failed to calculate JSA"))
+    });
+
+    // CWMA
+    group.bench_function(BenchmarkId::new("CWMA", 0), |b| {
+        let input = CwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_cwma(black_box(&input)).expect("Failed to calculate CWMA"))
+    });
+
+    // VPWMA
+    group.bench_function(BenchmarkId::new("VPWMA", 0), |b| {
+        let input = VpwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_vpwma(black_box(&input)).expect("Failed to calculate VPWMA"))
+    });
 
     // SRWMA
     group.bench_function(BenchmarkId::new("SRWMA", 0), |b| {

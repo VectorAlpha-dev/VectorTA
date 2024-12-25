@@ -49,3 +49,6 @@ pub mod mwdx;
 pub mod maaq;
 pub mod srwma;
 pub mod sqwma;
+pub mod vpwma;
+pub mod cwma;
+pub mod jsa;
