@@ -105,7 +105,7 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-        let hl2 = candles.get_calculated_field(("hl2")).expect("Failed to calculate HL2");
+        let hl2 = candles.get_calculated_field("hl2").expect("Failed to calculate HL2");
         let params = EdcfParams { period: Some(15) };
         let input = EdcfInput::new(&hl2, params);
 
