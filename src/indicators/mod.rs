@@ -46,3 +46,6 @@ pub mod wilders;
 pub mod wma;
 pub mod zlema;
 pub mod mwdx;
+pub mod maaq;
+pub mod srwma;
+pub mod sqwma;

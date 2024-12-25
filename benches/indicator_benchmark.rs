@@ -33,6 +33,7 @@ use my_project::indicators::{
     jma::{calculate_jma, JmaInput},
     kama::{calculate_kama, KamaInput},
     linearreg::{calculate_linreg, LinRegInput},
+    maaq::{calculate_maaq, MaaqInput},
     mama::{calculate_mama, MamaInput},
     mwdx::{calculate_mwdx, MwdxInput},
     nma::{calculate_nma, NmaInput},
@@ -42,6 +43,8 @@ use my_project::indicators::{
     sinwma::{calculate_sinwma, SinWmaInput},
     sma::{calculate_sma, SmaInput},
     smma::{calculate_smma, SmmaInput},
+    sqwma::{calculate_sqwma, SqwmaInput},
+    srwma::{calculate_srwma, SrwmaInput},
     supersmoother::{calculate_supersmoother, SuperSmootherInput},
     supersmoother_3_pole::{calculate_supersmoother_3_pole, SuperSmoother3PoleInput},
     swma::{calculate_swma, SwmaInput},
@@ -79,6 +82,24 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // SRWMA
+    group.bench_function(BenchmarkId::new("SRWMA", 0), |b| {
+        let input = SrwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_srwma(black_box(&input)).expect("Failed to calculate SRWMA"))
+    });
+
+    // SQWMA
+    group.bench_function(BenchmarkId::new("SQWMA", 0), |b| {
+        let input = SqwmaInput::with_default_params(close_prices);
+        b.iter(|| calculate_sqwma(black_box(&input)).expect("Failed to calculate SQWMA"))
+    });
+
+    // MAAQ
+    group.bench_function(BenchmarkId::new("MAAQ", 0), |b| {
+        let input = MaaqInput::with_default_params(close_prices);
+        b.iter(|| calculate_maaq(black_box(&input)).expect("Failed to calculate MAAQ"))
+    });
 
     // MWDX
     group.bench_function(BenchmarkId::new("MWDX", 0), |b| {
