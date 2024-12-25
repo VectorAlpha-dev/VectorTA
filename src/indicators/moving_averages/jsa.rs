@@ -59,7 +59,7 @@ pub fn calculate_jsa(input: &JsaInput) -> Result<JsaOutput, Box<dyn Error>> {
         return Err("JSA period must be > 0.".into());
     }
     if period >= n {
-        let mut output = vec![f64::NAN; n];
+        let output = vec![f64::NAN; n];
         return Ok(JsaOutput { values: output });
     }
 
