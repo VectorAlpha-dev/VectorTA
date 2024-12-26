@@ -1,3 +1,4 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,18 @@ pub struct AlmaOutput {
     pub values: Vec<f64>,
 }
 
+pub fn alma(
+    candles: &Candles,
+    source: Option<&str>,
+    params: Option<AlmaParams>,
+) -> Result<AlmaOutput, Box<dyn Error>> {
+    let source = source.unwrap_or("close");
+    let params = params.unwrap_or_default();
+    let data_slice = source_type(candles, source);
+    let input = AlmaInput::new(data_slice, params);
+    calculate_alma(&input)
+}
+
 pub fn calculate_alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
     let data = input.data;
     let len = data.len();
@@ -108,27 +121,47 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_alma_simple_call() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let output = alma(&candles, None, None).expect("Failed to compute ALMA");
+        assert_eq!(output.values.len(), candles.close.len());
+
+        let output2 = alma(&candles, Some("hl2"), None).expect("Failed to compute ALMA(hl2)");
+        assert_eq!(output2.values.len(), candles.close.len());
+
+        let custom_params = AlmaParams {
+            windowsize: Some(14),
+            offset: None,
+            sigma: None,
+        };
+        let output3 = alma(&candles, None, Some(custom_params)).expect("Failed to compute ALMA");
+        assert_eq!(output3.values.len(), candles.close.len());
+
+        let custom_params2 = AlmaParams {
+            windowsize: Some(10),
+            offset: Some(0.9),
+            sigma: Some(5.0),
+        };
+        let output4 =
+            alma(&candles, Some("hlc3"), Some(custom_params2)).expect("Failed ALMA(hlc3) custom");
+        assert_eq!(output4.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_alma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
 
-        let input = AlmaInput::with_default_params(close_prices);
-        let result = calculate_alma(&input).expect("Failed to calculate ALMA");
+        let result = alma(&candles, None, None).expect("Failed to calculate ALMA");
 
         let expected_last_five = [59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];
 
         assert_eq!(
             result.values.len(),
-            close_prices.len(),
+            candles.close.len(),
             "ALMA output length does not match input length!"
-        );
-
-        assert!(
-            result.values.len() >= 5,
-            "Not enough ALMA values for the test"
         );
 
         let start_index = result.values.len().saturating_sub(5);

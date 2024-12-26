@@ -14,6 +14,11 @@ pub struct Candles {
     pub low: Vec<f64>,
     pub close: Vec<f64>,
     pub volume: Vec<f64>,
+
+    pub hl2: Vec<f64>,
+    pub hlc3: Vec<f64>,
+    pub ohlc4: Vec<f64>,
+    pub hlcc4: Vec<f64>,
 }
 
 impl Candles {
@@ -25,21 +30,74 @@ impl Candles {
         close: Vec<f64>,
         volume: Vec<f64>,
     ) -> Self {
-        Candles {
+        let mut candles = Candles {
             timestamp,
             open,
             high,
             low,
             close,
             volume,
-        }
+            hl2:   Vec::new(),
+            hlc3:  Vec::new(),
+            ohlc4: Vec::new(),
+            hlcc4: Vec::new(),
+        };
+        
+        candles.precompute_fields();
+        candles
     }
 
     pub fn get_timestamp(&self) -> Result<&[i64], Box<dyn Error>> {
         Ok(&self.timestamp)
     }
 
-    pub fn select_candle_field(&self, field: &str) -> Result<&[f64], Box<dyn Error>> {
+    fn compute_hl2(&self) -> Vec<f64> {
+        self.high
+            .iter()
+            .zip(self.low.iter())
+            .map(|(h, l)| (h + l) / 2.0)
+            .collect()
+    }
+
+    fn compute_hlc3(&self) -> Vec<f64> {
+        self.high
+            .iter()
+            .zip(self.low.iter())
+            .zip(self.close.iter())
+            .map(|((&h, &l), &c)| (h + l + c) / 3.0)
+            .collect()
+    }
+
+    fn compute_ohlc4(&self) -> Vec<f64> {
+        self.open
+            .iter()
+            .zip(self.high.iter())
+            .zip(self.low.iter())
+            .zip(self.close.iter())
+            .map(|(((&o, &h), &l), &c)| (o + h + l + c) / 4.0)
+            .collect()
+    }
+
+    fn compute_hlcc4(&self) -> Vec<f64> {
+        self.high
+            .iter()
+            .zip(self.low.iter())
+            .zip(self.close.iter())
+            .map(|((&h, &l), &c)| (h + l + 2.0 * c) / 4.0)
+            .collect()
+    }
+
+    pub fn get_calculated_field(&self, field: &str) -> Result<&[f64], Box<dyn std::error::Error>> {
+        match field.to_lowercase().as_str() {
+            "hl2" => Ok(&self.hl2),
+            "hlc3" => Ok(&self.hlc3),
+            "ohlc4" => Ok(&self.ohlc4),
+            "hlcc4" => Ok(&self.hlcc4),
+            _ => Err(format!("Invalid calculated field: {}", field).into()),
+        }
+    }
+
+    pub fn select_candle_field(&self, field: &str) -> Result<&[f64], Box<dyn std::error::Error>> {
         match field.to_lowercase().as_str() {
             "open" => Ok(&self.open),
             "high" => Ok(&self.high),
@@ -50,52 +108,32 @@ impl Candles {
         }
     }
 
-    pub fn get_calculated_field(&self, field: &str) -> Result<Vec<f64>, Box<dyn Error>> {
-        match field.to_lowercase().as_str() {
-            "hl2" => Ok(self.hl2()),
-            "hlc3" => Ok(self.hlc3()),
-            "ohlc4" => Ok(self.ohlc4()),
-            "hlcc4" => Ok(self.hlcc4()),
-            _ => Err(format!("Invalid calculated field: {}", field).into()),
+    fn precompute_fields(&mut self) {
+        let len = self.high.len();
+        let mut hl2   = Vec::with_capacity(len);
+        let mut hlc3  = Vec::with_capacity(len);
+        let mut ohlc4 = Vec::with_capacity(len);
+        let mut hlcc4 = Vec::with_capacity(len);
+    
+        for i in 0..len {
+            let o = self.open[i];
+            let h = self.high[i];
+            let l = self.low[i];
+            let c = self.close[i];
+    
+            hl2.push((h + l) / 2.0);
+            hlc3.push((h + l + c) / 3.0);
+            ohlc4.push((o + h + l + c) / 4.0);
+            hlcc4.push((h + l + 2.0 * c) / 4.0);
         }
-    }
-
-    pub fn hl2(&self) -> Vec<f64> {
-        self.high
-            .iter()
-            .zip(self.low.iter())
-            .map(|(&high, &low)| (high + low) / 2.0)
-            .collect()
-    }
-
-    pub fn hlc3(&self) -> Vec<f64> {
-        self.high
-            .iter()
-            .zip(self.low.iter())
-            .zip(self.close.iter())
-            .map(|((&high, &low), &close)| (high + low + close) / 3.0)
-            .collect()
-    }
-
-    pub fn ohlc4(&self) -> Vec<f64> {
-        self.open
-            .iter()
-            .zip(self.high.iter())
-            .zip(self.low.iter())
-            .zip(self.close.iter())
-            .map(|(((&open, &high), &low), &close)| (open + high + low + close) / 4.0)
-            .collect()
-    }
-
-    pub fn hlcc4(&self) -> Vec<f64> {
-        self.high
-            .iter()
-            .zip(self.low.iter())
-            .zip(self.close.iter())
-            .map(|((&high, &low), &close)| (high + low + 2.0 * close) / 4.0)
-            .collect()
+    
+        self.hl2   = hl2;
+        self.hlc3  = hlc3;
+        self.ohlc4 = ohlc4;
+        self.hlcc4 = hlcc4;
     }
 }
+
 
 pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>> {
     let file = File::open(file_path)?;
@@ -126,6 +164,24 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
         close,
         volume,
     ))
+}
+
+pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    let field = source.to_lowercase();
+    match field.as_str() {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" => &candles.hlcc4,
+        _ => {
+            eprintln!("Warning: Invalid price source '{source}'. Defaulting to 'close'.");
+            &candles.close
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,5 +241,38 @@ mod tests {
         compare_last_five(&hlc3, &expected_last_5_hlc3, "HLC3");
         compare_last_five(&ohlc4, &expected_last_5_ohlc4, "OHLC4");
         compare_last_five(&hlcc4, &expected_last_5_hlcc4, "HLCC4");
+    }
+
+    #[test]
+    fn test_precompute_fields_direct() {
+        let timestamp = vec![1, 2, 3];
+        let open  = vec![100.0, 200.0, 300.0];
+        let high  = vec![110.0, 220.0, 330.0];
+        let low   = vec![ 90.0, 180.0, 270.0];
+        let close = vec![105.0, 190.0, 310.0];
+        let volume = vec![1000.0, 2000.0, 3000.0];
+
+        let candles = Candles::new(timestamp, open, high, low, close, volume);
+
+        let hl2 = candles.get_calculated_field("hl2").unwrap();
+        assert_eq!(hl2, &[100.0, 200.0, 300.0]);
+
+        let hlc3 = candles.get_calculated_field("hlc3").unwrap();
+        let expected_hlc3 = &[101.6667, 196.6667, 303.3333];
+        for (actual, expected) in hlc3.iter().zip(expected_hlc3.iter()) {
+            assert!((actual - expected).abs() < 1e-4);
+        }
+
+        let ohlc4 = candles.get_calculated_field("ohlc4").unwrap();
+        let expected_ohlc4 = &[101.25, 197.5, 302.5];
+        for (actual, expected) in ohlc4.iter().zip(expected_ohlc4.iter()) {
+            assert!((actual - expected).abs() < 1e-4);
+        }
+
+        let hlcc4 = candles.get_calculated_field("hlcc4").unwrap();
+        let expected_hlcc4 = &[102.5, 195.0, 305.0];
+        for (actual, expected) in hlcc4.iter().zip(expected_hlcc4.iter()) {
+            assert!((actual - expected).abs() < 1e-4);
+        }
     }
 }

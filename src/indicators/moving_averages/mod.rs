@@ -15,6 +15,7 @@ pub mod jma;
 pub mod jsa;
 pub mod kama;
 pub mod linearreg;
+pub mod ma;
 pub mod maaq;
 pub mod mama;
 pub mod mwdx;
