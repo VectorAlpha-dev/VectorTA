@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct CwmaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct CwmaParams {
@@ -13,18 +19,24 @@ impl Default for CwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct CwmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: CwmaParams,
 }
 
 impl<'a> CwmaInput<'a> {
-    pub fn new(data: &'a [f64], params: CwmaParams) -> Self {
-        CwmaInput { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: CwmaParams) -> Self {
+        CwmaInput {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         CwmaInput {
-            data,
+            candles,
+            source: "close",
             params: CwmaParams::default(),
         }
     }
@@ -37,15 +49,11 @@ impl<'a> CwmaInput<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CwmaOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.get_period();
 
     if data.is_empty() {
         return Ok(CwmaOutput { values: vec![] });
@@ -94,17 +102,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
+        let input = CwmaInput::with_default_params(&candles);
 
-        let params = CwmaParams { period: Some(14) };
-        let input = CwmaInput::new(close_prices, params);
-
-        let cwma_result = calculate_cwma(&input).expect("CWMA calculation failed");
+        let cwma_result = cwma(&input).expect("CWMA calculation failed");
         let cwma_values = &cwma_result.values;
 
-        assert_eq!(cwma_values.len(), close_prices.len(), "Length mismatch");
+        assert_eq!(cwma_values.len(), candles.close.len(), "Length mismatch");
 
         let expected_last_five = [
             59224.641237300435,
@@ -130,8 +133,8 @@ mod tests {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-8,
-                "CWMA mismatch at last-five index {}: expected {:.14}, got {:.14}",
-                i,
+                "CWMA mismatch at index {}: expected {:.14}, got {:.14}",
+                start_index + i,
                 expected,
                 actual
             );
@@ -139,11 +142,11 @@ mod tests {
 
         let period = input.get_period();
         for i in 0..=period {
-            let orig_val = close_prices[i];
+            let orig_val = candles.close[i];
             let cwma_val = cwma_values[i];
             assert!(
                 (orig_val - cwma_val).abs() < f64::EPSILON,
-                "Expected CWMA to remain same as original for index {}",
+                "Expected CWMA to remain the same as original for index {}",
                 i
             );
         }

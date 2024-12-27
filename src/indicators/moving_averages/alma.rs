@@ -48,44 +48,50 @@ impl<'a> AlmaInput<'a> {
     }
 }
 
+#[inline]
 pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let len = data.len();
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
 
-    let period = input.params.period.unwrap_or(9);
-    let offset = input.params.offset.unwrap_or(0.85);
-    let sigma = input.params.sigma.unwrap_or(6.0);
+    let period: usize = input.params.period.unwrap_or(9);
+    let offset: f64 = input.params.offset.unwrap_or(0.85);
+    let sigma: f64 = input.params.sigma.unwrap_or(6.0);
 
     if period == 0 || period > len {
         return Err("Invalid period specified for ALMA calculation.".into());
     }
 
-    let m = offset * (period - 1) as f64;
-    let s = period as f64 / sigma;
-    let s_sq = s * s;
-    let den = 2.0 * s_sq;
+    let m: f64 = offset * (period - 1) as f64;
+    let s: f64 = period as f64 / sigma;
+    let s_sq: f64 = s * s;
+    let den: f64 = 2.0 * s_sq;
 
-    let mut weights = Vec::with_capacity(period);
-    let mut norm = 0.0;
+    let mut weights: Vec<f64> = Vec::with_capacity(period);
+    let mut norm: f64 = 0.0;
 
     for i in 0..period {
-        let diff = i as f64 - m;
-        let w = (-diff * diff / den).exp();
+        let diff: f64 = i as f64 - m;
+        let num: f64 = diff * diff;
+        let w: f64 = (-num / den).exp();
         weights.push(w);
         norm += w;
     }
 
-    let inv_norm = 1.0 / norm;
-    let mut alma_values = vec![f64::NAN; len];
+    let inv_norm: f64 = 1.0 / norm;
+    let mut alma_values: Vec<f64> = vec![f64::NAN; len];
 
-    for i in (period - 1)..len {
-        let start = i + 1 - period;
-        let mut sum = 0.0;
-        for (idx, &w) in weights.iter().enumerate() {
-            sum += data[start + idx] * w;
-        }
-        alma_values[i] = sum * inv_norm;
-    }
+    alma_values
+        .iter_mut()
+        .enumerate()
+        .skip(period - 1)
+        .for_each(|(i, value)| {
+            let start: usize = i + 1 - period;
+            let mut sum: f64 = 0.0;
+            for (idx, &w) in weights.iter().enumerate() {
+                sum += data[start + idx] * w;
+            }
+            *value = sum * inv_norm;
+        });
 
     Ok(AlmaOutput {
         values: alma_values,

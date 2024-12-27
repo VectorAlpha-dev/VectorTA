@@ -19,7 +19,7 @@ use my_project::indicators::{
     atr::{calculate_atr, AtrInput},
     avgprice::{calculate_avgprice, AvgPriceInput},
     bandpass::{calculate_bandpass, BandPassInput},
-    cwma::{calculate_cwma, CwmaInput},
+    cwma::{cwma, CwmaInput},
     dema::{calculate_dema, DemaInput},
     edcf::{calculate_edcf, EdcfInput},
     ema::{calculate_ema, EmaInput},
@@ -100,8 +100,8 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // CWMA
     group.bench_function(BenchmarkId::new("CWMA", 0), |b| {
-        let input = CwmaInput::with_default_params(close_prices);
-        b.iter(|| calculate_cwma(black_box(&input)).expect("Failed to calculate CWMA"))
+        let input = CwmaInput::with_default_params(&candles);
+        b.iter(|| cwma(black_box(&input)).expect("Failed to calculate CWMA"))
     });
 
     // VPWMA

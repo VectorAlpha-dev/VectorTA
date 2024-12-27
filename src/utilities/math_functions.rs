@@ -25,7 +25,7 @@ pub fn atan64(x: f64) -> f64 {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn fast_sin_f64(mut x: f64) -> f64 {
     const TWO_PI: f64 = std::f64::consts::PI * 2.0;
     x %= TWO_PI;
