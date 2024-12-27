@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct DemaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct DemaParams {
@@ -13,35 +19,37 @@ impl Default for DemaParams {
 
 #[derive(Debug, Clone)]
 pub struct DemaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: DemaParams,
 }
 
 impl<'a> DemaInput<'a> {
-    pub fn new(data: &'a [f64], params: DemaParams) -> Self {
-        DemaInput { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: DemaParams) -> Self {
+        Self {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        DemaInput {
-            data,
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        Self {
+            candles,
+            source: "close",
             params: DemaParams::default(),
         }
     }
 
+    #[inline]
     fn get_period(&self) -> usize {
         self.params.period.unwrap_or(30)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DemaOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
-    let data = input.data;
+pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
+    let data = source_type(input.candles, input.source);
     let size = data.len();
     let period = input.get_period();
 
@@ -77,6 +85,7 @@ pub fn calculate_dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
 
     Ok(DemaOutput { values: output })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,12 +93,15 @@ mod tests {
 
     #[test]
     fn test_dema_accuracy() {
+        // Load historical candles
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let data = &candles.close;
 
-        let input = DemaInput::with_default_params(data);
-        let result = calculate_dema(&input).expect("Failed to calculate DEMA");
+        // Create input with default params (period = 30), source = "close"
+        let input = DemaInput::with_default_params(&candles);
+
+        // Calculate the DEMA
+        let result = dema(&input).expect("Failed to calculate DEMA");
 
         let expected_last_five = [
             59189.73193987478,
@@ -99,20 +111,23 @@ mod tests {
             58908.370159946775,
         ];
 
-        assert!(result.values.len() >= 5);
+        // Basic length checks
+        assert!(result.values.len() >= expected_last_five.len());
         assert_eq!(
             result.values.len(),
             candles.close.len(),
             "DEMA output length does not match input length"
         );
+
+        // Compare the last five computed values
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
         for (i, &val) in last_five.iter().enumerate() {
             let exp = expected_last_five[i];
             assert!(
                 (val - exp).abs() < 1e-6,
-                "DEMA mismatch at {}: expected {}, got {}",
-                i,
+                "DEMA mismatch at index {}: expected {}, got {}",
+                start_index + i,
                 exp,
                 val
             );

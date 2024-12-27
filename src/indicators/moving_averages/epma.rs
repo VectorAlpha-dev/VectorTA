@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct EpmaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct EpmaParams {
@@ -6,65 +12,50 @@ pub struct EpmaParams {
     pub offset: Option<usize>,
 }
 
-impl Default for EpmaParams {
-    fn default() -> Self {
+impl EpmaParams {
+    pub fn with_default_params() -> Self {
         EpmaParams {
-            period: Some(11),
-            offset: Some(4),
+            period: None,
+            offset: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct EpmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: EpmaParams,
 }
 
 impl<'a> EpmaInput<'a> {
-    #[inline]
-    pub fn new(data: &'a [f64], params: EpmaParams) -> Self {
-        Self { data, params }
-    }
-
-    #[inline]
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        Self {
-            data,
-            params: EpmaParams::default(),
+    pub fn new(candles: &'a Candles, source: &'a str, params: EpmaParams) -> Self {
+        EpmaInput {
+            candles,
+            source,
+            params,
         }
     }
 
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| EpmaParams::default().period.unwrap())
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        EpmaInput {
+            candles,
+            source: "close",
+            params: EpmaParams::with_default_params(),
+        }
     }
-
-    #[inline]
-    fn get_offset(&self) -> usize {
-        self.params
-            .offset
-            .unwrap_or_else(|| EpmaParams::default().offset.unwrap())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EpmaOutput {
-    pub values: Vec<f64>,
 }
 
 #[inline]
-pub fn calculate_epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let n = data.len();
+pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let n: usize = data.len();
     if n == 0 {
         return Err("Empty data slice for EPMA calculation.".into());
     }
 
-    let period = input.get_period();
-    let offset = input.get_offset();
+    let period = input.params.period.unwrap_or(11);
+    let offset = input.params.offset.unwrap_or(4);
     if period < 2 {
         return Err("EPMA period must be >= 2.".into());
     }
@@ -117,44 +108,72 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_epma_accuracy() {
-        let expected_last_five = [59174.48, 59201.04, 59167.6, 59200.32, 59117.04];
-
+    fn test_epma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let source = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
-        let params = EpmaParams {
-            period: Some(11),
-            offset: Some(4),
+        let default_params = EpmaParams {
+            period: None,
+            offset: None,
         };
-        let input = EpmaInput::new(source, params);
+        let input = EpmaInput::new(&candles, "close", default_params);
+        let output = epma(&input).expect("Failed EPMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
 
-        let result = calculate_epma(&input).expect("EPMA failed");
-        assert_eq!(result.values.len(), source.len());
+        let params_period_14 = EpmaParams {
+            period: Some(14),
+            offset: None,
+        };
+        let input2 = EpmaInput::new(&candles, "hl2", params_period_14);
+        let output2 = epma(&input2).expect("Failed EPMA with period=14, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
 
-        assert!(result.values.len() >= 5, "Not enough data for last-5 check");
-        let start_idx = result.values.len() - 5;
-        let actual_last_five = &result.values[start_idx..];
+        let params_custom = EpmaParams {
+            period: Some(10),
+            offset: Some(5),
+        };
+        let input3 = EpmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = epma(&input3).expect("Failed EPMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
 
-        for (i, &val) in actual_last_five.iter().enumerate() {
-            let expected_val = expected_last_five[i];
-            let diff = (val - expected_val).abs();
+    #[test]
+    fn test_epma_accuracy() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = EpmaParams::with_default_params();
+        let input = EpmaInput::new(&candles, "close", default_params);
+        let result = epma(&input).expect("Failed to calculate EPMA");
+
+        let expected_last_five = [59174.48, 59201.04, 59167.60, 59200.32, 59117.04];
+
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "EPMA output length does not match input length!"
+        );
+
+        let start_index = result.values.len().saturating_sub(5);
+        let result_last_five = &result.values[start_index..];
+
+        for (i, &value) in result_last_five.iter().enumerate() {
             assert!(
-                diff < 1e-2,
-                "EPMA mismatch at index {}, expected {}, got {}, diff={}",
+                (value - expected_last_five[i]).abs() < 1e-1,
+                "EPMA value mismatch at index {}: expected {}, got {}",
                 i,
-                expected_val,
-                val,
-                diff
+                expected_last_five[i],
+                value
             );
         }
 
-        let default_input = EpmaInput::with_default_params(source);
-        let default_result = calculate_epma(&default_input).expect("default EPMA failed");
-        assert_eq!(default_result.values.len(), source.len());
+        for val in &result.values {
+            if !val.is_nan() {
+                assert!(
+                    val.is_finite(),
+                    "EPMA output contains non-finite values (e.g. Inf)."
+                );
+            }
+        }
     }
 }

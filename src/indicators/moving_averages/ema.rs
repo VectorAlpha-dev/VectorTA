@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct EmaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct EmaParams {
@@ -13,22 +19,29 @@ impl Default for EmaParams {
 
 #[derive(Debug, Clone)]
 pub struct EmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: EmaParams,
 }
 
 impl<'a> EmaInput<'a> {
-    pub fn new(data: &'a [f64], params: EmaParams) -> Self {
-        EmaInput { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: EmaParams) -> Self {
+        EmaInput {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         EmaInput {
-            data,
+            candles,
+            source: "close",
             params: EmaParams::default(),
         }
     }
 
+    #[inline]
     fn get_period(&self) -> usize {
         self.params
             .period
@@ -36,14 +49,10 @@ impl<'a> EmaInput<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EmaOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
-    let data = input.data;
+pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
+    let data = source_type(input.candles, input.source);
+    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > data.len() {
@@ -74,13 +83,16 @@ mod tests {
     fn test_ema_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
 
+        let close_prices = &candles.close;
         let params = EmaParams { period: Some(9) };
-        let input = EmaInput::new(close_prices, params);
-        let ema_result = calculate_ema(&input).expect("Failed to calculate EMA");
+
+        let old_style_input = EmaInput {
+            candles: &candles,
+            source: "close",
+            params,
+        };
+        let ema_result = ema(&old_style_input).expect("Failed to calculate EMA");
 
         let expected_last_five_ema = [59302.2, 59277.9, 59230.2, 59215.1, 59103.1];
 
@@ -91,8 +103,9 @@ mod tests {
         assert_eq!(
             ema_result.values.len(),
             close_prices.len(),
-            "EMA values count should match input data count"
+            "EMA output length does not match input length"
         );
+
         let start_index = ema_result.values.len().saturating_sub(5);
         let result_last_five_ema = &ema_result.values[start_index..];
 
@@ -106,9 +119,8 @@ mod tests {
             );
         }
 
-        let default_input = EmaInput::with_default_params(close_prices);
-        let default_ema_result =
-            calculate_ema(&default_input).expect("Failed to calculate EMA with defaults");
+        let default_input = EmaInput::with_default_params(&candles);
+        let default_ema_result = ema(&default_input).expect("Failed to calculate default EMA");
         assert!(
             !default_ema_result.values.is_empty(),
             "Should produce EMA values with default params"

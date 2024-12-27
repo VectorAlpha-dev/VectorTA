@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct EdcfOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct EdcfParams {
@@ -13,18 +19,30 @@ impl Default for EdcfParams {
 
 #[derive(Debug, Clone)]
 pub struct EdcfInput<'a> {
-    pub data: &'a [f64],
+    /// Full candle data, used for referencing the desired source
+    pub candles: &'a Candles,
+    /// Which field to calculate the EDCF on (e.g. "close", "hl2", etc.)
+    pub source: &'a str,
+    /// User-specified or default parameters
     pub params: EdcfParams,
 }
 
 impl<'a> EdcfInput<'a> {
-    pub fn new(data: &'a [f64], params: EdcfParams) -> Self {
-        EdcfInput { data, params }
+    /// Create a new input struct with specific parameters
+    pub fn new(candles: &'a Candles, source: &'a str, params: EdcfParams) -> Self {
+        EdcfInput {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    /// Create a new input struct using default parameters
+    /// (e.g., period=15) and default source="close"
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         EdcfInput {
-            data,
+            candles,
+            source: "close",
             params: EdcfParams::default(),
         }
     }
@@ -37,14 +55,9 @@ impl<'a> EdcfInput<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EdcfOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
-    let data = input.data;
+pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
+    let data = source_type(input.candles, input.source);
     let period = input.get_period();
     let len = data.len();
 
@@ -102,19 +115,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-        let hl2 = candles
-            .get_calculated_field("hl2")
-            .expect("Failed to calculate HL2");
-        let params = EdcfParams { period: Some(15) };
-        let input = EdcfInput::new(hl2, params);
+        // We can compare EDCF on any source; let's use "hl2" for this example
+        let input = EdcfInput::new(&candles, "hl2", EdcfParams { period: Some(15) });
 
-        let edcf_result = calculate_edcf(&input).expect("EDCF calculation failed");
+        // Run the calculation
+        let edcf_result = edcf(&input).expect("EDCF calculation failed");
         let edcf_values = &edcf_result.values;
 
-        assert_eq!(edcf_values.len(), close_prices.len(), "Length mismatch");
+        // For a sanity check, compare length to the candle set
+        assert_eq!(
+            edcf_values.len(),
+            candles.close.len(),
+            "EDCF output length does not match input length!"
+        );
 
         let expected_last_five = [
             59593.332275678375,
@@ -141,7 +154,7 @@ mod tests {
             assert!(
                 diff < 1e-8,
                 "EDCF mismatch at index {}: expected {:.14}, got {:.14}",
-                i,
+                start_index + i,
                 expected,
                 actual
             );
