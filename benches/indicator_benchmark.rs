@@ -62,7 +62,6 @@ use my_project::indicators::{
     wma::{calculate_wma, WmaInput},
     zlema::{calculate_zlema, ZlemaInput},
 };
-use std::default;
 use std::time::Duration;
 
 fn benchmark_indicators(c: &mut Criterion) {
@@ -144,13 +143,13 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // EDCF
     group.bench_function(BenchmarkId::new("EDCF", 0), |b| {
-        let input = EdcfInput::with_default_params(&hl2_prices);
+        let input = EdcfInput::with_default_params(hl2_prices);
         b.iter(|| calculate_edcf(black_box(&input)).expect("Failed to calculate EDCF"))
     });
 
     // VWAP
     group.bench_function(BenchmarkId::new("VWAP", 0), |b| {
-        let input = VwapInput::with_default_params(timestamps, &hl3_prices, volume);
+        let input = VwapInput::with_default_params(timestamps, hl3_prices, volume);
         b.iter(|| calculate_vwap(black_box(&input)).expect("Failed to calculate VWAP"))
     });
 
@@ -363,7 +362,7 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // AO
     group.bench_function(BenchmarkId::new("AO", 0), |b| {
-        let input = AoInput::with_default_params(&hl2_prices);
+        let input = AoInput::with_default_params(hl2_prices);
         b.iter(|| calculate_ao(black_box(&input)).expect("Failed to calculate AO"))
     });
 
@@ -387,7 +386,7 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // Alligator
     group.bench_function(BenchmarkId::new("ALLIGATOR", 0), |b| {
-        let input = AlligatorInput::with_default_params(&hl2_prices);
+        let input = AlligatorInput::with_default_params(hl2_prices);
         b.iter(|| calculate_alligator(black_box(&input)).expect("Failed to calculate alligator"))
     });
 

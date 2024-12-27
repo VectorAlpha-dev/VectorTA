@@ -202,7 +202,7 @@ mod tests {
             .get_calculated_field("hl2")
             .expect("Failed to extract hl2 prices");
 
-        let input = AlligatorInput::with_default_params(&hl2_prices);
+        let input = AlligatorInput::with_default_params(hl2_prices);
         let result = calculate_alligator(&input).expect("Failed to calculate alligator");
 
         let expected_last_five_jaw_result = [60742.4, 60632.6, 60555.1, 60442.7, 60308.7];
@@ -269,7 +269,7 @@ mod tests {
             jaw_period: Some(14),
             ..AlligatorParams::default()
         };
-        let custom_input = AlligatorInput::new(&hl2_prices, custom_params);
+        let custom_input = AlligatorInput::new(hl2_prices, custom_params);
         let _ = calculate_alligator(&custom_input)
             .expect("Alligator calculation with custom params failed");
     }

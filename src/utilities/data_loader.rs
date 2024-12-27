@@ -237,10 +237,10 @@ mod tests {
                 );
             }
         }
-        compare_last_five(&hl2, &expected_last_5_hl2, "HL2");
-        compare_last_five(&hlc3, &expected_last_5_hlc3, "HLC3");
-        compare_last_five(&ohlc4, &expected_last_5_ohlc4, "OHLC4");
-        compare_last_five(&hlcc4, &expected_last_5_hlcc4, "HLCC4");
+        compare_last_five(hl2, &expected_last_5_hl2, "HL2");
+        compare_last_five(hlc3, &expected_last_5_hlc3, "HLC3");
+        compare_last_five(ohlc4, &expected_last_5_ohlc4, "OHLC4");
+        compare_last_five(hlcc4, &expected_last_5_hlcc4, "HLCC4");
     }
 
     #[test]
