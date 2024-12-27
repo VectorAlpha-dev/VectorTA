@@ -7,9 +7,7 @@ pub struct JsaParams {
 
 impl Default for JsaParams {
     fn default() -> Self {
-        JsaParams {
-            period: Some(30),
-        }
+        JsaParams { period: Some(30) }
     }
 }
 
@@ -87,9 +85,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let params = JsaParams {
-            period: Some(30),
-        };
+        let params = JsaParams { period: Some(30) };
         let input = JsaInput::new(source, params);
 
         let result = calculate_jsa(&input).expect("Failed to calculate JSA");
@@ -120,7 +116,8 @@ mod tests {
         }
 
         let default_input = JsaInput::with_default_params(source);
-        let default_result = calculate_jsa(&default_input).expect("Failed to calculate JSA default");
+        let default_result =
+            calculate_jsa(&default_input).expect("Failed to calculate JSA default");
         assert_eq!(
             default_result.values.len(),
             source.len(),

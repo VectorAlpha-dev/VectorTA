@@ -5,7 +5,6 @@ edition = "2021"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-lazy_static = "1.4"
 
 [[bench]]
 name = "indicator_benchmark"
@@ -14,14 +13,13 @@ harness = false
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 csv = "1.1"
-lazy_static = "1.5.0"
 ndarray = "0.16.1"
 chrono = "0.4.39"
 
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "my_project"
@@ -41,4 +39,4 @@ debug = false
 incremental = false
 
 [build]
-rustflags = ["-C", "target-cpu=native","-Z", "threads=16"]
+rustflags = ["-C", "target-cpu=native"]

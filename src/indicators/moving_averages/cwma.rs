@@ -122,7 +122,11 @@ mod tests {
         let start_index = cwma_values.len() - expected_last_five.len();
         let actual_last_five = &cwma_values[start_index..];
 
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(expected_last_five.iter()).enumerate() {
+        for (i, (&actual, &expected)) in actual_last_five
+            .iter()
+            .zip(expected_last_five.iter())
+            .enumerate()
+        {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-8,

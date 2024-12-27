@@ -105,7 +105,9 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-        let hl2 = candles.get_calculated_field("hl2").expect("Failed to calculate HL2");
+        let hl2 = candles
+            .get_calculated_field("hl2")
+            .expect("Failed to calculate HL2");
         let params = EdcfParams { period: Some(15) };
         let input = EdcfInput::new(hl2, params);
 
@@ -130,7 +132,11 @@ mod tests {
         let start_index = edcf_values.len() - expected_last_five.len();
         let actual_last_five = &edcf_values[start_index..];
 
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(expected_last_five.iter()).enumerate() {
+        for (i, (&actual, &expected)) in actual_last_five
+            .iter()
+            .zip(expected_last_five.iter())
+            .enumerate()
+        {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-8,

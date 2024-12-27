@@ -1,5 +1,4 @@
 extern crate criterion;
-extern crate lazy_static;
 extern crate my_project;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};

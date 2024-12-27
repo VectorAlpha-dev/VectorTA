@@ -91,13 +91,11 @@ pub fn calculate_nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
         nma_values[j] = data[j - i] * ratio + data[j - i - 1] * (1.0 - ratio);
     }
 
-    Ok(NmaOutput {
-        values: nma_values,
-    })
+    Ok(NmaOutput { values: nma_values })
 }
 
 #[cfg(test)]
- mod tests {
+mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 

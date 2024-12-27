@@ -70,11 +70,7 @@ pub fn calculate_maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
 
     let len = data.len();
     if len < period {
-        return Err(format!(
-            "Not enough data: length={} < period={}",
-            len, period
-        )
-        .into());
+        return Err(format!("Not enough data: length={} < period={}", len, period).into());
     }
     if period == 0 || fast_p == 0 || slow_p == 0 {
         return Err("MAAQ periods cannot be zero.".into());
@@ -111,7 +107,6 @@ pub fn calculate_maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
         } else {
             signal / noise
         };
-
 
         let sc = ratio.mul_add(fast_sc, slow_sc);
         let temp = sc * sc;

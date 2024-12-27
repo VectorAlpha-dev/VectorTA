@@ -65,7 +65,6 @@ pub fn calculate_sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>
 
     let mut weights = Vec::with_capacity(period - 1);
     for i in 0..(period - 1) {
-
         let w = (period as f64 - i as f64).powi(2);
         weights.push(w);
     }
@@ -75,20 +74,16 @@ pub fn calculate_sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>
     let mut output = data.to_vec();
 
     #[inline(always)]
-    fn sqwma_sum(
-        data: &[f64],
-        j: usize,
-        weights: &[f64],
-    ) -> f64 {
+    fn sqwma_sum(data: &[f64], j: usize, weights: &[f64]) -> f64 {
         let mut sum_ = 0.0;
         let p_minus_1 = weights.len();
 
         let mut i = 0;
         while i < p_minus_1.saturating_sub(3) {
-            sum_ += data[j - i]         * weights[i];
-            sum_ += data[j - (i + 1)]   * weights[i + 1];
-            sum_ += data[j - (i + 2)]   * weights[i + 2];
-            sum_ += data[j - (i + 3)]   * weights[i + 3];
+            sum_ += data[j - i] * weights[i];
+            sum_ += data[j - (i + 1)] * weights[i + 1];
+            sum_ += data[j - (i + 2)] * weights[i + 2];
+            sum_ += data[j - (i + 3)] * weights[i + 3];
             i += 4;
         }
         while i < p_minus_1 {
@@ -133,10 +128,7 @@ mod tests {
         let result = calculate_sqwma(&input).expect("Failed to calculate SQWMA");
         assert_eq!(result.values.len(), source.len());
 
-        assert!(
-            result.values.len() >= 5,
-            "Not enough data for last-5 check"
-        );
+        assert!(result.values.len() >= 5, "Not enough data for last-5 check");
         let start_idx = result.values.len() - 5;
         let actual_last_five = &result.values[start_idx..];
 

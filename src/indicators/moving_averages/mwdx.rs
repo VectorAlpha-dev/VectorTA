@@ -7,9 +7,7 @@ pub struct MwdxParams {
 
 impl Default for MwdxParams {
     fn default() -> Self {
-        MwdxParams {
-            factor: Some(0.2),
-        }
+        MwdxParams { factor: Some(0.2) }
     }
 }
 

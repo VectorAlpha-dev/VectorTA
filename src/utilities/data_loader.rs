@@ -1,5 +1,4 @@
 extern crate csv;
-extern crate lazy_static;
 extern crate serde;
 
 use csv::ReaderBuilder;
@@ -37,12 +36,12 @@ impl Candles {
             low,
             close,
             volume,
-            hl2:   Vec::new(),
-            hlc3:  Vec::new(),
+            hl2: Vec::new(),
+            hlc3: Vec::new(),
             ohlc4: Vec::new(),
             hlcc4: Vec::new(),
         };
-        
+
         candles.precompute_fields();
         candles
     }
@@ -110,30 +109,29 @@ impl Candles {
 
     fn precompute_fields(&mut self) {
         let len = self.high.len();
-        let mut hl2   = Vec::with_capacity(len);
-        let mut hlc3  = Vec::with_capacity(len);
+        let mut hl2 = Vec::with_capacity(len);
+        let mut hlc3 = Vec::with_capacity(len);
         let mut ohlc4 = Vec::with_capacity(len);
         let mut hlcc4 = Vec::with_capacity(len);
-    
+
         for i in 0..len {
             let o = self.open[i];
             let h = self.high[i];
             let l = self.low[i];
             let c = self.close[i];
-    
+
             hl2.push((h + l) / 2.0);
             hlc3.push((h + l + c) / 3.0);
             ohlc4.push((o + h + l + c) / 4.0);
             hlcc4.push((h + l + 2.0 * c) / 4.0);
         }
-    
-        self.hl2   = hl2;
-        self.hlc3  = hlc3;
+
+        self.hl2 = hl2;
+        self.hlc3 = hlc3;
         self.ohlc4 = ohlc4;
         self.hlcc4 = hlcc4;
     }
 }
-
 
 pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>> {
     let file = File::open(file_path)?;
@@ -156,14 +154,7 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
         volume.push(record[5].parse::<f64>()?);
     }
 
-    Ok(Candles::new(
-        timestamp,
-        open,
-        high,
-        low,
-        close,
-        volume,
-    ))
+    Ok(Candles::new(timestamp, open, high, low, close, volume))
 }
 
 pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
@@ -206,10 +197,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load CSV for testing");
 
-        let hl2 = candles.get_calculated_field("hl2").expect("Failed to get HL2");
-        let hlc3 = candles.get_calculated_field("hlc3").expect("Failed to get HLC3");
-        let ohlc4 = candles.get_calculated_field("ohlc4").expect("Failed to get OHLC4");
-        let hlcc4 = candles.get_calculated_field("hlcc4").expect("Failed to get HLCC4");
+        let hl2 = candles
+            .get_calculated_field("hl2")
+            .expect("Failed to get HL2");
+        let hlc3 = candles
+            .get_calculated_field("hlc3")
+            .expect("Failed to get HLC3");
+        let ohlc4 = candles
+            .get_calculated_field("ohlc4")
+            .expect("Failed to get OHLC4");
+        let hlcc4 = candles
+            .get_calculated_field("hlcc4")
+            .expect("Failed to get HLCC4");
 
         let len = candles.timestamp.len();
         assert_eq!(hl2.len(), len, "HL2 length mismatch");
@@ -246,9 +245,9 @@ mod tests {
     #[test]
     fn test_precompute_fields_direct() {
         let timestamp = vec![1, 2, 3];
-        let open  = vec![100.0, 200.0, 300.0];
-        let high  = vec![110.0, 220.0, 330.0];
-        let low   = vec![ 90.0, 180.0, 270.0];
+        let open = vec![100.0, 200.0, 300.0];
+        let high = vec![110.0, 220.0, 330.0];
+        let low = vec![90.0, 180.0, 270.0];
         let close = vec![105.0, 190.0, 310.0];
         let volume = vec![1000.0, 2000.0, 3000.0];
 

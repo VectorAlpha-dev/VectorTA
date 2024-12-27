@@ -1,4 +1,4 @@
-use chrono::{NaiveDateTime, Datelike, Utc};
+use chrono::{Datelike, NaiveDateTime, Utc};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -110,9 +110,7 @@ pub fn calculate_vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
                 let bucket_ms = (count as i64) * 86_400_000;
                 ts_ms / bucket_ms
             }
-            'M' => {
-                floor_to_month(ts_ms, count)?
-            }
+            'M' => floor_to_month(ts_ms, count)?,
             _ => return Err(format!("Unsupported anchor unit '{}'", unit_char).into()),
         };
 
@@ -132,7 +130,9 @@ pub fn calculate_vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
         };
     }
 
-    Ok(VwapOutput { values: vwap_values })
+    Ok(VwapOutput {
+        values: vwap_values,
+    })
 }
 
 #[inline]
@@ -184,11 +184,10 @@ fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
         Ok(group_id)
     } else {
         let quarter_group = (month as i64 - 1) / (count as i64);
-        let group_id = (year as i64) * 100 + quarter_group; 
+        let group_id = (year as i64) * 100 + quarter_group;
         Ok(group_id)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

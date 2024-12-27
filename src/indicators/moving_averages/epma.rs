@@ -94,7 +94,7 @@ pub fn calculate_epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
         let mut i = 0_usize;
 
         while i + 3 < p_minus_1 {
-            my_sum += data[j - i]       * weights[i];
+            my_sum += data[j - i] * weights[i];
             my_sum += data[j - (i + 1)] * weights[i + 1];
             my_sum += data[j - (i + 2)] * weights[i + 2];
             my_sum += data[j - (i + 3)] * weights[i + 3];
