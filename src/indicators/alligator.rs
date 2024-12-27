@@ -198,7 +198,7 @@ mod tests {
     fn test_alligator_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let hl2_prices: Vec<f64> = candles
+        let hl2_prices = candles
             .get_calculated_field("hl2")
             .expect("Failed to extract hl2 prices");
 

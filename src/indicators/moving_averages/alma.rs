@@ -2,110 +2,87 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub struct AlmaOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AlmaParams {
-    pub windowsize: Option<usize>,
+    pub period: Option<usize>,
     pub offset: Option<f64>,
     pub sigma: Option<f64>,
 }
 
-impl Default for AlmaParams {
-    fn default() -> Self {
+impl AlmaParams {
+    pub fn with_default_params() -> Self {
         AlmaParams {
-            windowsize: Some(9),
-            offset: Some(0.85),
-            sigma: Some(6.0),
+            period: None,
+            offset: None,
+            sigma: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AlmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: AlmaParams,
 }
 
 impl<'a> AlmaInput<'a> {
-    pub fn new(data: &'a [f64], params: AlmaParams) -> Self {
-        AlmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn new(candles: &'a Candles, source: &'a str, params: AlmaParams) -> Self {
         AlmaInput {
-            data,
-            params: AlmaParams::default(),
+            candles,
+            source,
+            params,
         }
     }
 
-    fn get_windowsize(&self) -> usize {
-        self.params
-            .windowsize
-            .unwrap_or_else(|| AlmaParams::default().windowsize.unwrap())
-    }
-
-    fn get_offset(&self) -> f64 {
-        self.params
-            .offset
-            .unwrap_or_else(|| AlmaParams::default().offset.unwrap())
-    }
-
-    fn get_sigma(&self) -> f64 {
-        self.params
-            .sigma
-            .unwrap_or_else(|| AlmaParams::default().sigma.unwrap())
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        AlmaInput {
+            candles,
+            source: "close",
+            params: AlmaParams::with_default_params(),
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AlmaOutput {
-    pub values: Vec<f64>,
-}
-
-pub fn alma(
-    candles: &Candles,
-    source: Option<&str>,
-    params: Option<AlmaParams>,
-) -> Result<AlmaOutput, Box<dyn Error>> {
-    let source = source.unwrap_or("close");
-    let params = params.unwrap_or_default();
-    let data_slice = source_type(candles, source);
-    let input = AlmaInput::new(data_slice, params);
-    calculate_alma(&input)
-}
-
-pub fn calculate_alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
-    let data = input.data;
+pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
+    let data = source_type(input.candles, input.source);
     let len = data.len();
-    let windowsize = input.get_windowsize();
-    let offset = input.get_offset();
-    let sigma = input.get_sigma();
 
-    if windowsize == 0 || windowsize > len {
-        return Err("Invalid windowsize specified for ALMA calculation.".into());
+    let period = input.params.period.unwrap_or(9);
+    let offset = input.params.offset.unwrap_or(0.85);
+    let sigma = input.params.sigma.unwrap_or(6.0);
+
+    if period == 0 || period > len {
+        return Err("Invalid period specified for ALMA calculation.".into());
     }
 
-    let m = offset * (windowsize - 1) as f64;
-    let s = windowsize as f64 / sigma;
+    let m = offset * (period - 1) as f64;
+    let s = period as f64 / sigma;
     let s_sq = s * s;
     let den = 2.0 * s_sq;
-    let mut weights = Vec::with_capacity(windowsize);
+
+    let mut weights = Vec::with_capacity(period);
     let mut norm = 0.0;
 
-    for i in 0..windowsize {
-        let dif = i as f64 - m;
-        let num = dif * dif;
-        let weight = (-num / den).exp();
-        weights.push(weight);
-        norm += weight;
+    for i in 0..period {
+        let diff = i as f64 - m;
+        let w = (-diff * diff / den).exp();
+        weights.push(w);
+        norm += w;
     }
-    let inv_norm = 1.0 / norm;
 
+    let inv_norm = 1.0 / norm;
     let mut alma_values = vec![f64::NAN; len];
 
-    for i in (windowsize - 1)..len {
-        let start = i + 1 - windowsize;
+    for i in (period - 1)..len {
+        let start = i + 1 - period;
         let mut sum = 0.0;
-        for (w_i, &w) in weights.iter().enumerate() {
-            sum += data[start + w_i] * w;
+        for (idx, &w) in weights.iter().enumerate() {
+            sum += data[start + idx] * w;
         }
         alma_values[i] = sum * inv_norm;
     }
@@ -121,32 +98,36 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_alma_simple_call() {
+    fn test_alma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let output = alma(&candles, None, None).expect("Failed to compute ALMA");
-        assert_eq!(output.values.len(), candles.close.len());
-
-        let output2 = alma(&candles, Some("hl2"), None).expect("Failed to compute ALMA(hl2)");
-        assert_eq!(output2.values.len(), candles.close.len());
-
-        let custom_params = AlmaParams {
-            windowsize: Some(14),
+        let default_params = AlmaParams {
+            period: None,
             offset: None,
             sigma: None,
         };
-        let output3 = alma(&candles, None, Some(custom_params)).expect("Failed to compute ALMA");
-        assert_eq!(output3.values.len(), candles.close.len());
+        let input = AlmaInput::new(&candles, "close", default_params);
+        let output = alma(&input).expect("Failed ALMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
 
-        let custom_params2 = AlmaParams {
-            windowsize: Some(10),
+        let params_period_14 = AlmaParams {
+            period: Some(14),
+            offset: None,
+            sigma: None,
+        };
+        let input2 = AlmaInput::new(&candles, "hl2", params_period_14);
+        let output2 = alma(&input2).expect("Failed ALMA with period=14, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+
+        let params_custom = AlmaParams {
+            period: Some(10),
             offset: Some(0.9),
             sigma: Some(5.0),
         };
-        let output4 =
-            alma(&candles, Some("hlc3"), Some(custom_params2)).expect("Failed ALMA(hlc3) custom");
-        assert_eq!(output4.values.len(), candles.close.len());
+        let input3 = AlmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = alma(&input3).expect("Failed ALMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
     }
 
     #[test]
@@ -154,7 +135,10 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let result = alma(&candles, None, None).expect("Failed to calculate ALMA");
+        let default_params = AlmaParams::with_default_params();
+
+        let input = AlmaInput::new(&candles, "close", default_params);
+        let result = alma(&input).expect("Failed to calculate ALMA");
 
         let expected_last_five = [59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];
 

@@ -12,7 +12,7 @@ use my_project::indicators::{
     adx::{calculate_adx, AdxInput},
     adxr::{calculate_adxr, AdxrInput},
     alligator::{calculate_alligator, AlligatorInput},
-    alma::{calculate_alma, AlmaInput},
+    alma::{alma, AlmaInput},
     ao::{calculate_ao, AoInput},
     apo::{calculate_apo, ApoInput},
     aroon::{calculate_aroon, AroonInput},
@@ -62,6 +62,7 @@ use my_project::indicators::{
     wma::{calculate_wma, WmaInput},
     zlema::{calculate_zlema, ZlemaInput},
 };
+use std::default;
 use std::time::Duration;
 
 fn benchmark_indicators(c: &mut Criterion) {
@@ -368,8 +369,8 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // ALMA
     group.bench_function(BenchmarkId::new("ALMA", 0), |b| {
-        let input = AlmaInput::with_default_params(close_prices);
-        b.iter(|| calculate_alma(black_box(&input)).expect("Failed to calculate ALMA"))
+        let input = AlmaInput::with_default_params(&candles);
+        b.iter(|| alma(black_box(&input)).expect("Failed to calculate ALMA"))
     });
 
     // ADOSC
