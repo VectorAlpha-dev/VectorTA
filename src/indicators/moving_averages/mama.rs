@@ -72,7 +72,7 @@ fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
 
 #[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
-    let src = match &input.data {
+    let src: &[f64] = match &input.data {
         MamaData::Candles { candles, source } => source_type(candles, source),
         MamaData::Slice(slice) => slice,
     };

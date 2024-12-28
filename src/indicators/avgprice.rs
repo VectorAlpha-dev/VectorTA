@@ -35,7 +35,7 @@ pub struct AvgPriceOutput {
 }
 
 #[inline]
-pub fn calculate_avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<dyn Error>> {
+pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<dyn Error>> {
     let candles = input.candles;
     let len = candles.close.len();
     if len == 0 {
@@ -76,7 +76,7 @@ mod tests {
         };
 
         let input = AvgPriceInput::with_default_params(&candles);
-        let result = calculate_avgprice(&input).expect("Failed to calculate avgprice");
+        let result = avgprice(&input).expect("Failed to calculate avgprice");
         assert_eq!(
             result.values.len(),
             candles.close.len(),

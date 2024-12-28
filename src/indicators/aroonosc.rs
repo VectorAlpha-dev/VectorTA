@@ -41,7 +41,7 @@ pub struct AroonOscOutput {
 }
 
 #[inline]
-pub fn calculate_aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<dyn Error>> {
+pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<dyn Error>> {
     let candles = input.candles;
     let length = input.get_length();
     if length == 0 {
@@ -102,7 +102,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = AroonOscInput::with_default_params(&candles);
-        let result = calculate_aroon_osc(&input).expect("Failed to calculate Aroon Osc");
+        let result = aroon_osc(&input).expect("Failed to calculate Aroon Osc");
 
         let expected_last_five = [-50.0, -50.0, -50.0, -50.0, -42.8571];
 

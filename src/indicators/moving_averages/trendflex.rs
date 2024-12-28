@@ -3,6 +3,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum TrendFlexData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct TrendFlexOutput {
     pub values: Vec<f64>,
 }
@@ -14,30 +23,37 @@ pub struct TrendFlexParams {
 
 impl TrendFlexParams {
     pub fn with_default_params() -> Self {
-        TrendFlexParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TrendFlexInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: TrendFlexData<'a>,
     pub params: TrendFlexParams,
 }
 
 impl<'a> TrendFlexInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: TrendFlexParams) -> Self {
-        TrendFlexInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: TrendFlexParams) -> Self {
+        Self {
+            data: TrendFlexData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        TrendFlexInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: TrendFlexParams) -> Self {
+        Self {
+            data: TrendFlexData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: TrendFlexData::Candles {
+                candles,
+                source: "close",
+            },
             params: TrendFlexParams::with_default_params(),
         }
     }
@@ -45,7 +61,10 @@ impl<'a> TrendFlexInput<'a> {
 
 #[inline]
 pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        TrendFlexData::Candles { candles, source } => source_type(candles, source),
+        TrendFlexData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let trendflex_period: usize = input.params.period.unwrap_or(20);
 
@@ -123,13 +142,13 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = TrendFlexParams { period: None };
-        let input_default = TrendFlexInput::new(&candles, "close", default_params);
+        let input_default = TrendFlexInput::from_candles(&candles, "close", default_params);
         let output_default =
             trendflex(&input_default).expect("Failed TrendFlex with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let custom_params = TrendFlexParams { period: Some(25) };
-        let input_custom = TrendFlexInput::new(&candles, "hlc3", custom_params);
+        let input_custom = TrendFlexInput::from_candles(&candles, "hlc3", custom_params);
         let output_custom =
             trendflex(&input_custom).expect("Failed TrendFlex with period=25, source=hlc3");
         assert_eq!(output_custom.values.len(), candles.close.len());
@@ -144,7 +163,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = TrendFlexParams { period: Some(20) };
-        let input = TrendFlexInput::new(&candles, "close", params);
+        let input = TrendFlexInput::from_candles(&candles, "close", params);
         let result = trendflex(&input).expect("TrendFlex calculation failed");
         assert_eq!(result.values.len(), close_prices.len());
 

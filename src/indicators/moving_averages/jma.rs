@@ -66,7 +66,7 @@ impl<'a> JmaInput<'a> {
 
 #[inline]
 pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         JmaData::Candles { candles, source } => source_type(candles, source),
         JmaData::Slice(slice) => slice,
     };

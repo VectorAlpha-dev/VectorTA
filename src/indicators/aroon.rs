@@ -42,7 +42,7 @@ pub struct AroonOutput {
 }
 
 #[inline]
-pub fn calculate_aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
+pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
     let candles = input.candles;
     let length = input.get_length();
 
@@ -107,7 +107,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = AroonInput::with_default_params(&candles);
-        let result = calculate_aroon(&input).expect("Failed to calculate Aroon");
+        let result = aroon(&input).expect("Failed to calculate Aroon");
 
         let expected_up_last_five = [21.43, 14.29, 7.14, 0.0, 0.0];
         let expected_down_last_five = [71.43, 64.29, 57.14, 50.0, 42.86];

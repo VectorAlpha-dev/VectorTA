@@ -71,7 +71,7 @@ impl<'a> GaussianInput<'a> {
 }
 
 pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         GaussianData::Candles { candles, source } => source_type(candles, source),
         GaussianData::Slice(slice) => slice,
     };

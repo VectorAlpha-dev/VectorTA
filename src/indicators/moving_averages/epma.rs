@@ -63,7 +63,7 @@ impl<'a> EpmaInput<'a> {
 }
 
 pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         EpmaData::Candles { candles, source } => source_type(candles, source),
         EpmaData::Slice(slice) => slice,
     };

@@ -60,7 +60,7 @@ impl<'a> JsaInput<'a> {
 
 #[inline]
 pub fn jsa(input: &JsaInput) -> Result<JsaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         JsaData::Candles { candles, source } => source_type(candles, source),
         JsaData::Slice(slice) => slice,
     };

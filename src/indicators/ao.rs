@@ -50,7 +50,7 @@ pub struct AoOutput {
     pub values: Vec<f64>,
 }
 
-pub fn calculate_ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
+pub fn ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
     let data = input.data;
     let short = input.get_short_period();
     let long = input.get_long_period();
@@ -116,7 +116,7 @@ mod tests {
             .collect();
 
         let input = AoInput::with_default_params(&hl2_values);
-        let result = calculate_ao(&input).expect("Failed to calculate AO");
+        let result = ao(&input).expect("Failed to calculate AO");
         let expected_last_five = [-1671.3, -1401.6706, -1262.3559, -1178.4941, -1157.4118];
 
         assert!(

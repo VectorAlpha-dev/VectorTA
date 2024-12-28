@@ -60,7 +60,7 @@ impl<'a> LinRegInput<'a> {
 
 #[inline]
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         LinRegData::Candles { candles, source } => source_type(candles, source),
         LinRegData::Slice(slice) => slice,
     };

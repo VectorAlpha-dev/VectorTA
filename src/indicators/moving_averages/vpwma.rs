@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum VpwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct VpwmaParams {
     pub period: Option<usize>,
     pub power: Option<f64>,
@@ -18,24 +27,31 @@ impl Default for VpwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct VpwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: VpwmaData<'a>,
     pub params: VpwmaParams,
 }
 
 impl<'a> VpwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: VpwmaParams) -> Self {
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: VpwmaParams) -> Self {
         Self {
-            candles,
-            source,
+            data: VpwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: VpwmaParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: VpwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: VpwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: VpwmaParams::default(),
         }
     }
@@ -57,9 +73,13 @@ impl<'a> VpwmaInput<'a> {
 pub struct VpwmaOutput {
     pub values: Vec<f64>,
 }
+
 #[inline]
 pub fn vpwma(input: &VpwmaInput) -> Result<VpwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        VpwmaData::Candles { candles, source } => source_type(candles, source),
+        VpwmaData::Slice(slice) => slice,
+    };
     let period: usize = input.get_period();
     let power: f64 = input.get_power();
     let len: usize = data.len();
@@ -111,7 +131,7 @@ mod tests {
             period: Some(14),
             power: Some(0.382),
         };
-        let input = VpwmaInput::new(&candles, "close", params);
+        let input = VpwmaInput::from_candles(&candles, "close", params);
         let result = vpwma(&input).expect("Failed to calculate VPWMA");
         assert_eq!(result.values.len(), close_prices.len());
         let expected_last_five = [
@@ -137,15 +157,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vpwma_with_defaults() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = VpwmaInput::with_default_params(&candles);
-        let result = vpwma(&input);
-        assert!(result.is_err(), "Should fail due to insufficient data");
-    }
-
-    #[test]
     fn test_vpwma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -153,21 +164,21 @@ mod tests {
             period: None,
             power: None,
         };
-        let input = VpwmaInput::new(&candles, "close", default_params);
+        let input = VpwmaInput::from_candles(&candles, "close", default_params);
         let output = vpwma(&input).expect("Failed VPWMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_14 = VpwmaParams {
             period: Some(14),
             power: None,
         };
-        let input2 = VpwmaInput::new(&candles, "hl2", params_period_14);
+        let input2 = VpwmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = vpwma(&input2).expect("Failed VPWMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = VpwmaParams {
             period: Some(10),
             power: Some(0.5),
         };
-        let input3 = VpwmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = VpwmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = vpwma(&input3).expect("Failed VPWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }

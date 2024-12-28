@@ -60,7 +60,7 @@ impl<'a> FwmaInput<'a> {
 
 #[inline]
 pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         FwmaData::Candles { candles, source } => source_type(candles, source),
         FwmaData::Slice(slice) => slice,
     };

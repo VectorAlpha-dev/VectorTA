@@ -66,7 +66,7 @@ impl<'a> HwmaInput<'a> {
 
 #[inline]
 pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         HwmaData::Candles { candles, source } => source_type(candles, source),
         HwmaData::Slice(slice) => slice,
     };

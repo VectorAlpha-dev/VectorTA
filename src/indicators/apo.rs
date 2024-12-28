@@ -49,7 +49,7 @@ pub struct ApoOutput {
 }
 
 #[inline]
-pub fn calculate_apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
+pub fn apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
     let candles = input.candles;
     let short = input.get_short_period();
     let long = input.get_long_period();
@@ -101,7 +101,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let input = ApoInput::with_default_params(&candles);
-        let result = calculate_apo(&input).expect("Failed to calculate APO");
+        let result = apo(&input).expect("Failed to calculate APO");
 
         let expected_last_five = [-429.8, -401.6, -386.1, -357.9, -374.1];
 

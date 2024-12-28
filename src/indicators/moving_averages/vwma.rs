@@ -2,6 +2,31 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum VwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    CandlesPlusPrices {
+        candles: &'a Candles,
+        prices: &'a [f64],
+    },
+}
+
+trait CandlesRef<'a> {
+    fn match_candles(&'a self) -> &'a Candles;
+}
+
+impl<'a> CandlesRef<'a> for VwmaInput<'a> {
+    fn match_candles(&'a self) -> &'a Candles {
+        match &self.data {
+            VwmaData::Candles { candles, .. } => candles,
+            VwmaData::CandlesPlusPrices { candles, .. } => candles,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct VwmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,30 +38,41 @@ pub struct VwmaParams {
 
 impl VwmaParams {
     pub fn with_default_params() -> Self {
-        VwmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct VwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: VwmaData<'a>,
     pub params: VwmaParams,
 }
 
 impl<'a> VwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: VwmaParams) -> Self {
-        VwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: VwmaParams) -> Self {
+        Self {
+            data: VwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        VwmaInput {
-            candles,
-            source: "close",
+    pub fn from_candles_plus_prices(
+        candles: &'a Candles,
+        prices: &'a [f64],
+        params: VwmaParams,
+    ) -> Self {
+        Self {
+            data: VwmaData::CandlesPlusPrices { candles, prices },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: VwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: VwmaParams::with_default_params(),
         }
     }
@@ -44,11 +80,12 @@ impl<'a> VwmaInput<'a> {
 
 #[inline]
 pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
-    let price: &[f64] = source_type(input.candles, input.source);
-    let volume: &[f64] = input
-        .candles
-        .select_candle_field("volume")
-        .expect("Failed to extract volume");
+    let volume: &[f64] = input.match_candles().select_candle_field("volume")?;
+
+    let price: &[f64] = match &input.data {
+        VwmaData::Candles { candles, source } => source_type(candles, source),
+        VwmaData::CandlesPlusPrices { prices, .. } => prices,
+    };
     let len: usize = price.len();
     let period: usize = input.params.period.unwrap_or(20);
 
@@ -96,12 +133,12 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = VwmaParams { period: None };
-        let input_default = VwmaInput::new(&candles, "close", default_params);
+        let input_default = VwmaInput::from_candles(&candles, "close", default_params);
         let output_default = vwma(&input_default).expect("Failed VWMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let custom_params = VwmaParams { period: Some(10) };
-        let input_custom = VwmaInput::new(&candles, "hlc3", custom_params);
+        let input_custom = VwmaInput::from_candles(&candles, "hlc3", custom_params);
         let output_custom = vwma(&input_custom).expect("Failed VWMA with period=10, source=hlc3");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -115,7 +152,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = VwmaParams { period: Some(20) };
-        let input = VwmaInput::new(&candles, "close", params);
+        let input = VwmaInput::from_candles(&candles, "close", params);
         let vwma_result = vwma(&input).expect("Failed to calculate VWMA");
         assert_eq!(vwma_result.values.len(), close_prices.len());
 

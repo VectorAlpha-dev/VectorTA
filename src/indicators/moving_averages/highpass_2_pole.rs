@@ -64,7 +64,7 @@ impl<'a> HighPass2Input<'a> {
 }
 
 pub fn high_pass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         HighPass2Data::Candles { candles, source } => source_type(candles, source),
         HighPass2Data::Slice(slice) => slice,
     };

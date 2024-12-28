@@ -2,39 +2,56 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum MwdxData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct MwdxParams {
     pub factor: Option<f64>,
 }
 
 impl Default for MwdxParams {
     fn default() -> Self {
-        MwdxParams { factor: Some(0.2) }
+        Self { factor: Some(0.2) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MwdxInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: MwdxData<'a>,
     pub params: MwdxParams,
 }
 
 impl<'a> MwdxInput<'a> {
-    #[inline]
-    pub fn new(candles: &'a Candles, source: &'a str, params: MwdxParams) -> Self {
-        Self { candles, source, params }
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: MwdxParams) -> Self {
+        Self {
+            data: MwdxData::Candles { candles, source },
+            params,
+        }
     }
 
-    #[inline]
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: MwdxParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: MwdxData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: MwdxData::Candles {
+                candles,
+                source: "close",
+            },
             params: MwdxParams::default(),
         }
     }
 
-    #[inline]
     fn get_factor(&self) -> f64 {
         self.params
             .factor
@@ -47,9 +64,11 @@ pub struct MwdxOutput {
     pub values: Vec<f64>,
 }
 
-#[inline]
 pub fn mwdx(input: &MwdxInput) -> Result<MwdxOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        MwdxData::Candles { candles, source } => source_type(candles, source),
+        MwdxData::Slice(slice) => slice,
+    };
     let n: usize = data.len();
     if n == 0 {
         return Err("Empty data slice for MWDX calculation.".into());
@@ -83,19 +102,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = MwdxParams { factor: None };
-        let input = MwdxInput::new(&candles, "close", default_params);
+        let input = MwdxInput::from_candles(&candles, "close", default_params);
         let output = mwdx(&input).expect("Failed MWDX with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_factor_05 = MwdxParams { factor: Some(0.5) };
-        let input2 = MwdxInput::new(&candles, "hl2", params_factor_05);
+        let input2 = MwdxInput::from_candles(&candles, "hl2", params_factor_05);
         let output2 = mwdx(&input2).expect("Failed MWDX with factor=0.5, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = MwdxParams { factor: Some(0.7) };
-        let input3 = MwdxInput::new(&candles, "hlc3", params_custom);
+        let input3 = MwdxInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = mwdx(&input3).expect("Failed MWDX fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
-    
+
     #[test]
     fn test_mwdx_accuracy() {
         let expected_last_five = [
@@ -111,7 +130,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let params = MwdxParams { factor: Some(0.2) };
-        let input = MwdxInput::new(&candles, "close", params);
+        let input = MwdxInput::from_candles(&candles, "close", params);
         let result = mwdx(&input).expect("Failed to calculate MWDX");
         assert_eq!(result.values.len(), source.len());
         assert!(result.values.len() >= 5);

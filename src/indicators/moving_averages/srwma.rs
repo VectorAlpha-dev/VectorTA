@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum SrwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SrwmaParams {
     pub period: Option<usize>,
 }
@@ -14,29 +23,39 @@ impl Default for SrwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct SrwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SrwmaData<'a>,
     pub params: SrwmaParams,
 }
 
 impl<'a> SrwmaInput<'a> {
-    #[inline]
-    pub fn new(candles: &'a Candles, source: &'a str, params: SrwmaParams) -> Self {
-        Self { candles, source, params }
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: SrwmaParams) -> Self {
+        Self {
+            data: SrwmaData::Candles { candles, source },
+            params,
+        }
     }
 
-    #[inline]
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: SrwmaParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: SrwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SrwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: SrwmaParams::default(),
         }
     }
 
-    #[inline]
     fn get_period(&self) -> usize {
-        self.params.period.unwrap_or_else(|| SrwmaParams::default().period.unwrap())
+        self.params
+            .period
+            .unwrap_or_else(|| SrwmaParams::default().period.unwrap())
     }
 }
 
@@ -47,7 +66,10 @@ pub struct SrwmaOutput {
 
 #[inline]
 pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SrwmaData::Candles { candles, source } => source_type(candles, source),
+        SrwmaData::Slice(slice) => slice,
+    };
     let period: usize = input.get_period();
 
     if data.is_empty() {
@@ -94,9 +116,11 @@ mod tests {
     fn test_srwma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles.select_candle_field("close").expect("Failed to extract close");
+        let close_prices = candles
+            .select_candle_field("close")
+            .expect("Failed to extract close");
         let params = SrwmaParams { period: Some(14) };
-        let input = SrwmaInput::new(&candles, "close", params);
+        let input = SrwmaInput::from_candles(&candles, "close", params);
         let result = srwma(&input).expect("SRWMA calculation failed");
         let vals = &result.values;
         assert_eq!(vals.len(), close_prices.len());
@@ -128,15 +152,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = SrwmaParams { period: None };
-        let input = SrwmaInput::new(&candles, "close", default_params);
+        let input = SrwmaInput::from_candles(&candles, "close", default_params);
         let output = srwma(&input).expect("Failed SRWMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_14 = SrwmaParams { period: Some(14) };
-        let input2 = SrwmaInput::new(&candles, "hl2", params_period_14);
+        let input2 = SrwmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = srwma(&input2).expect("Failed SRWMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = SrwmaParams { period: Some(10) };
-        let input3 = SrwmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = SrwmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = srwma(&input3).expect("Failed SRWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }

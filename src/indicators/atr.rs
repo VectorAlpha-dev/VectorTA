@@ -41,7 +41,7 @@ pub struct AtrOutput {
 }
 
 #[inline]
-pub fn calculate_atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
+pub fn atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
     let candles = input.candles;
     let length = input.get_length();
 
@@ -103,7 +103,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = AtrInput::with_default_params(&candles);
-        let result = calculate_atr(&input).expect("Failed to calculate ATR");
+        let result = atr(&input).expect("Failed to calculate ATR");
 
         let expected_last_five = [916.89, 874.33, 838.45, 801.92, 811.57];
 

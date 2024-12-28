@@ -1,23 +1,39 @@
 use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
+#[derive(Debug, Clone)]
+pub enum AcoscData<'a> {
+    Candles { candles: &'a Candles },
+    Slices { high: &'a [f64], low: &'a [f64] },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AcoscParams {}
 
 #[derive(Debug, Clone)]
 pub struct AcoscInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AcoscData<'a>,
     pub params: AcoscParams,
 }
 
 impl<'a> AcoscInput<'a> {
-    pub fn new(candles: &'a Candles, params: AcoscParams) -> Self {
-        AcoscInput { candles, params }
+    pub fn from_candles(candles: &'a Candles, params: AcoscParams) -> Self {
+        Self {
+            data: AcoscData::Candles { candles },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AcoscInput {
-            candles,
+    pub fn from_slices(high: &'a [f64], low: &'a [f64], params: AcoscParams) -> Self {
+        Self {
+            data: AcoscData::Slices { high, low },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AcoscData::Candles { candles },
             params: AcoscParams::default(),
         }
     }
@@ -30,11 +46,15 @@ pub struct AcoscOutput {
 }
 
 #[inline]
-pub fn calculate_acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>> {
-    let candles = input.candles;
-
-    let high_prices = candles.select_candle_field("high")?;
-    let low_prices = candles.select_candle_field("low")?;
+pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>> {
+    let (high_prices, low_prices) = match &input.data {
+        AcoscData::Candles { candles } => {
+            let high: &[f64] = candles.select_candle_field("high")?;
+            let low: &[f64] = candles.select_candle_field("low")?;
+            (high, low)
+        }
+        AcoscData::Slices { high, low } => (*high, *low),
+    };
 
     let len = low_prices.len();
     const PERIOD_SMA5: usize = 5;
@@ -156,8 +176,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = AcoscInput::with_default_params(&candles);
-        let acosc_result = calculate_acosc(&input).expect("Failed to calculate acosc");
+        let input = AcoscInput::with_default_candles(&candles);
+        let acosc_result = acosc(&input).expect("Failed to calculate acosc");
 
         assert_eq!(
             acosc_result.osc.len(),

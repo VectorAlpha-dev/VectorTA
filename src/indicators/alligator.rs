@@ -86,7 +86,7 @@ pub struct AlligatorOutput {
 }
 
 #[inline]
-pub fn calculate_alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Error>> {
+pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Error>> {
     let data = input.data;
     let len = data.len();
 
@@ -203,7 +203,7 @@ mod tests {
             .expect("Failed to extract hl2 prices");
 
         let input = AlligatorInput::with_default_params(hl2_prices);
-        let result = calculate_alligator(&input).expect("Failed to calculate alligator");
+        let result = alligator(&input).expect("Failed to calculate alligator");
 
         let expected_last_five_jaw_result = [60742.4, 60632.6, 60555.1, 60442.7, 60308.7];
         let expected_last_five_teeth_result = [59908.0, 59757.2, 59684.3, 59653.5, 59621.1];
@@ -270,7 +270,6 @@ mod tests {
             ..AlligatorParams::default()
         };
         let custom_input = AlligatorInput::new(hl2_prices, custom_params);
-        let _ = calculate_alligator(&custom_input)
-            .expect("Alligator calculation with custom params failed");
+        let _ = alligator(&custom_input).expect("Alligator calculation with custom params failed");
     }
 }

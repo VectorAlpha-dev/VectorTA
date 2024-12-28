@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum SqwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SqwmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,48 @@ pub struct SqwmaParams {
 
 impl SqwmaParams {
     pub fn with_default_params() -> Self {
-        SqwmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SqwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SqwmaData<'a>,
     pub params: SqwmaParams,
 }
 
 impl<'a> SqwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: SqwmaParams) -> Self {
-        SqwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: SqwmaParams) -> Self {
+        Self {
+            data: SqwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        SqwmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: SqwmaParams) -> Self {
+        Self {
+            data: SqwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SqwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: SqwmaParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SqwmaData::Candles { candles, source } => source_type(candles, source),
+        SqwmaData::Slice(slice) => slice,
+    };
     let n: usize = data.len();
     let period: usize = input.params.period.unwrap_or(14);
     if n == 0 {
@@ -108,15 +128,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = SqwmaParams { period: None };
-        let input = SqwmaInput::new(&candles, "close", default_params);
+        let input = SqwmaInput::from_candles(&candles, "close", default_params);
         let output = sqwma(&input).expect("Failed SQWMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_10 = SqwmaParams { period: Some(10) };
-        let input2 = SqwmaInput::new(&candles, "hl2", params_period_10);
+        let input2 = SqwmaInput::from_candles(&candles, "hl2", params_period_10);
         let output2 = sqwma(&input2).expect("Failed SQWMA with period=10, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = SqwmaParams { period: Some(20) };
-        let input3 = SqwmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = SqwmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = sqwma(&input3).expect("Failed SQWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -136,7 +156,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let default_params = SqwmaParams::with_default_params();
-        let input = SqwmaInput::new(&candles, "close", default_params);
+        let input = SqwmaInput::from_candles(&candles, "close", default_params);
         let result = sqwma(&input).expect("Failed to calculate SQWMA");
         assert_eq!(result.values.len(), source.len());
         assert!(result.values.len() >= 5);
@@ -152,7 +172,7 @@ mod tests {
                 val
             );
         }
-        let default_input = SqwmaInput::with_default_params(&candles);
+        let default_input = SqwmaInput::with_default_candles(&candles);
         let default_result = sqwma(&default_input).expect("Failed default SQWMA");
         assert_eq!(default_result.values.len(), source.len());
     }

@@ -66,7 +66,7 @@ impl<'a> EmaInput<'a> {
 
 #[inline]
 pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         EmaData::Candles { candles, source } => source_type(candles, source),
         EmaData::Slice(slice) => slice,
     };

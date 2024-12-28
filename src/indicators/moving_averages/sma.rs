@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum SmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,48 @@ pub struct SmaParams {
 
 impl SmaParams {
     pub fn with_default_params() -> Self {
-        SmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SmaData<'a>,
     pub params: SmaParams,
 }
 
 impl<'a> SmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: SmaParams) -> Self {
-        SmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: SmaParams) -> Self {
+        Self {
+            data: SmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        SmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: SmaParams) -> Self {
+        Self {
+            data: SmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: SmaParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SmaData::Candles { candles, source } => source_type(candles, source),
+        SmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period = input.params.period.unwrap_or(9);
     if period == 0 || period > data.len() {
@@ -80,18 +100,18 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = SmaParams { period: None };
-        let input_default = SmaInput::new(&candles, "close", default_params);
+        let input_default = SmaInput::from_candles(&candles, "close", default_params);
         let output_default = sma(&input_default).expect("Failed SMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_period_14 = SmaParams { period: Some(14) };
-        let input_period_14 = SmaInput::new(&candles, "hl2", params_period_14);
+        let input_period_14 = SmaInput::from_candles(&candles, "hl2", params_period_14);
         let output_period_14 =
             sma(&input_period_14).expect("Failed SMA with period=14, source=hl2");
         assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = SmaParams { period: Some(20) };
-        let input_custom = SmaInput::new(&candles, "hlc3", params_custom);
+        let input_custom = SmaInput::from_candles(&candles, "hlc3", params_custom);
         let output_custom = sma(&input_custom).expect("Failed SMA fully custom");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -105,7 +125,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SmaParams { period: Some(9) };
-        let input = SmaInput::new(&candles, "close", params);
+        let input = SmaInput::from_candles(&candles, "close", params);
         let sma_result = sma(&input).expect("Failed to calculate SMA");
 
         assert_eq!(
@@ -134,7 +154,7 @@ mod tests {
             assert!(sma_result.values[i].is_nan());
         }
 
-        let default_input = SmaInput::with_default_params(&candles);
+        let default_input = SmaInput::with_default_candles(&candles);
         let default_sma_result = sma(&default_input).expect("Failed to calculate SMA defaults");
         assert_eq!(default_sma_result.values.len(), close_prices.len());
     }

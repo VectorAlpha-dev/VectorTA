@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum SwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SwmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,30 +22,37 @@ pub struct SwmaParams {
 
 impl SwmaParams {
     pub fn with_default_params() -> Self {
-        SwmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SwmaData<'a>,
     pub params: SwmaParams,
 }
 
 impl<'a> SwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: SwmaParams) -> Self {
-        SwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: SwmaParams) -> Self {
+        Self {
+            data: SwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        SwmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: SwmaParams) -> Self {
+        Self {
+            data: SwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: SwmaParams::with_default_params(),
         }
     }
@@ -44,7 +60,10 @@ impl<'a> SwmaInput<'a> {
 
 #[inline]
 pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SwmaData::Candles { candles, source } => source_type(candles, source),
+        SwmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(5);
     if data.is_empty() {
@@ -116,17 +135,17 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = SwmaParams { period: None };
-        let input = SwmaInput::new(&candles, "close", default_params);
+        let input = SwmaInput::from_candles(&candles, "close", default_params);
         let output = swma(&input).expect("Failed SWMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
 
         let params_period_10 = SwmaParams { period: Some(10) };
-        let input2 = SwmaInput::new(&candles, "hl2", params_period_10);
+        let input2 = SwmaInput::from_candles(&candles, "hl2", params_period_10);
         let output2 = swma(&input2).expect("Failed SWMA with period=10, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
 
         let params_custom = SwmaParams { period: Some(20) };
-        let input3 = SwmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = SwmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = swma(&input3).expect("Failed SWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -141,7 +160,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let default_params = SwmaParams::with_default_params();
-        let input = SwmaInput::new(&candles, "close", default_params);
+        let input = SwmaInput::from_candles(&candles, "close", default_params);
         let result = swma(&input).expect("SWMA calculation failed");
         let len = result.values.len();
         assert_eq!(len, close_prices.len(), "Length mismatch");

@@ -2,6 +2,19 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AdoscData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        volume: &'a [f64],
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct AdoscParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -9,7 +22,7 @@ pub struct AdoscParams {
 
 impl Default for AdoscParams {
     fn default() -> Self {
-        AdoscParams {
+        Self {
             short_period: Some(3),
             long_period: Some(10),
         }
@@ -18,18 +31,39 @@ impl Default for AdoscParams {
 
 #[derive(Debug, Clone)]
 pub struct AdoscInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AdoscData<'a>,
     pub params: AdoscParams,
 }
 
 impl<'a> AdoscInput<'a> {
-    pub fn new(candles: &'a Candles, params: AdoscParams) -> Self {
-        AdoscInput { candles, params }
+    pub fn from_candles(candles: &'a Candles, params: AdoscParams) -> Self {
+        Self {
+            data: AdoscData::Candles { candles },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AdoscInput {
-            candles,
+    pub fn from_slices(
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        volume: &'a [f64],
+        params: AdoscParams,
+    ) -> Self {
+        Self {
+            data: AdoscData::Slices {
+                high,
+                low,
+                close,
+                volume,
+            },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AdoscData::Candles { candles },
             params: AdoscParams::default(),
         }
     }
@@ -52,9 +86,7 @@ pub struct AdoscOutput {
     pub values: Vec<f64>,
 }
 
-#[inline]
-pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
-    let candles = input.candles;
+pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
     let short = input.get_short_period();
     let long = input.get_long_period();
 
@@ -65,18 +97,38 @@ pub fn calculate_adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>
         return Err("Short period must be less than the long period for ADOSC.".into());
     }
 
-    let len = candles.close.len();
-    if len < 1 {
-        return Err("No candles available.".into());
-    }
-    if long > len {
-        return Err("Not enough data points to calculate ADOSC.".into());
-    }
-
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
-    let close = candles.select_candle_field("close")?;
-    let volume = candles.select_candle_field("volume")?;
+    let (high, low, close, volume) = match &input.data {
+        AdoscData::Candles { candles } => {
+            if candles.close.is_empty() {
+                return Err("No candles available.".into());
+            }
+            if long > candles.close.len() {
+                return Err("Not enough data points to calculate ADOSC.".into());
+            }
+            (
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+                candles.select_candle_field("close")?,
+                candles.select_candle_field("volume")?,
+            )
+        }
+        AdoscData::Slices {
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
+                return Err("One of the slices provided to ADOSC is empty.".into());
+            }
+            let len = close.len();
+            if long > len {
+                return Err("Not enough data points to calculate ADOSC.".into());
+            }
+            (*high, *low, *close, *volume)
+        }
+    };
+    let len = close.len();
 
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
@@ -141,8 +193,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = AdoscInput::with_default_params(&candles);
-        let result = calculate_adosc(&input).expect("Failed to calculate ADOSC");
+        let input = AdoscInput::with_default_candles(&candles);
+        let result = adosc(&input).expect("Failed to calculate ADOSC");
 
         assert_eq!(
             result.values.len(),

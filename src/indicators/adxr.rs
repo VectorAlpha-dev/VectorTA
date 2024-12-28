@@ -43,7 +43,7 @@ pub struct AdxrOutput {
 }
 
 #[inline]
-pub fn calculate_adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
+pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
     let candles = input.candles;
     let period = input.get_period();
 
@@ -206,7 +206,7 @@ mod tests {
 
         let params = AdxrParams { period: Some(14) };
         let input = AdxrInput::new(&candles, params);
-        let adxr_result = calculate_adxr(&input).expect("Failed to calculate ADXR");
+        let adxr_result = adxr(&input).expect("Failed to calculate ADXR");
 
         assert_eq!(
             adxr_result.values.len(),
@@ -236,7 +236,7 @@ mod tests {
 
         let default_input = AdxrInput::with_default_params(&candles);
         let default_adxr_result =
-            calculate_adxr(&default_input).expect("Failed to calculate ADXR with defaults");
+            adxr(&default_input).expect("Failed to calculate ADXR with defaults");
         assert!(
             !default_adxr_result.values.is_empty(),
             "Should produce ADXR values with default params"

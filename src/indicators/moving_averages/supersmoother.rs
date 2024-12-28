@@ -3,6 +3,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum SuperSmootherData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SuperSmootherOutput {
     pub values: Vec<f64>,
 }
@@ -14,37 +23,52 @@ pub struct SuperSmootherParams {
 
 impl SuperSmootherParams {
     pub fn with_default_params() -> Self {
-        SuperSmootherParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SuperSmootherInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SuperSmootherData<'a>,
     pub params: SuperSmootherParams,
 }
 
 impl<'a> SuperSmootherInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: SuperSmootherParams) -> Self {
-        SuperSmootherInput {
-            candles,
-            source,
+    pub fn from_candles(
+        candles: &'a Candles,
+        source: &'a str,
+        params: SuperSmootherParams,
+    ) -> Self {
+        Self {
+            data: SuperSmootherData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        SuperSmootherInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: SuperSmootherParams) -> Self {
+        Self {
+            data: SuperSmootherData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SuperSmootherData::Candles {
+                candles,
+                source: "close",
+            },
             params: SuperSmootherParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn supersmoother(input: &SuperSmootherInput) -> Result<SuperSmootherOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SuperSmootherData::Candles { candles, source } => source_type(candles, source),
+        SuperSmootherData::Slice(slice) => slice,
+    };
     let period: usize = input.params.period.unwrap_or(14);
 
     if data.is_empty() {
@@ -91,15 +115,15 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = SuperSmootherParams { period: None };
-        let input_default = SuperSmootherInput::new(&candles, "close", default_params);
-        let output_default = supersmoother(&input_default)
-            .expect("Failed supersmoother with default params");
+        let input_default = SuperSmootherInput::from_candles(&candles, "close", default_params);
+        let output_default =
+            supersmoother(&input_default).expect("Failed supersmoother with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let custom_params = SuperSmootherParams { period: Some(20) };
-        let input_custom = SuperSmootherInput::new(&candles, "hlc3", custom_params);
-        let output_custom = supersmoother(&input_custom)
-            .expect("Failed supersmoother with period=20, source=hlc3");
+        let input_custom = SuperSmootherInput::from_candles(&candles, "hlc3", custom_params);
+        let output_custom =
+            supersmoother(&input_custom).expect("Failed supersmoother with period=20, source=hlc3");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
 
@@ -112,7 +136,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SuperSmootherParams { period: Some(14) };
-        let input = SuperSmootherInput::new(&candles, "close", params);
+        let input = SuperSmootherInput::from_candles(&candles, "close", params);
         let result = supersmoother(&input).expect("Failed to calculate SuperSmoother");
 
         let out_vals = &result.values;
@@ -129,7 +153,8 @@ mod tests {
 
         let start_idx = out_vals.len() - 5;
         let actual_last_five = &out_vals[start_idx..];
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate()
+        for (i, (&actual, &expected)) in
+            actual_last_five.iter().zip(&expected_last_five).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(

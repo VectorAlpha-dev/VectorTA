@@ -43,7 +43,7 @@ pub struct AdxOutput {
 }
 
 #[inline]
-pub fn calculate_adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
+pub fn adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
     let candles = input.candles;
     let period = input.get_period();
 
@@ -183,7 +183,7 @@ mod tests {
 
         let params = AdxParams { period: Some(14) };
         let input = AdxInput::new(&candles, params);
-        let adx_result = calculate_adx(&input).expect("Failed to calculate ADX");
+        let adx_result = adx(&input).expect("Failed to calculate ADX");
 
         assert_eq!(
             adx_result.values.len(),
@@ -214,7 +214,7 @@ mod tests {
 
         let default_input = AdxInput::with_default_params(&candles);
         let default_adx_result =
-            calculate_adx(&default_input).expect("Failed to calculate ADX with defaults");
+            adx(&default_input).expect("Failed to calculate ADX with defaults");
         assert!(
             !default_adx_result.values.is_empty(),
             "Should produce ADX values with default params"

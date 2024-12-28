@@ -76,7 +76,7 @@ impl<'a> EhlersITrendInput<'a> {
 }
 
 pub fn ht_trendline(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
-    let src = match &input.data {
+    let src: &[f64] = match &input.data {
         EhlersITrendData::Candles { candles, source } => source_type(candles, source),
         EhlersITrendData::Slice(slice) => slice,
     };

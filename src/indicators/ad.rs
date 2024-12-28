@@ -1,23 +1,57 @@
 use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
+#[derive(Debug, Clone)]
+pub enum AdData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        volume: &'a [f64],
+    },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AdParams {}
 
 #[derive(Debug, Clone)]
 pub struct AdInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AdData<'a>,
     pub params: AdParams,
 }
 
 impl<'a> AdInput<'a> {
-    pub fn new(candles: &'a Candles, params: AdParams) -> Self {
-        AdInput { candles, params }
+    pub fn from_candles(candles: &'a Candles, params: AdParams) -> Self {
+        Self {
+            data: AdData::Candles { candles },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AdInput {
-            candles,
+    pub fn from_slices(
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        volume: &'a [f64],
+        params: AdParams,
+    ) -> Self {
+        Self {
+            data: AdData::Slices {
+                high,
+                low,
+                close,
+                volume,
+            },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AdData::Candles { candles },
             params: AdParams::default(),
         }
     }
@@ -29,12 +63,22 @@ pub struct AdOutput {
 }
 
 #[inline]
-pub fn calculate_ad(input: &AdInput) -> Result<AdOutput, Box<dyn Error>> {
-    let candles = input.candles;
-    let high: &[f64] = candles.select_candle_field("high")?;
-    let low: &[f64] = candles.select_candle_field("low")?;
-    let close: &[f64] = candles.select_candle_field("close")?;
-    let volume: &[f64] = candles.select_candle_field("volume")?;
+pub fn ad(input: &AdInput) -> Result<AdOutput, Box<dyn Error>> {
+    let (high, low, close, volume) = match &input.data {
+        AdData::Candles { candles } => {
+            let high: &[f64] = candles.select_candle_field("high")?;
+            let low: &[f64] = candles.select_candle_field("low")?;
+            let close: &[f64] = candles.select_candle_field("close")?;
+            let volume: &[f64] = candles.select_candle_field("volume")?;
+            (high, low, close, volume)
+        }
+        AdData::Slices {
+            high,
+            low,
+            close,
+            volume,
+        } => (*high, *low, *close, *volume),
+    };
 
     let size: usize = high.len();
     if size < 1 {
@@ -71,8 +115,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = AdInput::with_default_params(&candles);
-        let ad_result = calculate_ad(&input).expect("Failed to calculate AD");
+        let input = AdInput::with_default_candles(&candles);
+        let ad_result = ad(&input).expect("Failed to calculate AD");
 
         assert_eq!(
             ad_result.values.len(),

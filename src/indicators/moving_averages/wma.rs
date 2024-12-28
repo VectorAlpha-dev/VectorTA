@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum WmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct WmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,47 @@ pub struct WmaParams {
 
 impl WmaParams {
     pub fn with_default_params() -> Self {
-        WmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct WmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: WmaData<'a>,
     pub params: WmaParams,
 }
 
 impl<'a> WmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: WmaParams) -> Self {
-        WmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: WmaParams) -> Self {
+        Self {
+            data: WmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        WmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: WmaParams) -> Self {
+        Self {
+            data: WmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: WmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: WmaParams::with_default_params(),
         }
     }
 }
 
 pub fn wma(input: &WmaInput) -> Result<WmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        WmaData::Candles { candles, source } => source_type(candles, source),
+        WmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(30);
     let mut values = vec![f64::NAN; len];
@@ -90,17 +109,17 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = WmaParams { period: None };
-        let input = WmaInput::new(&candles, "close", default_params);
+        let input = WmaInput::from_candles(&candles, "close", default_params);
         let output = wma(&input).expect("Failed WMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
 
         let params_period_14 = WmaParams { period: Some(14) };
-        let input2 = WmaInput::new(&candles, "hl2", params_period_14);
+        let input2 = WmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = wma(&input2).expect("Failed WMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
 
         let params_custom = WmaParams { period: Some(20) };
-        let input3 = WmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = WmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = wma(&input3).expect("Failed WMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -111,7 +130,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let data = &candles.close;
         let default_params = WmaParams::with_default_params();
-        let input = WmaInput::new(&candles, "close", default_params);
+        let input = WmaInput::from_candles(&candles, "close", default_params);
         let result = wma(&input).expect("Failed to calculate WMA");
 
         let expected_last_five = [

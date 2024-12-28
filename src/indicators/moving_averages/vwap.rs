@@ -3,8 +3,15 @@ use chrono::{Datelike, NaiveDateTime, Utc};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-pub struct VwapOutput {
-    pub values: Vec<f64>,
+pub enum VwapData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    CandlesPlusPrices {
+        candles: &'a Candles,
+        prices: &'a [f64],
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -14,7 +21,7 @@ pub struct VwapParams {
 
 impl VwapParams {
     pub fn with_default_params() -> Self {
-        VwapParams {
+        Self {
             anchor: Some("1d".to_string()),
         }
     }
@@ -22,24 +29,35 @@ impl VwapParams {
 
 #[derive(Debug, Clone)]
 pub struct VwapInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: VwapData<'a>,
     pub params: VwapParams,
 }
 
 impl<'a> VwapInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: VwapParams) -> Self {
-        VwapInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: VwapParams) -> Self {
+        Self {
+            data: VwapData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        VwapInput {
-            candles,
-            source: "hlc3",
+    pub fn from_candles_plus_prices(
+        candles: &'a Candles,
+        prices: &'a [f64],
+        params: VwapParams,
+    ) -> Self {
+        Self {
+            data: VwapData::CandlesPlusPrices { candles, prices },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: VwapData::Candles {
+                candles,
+                source: "hlc3",
+            },
             params: VwapParams::with_default_params(),
         }
     }
@@ -49,13 +67,26 @@ impl<'a> VwapInput<'a> {
     }
 }
 
-#[inline]
-pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
-    let timestamps: &[i64] = input.candles.get_timestamp()?;
-    let prices: &[f64] = source_type(input.candles, input.source);
-    let volumes: &[f64] = input.candles.select_candle_field("volume")?;
+#[derive(Debug, Clone)]
+pub struct VwapOutput {
+    pub values: Vec<f64>,
+}
 
-    let n = prices.len();
+pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
+    let (timestamps, volumes, prices) = match &input.data {
+        VwapData::Candles { candles, source } => {
+            let timestamps: &[i64] = candles.get_timestamp()?;
+            let prices: &[f64] = source_type(candles, source);
+            let volumes: &[f64] = candles.select_candle_field("volume")?;
+            (timestamps, volumes, prices)
+        }
+        VwapData::CandlesPlusPrices { candles, prices } => {
+            let timestamps: &[i64] = candles.get_timestamp()?;
+            let volumes: &[f64] = candles.select_candle_field("volume")?;
+            (timestamps, volumes, *prices)
+        }
+    };
+    let n: usize = prices.len();
     if timestamps.len() != n || volumes.len() != n {
         return Err("Mismatch in length of timestamps, prices, or volumes".into());
     }
@@ -178,21 +209,21 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let params_default = VwapParams { anchor: None };
-        let input_default = VwapInput::new(&candles, "hlc3", params_default);
+        let input_default = VwapInput::from_candles(&candles, "hlc3", params_default);
         let output_default = vwap(&input_default).expect("Failed VWAP default anchor");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_1h = VwapParams {
             anchor: Some("1h".to_string()),
         };
-        let input_1h = VwapInput::new(&candles, "close", params_1h);
+        let input_1h = VwapInput::from_candles(&candles, "close", params_1h);
         let output_1h = vwap(&input_1h).expect("Failed VWAP with anchor=1h");
         assert_eq!(output_1h.values.len(), candles.close.len());
 
         let params_2M = VwapParams {
             anchor: Some("2M".to_string()),
         };
-        let input_2M = VwapInput::new(&candles, "hl2", params_2M);
+        let input_2M = VwapInput::from_candles(&candles, "hl2", params_2M);
         let output_2M = vwap(&input_2M).expect("Failed VWAP with anchor=2M");
         assert_eq!(output_2M.values.len(), candles.close.len());
     }
@@ -215,11 +246,7 @@ mod tests {
         let params = VwapParams {
             anchor: Some("1D".to_string()),
         };
-        let input = VwapInput {
-            candles: &candles,
-            source: "hlc3",
-            params,
-        };
+        let input = VwapInput::from_candles(&candles, "hlc3", params);
         let result = vwap(&input).expect("Failed to calculate VWAP");
         assert_eq!(
             result.values.len(),

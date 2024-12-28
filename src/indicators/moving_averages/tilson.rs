@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum TilsonData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct TilsonOutput {
     pub values: Vec<f64>,
 }
@@ -14,7 +23,7 @@ pub struct TilsonParams {
 
 impl TilsonParams {
     pub fn with_default_params() -> Self {
-        TilsonParams {
+        Self {
             period: None,
             volume_factor: None,
         }
@@ -23,31 +32,42 @@ impl TilsonParams {
 
 #[derive(Debug, Clone)]
 pub struct TilsonInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: TilsonData<'a>,
     pub params: TilsonParams,
 }
 
 impl<'a> TilsonInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: TilsonParams) -> Self {
-        TilsonInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: TilsonParams) -> Self {
+        Self {
+            data: TilsonData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        TilsonInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: TilsonParams) -> Self {
+        Self {
+            data: TilsonData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: TilsonData::Candles {
+                candles,
+                source: "close",
+            },
             params: TilsonParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        TilsonData::Candles { candles, source } => source_type(candles, source),
+        TilsonData::Slice(slice) => slice,
+    };
     let length: usize = data.len();
     let opt_in_time_period = input.params.period.unwrap_or(5);
     let opt_in_v_factor = input.params.volume_factor.unwrap_or(0.0);
@@ -181,7 +201,7 @@ mod tests {
             period: None,
             volume_factor: None,
         };
-        let input_default = TilsonInput::new(&candles, "close", default_params);
+        let input_default = TilsonInput::from_candles(&candles, "close", default_params);
         let output_default = tilson(&input_default).expect("Failed T3/Tilson with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
@@ -189,7 +209,7 @@ mod tests {
             period: Some(10),
             volume_factor: None,
         };
-        let input_custom_period = TilsonInput::new(&candles, "hl2", params_custom_period);
+        let input_custom_period = TilsonInput::from_candles(&candles, "hl2", params_custom_period);
         let output_custom_period =
             tilson(&input_custom_period).expect("Failed T3/Tilson with period=10, source=hl2");
         assert_eq!(output_custom_period.values.len(), candles.close.len());
@@ -198,7 +218,7 @@ mod tests {
             period: Some(7),
             volume_factor: Some(0.9),
         };
-        let input_fully_custom = TilsonInput::new(&candles, "hlc3", params_fully_custom);
+        let input_fully_custom = TilsonInput::from_candles(&candles, "hlc3", params_fully_custom);
         let output_fully_custom =
             tilson(&input_fully_custom).expect("Failed T3/Tilson fully custom");
         assert_eq!(output_fully_custom.values.len(), candles.close.len());
@@ -216,7 +236,7 @@ mod tests {
             period: Some(5),
             volume_factor: Some(0.0),
         };
-        let input = TilsonInput::new(&candles, "close", params);
+        let input = TilsonInput::from_candles(&candles, "close", params);
         let t3_result = tilson(&input).expect("Failed to calculate T3/Tilson");
 
         let expected_last_five_t3 = [
@@ -242,7 +262,7 @@ mod tests {
             );
         }
 
-        let default_input = TilsonInput::with_default_params(&candles);
+        let default_input = TilsonInput::with_default_candles(&candles);
         let default_t3_result =
             tilson(&default_input).expect("Failed to calculate T3 with defaults");
         assert_eq!(default_t3_result.values.len(), close_prices.len());

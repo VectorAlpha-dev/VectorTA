@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum TrimaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct TrimaOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,47 @@ pub struct TrimaParams {
 
 impl TrimaParams {
     pub fn with_default_params() -> Self {
-        TrimaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TrimaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: TrimaData<'a>,
     pub params: TrimaParams,
 }
 
 impl<'a> TrimaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: TrimaParams) -> Self {
-        TrimaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: TrimaParams) -> Self {
+        Self {
+            data: TrimaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        TrimaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: TrimaParams) -> Self {
+        Self {
+            data: TrimaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: TrimaData::Candles {
+                candles,
+                source: "close",
+            },
             params: TrimaParams::with_default_params(),
         }
     }
 }
 
 pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        TrimaData::Candles { candles, source } => source_type(candles, source),
+        TrimaData::Slice(slice) => slice,
+    };
     let n: usize = data.len();
     let period: usize = input.params.period.unwrap_or(14);
 
@@ -138,15 +157,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = TrimaParams { period: None };
-        let input = TrimaInput::new(&candles, "close", default_params);
+        let input = TrimaInput::from_candles(&candles, "close", default_params);
         let output = trima(&input).expect("Failed TRIMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_10 = TrimaParams { period: Some(10) };
-        let input2 = TrimaInput::new(&candles, "hl2", params_period_10);
+        let input2 = TrimaInput::from_candles(&candles, "hl2", params_period_10);
         let output2 = trima(&input2).expect("Failed TRIMA with period=10, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = TrimaParams { period: Some(30) };
-        let input3 = TrimaInput::new(&candles, "hlc3", params_custom);
+        let input3 = TrimaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = trima(&input3).expect("Failed TRIMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -159,7 +178,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let params = TrimaParams { period: Some(30) };
-        let input = TrimaInput::new(&candles, "close", params);
+        let input = TrimaInput::from_candles(&candles, "close", params);
         let trima_result = trima(&input).expect("Failed to calculate TRIMA");
         assert_eq!(
             trima_result.values.len(),
@@ -173,7 +192,10 @@ mod tests {
             59665.2125,
             59581.612499999996,
         ];
-        assert!(trima_result.values.len() >= 5, "Not enough TRIMA values for the test");
+        assert!(
+            trima_result.values.len() >= 5,
+            "Not enough TRIMA values for the test"
+        );
         let start_index = trima_result.values.len() - 5;
         let result_last_five_trima = &trima_result.values[start_index..];
         for (i, &value) in result_last_five_trima.iter().enumerate() {
@@ -195,8 +217,9 @@ mod tests {
                 trima_result.values[i]
             );
         }
-        let default_input = TrimaInput::with_default_params(&candles);
-        let default_trima_result = trima(&default_input).expect("Failed to calculate TRIMA with defaults");
+        let default_input = TrimaInput::with_default_candles(&candles);
+        let default_trima_result =
+            trima(&default_input).expect("Failed to calculate TRIMA with defaults");
         assert!(
             !default_trima_result.values.is_empty(),
             "Should produce some TRIMA values with default params"

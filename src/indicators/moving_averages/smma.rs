@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum SmmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct SmmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,30 +22,37 @@ pub struct SmmaParams {
 
 impl SmmaParams {
     pub fn with_default_params() -> Self {
-        SmmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SmmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: SmmaData<'a>,
     pub params: SmmaParams,
 }
 
 impl<'a> SmmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: SmmaParams) -> Self {
-        SmmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: SmmaParams) -> Self {
+        Self {
+            data: SmmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        SmmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: SmmaParams) -> Self {
+        Self {
+            data: SmmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: SmmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: SmmaParams::with_default_params(),
         }
     }
@@ -44,7 +60,10 @@ impl<'a> SmmaInput<'a> {
 
 #[inline]
 pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        SmmaData::Candles { candles, source } => source_type(candles, source),
+        SmmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(7);
 
@@ -83,14 +102,14 @@ mod tests {
     fn test_smma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        
+
         let default_params = SmmaParams { period: None };
-        let input_default = SmmaInput::new(&candles, "close", default_params);
+        let input_default = SmmaInput::from_candles(&candles, "close", default_params);
         let output_default = smma(&input_default).expect("Failed SMMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_custom = SmmaParams { period: Some(10) };
-        let input_custom = SmmaInput::new(&candles, "hl2", params_custom);
+        let input_custom = SmmaInput::from_candles(&candles, "hl2", params_custom);
         let output_custom = smma(&input_custom).expect("Failed SMMA with period=10, source=hl2");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -104,7 +123,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SmmaParams { period: Some(7) };
-        let input = SmmaInput::new(&candles, "close", params);
+        let input = SmmaInput::from_candles(&candles, "close", params);
         let result = smma(&input).expect("Failed to calculate SMMA");
         assert_eq!(result.values.len(), close_prices.len());
 

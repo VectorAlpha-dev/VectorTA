@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum TemaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct TemaParams {
     pub period: Option<usize>,
 }
@@ -14,20 +23,31 @@ impl Default for TemaParams {
 
 #[derive(Debug, Clone)]
 pub struct TemaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: TemaData<'a>,
     pub params: TemaParams,
 }
 
 impl<'a> TemaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: TemaParams) -> Self {
-        Self { candles, source, params }
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: TemaParams) -> Self {
+        Self {
+            data: TemaData::Candles { candles, source },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: TemaParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: TemaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: TemaData::Candles {
+                candles,
+                source: "close",
+            },
             params: TemaParams::default(),
         }
     }
@@ -41,9 +61,13 @@ impl<'a> TemaInput<'a> {
 pub struct TemaOutput {
     pub values: Vec<f64>,
 }
+
 #[inline]
 pub fn tema(input: &TemaInput) -> Result<TemaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        TemaData::Candles { candles, source } => source_type(candles, source),
+        TemaData::Slice(slice) => slice,
+    };
     let n: usize = data.len();
     let period: usize = input.get_period();
 
@@ -113,7 +137,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let params = TemaParams { period: Some(9) };
-        let input = TemaInput::new(&candles, "close", params);
+        let input = TemaInput::from_candles(&candles, "close", params);
         let tema_result = tema(&input).expect("Failed to calculate TEMA");
         let expected_last_five = [
             59281.895570662884,
@@ -143,15 +167,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = TemaParams { period: None };
-        let input = TemaInput::new(&candles, "close", default_params);
+        let input = TemaInput::from_candles(&candles, "close", default_params);
         let output = tema(&input).expect("Failed TEMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_14 = TemaParams { period: Some(14) };
-        let input2 = TemaInput::new(&candles, "hl2", params_period_14);
+        let input2 = TemaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = tema(&input2).expect("Failed TEMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = TemaParams { period: Some(10) };
-        let input3 = TemaInput::new(&candles, "hlc3", params_custom);
+        let input3 = TemaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = tema(&input3).expect("Failed TEMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }

@@ -42,7 +42,7 @@ pub struct RsiOutput {
 }
 
 #[inline]
-pub fn calculate_rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
+pub fn rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
     let data = input.data;
     let period = input.get_period();
 
@@ -115,7 +115,7 @@ mod tests {
 
         let params = RsiParams { period: Some(14) };
         let input = RsiInput::new(close_prices, params);
-        let rsi_result = calculate_rsi(&input).expect("Failed to calculate RSI");
+        let rsi_result = rsi(&input).expect("Failed to calculate RSI");
 
         let expected_last_five_rsi = [43.42, 42.68, 41.62, 42.86, 39.01];
 
@@ -145,7 +145,7 @@ mod tests {
 
         let default_input = RsiInput::with_default_params(close_prices);
         let default_rsi_result =
-            calculate_rsi(&default_input).expect("Failed to calculate RSI with defaults");
+            rsi(&default_input).expect("Failed to calculate RSI with defaults");
         assert!(
             !default_rsi_result.values.is_empty(),
             "Should produce RSI values with default params"

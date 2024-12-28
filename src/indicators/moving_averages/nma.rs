@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum NmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct NmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,48 @@ pub struct NmaParams {
 
 impl NmaParams {
     pub fn with_default_params() -> Self {
-        NmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct NmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: NmaData<'a>,
     pub params: NmaParams,
 }
 
 impl<'a> NmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: NmaParams) -> Self {
-        NmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: NmaParams) -> Self {
+        Self {
+            data: NmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        NmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: NmaParams) -> Self {
+        Self {
+            data: NmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: NmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: NmaParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        NmaData::Candles { candles, source } => source_type(candles, source),
+        NmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(40);
 
@@ -103,18 +123,18 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = NmaParams { period: None };
-        let input_default = NmaInput::new(&candles, "close", default_params);
+        let input_default = NmaInput::from_candles(&candles, "close", default_params);
         let output_default = nma(&input_default).expect("Failed NMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_14 = NmaParams { period: Some(14) };
-        let input_period_14 = NmaInput::new(&candles, "hl2", params_14);
+        let input_period_14 = NmaInput::from_candles(&candles, "hl2", params_14);
         let output_period_14 =
             nma(&input_period_14).expect("Failed NMA with period=14, source=hl2");
         assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = NmaParams { period: Some(20) };
-        let input_custom = NmaInput::new(&candles, "hlc3", params_custom);
+        let input_custom = NmaInput::from_candles(&candles, "hlc3", params_custom);
         let output_custom = nma(&input_custom).expect("Failed NMA fully custom");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -128,7 +148,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = NmaParams { period: Some(40) };
-        let input = NmaInput::new(&candles, "close", params);
+        let input = NmaInput::from_candles(&candles, "close", params);
         let nma_result = nma(&input).expect("Failed to calculate NMA");
 
         assert_eq!(
@@ -170,7 +190,7 @@ mod tests {
             );
         }
 
-        let default_input = NmaInput::with_default_params(&candles);
+        let default_input = NmaInput::with_default_candles(&candles);
         let default_nma_result =
             nma(&default_input).expect("Failed to calculate NMA with defaults");
         assert_eq!(

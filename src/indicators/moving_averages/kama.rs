@@ -64,7 +64,7 @@ impl<'a> KamaInput<'a> {
 
 #[inline]
 pub fn kama(input: &KamaInput) -> Result<KamaOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         KamaData::Candles { candles, source } => source_type(candles, source),
         KamaData::Slice(slice) => slice,
     };

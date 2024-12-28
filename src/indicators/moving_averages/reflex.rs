@@ -3,6 +3,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum ReflexData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct ReflexOutput {
     pub values: Vec<f64>,
 }
@@ -14,37 +23,48 @@ pub struct ReflexParams {
 
 impl ReflexParams {
     pub fn with_default_params() -> Self {
-        ReflexParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ReflexInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: ReflexData<'a>,
     pub params: ReflexParams,
 }
 
 impl<'a> ReflexInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: ReflexParams) -> Self {
-        ReflexInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: ReflexParams) -> Self {
+        Self {
+            data: ReflexData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        ReflexInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: ReflexParams) -> Self {
+        Self {
+            data: ReflexData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: ReflexData::Candles {
+                candles,
+                source: "close",
+            },
             params: ReflexParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        ReflexData::Candles { candles, source } => source_type(candles, source),
+        ReflexData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(20);
 
@@ -120,15 +140,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = ReflexParams { period: None };
-        let input = ReflexInput::new(&candles, "close", default_params);
+        let input = ReflexInput::from_candles(&candles, "close", default_params);
         let output = reflex(&input).expect("Failed Reflex with default params");
         assert_eq!(output.values.len(), candles.close.len());
         let params_period_14 = ReflexParams { period: Some(14) };
-        let input2 = ReflexInput::new(&candles, "hl2", params_period_14);
+        let input2 = ReflexInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = reflex(&input2).expect("Failed Reflex with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
         let params_custom = ReflexParams { period: Some(30) };
-        let input3 = ReflexInput::new(&candles, "hlc3", params_custom);
+        let input3 = ReflexInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = reflex(&input3).expect("Failed Reflex fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -138,7 +158,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = ReflexParams::with_default_params();
-        let input = ReflexInput::new(&candles, "close", default_params);
+        let input = ReflexInput::from_candles(&candles, "close", default_params);
         let result = reflex(&input).expect("Failed to calculate Reflex");
         assert_eq!(
             result.values.len(),

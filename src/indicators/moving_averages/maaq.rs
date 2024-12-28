@@ -66,7 +66,7 @@ impl<'a> MaaqInput<'a> {
 
 #[inline]
 pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
-    let data = match &input.data {
+    let data: &[f64] = match &input.data {
         MaaqData::Candles { candles, source } => source_type(candles, source),
         MaaqData::Slice(slice) => slice,
     };
