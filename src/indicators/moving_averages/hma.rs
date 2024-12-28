@@ -1,49 +1,52 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct HmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for HmaParams {
-    fn default() -> Self {
-        HmaParams { period: Some(5) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct HmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: HmaParams,
-}
-
-impl<'a> HmaInput<'a> {
-    pub fn new(data: &'a [f64], params: HmaParams) -> Self {
-        HmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        HmaInput {
-            data,
-            params: HmaParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(5)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct HmaOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HmaParams {
+    pub period: Option<usize>,
+}
+
+impl HmaParams {
+    pub fn with_default_params() -> Self {
+        HmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: HmaParams,
+}
+
+impl<'a> HmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: HmaParams) -> Self {
+        HmaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        HmaInput {
+            candles,
+            source: "close",
+            params: HmaParams::with_default_params(),
+        }
+    }
+}
+
 #[inline]
-pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
-    let data = input.data;
+pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
+    let data = source_type(input.candles, input.source);
     let len = data.len();
-    let period = input.get_period();
+    let period = input.params.period.unwrap_or(5);
     let mut values = vec![f64::NAN; len];
 
     if period == 0 || period > len {
@@ -239,18 +242,32 @@ pub fn calculate_hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
 
     Ok(HmaOutput { values })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_hma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = HmaParams { period: None };
+        let input_default = HmaInput::new(&candles, "close", default_params);
+        let output_default = hma(&input_default).expect("Failed hma with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+        let params_period = HmaParams { period: Some(10) };
+        let input_period = HmaInput::new(&candles, "hl2", params_period);
+        let output_period = hma(&input_period).expect("Failed hma with period=10, source=hl2");
+        assert_eq!(output_period.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_hma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let data = candles.select_candle_field("close").expect("Failed");
-        let input = HmaInput::with_default_params(data);
-        let result = calculate_hma(&input).expect("Failed hma");
+        let input = HmaInput::with_default_params(&candles);
+        let result = hma(&input).expect("Failed hma");
         let expected_last_five = [
             59334.13333336847,
             59201.4666667018,
@@ -259,11 +276,7 @@ mod tests {
             58803.44444447962,
         ];
         assert!(result.values.len() >= 5);
-        assert_eq!(
-            result.values.len(),
-            data.len(),
-            "HMA values count should match input data count"
-        );
+        assert_eq!(result.values.len(), candles.close.len());
         let start = result.values.len() - 5;
         let last_five = &result.values[start..];
         for (i, &val) in last_five.iter().enumerate() {
