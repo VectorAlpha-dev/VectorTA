@@ -1,3 +1,4 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -13,20 +14,22 @@ impl Default for MwdxParams {
 
 #[derive(Debug, Clone)]
 pub struct MwdxInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: MwdxParams,
 }
 
 impl<'a> MwdxInput<'a> {
     #[inline]
-    pub fn new(data: &'a [f64], params: MwdxParams) -> Self {
-        Self { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: MwdxParams) -> Self {
+        Self { candles, source, params }
     }
 
     #[inline]
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         Self {
-            data,
+            candles,
+            source: "close",
             params: MwdxParams::default(),
         }
     }
@@ -45,9 +48,9 @@ pub struct MwdxOutput {
 }
 
 #[inline]
-pub fn calculate_mwdx(input: &MwdxInput) -> Result<MwdxOutput, Box<dyn Error>> {
-    let data = input.data;
-    let n = data.len();
+pub fn mwdx(input: &MwdxInput) -> Result<MwdxOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let n: usize = data.len();
     if n == 0 {
         return Err("Empty data slice for MWDX calculation.".into());
     }
@@ -76,6 +79,24 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_mwdx_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = MwdxParams { factor: None };
+        let input = MwdxInput::new(&candles, "close", default_params);
+        let output = mwdx(&input).expect("Failed MWDX with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+        let params_factor_05 = MwdxParams { factor: Some(0.5) };
+        let input2 = MwdxInput::new(&candles, "hl2", params_factor_05);
+        let output2 = mwdx(&input2).expect("Failed MWDX with factor=0.5, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+        let params_custom = MwdxParams { factor: Some(0.7) };
+        let input3 = MwdxInput::new(&candles, "hlc3", params_custom);
+        let output3 = mwdx(&input3).expect("Failed MWDX fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
+    
+    #[test]
     fn test_mwdx_accuracy() {
         let expected_last_five = [
             59302.181566190935,
@@ -84,27 +105,18 @@ mod tests {
             59215.124961889764,
             59103.099969511815,
         ];
-
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
         let source = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-
         let params = MwdxParams { factor: Some(0.2) };
-        let input = MwdxInput::new(source, params);
-
-        let result = calculate_mwdx(&input).expect("Failed to calculate MWDX");
-        assert_eq!(result.values.len(), source.len(), "Output length mismatch");
-
-        assert!(
-            result.values.len() >= 5,
-            "Not enough data to compare last 5 MWDX values"
-        );
+        let input = MwdxInput::new(&candles, "close", params);
+        let result = mwdx(&input).expect("Failed to calculate MWDX");
+        assert_eq!(result.values.len(), source.len());
+        assert!(result.values.len() >= 5);
         let start_idx = result.values.len() - 5;
         let actual_last_five = &result.values[start_idx..];
-
         for (i, &val) in actual_last_five.iter().enumerate() {
             let exp_val = expected_last_five[i];
             assert!(

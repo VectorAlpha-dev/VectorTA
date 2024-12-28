@@ -1,51 +1,52 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct SmmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for SmmaParams {
-    fn default() -> Self {
-        SmmaParams { period: Some(7) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SmmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: SmmaParams,
-}
-
-impl<'a> SmmaInput<'a> {
-    pub fn new(data: &'a [f64], params: SmmaParams) -> Self {
-        SmmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        SmmaInput {
-            data,
-            params: SmmaParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| SmmaParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SmmaOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SmmaParams {
+    pub period: Option<usize>,
+}
+
+impl SmmaParams {
+    pub fn with_default_params() -> Self {
+        SmmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SmmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: SmmaParams,
+}
+
+impl<'a> SmmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: SmmaParams) -> Self {
+        SmmaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        SmmaInput {
+            candles,
+            source: "close",
+            params: SmmaParams::with_default_params(),
+        }
+    }
+}
+
 #[inline]
-pub fn calculate_smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
-    let period = input.get_period();
+pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(7);
 
     if period == 0 || period > len {
         return Err("Invalid period specified for SMMA calculation.".into());
@@ -79,6 +80,22 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_smma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        
+        let default_params = SmmaParams { period: None };
+        let input_default = SmmaInput::new(&candles, "close", default_params);
+        let output_default = smma(&input_default).expect("Failed SMMA with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_custom = SmmaParams { period: Some(10) };
+        let input_custom = SmmaInput::new(&candles, "hl2", params_custom);
+        let output_custom = smma(&input_custom).expect("Failed SMMA with period=10, source=hl2");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_smma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -87,31 +104,14 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SmmaParams { period: Some(7) };
-        let input = SmmaInput::new(close_prices, params);
-
-        let result = calculate_smma(&input).expect("Failed to calculate SMMA");
-
-        assert_eq!(
-            result.values.len(),
-            close_prices.len(),
-            "SMMA output length does not match input length!"
-        );
+        let input = SmmaInput::new(&candles, "close", params);
+        let result = smma(&input).expect("Failed to calculate SMMA");
+        assert_eq!(result.values.len(), close_prices.len());
 
         let expected_last_five = [59434.4, 59398.2, 59346.9, 59319.4, 59224.5];
-
-        assert!(
-            result.values.len() >= 5,
-            "Not enough SMMA values for the test"
-        );
-
-        assert_eq!(
-            result.values.len(),
-            close_prices.len(),
-            "SMMA values count should match input data count"
-        );
-        let start_index = result.values.len() - 5;
+        assert!(result.values.len() >= 5);
+        let start_index = result.values.len().saturating_sub(5);
         let actual_last_five = &result.values[start_index..];
-
         for (i, &actual) in actual_last_five.iter().enumerate() {
             let expected = expected_last_five[i];
             let diff = (actual - expected).abs();

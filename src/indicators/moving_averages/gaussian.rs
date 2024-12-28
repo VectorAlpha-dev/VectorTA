@@ -51,8 +51,8 @@ pub struct GaussianOutput {
 
 #[inline]
 pub fn calculate_gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
-    let data = input.data;
-    let n = data.len();
+    let data: &[f64] = input.data;
+    let n: usize = data.len();
     if n == 0 {
         return Err("No data provided to Gaussian filter.".into());
     }

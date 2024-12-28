@@ -1,50 +1,52 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
-
-#[derive(Debug, Clone)]
-pub struct ReflexParams {
-    pub period: Option<usize>,
-}
-
-impl Default for ReflexParams {
-    fn default() -> Self {
-        Self { period: Some(20) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ReflexInput<'a> {
-    pub data: &'a [f64],
-    pub params: ReflexParams,
-}
-
-impl<'a> ReflexInput<'a> {
-    pub fn new(data: &'a [f64], params: ReflexParams) -> Self {
-        Self { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        Self {
-            data,
-            params: ReflexParams::default(),
-        }
-    }
-
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(20)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ReflexOutput {
     pub values: Vec<f64>,
 }
 
-pub fn calculate_reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
-    let len = data.len();
+#[derive(Debug, Clone)]
+pub struct ReflexParams {
+    pub period: Option<usize>,
+}
+
+impl ReflexParams {
+    pub fn with_default_params() -> Self {
+        ReflexParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReflexInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: ReflexParams,
+}
+
+impl<'a> ReflexInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: ReflexParams) -> Self {
+        ReflexInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        ReflexInput {
+            candles,
+            source: "close",
+            params: ReflexParams::with_default_params(),
+        }
+    }
+}
+
+pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(20);
 
     if len == 0 {
         return Err("No data available for Reflex.".into());
@@ -114,27 +116,36 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_reflex_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = ReflexParams { period: None };
+        let input = ReflexInput::new(&candles, "close", default_params);
+        let output = reflex(&input).expect("Failed Reflex with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+        let params_period_14 = ReflexParams { period: Some(14) };
+        let input2 = ReflexInput::new(&candles, "hl2", params_period_14);
+        let output2 = reflex(&input2).expect("Failed Reflex with period=14, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+        let params_custom = ReflexParams { period: Some(30) };
+        let input3 = ReflexInput::new(&candles, "hlc3", params_custom);
+        let output3 = reflex(&input3).expect("Failed Reflex fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_reflex_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
-        let params = ReflexParams { period: Some(20) };
-        let input = ReflexInput::new(close_prices, params);
-
-        let result = calculate_reflex(&input).expect("Failed to calculate Reflex");
-        let reflex_vals = &result.values;
-        let len = reflex_vals.len();
+        let default_params = ReflexParams::with_default_params();
+        let input = ReflexInput::new(&candles, "close", default_params);
+        let result = reflex(&input).expect("Failed to calculate Reflex");
         assert_eq!(
-            reflex_vals.len(),
-            close_prices.len(),
-            "Output size mismatch. Got {} expected {}",
-            len,
-            close_prices.len()
+            result.values.len(),
+            candles.close.len(),
+            "Output size mismatch"
         );
+        let len = result.values.len();
         let expected_last_five = [
             0.8085220962465361,
             0.445264715886137,
@@ -142,11 +153,9 @@ mod tests {
             -0.03598639652007061,
             -0.224906760543743,
         ];
-
-        assert!(len >= 5, "Not enough data for the test. Got {}", len);
-
+        assert!(len >= 5, "Not enough data for the test");
         let start_idx = len - 5;
-        let last_five = &reflex_vals[start_idx..];
+        let last_five = &result.values[start_idx..];
         for (i, &val) in last_five.iter().enumerate() {
             let exp = expected_last_five[i];
             assert!(

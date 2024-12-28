@@ -1,3 +1,4 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
@@ -7,33 +8,35 @@ pub struct SrwmaParams {
 
 impl Default for SrwmaParams {
     fn default() -> Self {
-        SrwmaParams { period: Some(14) }
+        Self { period: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SrwmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: SrwmaParams,
 }
 
 impl<'a> SrwmaInput<'a> {
-    pub fn new(data: &'a [f64], params: SrwmaParams) -> Self {
-        SrwmaInput { data, params }
+    #[inline]
+    pub fn new(candles: &'a Candles, source: &'a str, params: SrwmaParams) -> Self {
+        Self { candles, source, params }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        SrwmaInput {
-            data,
+    #[inline]
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        Self {
+            candles,
+            source: "close",
             params: SrwmaParams::default(),
         }
     }
 
     #[inline]
     fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| SrwmaParams::default().period.unwrap())
+        self.params.period.unwrap_or_else(|| SrwmaParams::default().period.unwrap())
     }
 }
 
@@ -43,9 +46,9 @@ pub struct SrwmaOutput {
 }
 
 #[inline]
-pub fn calculate_srwma(input: &SrwmaInput) -> Result<SrwmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let period: usize = input.get_period();
 
     if data.is_empty() {
         return Ok(SrwmaOutput { values: vec![] });
@@ -91,19 +94,12 @@ mod tests {
     fn test_srwma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
+        let close_prices = candles.select_candle_field("close").expect("Failed to extract close");
         let params = SrwmaParams { period: Some(14) };
-        let input = SrwmaInput::new(close_prices, params);
-
-        let srwma_result = calculate_srwma(&input).expect("SRWMA calculation failed");
-        let srwma_values = &srwma_result.values;
-
-        assert_eq!(srwma_values.len(), close_prices.len(), "Length mismatch");
-
+        let input = SrwmaInput::new(&candles, "close", params);
+        let result = srwma(&input).expect("SRWMA calculation failed");
+        let vals = &result.values;
+        assert_eq!(vals.len(), close_prices.len());
         let expected_last_five = [
             59344.28384704595,
             59282.09151629659,
@@ -111,19 +107,10 @@ mod tests {
             59178.04767548977,
             59110.03801260874,
         ];
-
-        assert!(
-            srwma_values.len() >= expected_last_five.len(),
-            "Not enough SRWMA values for the test"
-        );
-
-        let start_index = srwma_values.len() - expected_last_five.len();
-        let actual_last_five = &srwma_values[start_index..];
-
-        for (i, (&actual, &expected)) in actual_last_five
-            .iter()
-            .zip(expected_last_five.iter())
-            .enumerate()
+        assert!(vals.len() >= 5);
+        let start_index = vals.len() - 5;
+        let last_five = &vals[start_index..];
+        for (i, (&actual, &expected)) in last_five.iter().zip(expected_last_five.iter()).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(
@@ -134,5 +121,23 @@ mod tests {
                 actual
             );
         }
+    }
+
+    #[test]
+    fn test_srwma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = SrwmaParams { period: None };
+        let input = SrwmaInput::new(&candles, "close", default_params);
+        let output = srwma(&input).expect("Failed SRWMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+        let params_period_14 = SrwmaParams { period: Some(14) };
+        let input2 = SrwmaInput::new(&candles, "hl2", params_period_14);
+        let output2 = srwma(&input2).expect("Failed SRWMA with period=14, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+        let params_custom = SrwmaParams { period: Some(10) };
+        let input3 = SrwmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = srwma(&input3).expect("Failed SRWMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
     }
 }

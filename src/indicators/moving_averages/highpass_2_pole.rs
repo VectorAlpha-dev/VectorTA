@@ -55,11 +55,11 @@ pub struct HighPass2Output {
 pub fn calculate_high_pass_2_pole(
     input: &HighPass2Input,
 ) -> Result<HighPass2Output, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
+    let data: &[f64] = input.data;
+    let len: usize = data.len();
 
-    let period = input.get_period();
-    let k = input.get_k();
+    let period: usize = input.get_period();
+    let k: f64 = input.get_k();
 
     if period < 2 || len == 0 {
         return Err("Invalid period (<2) or no data for 2-pole high-pass.".into());

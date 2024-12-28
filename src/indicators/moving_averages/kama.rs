@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct KamaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct KamaParams {
@@ -11,39 +17,42 @@ impl Default for KamaParams {
     }
 }
 
+
 #[derive(Debug, Clone)]
 pub struct KamaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: KamaParams,
 }
 
 impl<'a> KamaInput<'a> {
-    pub fn new(data: &'a [f64], params: KamaParams) -> Self {
-        KamaInput { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: KamaParams) -> Self {
+        Self {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        KamaInput {
-            data,
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        Self {
+            candles,
+            source: "close",
             params: KamaParams::default(),
         }
     }
 
+    #[inline]
     fn get_period(&self) -> usize {
         self.params.period.unwrap_or(30)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct KamaOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_kama(input: &KamaInput) -> Result<KamaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
-    let period = input.get_period();
+pub fn kama(input: &KamaInput) -> Result<KamaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.get_period();
     let mut values = vec![f64::NAN; len];
     if period > len {
         return Ok(KamaOutput { values });
@@ -127,9 +136,11 @@ mod tests {
     fn test_kama_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let data = &candles.close;
-        let input = KamaInput::with_default_params(data);
-        let result = calculate_kama(&input).expect("Failed to calculate KAMA");
+
+        let input = KamaInput::new(&candles, "close", KamaParams::default());
+
+        let result = kama(&input).expect("Failed to calculate KAMA");
+
         let expected_last_five = [
             60234.925553804125,
             60176.838757545665,
@@ -137,19 +148,25 @@ mod tests {
             60071.37070833558,
             59992.79386218023,
         ];
-        assert!(result.values.len() >= 5);
+
+        assert!(
+            result.values.len() >= 5,
+            "Expected at least 5 values to compare"
+        );
         assert_eq!(
             result.values.len(),
             candles.close.len(),
             "KAMA output length does not match input length"
         );
+
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
+
         for (i, &val) in last_five.iter().enumerate() {
             let exp = expected_last_five[i];
             assert!(
                 (val - exp).abs() < 1e-6,
-                "KAMA mismatch at {}: expected {}, got {}",
+                "KAMA mismatch at last-five index {}: expected {}, got {}",
                 i,
                 exp,
                 val

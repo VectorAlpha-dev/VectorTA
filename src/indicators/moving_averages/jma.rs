@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct JmaOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct JmaParams {
@@ -7,62 +13,45 @@ pub struct JmaParams {
     pub power: Option<u32>,
 }
 
-impl Default for JmaParams {
-    fn default() -> Self {
+impl JmaParams {
+    pub fn with_default_params() -> Self {
         JmaParams {
-            period: Some(7),
-            phase: Some(50.0),
-            power: Some(2),
+            period: None,
+            phase: None,
+            power: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct JmaInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: JmaParams,
 }
 
 impl<'a> JmaInput<'a> {
-    pub fn new(data: &'a [f64], params: JmaParams) -> Self {
-        JmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn new(candles: &'a Candles, source: &'a str, params: JmaParams) -> Self {
         JmaInput {
-            data,
-            params: JmaParams::default(),
+            candles,
+            source,
+            params,
         }
     }
 
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| JmaParams::default().period.unwrap())
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        JmaInput {
+            candles,
+            source: "close",
+            params: JmaParams::with_default_params(),
+        }
     }
-
-    fn get_phase(&self) -> f64 {
-        self.params
-            .phase
-            .unwrap_or_else(|| JmaParams::default().phase.unwrap())
-    }
-
-    fn get_power(&self) -> u32 {
-        self.params
-            .power
-            .unwrap_or_else(|| JmaParams::default().power.unwrap())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct JmaOutput {
-    pub values: Vec<f64>,
 }
 
 #[inline]
-pub fn calculate_jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
+pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
 
     if len == 0 {
         return Err("JMA calculation: input data is empty.".into());
@@ -120,10 +109,34 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_jma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = JmaParams {
+            period: None,
+            phase: None,
+            power: None,
+        };
+        let input_default = JmaInput::new(&candles, "close", default_params);
+        let output_default = jma(&input_default).expect("Failed JMA with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_custom = JmaParams {
+            period: Some(10),
+            phase: Some(0.0),
+            power: Some(1),
+        };
+        let input_custom = JmaInput::new(&candles, "hlc3", params_custom);
+        let output_custom = jma(&input_custom).expect("Failed JMA with custom params");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_jma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
+        let close_prices: &[f64] = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
@@ -132,9 +145,8 @@ mod tests {
             phase: Some(50.0),
             power: Some(2),
         };
-
-        let input = JmaInput::new(close_prices, jma_params);
-        let jma_result = calculate_jma(&input).expect("Failed to calculate JMA");
+        let input = JmaInput::new(&candles,"close", jma_params);
+        let jma_result = jma(&input).expect("Failed to calculate JMA");
 
         let expected_last_five = [
             59305.04794668568,
@@ -144,30 +156,18 @@ mod tests {
             58918.89223153998,
         ];
 
-        assert!(
-            jma_result.values.len() >= 5,
-            "Not enough JMA values for the test"
-        );
-
-        assert_eq!(
-            jma_result.values.len(),
-            close_prices.len(),
-            "JMA values count should match input data count"
-        );
-
+        assert!(jma_result.values.len() >= 5, "Not enough JMA values for the test");
+        assert_eq!(jma_result.values.len(), close_prices.len(), "JMA values count mismatch");
         let start_index = jma_result.values.len() - 5;
         let result_last_five = &jma_result.values[start_index..];
-
         for (i, &value) in result_last_five.iter().enumerate() {
             let expected_value = expected_last_five[i];
-            let diff = (value - expected_value).abs();
             assert!(
-                diff < 1e-6,
-                "JMA mismatch at index {}: expected {}, got {}, diff={}",
+                (value - expected_value).abs() < 1e-6,
+                "JMA mismatch at index {}: expected {}, got {}",
                 i,
                 expected_value,
-                value,
-                diff
+                value
             );
         }
     }

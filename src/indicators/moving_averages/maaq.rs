@@ -1,4 +1,11 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct MaaqOutput {
+    pub values: Vec<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MaaqParams {
     pub period: Option<usize>,
@@ -6,69 +13,48 @@ pub struct MaaqParams {
     pub slow_period: Option<usize>,
 }
 
-impl Default for MaaqParams {
-    fn default() -> Self {
+impl MaaqParams {
+    pub fn with_default_params() -> Self {
         MaaqParams {
-            period: Some(11),
-            fast_period: Some(2),
-            slow_period: Some(30),
+            period: None,
+            fast_period: None,
+            slow_period: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MaaqInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: MaaqParams,
 }
 
 impl<'a> MaaqInput<'a> {
-    pub fn new(data: &'a [f64], params: MaaqParams) -> Self {
-        MaaqInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn new(candles: &'a Candles, source: &'a str, params: MaaqParams) -> Self {
         MaaqInput {
-            data,
-            params: MaaqParams::default(),
+            candles,
+            source,
+            params,
         }
     }
 
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| MaaqParams::default().period.unwrap())
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        MaaqInput {
+            candles,
+            source: "close",
+            params: MaaqParams::with_default_params(),
+        }
     }
-
-    #[inline]
-    fn get_fast_period(&self) -> usize {
-        self.params
-            .fast_period
-            .unwrap_or_else(|| MaaqParams::default().fast_period.unwrap())
-    }
-
-    #[inline]
-    fn get_slow_period(&self) -> usize {
-        self.params
-            .slow_period
-            .unwrap_or_else(|| MaaqParams::default().slow_period.unwrap())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MaaqOutput {
-    pub values: Vec<f64>,
 }
 
 #[inline]
-pub fn calculate_maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
-    let fast_p = input.get_fast_period();
-    let slow_p = input.get_slow_period();
-
-    let len = data.len();
+pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let period: usize = input.params.period.unwrap_or(11);
+    let fast_p: usize = input.params.fast_period.unwrap_or(2);
+    let slow_p: usize = input.params.slow_period.unwrap_or(30);
+    let len: usize = data.len();
     if len < period {
         return Err(format!("Not enough data: length={} < period={}", len, period).into());
     }
@@ -126,6 +112,30 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_maaq_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = MaaqParams {
+            period: None,
+            fast_period: None,
+            slow_period: None,
+        };
+        let input_default = MaaqInput::new(&candles, "close", default_params);
+        let output_default = maaq(&input_default).expect("Failed MAAQ with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_custom = MaaqParams {
+            period: Some(12),
+            fast_period: Some(3),
+            slow_period: Some(25),
+        };
+        let input_custom = MaaqInput::new(&candles, "hl2", params_custom);
+        let output_custom = maaq(&input_custom).expect("Failed MAAQ with custom params");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_maaq_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -138,13 +148,9 @@ mod tests {
             fast_period: Some(2),
             slow_period: Some(30),
         };
-        let input = MaaqInput::new(close_prices, params);
-        let maaq_result = calculate_maaq(&input).expect("Failed to calculate MAAQ");
-        assert_eq!(
-            maaq_result.values.len(),
-            close_prices.len(),
-            "MAAQ length should match input length"
-        );
+        let input = MaaqInput::new(&candles, "close", params);
+        let maaq_result = maaq(&input).expect("Failed to calculate MAAQ");
+        assert_eq!(maaq_result.values.len(), close_prices.len());
 
         let expected_last_five = [
             59747.657115949725,
@@ -153,19 +159,14 @@ mod tests {
             59720.60576365108,
             59673.9954445178,
         ];
-        let len = maaq_result.values.len();
-        assert!(
-            len >= 5,
-            "Need at least 5 data points to compare last 5 values"
-        );
-        let actual_last_five = &maaq_result.values[len - 5..];
-
+        assert!(maaq_result.values.len() >= 5);
+        let start_index = maaq_result.values.len() - 5;
+        let actual_last_five = &maaq_result.values[start_index..];
         for (i, &val) in actual_last_five.iter().enumerate() {
             let exp = expected_last_five[i];
-            let diff = (val - exp).abs();
             assert!(
-                diff < 1e-2,
-                "MAAQ mismatch at last-5 index {}: expected {}, got {}",
+                (val - exp).abs() < 1e-2,
+                "MAAQ mismatch at index {}: expected {}, got {}",
                 i,
                 exp,
                 val

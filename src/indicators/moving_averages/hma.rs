@@ -44,9 +44,9 @@ impl<'a> HmaInput<'a> {
 
 #[inline]
 pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let len = data.len();
-    let period = input.params.period.unwrap_or(5);
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(5);
     let mut values = vec![f64::NAN; len];
 
     if period == 0 || period > len {

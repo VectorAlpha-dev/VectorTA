@@ -1,5 +1,11 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
+
+#[derive(Debug, Clone)]
+pub struct EhlersITrendOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct EhlersITrendParams {
@@ -18,18 +24,24 @@ impl Default for EhlersITrendParams {
 
 #[derive(Debug, Clone)]
 pub struct EhlersITrendInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: EhlersITrendParams,
 }
 
 impl<'a> EhlersITrendInput<'a> {
-    pub fn new(data: &'a [f64], params: EhlersITrendParams) -> Self {
-        EhlersITrendInput { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: EhlersITrendParams) -> Self {
+        Self {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        EhlersITrendInput {
-            data,
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        Self {
+            candles,
+            source: "close",
             params: EhlersITrendParams::default(),
         }
     }
@@ -49,18 +61,10 @@ impl<'a> EhlersITrendInput<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EhlersITrendOutput {
-    pub values: Vec<f64>,
-}
-
-// Differs from Ehler's original implementation. Requires refactoring.
 #[inline]
-pub fn calculate_ht_trendline(
-    input: &EhlersITrendInput,
-) -> Result<EhlersITrendOutput, Box<dyn Error>> {
-    let src = input.data;
-    let length = src.len();
+pub fn ht_trendline(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
+    let src: &[f64] = source_type(input.candles, input.source);
+    let length: usize = src.len();
     if length == 0 {
         return Ok(EhlersITrendOutput { values: vec![] });
     }
@@ -223,12 +227,8 @@ mod tests {
     fn test_ehlers_itrend_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
-        let input = EhlersITrendInput::with_default_params(close_prices);
-        let eit_result = calculate_ht_trendline(&input).expect("EIT calculation failed");
+        let input = EhlersITrendInput::with_default_params(&candles);
+        let eit_result = ht_trendline(&input).expect("HT Trendline calculation failed");
 
         assert_eq!(
             eit_result.values.len(),

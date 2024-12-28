@@ -1,53 +1,50 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct SqwmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for SqwmaParams {
-    fn default() -> Self {
-        SqwmaParams { period: Some(14) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SqwmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: SqwmaParams,
-}
-
-impl<'a> SqwmaInput<'a> {
-    #[inline]
-    pub fn new(data: &'a [f64], params: SqwmaParams) -> Self {
-        Self { data, params }
-    }
-
-    #[inline]
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        Self {
-            data,
-            params: SqwmaParams::default(),
-        }
-    }
-
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| SqwmaParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SqwmaOutput {
     pub values: Vec<f64>,
 }
 
-#[inline]
-pub fn calculate_sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let n = data.len();
+#[derive(Debug, Clone)]
+pub struct SqwmaParams {
+    pub period: Option<usize>,
+}
+
+impl SqwmaParams {
+    pub fn with_default_params() -> Self {
+        SqwmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqwmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: SqwmaParams,
+}
+
+impl<'a> SqwmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: SqwmaParams) -> Self {
+        SqwmaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        SqwmaInput {
+            candles,
+            source: "close",
+            params: SqwmaParams::with_default_params(),
+        }
+    }
+}
+
+pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
     if n == 0 {
         return Err("Empty data for SQWMA calculation.".into());
     }
@@ -107,6 +104,24 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_sqwma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = SqwmaParams { period: None };
+        let input = SqwmaInput::new(&candles, "close", default_params);
+        let output = sqwma(&input).expect("Failed SQWMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+        let params_period_10 = SqwmaParams { period: Some(10) };
+        let input2 = SqwmaInput::new(&candles, "hl2", params_period_10);
+        let output2 = sqwma(&input2).expect("Failed SQWMA with period=10, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+        let params_custom = SqwmaParams { period: Some(20) };
+        let input3 = SqwmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = sqwma(&input3).expect("Failed SQWMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_sqwma_accuracy() {
         let expected_last_five = [
             59229.72287968442,
@@ -115,23 +130,18 @@ mod tests {
             59167.73471400394,
             59067.97928994083,
         ];
-
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let source = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-
-        let params = SqwmaParams { period: Some(14) };
-        let input = SqwmaInput::new(source, params);
-
-        let result = calculate_sqwma(&input).expect("Failed to calculate SQWMA");
+        let default_params = SqwmaParams::with_default_params();
+        let input = SqwmaInput::new(&candles, "close", default_params);
+        let result = sqwma(&input).expect("Failed to calculate SQWMA");
         assert_eq!(result.values.len(), source.len());
-
-        assert!(result.values.len() >= 5, "Not enough data for last-5 check");
+        assert!(result.values.len() >= 5);
         let start_idx = result.values.len() - 5;
         let actual_last_five = &result.values[start_idx..];
-
         for (i, &val) in actual_last_five.iter().enumerate() {
             let exp_val = expected_last_five[i];
             assert!(
@@ -142,9 +152,8 @@ mod tests {
                 val
             );
         }
-
-        let default_input = SqwmaInput::with_default_params(source);
-        let default_result = calculate_sqwma(&default_input).expect("Failed default SQWMA");
-        assert!(!default_result.values.is_empty());
+        let default_input = SqwmaInput::with_default_params(&candles);
+        let default_result = sqwma(&default_input).expect("Failed default SQWMA");
+        assert_eq!(default_result.values.len(), source.len());
     }
 }

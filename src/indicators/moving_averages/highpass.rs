@@ -45,9 +45,9 @@ impl<'a> HighPassInput<'a> {
 
 #[inline]
 pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let period = input.params.period.unwrap_or(48);
-    let len = data.len();
+    let data: &[f64] = source_type(input.candles, input.source);
+    let period: usize = input.params.period.unwrap_or(48);
+    let len: usize = data.len();
     if len <= 2 || period == 0 || period > len {
         return Err("Invalid period or insufficient data for highpass calculation.".into());
     }

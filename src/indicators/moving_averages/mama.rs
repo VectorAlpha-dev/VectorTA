@@ -1,42 +1,7 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::math_functions::atan64;
 use std::error::Error;
 use std::f64::consts::PI;
-
-#[derive(Debug, Clone)]
-pub struct MamaParams {
-    pub fast_limit: f64,
-    pub slow_limit: f64,
-}
-
-impl Default for MamaParams {
-    fn default() -> Self {
-        Self {
-            fast_limit: 0.5,
-            slow_limit: 0.05,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MamaInput<'a> {
-    pub data: &'a [f64],
-    pub params: MamaParams,
-}
-
-impl<'a> MamaInput<'a> {
-    #[inline]
-    pub fn new(data: &'a [f64], params: MamaParams) -> Self {
-        Self { data, params }
-    }
-
-    #[inline]
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        Self {
-            data,
-            params: MamaParams::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct MamaOutput {
@@ -44,15 +9,54 @@ pub struct MamaOutput {
     pub fama_values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MamaParams {
+    pub fast_limit: Option<f64>,
+    pub slow_limit: Option<f64>,
+}
+
+impl MamaParams {
+    pub fn with_default_params() -> Self {
+        MamaParams {
+            fast_limit: None,
+            slow_limit: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MamaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: MamaParams,
+}
+
+impl<'a> MamaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: MamaParams) -> Self {
+        MamaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        MamaInput {
+            candles,
+            source: "close",
+            params: MamaParams::with_default_params(),
+        }
+    }
+}
+
 #[inline(always)]
 fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
     0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6
 }
 
-#[inline]
-pub fn calculate_mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
-    let src = input.data;
-    let len = src.len();
+pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
     if len < 10 {
         return Err("Not enough data".into());
     }
@@ -218,24 +222,55 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_mama_accuracy_with_tolerance() {
+    fn test_mama_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
-        let params = MamaParams {
-            fast_limit: 0.5,
-            slow_limit: 0.05,
+        let default_params = MamaParams {
+            fast_limit: None,
+            slow_limit: None,
         };
-        let input = MamaInput::new(close_prices, params);
-        let result = calculate_mama(&input).expect("Failed to calculate MAMA");
+        let input = MamaInput::new(&candles, "close", default_params);
+        let output = mama(&input).expect("Failed MAMA with default params");
+        assert_eq!(output.mama_values.len(), candles.close.len());
+        assert_eq!(output.fama_values.len(), candles.close.len());
+        let custom_fast_params = MamaParams {
+            fast_limit: Some(0.6),
+            slow_limit: None,
+        };
+        let input2 = MamaInput::new(&candles, "hl2", custom_fast_params);
+        let output2 = mama(&input2).expect("Failed MAMA with fast_limit=0.6, source=hl2");
+        assert_eq!(output2.mama_values.len(), candles.close.len());
+        assert_eq!(output2.fama_values.len(), candles.close.len());
+        let custom_both_params = MamaParams {
+            fast_limit: Some(0.7),
+            slow_limit: Some(0.1),
+        };
+        let input3 = MamaInput::new(&candles, "hlc3", custom_both_params);
+        let output3 = mama(&input3).expect("Failed MAMA fully custom");
+        assert_eq!(output3.mama_values.len(), candles.close.len());
+        assert_eq!(output3.fama_values.len(), candles.close.len());
+    }
 
+    #[test]
+    fn test_mama_accuracy() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = MamaParams::with_default_params();
+        let input = MamaInput::new(&candles, "close", default_params);
+        let result = mama(&input).expect("Failed to calculate MAMA");
+        assert_eq!(
+            result.mama_values.len(),
+            candles.close.len(),
+            "MAMA values count should match input data count"
+        );
+        assert_eq!(
+            result.fama_values.len(),
+            candles.close.len(),
+            "FAMA values count should match input data count"
+        );
         let mama_vals = &result.mama_values;
         let fama_vals = &result.fama_values;
         assert!(mama_vals.len() > 5 && fama_vals.len() > 5);
-
         let last_idx = mama_vals.len() - 5;
         let expected = [
             (59272.6126101837, 59904.82955384927),
@@ -244,23 +279,11 @@ mod tests {
             (59153.59019034539, 59691.27443288086),
             (59128.66068082812, 59677.20908907954),
         ];
-        assert_eq!(
-            mama_vals.len(),
-            close_prices.len(),
-            "MAMA values count should match input data count"
-        );
-        assert_eq!(
-            fama_vals.len(),
-            close_prices.len(),
-            "FAMA values count should match input data count"
-        );
         for (i, &(exp_mama, exp_fama)) in expected.iter().enumerate() {
             let got_mama = mama_vals[last_idx + i];
             let got_fama = fama_vals[last_idx + i];
-
             let mama_diff = (got_mama - exp_mama).abs() / exp_mama * 100.0;
             let fama_diff = (got_fama - exp_fama).abs() / exp_fama * 100.0;
-            println!("{}: got_mama={}, got_fama={}", i, got_mama, got_fama);
             assert!(
                 mama_diff < 0.01,
                 "MAMA mismatch at {}: expected {}, got {}, diff {}%",

@@ -1,50 +1,49 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct NmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for NmaParams {
-    fn default() -> Self {
-        NmaParams { period: Some(40) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct NmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: NmaParams,
-}
-
-impl<'a> NmaInput<'a> {
-    pub fn new(data: &'a [f64], params: NmaParams) -> Self {
-        NmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        NmaInput {
-            data,
-            params: NmaParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| NmaParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct NmaOutput {
     pub values: Vec<f64>,
 }
 
-#[inline]
-pub fn calculate_nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+#[derive(Debug, Clone)]
+pub struct NmaParams {
+    pub period: Option<usize>,
+}
+
+impl NmaParams {
+    pub fn with_default_params() -> Self {
+        NmaParams {
+            period: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: NmaParams,
+}
+
+impl<'a> NmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: NmaParams) -> Self {
+        NmaInput { candles, source, params }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        NmaInput {
+            candles,
+            source: "close",
+            params: NmaParams::with_default_params(),
+        }
+    }
+}
+
+pub fn nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(40);
 
     if period == 0 {
         return Err("NMA period cannot be zero.".into());
@@ -100,6 +99,27 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_nma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = NmaParams { period: None };
+        let input_default = NmaInput::new(&candles, "close", default_params);
+        let output_default = nma(&input_default).expect("Failed NMA with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_14 = NmaParams { period: Some(14) };
+        let input_period_14 = NmaInput::new(&candles, "hl2", params_14);
+        let output_period_14 = nma(&input_period_14).expect("Failed NMA with period=14, source=hl2");
+        assert_eq!(output_period_14.values.len(), candles.close.len());
+
+        let params_custom = NmaParams { period: Some(20) };
+        let input_custom = NmaInput::new(&candles, "hlc3", params_custom);
+        let output_custom = nma(&input_custom).expect("Failed NMA fully custom");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_nma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -108,8 +128,8 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = NmaParams { period: Some(40) };
-        let input = NmaInput::new(close_prices, params);
-        let nma_result = calculate_nma(&input).expect("Failed to calculate NMA");
+        let input = NmaInput::new(&candles, "close", params);
+        let nma_result = nma(&input).expect("Failed to calculate NMA");
 
         assert_eq!(
             nma_result.values.len(),
@@ -117,8 +137,8 @@ mod tests {
             "NMA values count should match the input data length"
         );
 
-        let period = input.get_period();
-        for i in 0..=(period) {
+        let period = params.period.unwrap();
+        for i in 0..=period {
             assert!(
                 nma_result.values[i].is_nan(),
                 "Expected NaN at index {}, got {}",
@@ -134,10 +154,7 @@ mod tests {
             63966.35530620797,
             64039.04719192334,
         ];
-        assert!(
-            nma_result.values.len() >= 5,
-            "Not enough NMA values for the test"
-        );
+        assert!(nma_result.values.len() >= 5);
 
         let start_index = nma_result.values.len() - 5;
         let result_last_five_nma = &nma_result.values[start_index..];
@@ -153,9 +170,8 @@ mod tests {
             );
         }
 
-        let default_input = NmaInput::with_default_params(close_prices);
-        let default_nma_result =
-            calculate_nma(&default_input).expect("Failed to calculate NMA with defaults");
+        let default_input = NmaInput::with_default_params(&candles);
+        let default_nma_result = nma(&default_input).expect("Failed to calculate NMA with defaults");
         assert_eq!(
             default_nma_result.values.len(),
             close_prices.len(),

@@ -44,9 +44,9 @@ impl<'a> FwmaInput<'a> {
 
 #[inline]
 pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let len = data.len();
-    let period = input.params.period.unwrap_or(5);
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(5);
     let mut values = vec![f64::NAN; len];
     if period == 0 || period > len {
         return Err("Invalid period specified for FWMA calculation.".into());

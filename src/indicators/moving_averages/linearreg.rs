@@ -1,47 +1,48 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct LinRegParams {
-    pub period: Option<usize>,
-}
-
-impl Default for LinRegParams {
-    fn default() -> Self {
-        Self { period: Some(14) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LinRegInput<'a> {
-    pub data: &'a [f64],
-    pub params: LinRegParams,
-}
-
-impl<'a> LinRegInput<'a> {
-    pub fn new(data: &'a [f64], params: LinRegParams) -> Self {
-        LinRegInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        LinRegInput {
-            data,
-            params: LinRegParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct LinRegOutput {
     pub values: Vec<f64>,
 }
 
-pub fn calculate_linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+#[derive(Debug, Clone)]
+pub struct LinRegParams {
+    pub period: Option<usize>,
+}
+
+impl LinRegParams {
+    pub fn with_default_params() -> Self {
+        LinRegParams {
+            period: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinRegInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: LinRegParams,
+}
+
+impl<'a> LinRegInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: LinRegParams) -> Self {
+        LinRegInput { candles, source, params }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        LinRegInput {
+            candles,
+            source: "close",
+            params: LinRegParams::with_default_params(),
+        }
+    }
+}
+
+pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let size: usize = data.len();
 
     if period < 1 {
         return Err("Invalid period (<1) for linear regression.".into());
@@ -108,9 +109,8 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-
         let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::new(close_prices, params);
+        let input = LinRegInput::new(&candles, "close", params);
 
         let linreg_result =
             calculate_linreg(&input).expect("Failed to calculate Linear Regression");
