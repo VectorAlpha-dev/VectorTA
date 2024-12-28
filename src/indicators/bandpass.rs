@@ -4,6 +4,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum BandPassData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct BandPassParams {
     pub period: Option<usize>,
     pub bandwidth: Option<f64>,
@@ -11,7 +20,7 @@ pub struct BandPassParams {
 
 impl BandPassParams {
     pub fn with_default_params() -> Self {
-        BandPassParams {
+        Self {
             period: None,
             bandwidth: None,
         }
@@ -20,24 +29,31 @@ impl BandPassParams {
 
 #[derive(Debug, Clone)]
 pub struct BandPassInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: BandPassData<'a>,
     pub params: BandPassParams,
 }
 
 impl<'a> BandPassInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: BandPassParams) -> Self {
-        BandPassInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: BandPassParams) -> Self {
+        Self {
+            data: BandPassData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        BandPassInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: BandPassParams) -> Self {
+        Self {
+            data: BandPassData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: BandPassData::Candles {
+                candles,
+                source: "close",
+            },
             params: BandPassParams::with_default_params(),
         }
     }
@@ -53,11 +69,14 @@ pub struct BandPassOutput {
 
 #[inline]
 pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        BandPassData::Candles { candles, source } => source_type(candles, source),
+        BandPassData::Slice(slice) => slice,
+    };
+
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(20);
     let bandwidth: f64 = input.params.bandwidth.unwrap_or(0.3);
-
     if len == 0 {
         return Err("No data available.".into());
     }
@@ -150,7 +169,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         // Use default BandPass parameters
-        let default_input = BandPassInput::with_default_params(&candles);
+        let default_input = BandPassInput::with_default_candles(&candles);
         let default_output = bandpass(&default_input).expect("Failed bandpass with default params");
         assert_eq!(default_output.bp.len(), candles.close.len());
 
@@ -159,7 +178,7 @@ mod tests {
             period: Some(30),
             bandwidth: Some(0.5),
         };
-        let custom_input = BandPassInput::new(&candles, "hl2", custom_params);
+        let custom_input = BandPassInput::from_candles(&candles, "hl2", custom_params);
         let custom_output = bandpass(&custom_input).expect("Failed bandpass with custom params");
         assert_eq!(custom_output.bp.len(), candles.close.len());
     }
@@ -167,7 +186,7 @@ mod tests {
     fn test_bandpass_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = BandPassInput::with_default_params(&candles);
+        let input = BandPassInput::with_default_candles(&candles);
         let result = bandpass(&input).expect("Failed to calculate bandpass");
 
         let expected_bp_last_five = [

@@ -2,36 +2,48 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AroonOscData<'a> {
+    Candles { candles: &'a Candles },
+    SlicesHL { high: &'a [f64], low: &'a [f64] },
+}
+
+#[derive(Debug, Clone)]
 pub struct AroonOscParams {
     pub length: Option<usize>,
 }
 
 impl Default for AroonOscParams {
     fn default() -> Self {
-        AroonOscParams { length: Some(14) }
+        Self { length: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AroonOscInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AroonOscData<'a>,
     pub params: AroonOscParams,
 }
 
 impl<'a> AroonOscInput<'a> {
-    pub fn new(candles: &'a Candles, params: AroonOscParams) -> Self {
-        AroonOscInput { candles, params }
-    }
-
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AroonOscInput {
-            candles,
-            params: AroonOscParams::default(),
+    pub fn from_candles(candles: &'a Candles, params: AroonOscParams) -> Self {
+        Self {
+            data: AroonOscData::Candles { candles },
+            params,
         }
     }
 
-    fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(14)
+    pub fn from_slices_hl(high: &'a [f64], low: &'a [f64], params: AroonOscParams) -> Self {
+        Self {
+            data: AroonOscData::SlicesHL { high, low },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AroonOscData::Candles { candles },
+            params: AroonOscParams::default(),
+        }
     }
 }
 
@@ -42,19 +54,40 @@ pub struct AroonOscOutput {
 
 #[inline]
 pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<dyn Error>> {
-    let candles = input.candles;
-    let length = input.get_length();
+    let length = input.params.length.unwrap_or(14);
     if length == 0 {
         return Err("Invalid length specified for Aroon Osc calculation.".into());
     }
 
-    let len = candles.close.len();
-    if len == 0 {
-        return Err("No candles available.".into());
+    let (high, low) = match &input.data {
+        AroonOscData::Candles { candles } => {
+            if candles.close.is_empty() {
+                return Err("No candles available.".into());
+            }
+            (
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+            )
+        }
+        AroonOscData::SlicesHL { high, low } => {
+            if high.is_empty() || low.is_empty() {
+                return Err("One or both of the slices for AroonOsc are empty.".into());
+            }
+            if high.len() != low.len() {
+                return Err("Mismatch in high/low slice length.".into());
+            }
+            (*high, *low)
+        }
+    };
+    let len = low.len();
+    if high.len() < length {
+        return Err(format!(
+            "Not enough data points ({} total) for Aroon Osc length {}.",
+            high.len(),
+            length
+        )
+        .into());
     }
-
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
 
     let mut values = vec![f64::NAN; len];
     let window = length + 1;
@@ -101,7 +134,7 @@ mod tests {
     fn test_aroon_osc_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = AroonOscInput::with_default_params(&candles);
+        let input = AroonOscInput::with_default_candles(&candles);
         let result = aroon_osc(&input).expect("Failed to calculate Aroon Osc");
 
         let expected_last_five = [-50.0, -50.0, -50.0, -50.0, -42.8571];
@@ -125,7 +158,7 @@ mod tests {
             );
         }
 
-        let length = input.get_length();
+        let length = 14;
         for val in result.values.iter().skip(length) {
             if !val.is_nan() {
                 assert!(

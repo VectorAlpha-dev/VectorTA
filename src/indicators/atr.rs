@@ -2,36 +2,59 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AtrData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct AtrParams {
     pub length: Option<usize>,
 }
 
 impl Default for AtrParams {
     fn default() -> Self {
-        AtrParams { length: Some(14) }
+        Self { length: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AtrInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AtrData<'a>,
     pub params: AtrParams,
 }
 
 impl<'a> AtrInput<'a> {
-    pub fn new(candles: &'a Candles, params: AtrParams) -> Self {
-        AtrInput { candles, params }
-    }
-
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AtrInput {
-            candles,
-            params: AtrParams::default(),
+    pub fn from_candles(candles: &'a Candles, params: AtrParams) -> Self {
+        Self {
+            data: AtrData::Candles { candles },
+            params,
         }
     }
 
-    fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(14)
+    pub fn from_slices(
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        params: AtrParams,
+    ) -> Self {
+        Self {
+            data: AtrData::Slices { high, low, close },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AtrData::Candles { candles },
+            params: AtrParams::default(),
+        }
     }
 }
 
@@ -42,16 +65,25 @@ pub struct AtrOutput {
 
 #[inline]
 pub fn atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
-    let candles = input.candles;
-    let length = input.get_length();
-
+    let length: usize = input.params.length.unwrap_or(14);
     if length == 0 {
         return Err("Invalid length for ATR calculation.".into());
     }
 
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
-    let close = candles.select_candle_field("close")?;
+    let (high, low, close) = match &input.data {
+        AtrData::Candles { candles } => {
+            let high: &[f64] = candles.select_candle_field("high")?;
+            let low: &[f64] = candles.select_candle_field("low")?;
+            let close: &[f64] = candles.select_candle_field("close")?;
+            (high, low, close)
+        }
+        AtrData::Slices { high, low, close } => {
+            if high.len() != low.len() || low.len() != close.len() {
+                return Err("Inconsistent slice lengths for ATR calculation.".into());
+            }
+            (*high, *low, *close)
+        }
+    };
 
     let len = close.len();
     if len == 0 {
@@ -102,7 +134,7 @@ mod tests {
     fn test_atr_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = AtrInput::with_default_params(&candles);
+        let input = AtrInput::with_default_candles(&candles);
         let result = atr(&input).expect("Failed to calculate ATR");
 
         let expected_last_five = [916.89, 874.33, 838.45, 801.92, 811.57];
@@ -126,7 +158,7 @@ mod tests {
             );
         }
 
-        let length = input.get_length();
+        let length = 14;
         for val in result.values.iter().skip(length - 1) {
             if !val.is_nan() {
                 assert!(

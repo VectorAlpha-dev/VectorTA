@@ -2,29 +2,38 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-pub struct AvgPriceParams;
-
-impl Default for AvgPriceParams {
-    fn default() -> Self {
-        AvgPriceParams
-    }
+pub enum AvgPriceData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct AvgPriceInput<'a> {
-    pub candles: &'a Candles,
-    pub params: AvgPriceParams,
+    pub data: AvgPriceData<'a>,
 }
 
 impl<'a> AvgPriceInput<'a> {
-    pub fn new(candles: &'a Candles, params: AvgPriceParams) -> Self {
-        AvgPriceInput { candles, params }
+    pub fn from_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AvgPriceData::Candles { candles },
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AvgPriceInput {
-            candles,
-            params: AvgPriceParams,
+    pub fn from_slices(open: &'a [f64], high: &'a [f64], low: &'a [f64], close: &'a [f64]) -> Self {
+        Self {
+            data: AvgPriceData::Slices {
+                open,
+                high,
+                low,
+                close,
+            },
         }
     }
 }
@@ -36,16 +45,36 @@ pub struct AvgPriceOutput {
 
 #[inline]
 pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<dyn Error>> {
-    let candles = input.candles;
-    let len = candles.close.len();
+    let (open, high, low, close) = match &input.data {
+        AvgPriceData::Candles { candles } => {
+            if candles.close.is_empty() {
+                return Err("No candles available.".into());
+            }
+            let open: &[f64] = candles.select_candle_field("open")?;
+            let high: &[f64] = candles.select_candle_field("high")?;
+            let low: &[f64] = candles.select_candle_field("low")?;
+            let close: &[f64] = candles.select_candle_field("close")?;
+            (open, high, low, close)
+        }
+        AvgPriceData::Slices {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            if open.is_empty() {
+                return Err("Input slices have zero length.".into());
+            }
+            if open.len() != high.len() || high.len() != low.len() || low.len() != close.len() {
+                return Err("Inconsistent slice lengths.".into());
+            }
+            (*open, *high, *low, *close)
+        }
+    };
+    let len: usize = close.len();
     if len == 0 {
         return Err("No candles available.".into());
     }
-
-    let open = candles.select_candle_field("open")?;
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
-    let close = candles.select_candle_field("close")?;
 
     let mut values = Vec::with_capacity(len);
     for i in 0..len {
@@ -75,7 +104,7 @@ mod tests {
             hlcc4: vec![100., 101., 102., 103., 104.],
         };
 
-        let input = AvgPriceInput::with_default_params(&candles);
+        let input = AvgPriceInput::from_candles(&candles);
         let result = avgprice(&input).expect("Failed to calculate avgprice");
         assert_eq!(
             result.values.len(),

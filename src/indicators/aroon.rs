@@ -2,30 +2,46 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AroonData<'a> {
+    Candles { candles: &'a Candles },
+    SlicesHL { high: &'a [f64], low: &'a [f64] },
+}
+
+#[derive(Debug, Clone)]
 pub struct AroonParams {
     pub length: Option<usize>,
 }
 
 impl Default for AroonParams {
     fn default() -> Self {
-        AroonParams { length: Some(14) }
+        Self { length: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AroonInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AroonData<'a>,
     pub params: AroonParams,
 }
 
 impl<'a> AroonInput<'a> {
-    pub fn new(candles: &'a Candles, params: AroonParams) -> Self {
-        AroonInput { candles, params }
+    pub fn from_candles(candles: &'a Candles, params: AroonParams) -> Self {
+        Self {
+            data: AroonData::Candles { candles },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AroonInput {
-            candles,
+    pub fn from_slices_hl(high: &'a [f64], low: &'a [f64], params: AroonParams) -> Self {
+        Self {
+            data: AroonData::SlicesHL { high, low },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AroonData::Candles { candles },
             params: AroonParams::default(),
         }
     }
@@ -39,21 +55,39 @@ pub struct AroonOutput {
 
 #[inline]
 pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
-    let candles = input.candles;
+    let (high, low) = match &input.data {
+        AroonData::Candles { candles } => {
+            if candles.close.is_empty() {
+                return Err("No candles available.".into());
+            }
+            (
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+            )
+        }
+        AroonData::SlicesHL { high, low } => {
+            if high.is_empty() || low.is_empty() {
+                return Err("One or both of the slices for Aroon are empty.".into());
+            }
+            if high.len() != low.len() {
+                return Err("Mismatch in high/low slice length.".into());
+            }
+            (*high, *low)
+        }
+    };
     let length = input.params.length.unwrap_or(14);
-
+    if high.len() < length {
+        return Err(format!(
+            "Not enough data points ({} total) for Aroon length {}.",
+            high.len(),
+            length
+        )
+        .into());
+    }
+    let len = low.len();
     if length == 0 {
         return Err("Invalid length specified for Aroon calculation.".into());
     }
-
-    let len = candles.close.len();
-    if len == 0 {
-        return Err("No candles available.".into());
-    }
-
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
-
     let mut aroon_up = vec![f64::NAN; len];
     let mut aroon_down = vec![f64::NAN; len];
 
@@ -102,7 +136,7 @@ mod tests {
     fn test_aroon_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = AroonInput::with_default_params(&candles);
+        let input = AroonInput::with_default_candles(&candles);
         let result = aroon(&input).expect("Failed to calculate Aroon");
 
         let expected_up_last_five = [21.43, 14.29, 7.14, 0.0, 0.0];
@@ -150,7 +184,7 @@ mod tests {
             );
         }
 
-        let length = input.get_length();
+        let length = 14;
         for val in result.aroon_up.iter().skip(length) {
             if !val.is_nan() {
                 assert!(
