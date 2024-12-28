@@ -69,7 +69,7 @@ fn benchmark_indicators(c: &mut Criterion) {
             .expect("Failed to load candles");
 
     let mut group = c.benchmark_group("Indicator Benchmarks");
-    group.measurement_time(Duration::new(8, 0));
+    group.measurement_time(Duration::new(6, 0));
     group.warm_up_time(Duration::new(4, 0));
 
     // EPMA
