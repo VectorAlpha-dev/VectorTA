@@ -2,30 +2,57 @@ use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AdxData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct AdxParams {
     pub period: Option<usize>,
 }
 
 impl Default for AdxParams {
     fn default() -> Self {
-        AdxParams { period: Some(14) }
+        Self { period: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AdxInput<'a> {
-    pub candles: &'a Candles,
+    pub data: AdxData<'a>,
     pub params: AdxParams,
 }
 
 impl<'a> AdxInput<'a> {
-    pub fn new(candles: &'a Candles, params: AdxParams) -> Self {
-        AdxInput { candles, params }
+    pub fn from_candles(candles: &'a Candles, params: AdxParams) -> Self {
+        Self {
+            data: AdxData::Candles { candles },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AdxInput {
-            candles,
+    pub fn from_slices(
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        params: AdxParams,
+    ) -> Self {
+        Self {
+            data: AdxData::Slices { high, low, close },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AdxData::Candles { candles },
             params: AdxParams::default(),
         }
     }
@@ -42,14 +69,18 @@ pub struct AdxOutput {
     pub values: Vec<f64>,
 }
 
-#[inline]
 pub fn adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
-    let candles = input.candles;
-    let period = input.get_period();
+    let period: usize = input.get_period();
 
-    let high = candles.select_candle_field("high")?;
-    let low = candles.select_candle_field("low")?;
-    let close = candles.select_candle_field("close")?;
+    let (high, low, close) = match &input.data {
+        AdxData::Candles { candles } => {
+            let high: &[f64] = candles.select_candle_field("high")?;
+            let low: &[f64] = candles.select_candle_field("low")?;
+            let close: &[f64] = candles.select_candle_field("close")?;
+            (high, low, close)
+        }
+        AdxData::Slices { high, low, close } => (*high, *low, *close),
+    };
 
     let len = close.len();
     if period == 0 || period > len {
@@ -182,7 +213,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let params = AdxParams { period: Some(14) };
-        let input = AdxInput::new(&candles, params);
+        let input = AdxInput::from_candles(&candles, params);
         let adx_result = adx(&input).expect("Failed to calculate ADX");
 
         assert_eq!(
@@ -212,7 +243,7 @@ mod tests {
             );
         }
 
-        let default_input = AdxInput::with_default_params(&candles);
+        let default_input = AdxInput::with_default_candles(&candles);
         let default_adx_result =
             adx(&default_input).expect("Failed to calculate ADX with defaults");
         assert!(

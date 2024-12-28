@@ -1,4 +1,14 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub enum AoData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
 
 #[derive(Debug, Clone)]
 pub struct AoParams {
@@ -16,32 +26,34 @@ impl Default for AoParams {
 }
 
 #[derive(Debug, Clone)]
-// Should use HL2 price input.
 pub struct AoInput<'a> {
-    pub data: &'a [f64],
+    pub data: AoData<'a>,
     pub params: AoParams,
 }
 
 impl<'a> AoInput<'a> {
-    pub fn new(data: &'a [f64], params: AoParams) -> Self {
-        AoInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        AoInput {
-            data,
-            params: AoParams::default(),
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: AoParams) -> Self {
+        Self {
+            data: AoData::Candles { candles, source },
+            params,
         }
     }
 
-    #[inline]
-    fn get_short_period(&self) -> usize {
-        self.params.short_period.unwrap_or(5)
+    pub fn from_slice(data: &'a [f64], params: AoParams) -> Self {
+        Self {
+            data: AoData::Slice(data),
+            params,
+        }
     }
 
-    #[inline]
-    fn get_long_period(&self) -> usize {
-        self.params.long_period.unwrap_or(34)
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AoData::Candles {
+                candles,
+                source: "hl2",
+            },
+            params: AoParams::default(),
+        }
     }
 }
 
@@ -51,9 +63,20 @@ pub struct AoOutput {
 }
 
 pub fn ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
-    let data = input.data;
-    let short = input.get_short_period();
-    let long = input.get_long_period();
+    let short: usize = input.params.short_period.unwrap_or(5);
+    let long: usize = input.params.long_period.unwrap_or(34);
+
+    if short == 0 || long == 0 {
+        return Err("Periods must be greater than 0".into());
+    }
+    if short >= long {
+        return Err("Short period must be less than long period".into());
+    }
+
+    let data: &[f64] = match &input.data {
+        AoData::Candles { candles, source } => source_type(candles, source),
+        AoData::Slice(slice) => slice,
+    };
 
     if short == 0 || long == 0 || short >= long {
         return Err("Invalid periods for AO: short=0 or long=0 or short>=long".into());
@@ -115,7 +138,7 @@ mod tests {
             .map(|(&h, &l)| 0.5 * (h + l))
             .collect();
 
-        let input = AoInput::with_default_params(&hl2_values);
+        let input = AoInput::with_default_candles(&candles);
         let result = ao(&input).expect("Failed to calculate AO");
         let expected_last_five = [-1671.3, -1401.6706, -1262.3559, -1178.4941, -1157.4118];
 
@@ -143,7 +166,7 @@ mod tests {
             );
         }
 
-        for val in result.values.iter().skip(input.get_long_period() - 1) {
+        for val in result.values.iter().skip(34 - 1) {
             assert!(
                 val.is_finite(),
                 "AO output should be finite at valid indices"

@@ -1,4 +1,14 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub enum AlligatorData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
 
 #[derive(Debug, Clone)]
 pub struct AlligatorParams {
@@ -12,7 +22,7 @@ pub struct AlligatorParams {
 
 impl Default for AlligatorParams {
     fn default() -> Self {
-        AlligatorParams {
+        Self {
             jaw_period: Some(13),
             jaw_offset: Some(8),
             teeth_period: Some(8),
@@ -25,56 +35,33 @@ impl Default for AlligatorParams {
 
 #[derive(Debug, Clone)]
 pub struct AlligatorInput<'a> {
-    pub data: &'a [f64],
+    pub data: AlligatorData<'a>,
     pub params: AlligatorParams,
 }
 
 impl<'a> AlligatorInput<'a> {
-    pub fn new(data: &'a [f64], params: AlligatorParams) -> Self {
-        AlligatorInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        AlligatorInput {
-            data,
-            params: AlligatorParams::default(),
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: AlligatorParams) -> Self {
+        Self {
+            data: AlligatorData::Candles { candles, source },
+            params,
         }
     }
 
-    fn get_jaw_period(&self) -> usize {
-        self.params
-            .jaw_period
-            .unwrap_or_else(|| AlligatorParams::default().jaw_period.unwrap())
+    pub fn from_slice(slice: &'a [f64], params: AlligatorParams) -> Self {
+        Self {
+            data: AlligatorData::Slice(slice),
+            params,
+        }
     }
 
-    fn get_jaw_offset(&self) -> usize {
-        self.params
-            .jaw_offset
-            .unwrap_or_else(|| AlligatorParams::default().jaw_offset.unwrap())
-    }
-
-    fn get_teeth_period(&self) -> usize {
-        self.params
-            .teeth_period
-            .unwrap_or_else(|| AlligatorParams::default().teeth_period.unwrap())
-    }
-
-    fn get_teeth_offset(&self) -> usize {
-        self.params
-            .teeth_offset
-            .unwrap_or_else(|| AlligatorParams::default().teeth_offset.unwrap())
-    }
-
-    fn get_lips_period(&self) -> usize {
-        self.params
-            .lips_period
-            .unwrap_or_else(|| AlligatorParams::default().lips_period.unwrap())
-    }
-
-    fn get_lips_offset(&self) -> usize {
-        self.params
-            .lips_offset
-            .unwrap_or_else(|| AlligatorParams::default().lips_offset.unwrap())
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AlligatorData::Candles {
+                candles,
+                source: "hl2",
+            },
+            params: AlligatorParams::default(),
+        }
     }
 }
 
@@ -87,15 +74,18 @@ pub struct AlligatorOutput {
 
 #[inline]
 pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
+    let data: &[f64] = match &input.data {
+        AlligatorData::Candles { candles, source } => source_type(candles, source),
+        AlligatorData::Slice(slice) => slice,
+    };
+    let len: usize = data.len();
 
-    let jaw_period = input.get_jaw_period();
-    let jaw_offset = input.get_jaw_offset();
-    let teeth_period = input.get_teeth_period();
-    let teeth_offset = input.get_teeth_offset();
-    let lips_period = input.get_lips_period();
-    let lips_offset = input.get_lips_offset();
+    let jaw_period = input.params.jaw_period.unwrap_or(13);
+    let jaw_offset = input.params.jaw_offset.unwrap_or(8);
+    let teeth_period = input.params.teeth_period.unwrap_or(8);
+    let teeth_offset = input.params.teeth_offset.unwrap_or(5);
+    let lips_period = input.params.lips_period.unwrap_or(5);
+    let lips_offset = input.params.lips_offset.unwrap_or(3);
 
     let mut jaw = vec![f64::NAN; len];
     let mut teeth = vec![f64::NAN; len];
@@ -202,7 +192,7 @@ mod tests {
             .get_calculated_field("hl2")
             .expect("Failed to extract hl2 prices");
 
-        let input = AlligatorInput::with_default_params(hl2_prices);
+        let input = AlligatorInput::with_default_candles(&candles);
         let result = alligator(&input).expect("Failed to calculate alligator");
 
         let expected_last_five_jaw_result = [60742.4, 60632.6, 60555.1, 60442.7, 60308.7];
@@ -269,7 +259,7 @@ mod tests {
             jaw_period: Some(14),
             ..AlligatorParams::default()
         };
-        let custom_input = AlligatorInput::new(hl2_prices, custom_params);
+        let custom_input = AlligatorInput::from_candles(&candles, "hl2", custom_params);
         let _ = alligator(&custom_input).expect("Alligator calculation with custom params failed");
     }
 }

@@ -29,10 +29,6 @@ impl<'a> AroonInput<'a> {
             params: AroonParams::default(),
         }
     }
-
-    fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(14)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +40,7 @@ pub struct AroonOutput {
 #[inline]
 pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
     let candles = input.candles;
-    let length = input.get_length();
+    let length = input.params.length.unwrap_or(14);
 
     if length == 0 {
         return Err("Invalid length specified for Aroon calculation.".into());
