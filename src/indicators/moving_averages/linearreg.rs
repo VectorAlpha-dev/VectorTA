@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum LinRegData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct LinRegOutput {
     pub values: Vec<f64>,
 }
@@ -13,37 +22,48 @@ pub struct LinRegParams {
 
 impl LinRegParams {
     pub fn with_default_params() -> Self {
-        LinRegParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LinRegInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: LinRegData<'a>,
     pub params: LinRegParams,
 }
 
 impl<'a> LinRegInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: LinRegParams) -> Self {
-        LinRegInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: LinRegParams) -> Self {
+        Self {
+            data: LinRegData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        LinRegInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: LinRegParams) -> Self {
+        Self {
+            data: LinRegData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: LinRegData::Candles {
+                candles,
+                source: "close",
+            },
             params: LinRegParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        LinRegData::Candles { candles, source } => source_type(candles, source),
+        LinRegData::Slice(slice) => slice,
+    };
     let size: usize = data.len();
     let period: usize = input.params.period.unwrap_or(14);
     if period < 1 {
@@ -111,7 +131,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::new(&candles, "close", params);
+        let input = LinRegInput::from_candles(&candles, "close", params);
         let linreg_result = linreg(&input).expect("Failed to calculate Linear Regression");
         let expected_last_five = [
             58929.37142857143,

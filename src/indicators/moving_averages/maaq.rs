@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum MaaqData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct MaaqOutput {
     pub values: Vec<f64>,
 }
@@ -15,7 +24,7 @@ pub struct MaaqParams {
 
 impl MaaqParams {
     pub fn with_default_params() -> Self {
-        MaaqParams {
+        Self {
             period: None,
             fast_period: None,
             slow_period: None,
@@ -25,24 +34,31 @@ impl MaaqParams {
 
 #[derive(Debug, Clone)]
 pub struct MaaqInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: MaaqData<'a>,
     pub params: MaaqParams,
 }
 
 impl<'a> MaaqInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: MaaqParams) -> Self {
-        MaaqInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: MaaqParams) -> Self {
+        Self {
+            data: MaaqData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        MaaqInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: MaaqParams) -> Self {
+        Self {
+            data: MaaqData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: MaaqData::Candles {
+                candles,
+                source: "close",
+            },
             params: MaaqParams::with_default_params(),
         }
     }
@@ -50,7 +66,10 @@ impl<'a> MaaqInput<'a> {
 
 #[inline]
 pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        MaaqData::Candles { candles, source } => source_type(candles, source),
+        MaaqData::Slice(slice) => slice,
+    };
     let period: usize = input.params.period.unwrap_or(11);
     let fast_p: usize = input.params.fast_period.unwrap_or(2);
     let slow_p: usize = input.params.slow_period.unwrap_or(30);
@@ -121,7 +140,7 @@ mod tests {
             fast_period: None,
             slow_period: None,
         };
-        let input_default = MaaqInput::new(&candles, "close", default_params);
+        let input_default = MaaqInput::from_candles(&candles, "close", default_params);
         let output_default = maaq(&input_default).expect("Failed MAAQ with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
@@ -130,7 +149,7 @@ mod tests {
             fast_period: Some(3),
             slow_period: Some(25),
         };
-        let input_custom = MaaqInput::new(&candles, "hl2", params_custom);
+        let input_custom = MaaqInput::from_candles(&candles, "hl2", params_custom);
         let output_custom = maaq(&input_custom).expect("Failed MAAQ with custom params");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -148,7 +167,7 @@ mod tests {
             fast_period: Some(2),
             slow_period: Some(30),
         };
-        let input = MaaqInput::new(&candles, "close", params);
+        let input = MaaqInput::from_candles(&candles, "close", params);
         let maaq_result = maaq(&input).expect("Failed to calculate MAAQ");
         assert_eq!(maaq_result.values.len(), close_prices.len());
 

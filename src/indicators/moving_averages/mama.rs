@@ -4,6 +4,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum MamaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct MamaOutput {
     pub mama_values: Vec<f64>,
     pub fama_values: Vec<f64>,
@@ -17,7 +26,7 @@ pub struct MamaParams {
 
 impl MamaParams {
     pub fn with_default_params() -> Self {
-        MamaParams {
+        Self {
             fast_limit: None,
             slow_limit: None,
         }
@@ -26,24 +35,31 @@ impl MamaParams {
 
 #[derive(Debug, Clone)]
 pub struct MamaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: MamaData<'a>,
     pub params: MamaParams,
 }
 
 impl<'a> MamaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: MamaParams) -> Self {
-        MamaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: MamaParams) -> Self {
+        Self {
+            data: MamaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        MamaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: MamaParams) -> Self {
+        Self {
+            data: MamaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: MamaData::Candles {
+                candles,
+                source: "close",
+            },
             params: MamaParams::with_default_params(),
         }
     }
@@ -53,9 +69,13 @@ impl<'a> MamaInput<'a> {
 fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
     0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6
 }
+
 #[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
-    let src: &[f64] = source_type(input.candles, input.source);
+    let src = match &input.data {
+        MamaData::Candles { candles, source } => source_type(candles, source),
+        MamaData::Slice(slice) => slice,
+    };
     let len: usize = src.len();
     if len < 10 {
         return Err("Not enough data".into());
@@ -229,7 +249,7 @@ mod tests {
             fast_limit: None,
             slow_limit: None,
         };
-        let input = MamaInput::new(&candles, "close", default_params);
+        let input = MamaInput::from_candles(&candles, "close", default_params);
         let output = mama(&input).expect("Failed MAMA with default params");
         assert_eq!(output.mama_values.len(), candles.close.len());
         assert_eq!(output.fama_values.len(), candles.close.len());
@@ -237,7 +257,7 @@ mod tests {
             fast_limit: Some(0.6),
             slow_limit: None,
         };
-        let input2 = MamaInput::new(&candles, "hl2", custom_fast_params);
+        let input2 = MamaInput::from_candles(&candles, "hl2", custom_fast_params);
         let output2 = mama(&input2).expect("Failed MAMA with fast_limit=0.6, source=hl2");
         assert_eq!(output2.mama_values.len(), candles.close.len());
         assert_eq!(output2.fama_values.len(), candles.close.len());
@@ -245,7 +265,7 @@ mod tests {
             fast_limit: Some(0.7),
             slow_limit: Some(0.1),
         };
-        let input3 = MamaInput::new(&candles, "hlc3", custom_both_params);
+        let input3 = MamaInput::from_candles(&candles, "hlc3", custom_both_params);
         let output3 = mama(&input3).expect("Failed MAMA fully custom");
         assert_eq!(output3.mama_values.len(), candles.close.len());
         assert_eq!(output3.fama_values.len(), candles.close.len());
@@ -256,7 +276,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = MamaParams::with_default_params();
-        let input = MamaInput::new(&candles, "close", default_params);
+        let input = MamaInput::from_candles(&candles, "close", default_params);
         let result = mama(&input).expect("Failed to calculate MAMA");
         assert_eq!(
             result.mama_values.len(),
