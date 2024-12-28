@@ -1,4 +1,14 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub enum RsiData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
 
 #[derive(Debug, Clone)]
 pub struct RsiParams {
@@ -7,32 +17,39 @@ pub struct RsiParams {
 
 impl Default for RsiParams {
     fn default() -> Self {
-        RsiParams { period: Some(14) }
+        Self { period: Some(14) }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RsiInput<'a> {
-    pub data: &'a [f64],
+    pub data: RsiData<'a>,
     pub params: RsiParams,
 }
 
 impl<'a> RsiInput<'a> {
-    pub fn new(data: &'a [f64], params: RsiParams) -> Self {
-        RsiInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        RsiInput {
-            data,
-            params: RsiParams::default(),
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: RsiParams) -> Self {
+        Self {
+            data: RsiData::Candles { candles, source },
+            params,
         }
     }
 
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| RsiParams::default().period.unwrap())
+    pub fn from_slice(slice: &'a [f64], params: RsiParams) -> Self {
+        Self {
+            data: RsiData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: RsiData::Candles {
+                candles,
+                source: "close",
+            },
+            params: RsiParams::default(),
+        }
     }
 }
 
@@ -43,8 +60,15 @@ pub struct RsiOutput {
 
 #[inline]
 pub fn rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+    let data: &[f64] = match &input.data {
+        RsiData::Candles { candles, source } => source_type(candles, source),
+        RsiData::Slice(slice) => slice,
+    };
+    let period = input.params.period.unwrap_or(14);
+
+    if data.len() < period {
+        return Err("Not enough data points to compute RSI.".into());
+    }
 
     if period == 0 || period > data.len() {
         return Err("Invalid period specified for RSI calculation.".into());
@@ -114,7 +138,7 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = RsiParams { period: Some(14) };
-        let input = RsiInput::new(close_prices, params);
+        let input = RsiInput::from_candles(&candles, "close", params);
         let rsi_result = rsi(&input).expect("Failed to calculate RSI");
 
         let expected_last_five_rsi = [43.42, 42.68, 41.62, 42.86, 39.01];
@@ -143,7 +167,7 @@ mod tests {
             );
         }
 
-        let default_input = RsiInput::with_default_params(close_prices);
+        let default_input = RsiInput::with_default_candles(&candles);
         let default_rsi_result =
             rsi(&default_input).expect("Failed to calculate RSI with defaults");
         assert!(

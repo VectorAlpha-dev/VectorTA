@@ -75,9 +75,6 @@ pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
     if period > data.len() {
         return Err("SWMA period cannot exceed data length.".into());
     }
-
-    let len: usize = data.len();
-
     let weights = build_symmetric_triangle(period);
 
     let mut swma_values = vec![f64::NAN; len];

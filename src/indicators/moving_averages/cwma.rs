@@ -81,7 +81,6 @@ pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
         return Err("CWMA period must be >= 1.".into());
     }
 
-    let len = data.len();
     if period + 1 > len {
         return Ok(CwmaOutput {
             values: data.to_vec(),

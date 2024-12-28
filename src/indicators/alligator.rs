@@ -112,9 +112,7 @@ pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Erro
     let lips_scale = (lips_period - 1) as f64;
     let lips_inv_period = 1.0 / lips_period as f64;
 
-    for i in 0..len {
-        let data_point = data[i];
-
+    for (i, &data_point) in data.iter().enumerate() {
         if !jaw_ready {
             if i < jaw_period {
                 jaw_sum += data_point;

@@ -87,8 +87,8 @@ pub struct AdoscOutput {
 }
 
 pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
-    let short = input.get_short_period();
-    let long = input.get_long_period();
+    let short: usize = input.get_short_period();
+    let long: usize = input.get_long_period();
 
     if short == 0 || long == 0 {
         return Err("Invalid period specified for ADOSC calculation.".into());

@@ -87,7 +87,7 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
         *w /= fib_sum;
     }
     let end_offset = period - 1;
-    for i in end_offset..len {
+    for (i, value) in values.iter_mut().enumerate().skip(end_offset) {
         let start = i + 1 - period;
         let mut sum = 0.0;
         let fib_slice = &fib[..];
@@ -95,7 +95,7 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
         for j in 0..period {
             sum += data_slice[j] * fib_slice[j];
         }
-        values[i] = sum;
+        *value = sum;
     }
     Ok(FwmaOutput { values })
 }

@@ -36,6 +36,12 @@ impl<'a> AvgPriceInput<'a> {
             },
         }
     }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AvgPriceData::Candles { candles },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

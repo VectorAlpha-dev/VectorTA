@@ -165,6 +165,11 @@ mod tests {
         ];
         let start_index = result.values.len() - 5;
         let actual_last_five = &result.values[start_index..];
+        assert_eq!(
+            result.values.len(),
+            close_prices.len(),
+            "HWMA output length mismatch"
+        );
         for (i, &actual) in actual_last_five.iter().enumerate() {
             let expected = expected_last_five[i];
             assert!(
