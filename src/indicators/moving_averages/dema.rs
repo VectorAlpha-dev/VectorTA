@@ -49,9 +49,9 @@ impl<'a> DemaInput<'a> {
 
 #[inline]
 pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let size = data.len();
-    let period = input.get_period();
+    let data: &[f64] = source_type(input.candles, input.source);
+    let size: usize = data.len();
+    let period: usize = input.get_period();
 
     if period < 1 {
         return Err("Invalid DEMA period (must be >= 1).".into());
@@ -93,14 +93,11 @@ mod tests {
 
     #[test]
     fn test_dema_accuracy() {
-        // Load historical candles
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        // Create input with default params (period = 30), source = "close"
         let input = DemaInput::with_default_params(&candles);
 
-        // Calculate the DEMA
         let result = dema(&input).expect("Failed to calculate DEMA");
 
         let expected_last_five = [
@@ -111,7 +108,6 @@ mod tests {
             58908.370159946775,
         ];
 
-        // Basic length checks
         assert!(result.values.len() >= expected_last_five.len());
         assert_eq!(
             result.values.len(),
@@ -119,7 +115,6 @@ mod tests {
             "DEMA output length does not match input length"
         );
 
-        // Compare the last five computed values
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
         for (i, &val) in last_five.iter().enumerate() {

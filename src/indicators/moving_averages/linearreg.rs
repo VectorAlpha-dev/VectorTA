@@ -39,7 +39,7 @@ impl<'a> LinRegInput<'a> {
         }
     }
 }
-
+#[inline]
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let size: usize = data.len();
@@ -47,7 +47,6 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
     if period < 1 {
         return Err("Invalid period (<1) for linear regression.".into());
     }
-    let size = data.len();
     if size == 0 {
         return Err("No data available for linear regression.".into());
     }
@@ -96,6 +95,7 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
 
     Ok(LinRegOutput { values })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,16 +105,12 @@ mod tests {
     fn test_linreg_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
         let params = LinRegParams { period: Some(14) };
         let input = LinRegInput::new(&candles, "close", params);
-
-        let linreg_result =
-            calculate_linreg(&input).expect("Failed to calculate Linear Regression");
-
+        let linreg_result = linreg(&input).expect("Failed to calculate Linear Regression");
         let expected_last_five = [
             58929.37142857143,
             58899.42857142857,
@@ -122,24 +118,15 @@ mod tests {
             59100.6,
             58987.94285714286,
         ];
-
-        assert!(
-            linreg_result.values.len() >= 5,
-            "Not enough LMA values for the test"
-        );
-        assert_eq!(
-            linreg_result.values.len(),
-            close_prices.len(),
-            "LMA values count should match input data count"
-        );
+        assert!(linreg_result.values.len() >= 5);
+        assert_eq!(linreg_result.values.len(), close_prices.len());
         let start_index = linreg_result.values.len() - 5;
         let result_last_five = &linreg_result.values[start_index..];
-
         for (i, &value) in result_last_five.iter().enumerate() {
             let expected_value = expected_last_five[i];
             assert!(
                 (value - expected_value).abs() < 1e-1,
-                "LMA value mismatch at index {}: expected {}, got {}",
+                "Mismatch at index {}: expected {}, got {}",
                 i,
                 expected_value,
                 value

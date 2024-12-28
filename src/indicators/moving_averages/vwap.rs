@@ -1,85 +1,63 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use chrono::{Datelike, NaiveDateTime, Utc};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct VwapParams {
-    pub anchor: Option<String>,
-}
-
-impl Default for VwapParams {
-    fn default() -> Self {
-        VwapParams {
-            anchor: Some("1d".to_string()),
-        }
-    }
-}
-
-impl VwapParams {
-    pub fn new(anchor: Option<String>) -> Self {
-        VwapParams {
-            anchor: anchor.map(|a| a.to_lowercase()),
-        }
-    }
-
-    pub fn set_anchor(&mut self, anchor: Option<String>) {
-        self.anchor = anchor.map(|a| a.to_lowercase());
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct VwapInput<'a> {
-    pub timestamps: &'a [i64],
-    pub prices: &'a [f64],
-    pub volumes: &'a [f64],
-    pub params: VwapParams,
-}
-
-impl<'a> VwapInput<'a> {
-    #[inline]
-    pub fn new(
-        timestamps: &'a [i64],
-        prices: &'a [f64],
-        volumes: &'a [f64],
-        params: VwapParams,
-    ) -> Self {
-        Self {
-            timestamps,
-            prices,
-            volumes,
-            params,
-        }
-    }
-
-    #[inline]
-    pub fn with_default_params(
-        timestamps: &'a [i64],
-        prices: &'a [f64],
-        volumes: &'a [f64],
-    ) -> Self {
-        Self {
-            timestamps,
-            prices,
-            volumes,
-            params: VwapParams::default(),
-        }
-    }
-
-    #[inline]
-    fn get_anchor(&self) -> &str {
-        self.params.anchor.as_deref().unwrap_or("1d")
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct VwapOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct VwapParams {
+    pub anchor: Option<String>,
+}
+
+impl VwapParams {
+    pub fn with_default_params() -> Self {
+        VwapParams {
+            anchor: Some("1d".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VwapInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: VwapParams,
+}
+
+impl<'a> VwapInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: VwapParams) -> Self {
+        VwapInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        VwapInput {
+            candles,
+            source: "hlc3",
+            params: VwapParams::with_default_params(),
+        }
+    }
+
+    fn get_anchor(&self) -> &str {
+        self.params.anchor.as_deref().unwrap_or("1d")
+    }
+}
+
 #[inline]
-pub fn calculate_vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
-    let n = input.prices.len();
-    if input.timestamps.len() != n || input.volumes.len() != n {
-        return Err("Mismatch in length of timestamps / prices / volumes".into());
+pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
+    let timestamps: &[i64] = input.candles.get_timestamp()?;
+    let prices: &[f64] = source_type(input.candles, input.source);
+    let volumes: &[f64] = input.candles.select_candle_field("volume")?;
+
+    let n = prices.len();
+    if timestamps.len() != n || volumes.len() != n {
+        return Err("Mismatch in length of timestamps, prices, or volumes".into());
     }
     if n == 0 {
         return Err("No data for VWAP calculation".into());
@@ -93,9 +71,9 @@ pub fn calculate_vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
     let mut vol_price_sum = 0.0;
 
     for i in 0..n {
-        let ts_ms = input.timestamps[i];
-        let price = input.prices[i];
-        let volume = input.volumes[i];
+        let ts_ms = timestamps[i];
+        let price = prices[i];
+        let volume = volumes[i];
 
         let group_id = match unit_char {
             'm' => {
@@ -195,6 +173,31 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_vwap_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params_default = VwapParams { anchor: None };
+        let input_default = VwapInput::new(&candles, "hlc3", params_default);
+        let output_default = vwap(&input_default).expect("Failed VWAP default anchor");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_1h = VwapParams {
+            anchor: Some("1h".to_string()),
+        };
+        let input_1h = VwapInput::new(&candles, "close", params_1h);
+        let output_1h = vwap(&input_1h).expect("Failed VWAP with anchor=1h");
+        assert_eq!(output_1h.values.len(), candles.close.len());
+
+        let params_2M = VwapParams {
+            anchor: Some("2M".to_string()),
+        };
+        let input_2M = VwapInput::new(&candles, "hl2", params_2M);
+        let output_2M = vwap(&input_2M).expect("Failed VWAP with anchor=2M");
+        assert_eq!(output_2M.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_vwap_accuracy() {
         let expected_last_five_vwap = [
             59353.05963230107,
@@ -203,30 +206,29 @@ mod tests {
             59274.6155462414,
             58730.0,
         ];
-
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let timestamps: &[i64] = candles.get_timestamp().unwrap();
+        let timestamps = candles.get_timestamp().unwrap();
         let volumes = candles.select_candle_field("volume").unwrap();
         let prices = candles.get_calculated_field("hlc3").unwrap();
 
         let params = VwapParams {
             anchor: Some("1D".to_string()),
         };
-        let input = VwapInput::new(timestamps, prices, volumes, params);
-
+        let input = VwapInput {
+            candles: &candles,
+            source: "hlc3",
+            params,
+        };
         let result = calculate_vwap(&input).expect("Failed to calculate VWAP");
         assert_eq!(
             result.values.len(),
             prices.len(),
-            "VWAP result length mismatch"
+            "Mismatch in output length"
         );
+        assert!(result.values.len() >= 5, "Not enough data points for test");
 
-        assert!(
-            result.values.len() >= 5,
-            "Not enough data to compare last 5 VWAP values"
-        );
         let start_idx = result.values.len() - 5;
         let actual_last_five = &result.values[start_idx..];
 

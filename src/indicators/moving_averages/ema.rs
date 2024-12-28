@@ -51,9 +51,9 @@ impl<'a> EmaInput<'a> {
 
 #[inline]
 pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let len = data.len();
-    let period = input.get_period();
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.get_period();
 
     if period == 0 || period > data.len() {
         return Err("Invalid period specified for EMA calculation.".into());

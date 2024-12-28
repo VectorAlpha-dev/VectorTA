@@ -1,53 +1,52 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
-
-#[derive(Debug, Clone)]
-pub struct TrendFlexParams {
-    pub period: Option<usize>,
-}
-
-impl Default for TrendFlexParams {
-    fn default() -> Self {
-        TrendFlexParams { period: Some(20) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TrendFlexInput<'a> {
-    pub data: &'a [f64],
-    pub params: TrendFlexParams,
-}
-
-impl<'a> TrendFlexInput<'a> {
-    pub fn new(data: &'a [f64], params: TrendFlexParams) -> Self {
-        TrendFlexInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        TrendFlexInput {
-            data,
-            params: TrendFlexParams::default(),
-        }
-    }
-
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| TrendFlexParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct TrendFlexOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TrendFlexParams {
+    pub period: Option<usize>,
+}
+
+impl TrendFlexParams {
+    pub fn with_default_params() -> Self {
+        TrendFlexParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrendFlexInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: TrendFlexParams,
+}
+
+impl<'a> TrendFlexInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: TrendFlexParams) -> Self {
+        TrendFlexInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        TrendFlexInput {
+            candles,
+            source: "close",
+            params: TrendFlexParams::with_default_params(),
+        }
+    }
+}
+
 #[inline]
-pub fn calculate_trendflex(input: &TrendFlexInput) -> Result<Vec<f64>, Box<dyn Error>> {
-    let data = input.data;
-    let trendflex_period = input.get_period();
-    let len = data.len();
+pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
 
     if data.is_empty() {
         return Err("No data provided to TrendFlex filter.".into());
@@ -118,19 +117,34 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_trendflex_accuracy() {
+    fn test_trendflex_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
+        let default_params = TrendFlexParams { period: None };
+        let input_default = TrendFlexInput::new(&candles, "close", default_params);
+        let output_default = trendflex(&input_default).expect("Failed TrendFlex with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let custom_params = TrendFlexParams { period: Some(25) };
+        let input_custom = TrendFlexInput::new(&candles, "hlc3", custom_params);
+        let output_custom = trendflex(&input_custom)
+            .expect("Failed TrendFlex with period=25, source=hlc3");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_trendflex_accuracy() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
         let params = TrendFlexParams { period: Some(20) };
-        let input = TrendFlexInput::new(close_prices, params);
-
-        let tf_values = calculate_trendflex(&input).expect("TrendFlex calculation failed");
-        assert_eq!(tf_values.len(), close_prices.len(), "Length mismatch");
+        let input = TrendFlexInput::new(&candles, "close", params);
+        let result = trendflex(&input).expect("TrendFlex calculation failed");
+        assert_eq!(result.values.len(), close_prices.len());
 
         let expected_last_five = [
             -0.19724678008015128,
@@ -140,18 +154,10 @@ mod tests {
             -0.16006869484450567,
         ];
 
-        assert!(
-            tf_values.len() >= expected_last_five.len(),
-            "Not enough TrendFlex values for the test"
-        );
-
-        let start_index = tf_values.len() - expected_last_five.len();
-        let actual_last_five = &tf_values[start_index..];
-
-        for (i, (&actual, &expected)) in actual_last_five
-            .iter()
-            .zip(expected_last_five.iter())
-            .enumerate()
+        assert!(result.values.len() >= 5);
+        let start_index = result.values.len() - 5;
+        let actual_last_five = &result.values[start_index..];
+        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(

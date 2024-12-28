@@ -1,48 +1,51 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct WmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for WmaParams {
-    fn default() -> Self {
-        WmaParams { period: Some(30) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: WmaParams,
-}
-
-impl<'a> WmaInput<'a> {
-    pub fn new(data: &'a [f64], params: WmaParams) -> Self {
-        WmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        WmaInput {
-            data,
-            params: WmaParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(30)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct WmaOutput {
     pub values: Vec<f64>,
 }
 
-pub fn calculate_wma(input: &WmaInput) -> Result<WmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let len = data.len();
-    let period = input.get_period();
+#[derive(Debug, Clone)]
+pub struct WmaParams {
+    pub period: Option<usize>,
+}
+
+impl WmaParams {
+    pub fn with_default_params() -> Self {
+        WmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: WmaParams,
+}
+
+impl<'a> WmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: WmaParams) -> Self {
+        WmaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        WmaInput {
+            candles,
+            source: "close",
+            params: WmaParams::with_default_params(),
+        }
+    }
+}
+
+pub fn wma(input: &WmaInput) -> Result<WmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(30);
     let mut values = vec![f64::NAN; len];
     if period > len {
         return Err("period is greater than data length".into());
@@ -82,13 +85,34 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_wma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = WmaParams { period: None };
+        let input = WmaInput::new(&candles, "close", default_params);
+        let output = wma(&input).expect("Failed WMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+
+        let params_period_14 = WmaParams { period: Some(14) };
+        let input2 = WmaInput::new(&candles, "hl2", params_period_14);
+        let output2 = wma(&input2).expect("Failed WMA with period=14, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+
+        let params_custom = WmaParams { period: Some(20) };
+        let input3 = WmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = wma(&input3).expect("Failed WMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_wma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let data = &candles.close;
-
-        let input = WmaInput::with_default_params(data);
-        let result = calculate_wma(&input).expect("Failed to calculate WMA");
+        let default_params = WmaParams::with_default_params();
+        let input = WmaInput::new(&candles, "close", default_params);
+        let result = wma(&input).expect("Failed to calculate WMA");
 
         let expected_last_five = [
             59638.52903225806,
@@ -104,6 +128,7 @@ mod tests {
             data.len(),
             "WMA output length should match input length"
         );
+
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
 
@@ -117,7 +142,7 @@ mod tests {
             );
         }
 
-        let period = input.get_period();
+        let period = input.params.period.unwrap_or(30);
         for val in result.values.iter().skip(period - 1) {
             if !val.is_nan() {
                 assert!(val.is_finite(), "WMA output should be finite");

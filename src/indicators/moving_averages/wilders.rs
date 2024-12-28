@@ -1,51 +1,52 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct WildersParams {
-    pub period: Option<usize>,
-}
-
-impl Default for WildersParams {
-    fn default() -> Self {
-        WildersParams { period: Some(5) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WildersInput<'a> {
-    pub data: &'a [f64],
-    pub params: WildersParams,
-}
-
-impl<'a> WildersInput<'a> {
-    pub fn new(data: &'a [f64], params: WildersParams) -> Self {
-        WildersInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        WildersInput {
-            data,
-            params: WildersParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| WildersParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct WildersOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WildersParams {
+    pub period: Option<usize>,
+}
+
+impl WildersParams {
+    pub fn with_default_params() -> Self {
+        WildersParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WildersInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: WildersParams,
+}
+
+impl<'a> WildersInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: WildersParams) -> Self {
+        WildersInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        WildersInput {
+            candles,
+            source: "close",
+            params: WildersParams::with_default_params(),
+        }
+    }
+}
+
 #[inline]
-pub fn calculate_wilders(input: &WildersInput) -> Result<WildersOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
-    let n = data.len();
+pub fn wilders(input: &WildersInput) -> Result<WildersOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let n: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(5);
 
     if period == 0 || period > n {
         return Err("Invalid period specified for Wilder's Moving Average.".into());
@@ -77,6 +78,22 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_wilders_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = WildersParams { period: None };
+        let input_default = WildersInput::new(&candles, "close", default_params);
+        let output_default = wilders(&input_default).expect("Failed Wilders with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let custom_params = WildersParams { period: Some(10) };
+        let input_custom = WildersInput::new(&candles, "hl2", custom_params);
+        let output_custom = wilders(&input_custom).expect("Failed Wilders with period=10, source=hl2");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_wilders_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -85,16 +102,9 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = WildersParams { period: Some(5) };
-        let input = WildersInput::new(close_prices, params);
-
-        let wilder_result = calculate_wilders(&input).expect("Wilder's calculation failed");
-        let out_vals = &wilder_result.values;
-
-        assert_eq!(
-            out_vals.len(),
-            close_prices.len(),
-            "Wilder's output length should match input data length"
-        );
+        let input = WildersInput::new(&candles, "close", params);
+        let output = wilders(&input).expect("Failed Wilders calculation");
+        assert_eq!(output.values.len(), close_prices.len());
 
         let expected_last_five = [
             59302.18156619092,
@@ -103,16 +113,11 @@ mod tests {
             59215.12496188975,
             59103.0999695118,
         ];
-        assert!(
-            out_vals.len() >= 5,
-            "Not enough Wilder's output to compare final 5 values."
-        );
-        let start_idx = out_vals.len() - 5;
-        let actual_last_five = &out_vals[start_idx..];
 
-        for (i, (&actual, &expected)) in
-            actual_last_five.iter().zip(&expected_last_five).enumerate()
-        {
+        assert!(output.values.len() >= 5);
+        let start_idx = output.values.len() - 5;
+        let actual_last_five = &output.values[start_idx..];
+        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate() {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-10,
@@ -124,12 +129,8 @@ mod tests {
             );
         }
 
-        let default_input = WildersInput::with_default_params(close_prices);
-        let default_output =
-            calculate_wilders(&default_input).expect("Wilder's default calculation failed");
-        assert!(
-            !default_output.values.is_empty(),
-            "Should produce some output with default period"
-        );
+        let input_default = WildersInput::with_default_params(&candles);
+        let default_output = wilders(&input_default).expect("Wilder's default calculation failed");
+        assert!(!default_output.values.is_empty());
     }
 }

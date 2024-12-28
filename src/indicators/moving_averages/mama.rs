@@ -53,7 +53,7 @@ impl<'a> MamaInput<'a> {
 fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
     0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6
 }
-
+#[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();

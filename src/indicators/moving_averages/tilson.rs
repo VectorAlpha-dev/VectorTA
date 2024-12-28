@@ -1,55 +1,50 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-pub struct T3Params {
+pub struct TilsonOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TilsonParams {
     pub period: Option<usize>,
     pub volume_factor: Option<f64>,
 }
 
-impl Default for T3Params {
-    fn default() -> Self {
-        T3Params {
-            period: Some(5),
-            volume_factor: Some(0.0),
+impl TilsonParams {
+    pub fn with_default_params() -> Self {
+        TilsonParams {
+            period: None,
+            volume_factor: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct T3Input<'a> {
-    pub data: &'a [f64],
-    pub params: T3Params,
+pub struct TilsonInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: TilsonParams,
 }
 
-impl<'a> T3Input<'a> {
-    pub fn new(data: &'a [f64], params: T3Params) -> Self {
-        T3Input { data, params }
+impl<'a> TilsonInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: TilsonParams) -> Self {
+        TilsonInput { candles, source, params }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        T3Input {
-            data,
-            params: T3Params::default(),
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        TilsonInput {
+            candles,
+            source: "close",
+            params: TilsonParams::with_default_params(),
         }
     }
-
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
-    }
-
-    fn get_volume_factor(&self) -> f64 {
-        self.params.volume_factor.unwrap_or(0.7)
-    }
 }
-
-#[derive(Debug, Clone)]
-pub struct T3Output {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_t3(input: &T3Input) -> Result<T3Output, Box<dyn Error>> {
-    let data = input.data;
+pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let length: usize = data.len();
     let opt_in_time_period = input.get_period();
     let opt_in_v_factor = input.get_volume_factor();
     let length = data.len();
@@ -174,20 +169,42 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_t3_accuracy() {
+    fn test_tilson_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = TilsonParams { period: None, volume_factor: None };
+        let input_default = TilsonInput::new(&candles, "close", default_params);
+        let output_default = tilson(&input_default).expect("Failed T3/Tilson with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_custom_period = TilsonParams { period: Some(10), volume_factor: None };
+        let input_custom_period = TilsonInput::new(&candles, "hl2", params_custom_period);
+        let output_custom_period =
+            tilson(&input_custom_period).expect("Failed T3/Tilson with period=10, source=hl2");
+        assert_eq!(output_custom_period.values.len(), candles.close.len());
+
+        let params_fully_custom = TilsonParams { period: Some(7), volume_factor: Some(0.9) };
+        let input_fully_custom = TilsonInput::new(&candles, "hlc3", params_fully_custom);
+        let output_fully_custom =
+            tilson(&input_fully_custom).expect("Failed T3/Tilson fully custom");
+        assert_eq!(output_fully_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_tilson_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let params = T3Params {
+        let params = TilsonParams {
             period: Some(5),
             volume_factor: Some(0.0),
         };
-
-        let input = T3Input::new(close_prices, params);
-        let t3_result = calculate_t3(&input).expect("Failed to calculate T3");
+        let input = TilsonInput::new(&candles, "close", params);
+        let t3_result = tilson(&input).expect("Failed to calculate T3/Tilson");
 
         let expected_last_five_t3 = [
             59304.716332473254,
@@ -196,30 +213,25 @@ mod tests {
             59240.25895948583,
             59203.544843167765,
         ];
-
         assert!(t3_result.values.len() >= 5);
-        assert_eq!(
-            t3_result.values.len(),
-            close_prices.len(),
-            "T3 output length does not match input length"
-        );
+        assert_eq!(t3_result.values.len(), close_prices.len());
+
         let start_index = t3_result.values.len() - 5;
         let result_last_five_t3 = &t3_result.values[start_index..];
-
         for (i, &value) in result_last_five_t3.iter().enumerate() {
             let expected_value = expected_last_five_t3[i];
             assert!(
                 (value - expected_value).abs() < 1e-10,
-                "T3 value mismatch at index {}: expected {}, got {}",
+                "T3 mismatch at index {}: expected {}, got {}",
                 i,
                 expected_value,
                 value
             );
         }
 
-        let default_input = T3Input::with_default_params(close_prices);
+        let default_input = TilsonInput::with_default_params(&candles);
         let default_t3_result =
-            calculate_t3(&default_input).expect("Failed to calculate T3 with defaults");
-        assert!(!default_t3_result.values.is_empty());
+            tilson(&default_input).expect("Failed to calculate T3 with defaults");
+        assert_eq!(default_t3_result.values.len(), close_prices.len());
     }
 }

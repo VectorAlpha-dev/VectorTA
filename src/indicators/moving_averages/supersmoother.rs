@@ -1,53 +1,51 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
-
-#[derive(Debug, Clone)]
-pub struct SuperSmootherParams {
-    pub period: Option<usize>,
-}
-
-impl Default for SuperSmootherParams {
-    fn default() -> Self {
-        SuperSmootherParams { period: Some(14) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SuperSmootherInput<'a> {
-    pub data: &'a [f64],
-    pub params: SuperSmootherParams,
-}
-
-impl<'a> SuperSmootherInput<'a> {
-    pub fn new(data: &'a [f64], params: SuperSmootherParams) -> Self {
-        SuperSmootherInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        SuperSmootherInput {
-            data,
-            params: SuperSmootherParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| SuperSmootherParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SuperSmootherOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SuperSmootherParams {
+    pub period: Option<usize>,
+}
+
+impl SuperSmootherParams {
+    pub fn with_default_params() -> Self {
+        SuperSmootherParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SuperSmootherInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: SuperSmootherParams,
+}
+
+impl<'a> SuperSmootherInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: SuperSmootherParams) -> Self {
+        SuperSmootherInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        SuperSmootherInput {
+            candles,
+            source: "close",
+            params: SuperSmootherParams::with_default_params(),
+        }
+    }
+}
 #[inline]
-pub fn calculate_supersmoother(
-    input: &SuperSmootherInput,
-) -> Result<SuperSmootherOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+pub fn supersmoother(input: &SuperSmootherInput) -> Result<SuperSmootherOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let period: usize = input.params.period.unwrap_or(14);
 
     if data.is_empty() {
         return Ok(SuperSmootherOutput { values: vec![] });
@@ -56,7 +54,7 @@ pub fn calculate_supersmoother(
         return Err("Period must be >= 1 for Super Smoother filter.".into());
     }
 
-    let len = data.len();
+    let len: usize = data.len();
     let mut output_values = vec![0.0; len];
 
     let a = (-1.414_f64 * PI / (period as f64)).exp();
@@ -88,6 +86,24 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_supersmoother_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = SuperSmootherParams { period: None };
+        let input_default = SuperSmootherInput::new(&candles, "close", default_params);
+        let output_default = supersmoother(&input_default)
+            .expect("Failed supersmoother with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let custom_params = SuperSmootherParams { period: Some(20) };
+        let input_custom = SuperSmootherInput::new(&candles, "hlc3", custom_params);
+        let output_custom = supersmoother(&input_custom)
+            .expect("Failed supersmoother with period=20, source=hlc3");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_supersmoother_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -96,11 +112,10 @@ mod tests {
             .expect("Failed to extract close prices");
 
         let params = SuperSmootherParams { period: Some(14) };
-        let input = SuperSmootherInput::new(close_prices, params);
+        let input = SuperSmootherInput::new(&candles, "close", params);
+        let result = supersmoother(&input).expect("Failed to calculate SuperSmoother");
 
-        let result = calculate_supersmoother(&input).expect("Failed to calculate SuperSmoother");
         let out_vals = &result.values;
-
         let expected_last_five = [
             59140.98229179739,
             59172.03593376982,
@@ -109,17 +124,12 @@ mod tests {
             59127.859841077094,
         ];
 
-        assert!(out_vals.len() >= 5, "Not enough data for test");
-        assert_eq!(
-            out_vals.len(),
-            close_prices.len(),
-            "Output count should match input data count",
-        );
+        assert!(out_vals.len() >= 5);
+        assert_eq!(out_vals.len(), close_prices.len());
+
         let start_idx = out_vals.len() - 5;
         let actual_last_five = &out_vals[start_idx..];
-
-        for (i, (&actual, &expected)) in
-            actual_last_five.iter().zip(&expected_last_five).enumerate()
+        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(

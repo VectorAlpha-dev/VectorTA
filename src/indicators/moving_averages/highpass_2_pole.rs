@@ -1,5 +1,11 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
+
+#[derive(Debug, Clone)]
+pub struct HighPass2Output {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct HighPass2Params {
@@ -7,60 +13,42 @@ pub struct HighPass2Params {
     pub k: Option<f64>,
 }
 
-impl Default for HighPass2Params {
-    fn default() -> Self {
+impl HighPass2Params {
+    pub fn with_default_params() -> Self {
         HighPass2Params {
-            period: Some(48),
-            k: Some(0.707),
+            period: None,
+            k: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct HighPass2Input<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: HighPass2Params,
 }
 
 impl<'a> HighPass2Input<'a> {
-    pub fn new(data: &'a [f64], params: HighPass2Params) -> Self {
-        HighPass2Input { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: HighPass2Params) -> Self {
+        HighPass2Input { candles, source, params }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         HighPass2Input {
-            data,
-            params: HighPass2Params::default(),
+            candles,
+            source: "close",
+            params: HighPass2Params::with_default_params(),
         }
     }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| HighPass2Params::default().period.unwrap())
-    }
-
-    fn get_k(&self) -> f64 {
-        self.params
-            .k
-            .unwrap_or_else(|| HighPass2Params::default().k.unwrap())
-    }
 }
 
-#[derive(Debug, Clone)]
-pub struct HighPass2Output {
-    pub values: Vec<f64>,
-}
-
-pub fn calculate_high_pass_2_pole(
-    input: &HighPass2Input,
-) -> Result<HighPass2Output, Box<dyn Error>> {
-    let data: &[f64] = input.data;
+#[inline]
+pub fn high_pass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
-
-    let period: usize = input.get_period();
-    let k: f64 = input.get_k();
-
+    let period: usize = input.params.period.unwrap_or(48);
+    let k: f64 = input.params.k.unwrap_or(0.707);
     if period < 2 || len == 0 {
         return Err("Invalid period (<2) or no data for 2-pole high-pass.".into());
     }
@@ -107,15 +95,12 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-
         let params = HighPass2Params {
             period: Some(48),
             k: Some(0.707),
         };
-        let input = HighPass2Input::new(close_prices, params);
-        let result = calculate_high_pass_2_pole(&input)
-            .expect("Failed to calculate 2-pole high pass filter");
-
+        let input = HighPass2Input::new(&candles, "close", params);
+        let result = high_pass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         let expected_last_five = [
             445.29073821108943,
             359.51467478973296,
@@ -123,32 +108,14 @@ mod tests {
             394.04381266217234,
             -52.65414073315134,
         ];
-
-        assert!(
-            result.values.len() >= 5,
-            "Not enough high-pass 2 pole values for test"
-        );
-
-        assert_eq!(
-            result.values.len(),
-            close_prices.len(),
-            "High-pass 2 pole output length does not match input length"
-        );
-
+        assert!(result.values.len() >= 5);
+        assert_eq!(result.values.len(), close_prices.len());
         let start_index = result.values.len() - 5;
         let actual_last_five = &result.values[start_index..];
-
         for (i, &actual) in actual_last_five.iter().enumerate() {
             let expected = expected_last_five[i];
             let diff = (actual - expected).abs();
-            assert!(
-                diff < 1e-6,
-                "Mismatch at index {}: expected {}, got {}, diff={}",
-                i,
-                expected,
-                actual,
-                diff
-            );
+            assert!(diff < 1e-6);
         }
     }
 }

@@ -41,7 +41,7 @@ impl<'a> SqwmaInput<'a> {
         }
     }
 }
-
+#[inline]
 pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();

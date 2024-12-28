@@ -1,4 +1,10 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
+
+#[derive(Debug, Clone)]
+pub struct GaussianOutput {
+    pub values: Vec<f64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct GaussianParams {
@@ -14,21 +20,26 @@ impl Default for GaussianParams {
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct GaussianInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: GaussianParams,
 }
 
 impl<'a> GaussianInput<'a> {
-    pub fn new(data: &'a [f64], params: GaussianParams) -> Self {
-        Self { data, params }
+    pub fn new(candles: &'a Candles, source: &'a str, params: GaussianParams) -> Self {
+        Self {
+            candles,
+            source,
+            params,
+        }
     }
 
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn with_default_params(candles: &'a Candles) -> Self {
         Self {
-            data,
+            candles,
+            source: "close",
             params: GaussianParams::default(),
         }
     }
@@ -44,14 +55,9 @@ impl<'a> GaussianInput<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GaussianOutput {
-    pub values: Vec<f64>,
-}
-
 #[inline]
-pub fn calculate_gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
-    let data: &[f64] = input.data;
+pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
     let n: usize = data.len();
     if n == 0 {
         return Err("No data provided to Gaussian filter.".into());
@@ -169,18 +175,13 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
         let params = GaussianParams {
             period: Some(14),
             poles: Some(4),
         };
-        let input = GaussianInput::new(close_prices, params);
+        let input = GaussianInput::new(&candles, "close", params);
 
-        let gaussian_result =
-            calculate_gaussian(&input).expect("Failed to calculate Gaussian filter");
+        let gaussian_result = gaussian(&input).expect("Failed to calculate Gaussian filter");
 
         let expected_last_five = [
             59221.90637814869,
@@ -189,12 +190,11 @@ mod tests {
             59178.48276885589,
             59085.36983209433,
         ];
-
         let len = gaussian_result.values.len();
         assert!(len >= 5, "Not enough Gaussian filter values for the test");
         assert_eq!(
             len,
-            close_prices.len(),
+            candles.close.len(),
             "Gaussian filter output length does not match input length"
         );
         let start_index = len - 5;
@@ -204,7 +204,7 @@ mod tests {
             let exp = expected_last_five[i];
             assert!(
                 (val - exp).abs() < 1e-4,
-                "Gaussian filter mismatch at index {}: expected {}, got {}",
+                "Gaussian filter mismatch at last-five index {}: expected {}, got {}",
                 i,
                 exp,
                 val

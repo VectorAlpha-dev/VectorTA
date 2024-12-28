@@ -42,7 +42,7 @@ impl<'a> ReflexInput<'a> {
         }
     }
 }
-
+#[inline]
 pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();

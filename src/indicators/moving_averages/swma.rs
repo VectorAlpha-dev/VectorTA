@@ -1,50 +1,51 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-
-#[derive(Debug, Clone)]
-pub struct SwmaParams {
-    pub period: Option<usize>,
-}
-
-impl Default for SwmaParams {
-    fn default() -> Self {
-        SwmaParams { period: Some(5) }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SwmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: SwmaParams,
-}
-
-impl<'a> SwmaInput<'a> {
-    pub fn new(data: &'a [f64], params: SwmaParams) -> Self {
-        SwmaInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        SwmaInput {
-            data,
-            params: SwmaParams::default(),
-        }
-    }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| SwmaParams::default().period.unwrap())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct SwmaOutput {
     pub values: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SwmaParams {
+    pub period: Option<usize>,
+}
+
+impl SwmaParams {
+    pub fn with_default_params() -> Self {
+        SwmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SwmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: SwmaParams,
+}
+
+impl<'a> SwmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: SwmaParams) -> Self {
+        SwmaInput {
+            candles,
+            source,
+            params,
+        }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        SwmaInput {
+            candles,
+            source: "close",
+            params: SwmaParams::with_default_params(),
+        }
+    }
+}
+
 #[inline]
-pub fn calculate_swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
+pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
 
     if data.is_empty() {
         return Ok(SwmaOutput { values: vec![] });
@@ -56,7 +57,7 @@ pub fn calculate_swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
         return Err("SWMA period cannot exceed data length.".into());
     }
 
-    let len = data.len();
+    let len: usize = data.len();
 
     let weights = build_symmetric_triangle(period);
 
@@ -77,6 +78,7 @@ pub fn calculate_swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
     })
 }
 
+#[inline]
 fn build_symmetric_triangle(n: usize) -> Vec<f64> {
     let n = n.max(2);
 
@@ -109,21 +111,39 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_swma_accuracy() {
+    fn test_swma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let close_prices = candles
+        let default_params = SwmaParams { period: None };
+        let input = SwmaInput::new(&candles, "close", default_params);
+        let output = swma(&input).expect("Failed SWMA with default params");
+        assert_eq!(output.values.len(), candles.close.len());
+
+        let params_period_10 = SwmaParams { period: Some(10) };
+        let input2 = SwmaInput::new(&candles, "hl2", params_period_10);
+        let output2 = swma(&input2).expect("Failed SWMA with period=10, source=hl2");
+        assert_eq!(output2.values.len(), candles.close.len());
+
+        let params_custom = SwmaParams { period: Some(20) };
+        let input3 = SwmaInput::new(&candles, "hlc3", params_custom);
+        let output3 = swma(&input3).expect("Failed SWMA fully custom");
+        assert_eq!(output3.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_swma_accuracy() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let source = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let params = SwmaParams { period: Some(5) };
-        let input = SwmaInput::new(close_prices, params);
-
-        let swma_result = calculate_swma(&input).expect("SWMA calculation failed");
-        let swma_values = &swma_result.values;
-
-        assert_eq!(swma_values.len(), close_prices.len(), "Length mismatch");
+        let default_params = SwmaParams::with_default_params();
+        let input = SwmaInput::new(&candles, "close", default_params);
+        let result = swma(&input).expect("SWMA calculation failed");
+        let len = result.values.len();
+        assert_eq!(len, candles.close.len(), "Length mismatch");
 
         let expected_last_five = [
             59288.22222222222,
@@ -132,20 +152,13 @@ mod tests {
             59179.88888888889,
             59080.99999999999,
         ];
-
         assert!(
-            swma_values.len() >= expected_last_five.len(),
+            len >= expected_last_five.len(),
             "Not enough SWMA values for the test"
         );
-
-        let start_index = swma_values.len() - expected_last_five.len();
-        let actual_last_five = &swma_values[start_index..];
-
-        for (i, (&actual, &expected)) in actual_last_five
-            .iter()
-            .zip(expected_last_five.iter())
-            .enumerate()
-        {
+        let start_index = len - expected_last_five.len();
+        let actual_last_five = &result.values[start_index..];
+        for (i, (&actual, &expected)) in actual_last_five.iter().zip(expected_last_five.iter()).enumerate() {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-8,

@@ -19,16 +19,12 @@ impl Default for EdcfParams {
 
 #[derive(Debug, Clone)]
 pub struct EdcfInput<'a> {
-    /// Full candle data, used for referencing the desired source
     pub candles: &'a Candles,
-    /// Which field to calculate the EDCF on (e.g. "close", "hl2", etc.)
     pub source: &'a str,
-    /// User-specified or default parameters
     pub params: EdcfParams,
 }
 
 impl<'a> EdcfInput<'a> {
-    /// Create a new input struct with specific parameters
     pub fn new(candles: &'a Candles, source: &'a str, params: EdcfParams) -> Self {
         EdcfInput {
             candles,
@@ -37,8 +33,6 @@ impl<'a> EdcfInput<'a> {
         }
     }
 
-    /// Create a new input struct using default parameters
-    /// (e.g., period=15) and default source="close"
     pub fn with_default_params(candles: &'a Candles) -> Self {
         EdcfInput {
             candles,
@@ -57,9 +51,9 @@ impl<'a> EdcfInput<'a> {
 
 #[inline]
 pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
-    let data = source_type(input.candles, input.source);
-    let period = input.get_period();
-    let len = data.len();
+    let data: &[f64] = source_type(input.candles, input.source);
+    let period: usize = input.get_period();
+    let len: usize = data.len();
 
     if data.is_empty() {
         return Err("No data provided to EDCF filter.".into());
@@ -115,14 +109,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        // We can compare EDCF on any source; let's use "hl2" for this example
         let input = EdcfInput::new(&candles, "hl2", EdcfParams { period: Some(15) });
 
-        // Run the calculation
         let edcf_result = edcf(&input).expect("EDCF calculation failed");
         let edcf_values = &edcf_result.values;
 
-        // For a sanity check, compare length to the candle set
         assert_eq!(
             edcf_values.len(),
             candles.close.len(),

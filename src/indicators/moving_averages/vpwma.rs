@@ -1,64 +1,48 @@
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
-#[derive(Debug, Clone)]
-pub struct VpwmaParams {
-    pub period: Option<usize>,
-    pub power: Option<f64>,
-}
-
-impl Default for VpwmaParams {
-    fn default() -> Self {
-        VpwmaParams {
-            period: Some(14),
-            power: Some(0.382),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
-pub struct VpwmaInput<'a> {
-    pub data: &'a [f64],
-    pub params: VpwmaParams,
-}
-
-impl<'a> VpwmaInput<'a> {
-    #[inline(always)]
-    pub fn new(data: &'a [f64], params: VpwmaParams) -> Self {
-        VpwmaInput { data, params }
-    }
-
-    #[inline(always)]
-    pub fn with_default_params(data: &'a [f64]) -> Self {
-        VpwmaInput {
-            data,
-            params: VpwmaParams::default(),
-        }
-    }
-
-    #[inline(always)]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| VpwmaParams::default().period.unwrap())
-    }
-
-    #[inline(always)]
-    fn get_power(&self) -> f64 {
-        self.params
-            .power
-            .unwrap_or_else(|| VpwmaParams::default().power.unwrap())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct VpwmaOutput {
+pub struct VwmaOutput {
     pub values: Vec<f64>,
 }
 
-#[inline(always)]
-pub fn calculate_vpwma(input: &VpwmaInput) -> Result<VpwmaOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
-    let power = input.get_power();
+#[derive(Debug, Clone)]
+pub struct VwmaParams {
+    pub period: Option<usize>,
+}
+
+impl VwmaParams {
+    pub fn with_default_params() -> Self {
+        VwmaParams { period: None }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VwmaInput<'a> {
+    pub candles: &'a Candles,
+    pub source: &'a str,
+    pub params: VwmaParams,
+}
+
+impl<'a> VwmaInput<'a> {
+    pub fn new(candles: &'a Candles, source: &'a str, params: VwmaParams) -> Self {
+        VwmaInput { candles, source, params }
+    }
+
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        VwmaInput {
+            candles,
+            source: "close",
+            params: VwmaParams::with_default_params(),
+        }
+    }
+}
+#[inline]
+pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
+    let price: &[f64] = source_type(input.candles, input.source);
+    let volume: &Vec<f64> = &input.candles.volume;
+    let len: usize = price.len();
+    let period: usize = input.params.period.unwrap_or(20);
 
     if data.len() < (period + 1) {
         return Err(format!(
@@ -104,54 +88,60 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_vpwma_accuracy() {
+    fn test_vwma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = VwmaParams { period: None };
+        let input_default = VwmaInput::new(&candles, "close", default_params);
+        let output_default = vwma(&input_default).expect("Failed VWMA with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_period_14 = VwmaParams { period: Some(14) };
+        let input_period_14 = VwmaInput::new(&candles, "hl2", params_period_14);
+        let output_period_14 = vwma(&input_period_14).expect("Failed VWMA with period=14, source=hl2");
+        assert_eq!(output_period_14.values.len(), candles.close.len());
+
+        let params_custom = VwmaParams { period: Some(30) };
+        let input_custom = VwmaInput::new(&candles, "hlc3", params_custom);
+        let output_custom = vwma(&input_custom).expect("Failed VWMA fully custom");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_vwma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let params = VpwmaParams {
-            period: Some(14),
-            power: Some(0.382),
-        };
-        let input = VpwmaInput::new(close_prices, params);
-        let result = calculate_vpwma(&input).expect("Failed to calculate VPWMA");
+        let params = VwmaParams { period: Some(20) };
+        let input = VwmaInput::new(&candles, "close", params);
+        let vwma_result = vwma(&input).expect("Failed to calculate VWMA");
 
-        assert_eq!(
-            result.values.len(),
-            close_prices.len(),
-            "VPWMA output length should match input length"
-        );
+        assert_eq!(vwma_result.values.len(), close_prices.len());
 
-        let expected_last_five = [
-            59363.927599446455,
-            59296.83894519251,
-            59196.82476139941,
-            59180.8040249446,
-            59113.84473799056,
+        let expected_last_five_vwma = [
+            59201.87047121331,
+            59217.157390630266,
+            59195.74526905522,
+            59196.261392450084,
+            59151.22059588594,
         ];
-        let start_index = result.values.len().saturating_sub(5);
-        let actual_last_five = &result.values[start_index..];
+        assert!(vwma_result.values.len() >= 5);
+        let start_index = vwma_result.values.len() - 5;
+        let result_last_five_vwma = &vwma_result.values[start_index..];
 
-        for (i, &val) in actual_last_five.iter().enumerate() {
-            let exp = expected_last_five[i];
-            let diff = (val - exp).abs();
+        for (i, &value) in result_last_five_vwma.iter().enumerate() {
+            let expected_value = expected_last_five_vwma[i];
             assert!(
-                diff < 1e-2,
-                "VPWMA mismatch at last-5 index {}: expected {}, got {}",
+                (value - expected_value).abs() < 1e-3,
+                "VWMA mismatch at index {}: expected {}, got {}",
                 i,
-                exp,
-                val
+                expected_value,
+                value
             );
         }
-    }
-
-    #[test]
-    fn test_vpwma_with_defaults() {
-        let data = vec![64000.0, 64010.0, 63990.0, 64020.0, 64030.0];
-        let input = VpwmaInput::with_default_params(&data);
-        let result = calculate_vpwma(&input);
-        assert!(result.is_err(), "Should fail due to insufficient data");
     }
 }
