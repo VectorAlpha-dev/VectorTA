@@ -74,13 +74,13 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, Box<dyn Error>> {
 
     let mut output = vec![f64::NAN; len];
 
-    for i in (period - 1)..len {
+    for (i, output_val) in output.iter_mut().enumerate().skip(period - 1) {
         let mut weighted_sum = 0.0;
-        for k in 0..period {
+        for (k, &weight) in weights.iter().enumerate() {
             let idx = i - k;
-            weighted_sum += data[idx] * weights[k];
+            weighted_sum += data[idx] * weight;
         }
-        output[i] = weighted_sum;
+        *output_val = weighted_sum;
     }
 
     Ok(PwmaOutput { values: output })

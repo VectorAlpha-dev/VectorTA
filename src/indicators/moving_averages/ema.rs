@@ -84,8 +84,8 @@ pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
     let mut last_ema = data[0];
     ema_values.push(last_ema);
 
-    for i in 1..len {
-        last_ema = alpha * data[i] + (1.0 - alpha) * last_ema;
+    for &value in &data[1..] {
+        last_ema = alpha * value + (1.0 - alpha) * last_ema;
         ema_values.push(last_ema);
     }
 

@@ -70,14 +70,13 @@ pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
         return Err("Invalid period specified for SMA calculation.".into());
     }
 
-    let len = data.len();
     let mut sma_values = vec![f64::NAN; len];
 
     let inv_period = 1.0 / period as f64;
     let mut sum: f64 = 0.0;
 
-    for i in 0..period {
-        sum += data[i];
+    for &value in data.iter().take(period) {
+        sum += value;
     }
     sma_values[period - 1] = sum * inv_period;
 

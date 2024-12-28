@@ -82,8 +82,8 @@ pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
     smma_values.push(first_smma);
 
     let mut prev_smma = first_smma;
-    for i in period..len {
-        let new_smma = (prev_smma * (period as f64 - 1.0) + data[i]) / (period as f64);
+    for &value in &data[period..] {
+        let new_smma = (prev_smma * (period as f64 - 1.0) + value) / (period as f64);
         smma_values.push(new_smma);
         prev_smma = new_smma;
     }

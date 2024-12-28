@@ -102,11 +102,11 @@ pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Error>> {
     let len = data.len();
     let mut sinwma_values = vec![f64::NAN; len];
 
-    for i in (period - 1)..len {
+    for (i, sinwma_value) in sinwma_values.iter_mut().enumerate().skip(period - 1) {
         let start_idx = i + 1 - period;
         let data_window = &data[start_idx..(start_idx + period)];
         let value = dot_product(data_window, &sines);
-        sinwma_values[i] = value;
+        *sinwma_value = value;
     }
 
     Ok(SinWmaOutput {

@@ -80,8 +80,7 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, Box<dyn Error>> {
     let mut weighted_sum = 0.0;
     let mut plain_sum = 0.0;
 
-    for i in 0..lookback {
-        let val = data[i];
+    for (i, &val) in data.iter().take(lookback).enumerate() {
         weighted_sum += (i as f64 + 1.0) * val;
         plain_sum += val;
     }

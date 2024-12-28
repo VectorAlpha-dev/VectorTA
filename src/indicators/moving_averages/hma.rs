@@ -254,9 +254,7 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
         }
     }
 
-    for i in 0..len {
-        values[i] = wma_sqrt[i];
-    }
+    values.copy_from_slice(&wma_sqrt);
 
     Ok(HmaOutput { values })
 }

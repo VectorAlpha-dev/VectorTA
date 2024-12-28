@@ -185,12 +185,7 @@ pub fn ht_trendline(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box
         if new_mesa < low_lim {
             new_mesa = low_lim;
         }
-        if new_mesa < 6.0 {
-            new_mesa = 6.0;
-        }
-        if new_mesa > 50.0 {
-            new_mesa = 50.0;
-        }
+        new_mesa = new_mesa.clamp(6.0, 50.0);
         let final_mesa = 0.2 * new_mesa + 0.8 * prev_mesa;
         prev_mesa = final_mesa;
 

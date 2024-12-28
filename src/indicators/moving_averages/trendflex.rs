@@ -109,8 +109,8 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Erro
     let inv_tp = 1.0 / tp_f;
 
     let mut rolling_sum = 0.0;
-    for i in 0..trendflex_period {
-        rolling_sum += ssf[i];
+    for &value in &ssf[..trendflex_period] {
+        rolling_sum += value;
     }
 
     for i in trendflex_period..len {

@@ -90,13 +90,11 @@ pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
     }
 
     let mut maaq_values = vec![f64::NAN; len];
-    for i in 0..period {
-        maaq_values[i] = data[i];
-    }
+    maaq_values[..period].copy_from_slice(&data[..period]);
 
     let mut rolling_sum = 0.0;
-    for i in 0..period {
-        rolling_sum += diff[i];
+    for &value in &diff[..period] {
+        rolling_sum += value;
     }
 
     for i in period..len {
