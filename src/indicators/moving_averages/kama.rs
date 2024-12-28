@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum KamaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct KamaOutput {
     pub values: Vec<f64>,
 }
@@ -17,32 +26,37 @@ impl Default for KamaParams {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct KamaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: KamaData<'a>,
     pub params: KamaParams,
 }
 
 impl<'a> KamaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: KamaParams) -> Self {
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: KamaParams) -> Self {
         Self {
-            candles,
-            source,
+            data: KamaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: KamaParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: KamaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: KamaData::Candles {
+                candles,
+                source: "close",
+            },
             params: KamaParams::default(),
         }
     }
 
-    #[inline]
     fn get_period(&self) -> usize {
         self.params.period.unwrap_or(30)
     }
@@ -50,7 +64,10 @@ impl<'a> KamaInput<'a> {
 
 #[inline]
 pub fn kama(input: &KamaInput) -> Result<KamaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        KamaData::Candles { candles, source } => source_type(candles, source),
+        KamaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.get_period();
     let mut values = vec![f64::NAN; len];
@@ -137,7 +154,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = KamaInput::new(&candles, "close", KamaParams::default());
+        let input = KamaInput::with_default_candles(&candles);
 
         let result = kama(&input).expect("Failed to calculate KAMA");
 

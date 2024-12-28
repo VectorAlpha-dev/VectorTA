@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum HmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct HmaOutput {
     pub values: Vec<f64>,
 }
@@ -13,38 +22,47 @@ pub struct HmaParams {
 
 impl HmaParams {
     pub fn with_default_params() -> Self {
-        HmaParams { period: None }
+        Self { period: None }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct HmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: HmaData<'a>,
     pub params: HmaParams,
 }
 
 impl<'a> HmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: HmaParams) -> Self {
-        HmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: HmaParams) -> Self {
+        Self {
+            data: HmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        HmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: HmaParams) -> Self {
+        Self {
+            data: HmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: HmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: HmaParams::with_default_params(),
         }
     }
 }
 
-#[inline]
 pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        HmaData::Candles { candles, source } => source_type(candles, source),
+        HmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(5);
     let mut values = vec![f64::NAN; len];
@@ -253,11 +271,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = HmaParams { period: None };
-        let input_default = HmaInput::new(&candles, "close", default_params);
+        let input_default = HmaInput::from_candles(&candles, "close", default_params);
         let output_default = hma(&input_default).expect("Failed hma with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
         let params_period = HmaParams { period: Some(10) };
-        let input_period = HmaInput::new(&candles, "hl2", params_period);
+        let input_period = HmaInput::from_candles(&candles, "hl2", params_period);
         let output_period = hma(&input_period).expect("Failed hma with period=10, source=hl2");
         assert_eq!(output_period.values.len(), candles.close.len());
     }
@@ -266,7 +284,7 @@ mod tests {
     fn test_hma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = HmaInput::with_default_params(&candles);
+        let input = HmaInput::with_default_candles(&candles);
         let result = hma(&input).expect("Failed hma");
         let expected_last_five = [
             59334.13333336847,

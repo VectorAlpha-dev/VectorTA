@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum JmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct JmaOutput {
     pub values: Vec<f64>,
 }
@@ -25,24 +34,31 @@ impl JmaParams {
 
 #[derive(Debug, Clone)]
 pub struct JmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: JmaData<'a>,
     pub params: JmaParams,
 }
 
 impl<'a> JmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: JmaParams) -> Self {
-        JmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: JmaParams) -> Self {
+        Self {
+            data: JmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        JmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: JmaParams) -> Self {
+        Self {
+            data: JmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: JmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: JmaParams::with_default_params(),
         }
     }
@@ -50,7 +66,10 @@ impl<'a> JmaInput<'a> {
 
 #[inline]
 pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        JmaData::Candles { candles, source } => source_type(candles, source),
+        JmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
 
     if len == 0 {
@@ -118,7 +137,7 @@ mod tests {
             phase: None,
             power: None,
         };
-        let input_default = JmaInput::new(&candles, "close", default_params);
+        let input_default = JmaInput::from_candles(&candles, "close", default_params);
         let output_default = jma(&input_default).expect("Failed JMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
@@ -127,7 +146,7 @@ mod tests {
             phase: Some(0.0),
             power: Some(1),
         };
-        let input_custom = JmaInput::new(&candles, "hlc3", params_custom);
+        let input_custom = JmaInput::from_candles(&candles, "hlc3", params_custom);
         let output_custom = jma(&input_custom).expect("Failed JMA with custom params");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
@@ -145,7 +164,7 @@ mod tests {
             phase: Some(50.0),
             power: Some(2),
         };
-        let input = JmaInput::new(&candles, "close", jma_params);
+        let input = JmaInput::from_candles(&candles, "close", jma_params);
         let jma_result = jma(&input).expect("Failed to calculate JMA");
 
         let expected_last_five = [

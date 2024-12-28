@@ -3,6 +3,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum EhlersITrendData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct EhlersITrendOutput {
     pub values: Vec<f64>,
 }
@@ -15,7 +24,7 @@ pub struct EhlersITrendParams {
 
 impl Default for EhlersITrendParams {
     fn default() -> Self {
-        EhlersITrendParams {
+        Self {
             warmup_bars: Some(12),
             max_dc_period: Some(50),
         }
@@ -24,36 +33,41 @@ impl Default for EhlersITrendParams {
 
 #[derive(Debug, Clone)]
 pub struct EhlersITrendInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: EhlersITrendData<'a>,
     pub params: EhlersITrendParams,
 }
 
 impl<'a> EhlersITrendInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: EhlersITrendParams) -> Self {
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: EhlersITrendParams) -> Self {
         Self {
-            candles,
-            source,
+            data: EhlersITrendData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: EhlersITrendParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: EhlersITrendData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: EhlersITrendData::Candles {
+                candles,
+                source: "close",
+            },
             params: EhlersITrendParams::default(),
         }
     }
 
-    #[inline]
     fn get_warmup_bars(&self) -> usize {
         self.params
             .warmup_bars
             .unwrap_or_else(|| EhlersITrendParams::default().warmup_bars.unwrap())
     }
 
-    #[inline]
     fn get_max_dc_period(&self) -> usize {
         self.params
             .max_dc_period
@@ -61,9 +75,11 @@ impl<'a> EhlersITrendInput<'a> {
     }
 }
 
-#[inline]
 pub fn ht_trendline(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
-    let src: &[f64] = source_type(input.candles, input.source);
+    let src = match &input.data {
+        EhlersITrendData::Candles { candles, source } => source_type(candles, source),
+        EhlersITrendData::Slice(slice) => slice,
+    };
     let length: usize = src.len();
     if length == 0 {
         return Ok(EhlersITrendOutput { values: vec![] });
@@ -227,7 +243,7 @@ mod tests {
     fn test_ehlers_itrend_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = EhlersITrendInput::with_default_params(&candles);
+        let input = EhlersITrendInput::with_default_candles(&candles);
         let eit_result = ht_trendline(&input).expect("HT Trendline calculation failed");
         let close_prices: &[f64] = candles.select_candle_field("close").unwrap();
 

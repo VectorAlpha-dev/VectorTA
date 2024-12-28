@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum GaussianData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct GaussianOutput {
     pub values: Vec<f64>,
 }
@@ -20,44 +29,53 @@ impl Default for GaussianParams {
         }
     }
 }
+
 #[derive(Debug, Clone)]
 pub struct GaussianInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: GaussianData<'a>,
     pub params: GaussianParams,
 }
 
 impl<'a> GaussianInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: GaussianParams) -> Self {
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: GaussianParams) -> Self {
         Self {
-            candles,
-            source,
+            data: GaussianData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: GaussianParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: GaussianData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: GaussianData::Candles {
+                candles,
+                source: "close",
+            },
             params: GaussianParams::default(),
         }
     }
 
-    #[inline]
     fn get_period(&self) -> usize {
         self.params.period.unwrap_or(14)
     }
 
-    #[inline]
     fn get_poles(&self) -> usize {
         self.params.poles.unwrap_or(4)
     }
 }
 
-#[inline]
 pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        GaussianData::Candles { candles, source } => source_type(candles, source),
+        GaussianData::Slice(slice) => slice,
+    };
+
     let n: usize = data.len();
     if n == 0 {
         return Err("No data provided to Gaussian filter.".into());
@@ -179,7 +197,7 @@ mod tests {
             period: Some(14),
             poles: Some(4),
         };
-        let input = GaussianInput::new(&candles, "close", params);
+        let input = GaussianInput::from_candles(&candles, "close", params);
 
         let gaussian_result = gaussian(&input).expect("Failed to calculate Gaussian filter");
 

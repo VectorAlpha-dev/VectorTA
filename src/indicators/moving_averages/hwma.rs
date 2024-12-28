@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum HwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct HwmaOutput {
     pub values: Vec<f64>,
 }
@@ -25,31 +34,42 @@ impl HwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct HwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: HwmaData<'a>,
     pub params: HwmaParams,
 }
 
 impl<'a> HwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: HwmaParams) -> Self {
-        HwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: HwmaParams) -> Self {
+        Self {
+            data: HwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        HwmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: HwmaParams) -> Self {
+        Self {
+            data: HwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: HwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: HwmaParams::with_default_params(),
         }
     }
 }
+
 #[inline]
 pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        HwmaData::Candles { candles, source } => source_type(candles, source),
+        HwmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let na = input.params.na.unwrap_or(0.2);
     let nb = input.params.nb.unwrap_or(0.1);
@@ -100,7 +120,7 @@ mod tests {
             nb: None,
             nc: None,
         };
-        let input_default = HwmaInput::new(&candles, "close", params_default);
+        let input_default = HwmaInput::from_candles(&candles, "close", params_default);
         let result_default = hwma(&input_default).expect("Failed HWMA default");
         assert_eq!(result_default.values.len(), candles.close.len());
         let params_partial = HwmaParams {
@@ -108,7 +128,7 @@ mod tests {
             nb: None,
             nc: None,
         };
-        let input_partial = HwmaInput::new(&candles, "hl2", params_partial);
+        let input_partial = HwmaInput::from_candles(&candles, "hl2", params_partial);
         let result_partial = hwma(&input_partial).expect("Failed HWMA partial");
         assert_eq!(result_partial.values.len(), candles.close.len());
         let params_custom = HwmaParams {
@@ -116,7 +136,7 @@ mod tests {
             nb: Some(0.15),
             nc: Some(0.05),
         };
-        let input_custom = HwmaInput::new(&candles, "hlc3", params_custom);
+        let input_custom = HwmaInput::from_candles(&candles, "hlc3", params_custom);
         let result_custom = hwma(&input_custom).expect("Failed HWMA custom");
         assert_eq!(result_custom.values.len(), candles.close.len());
     }
@@ -133,7 +153,7 @@ mod tests {
             nb: Some(0.1),
             nc: Some(0.1),
         };
-        let input = HwmaInput::new(&candles, "close", params);
+        let input = HwmaInput::from_candles(&candles, "close", params);
         let result = hwma(&input).expect("Failed to calculate HWMA");
         assert!(result.values.len() > 5);
         let expected_last_five = [

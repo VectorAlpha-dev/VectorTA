@@ -3,6 +3,15 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
+pub enum HighPass2Data<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct HighPass2Output {
     pub values: Vec<f64>,
 }
@@ -24,28 +33,41 @@ impl HighPass2Params {
 
 #[derive(Debug, Clone)]
 pub struct HighPass2Input<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: HighPass2Data<'a>,
     pub params: HighPass2Params,
 }
 
 impl<'a> HighPass2Input<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: HighPass2Params) -> Self {
-        HighPass2Input { candles, source, params }
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: HighPass2Params) -> Self {
+        Self {
+            data: HighPass2Data::Candles { candles, source },
+            params,
+        }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        HighPass2Input {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: HighPass2Params) -> Self {
+        Self {
+            data: HighPass2Data::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: HighPass2Data::Candles {
+                candles,
+                source: "close",
+            },
             params: HighPass2Params::with_default_params(),
         }
     }
 }
 
-#[inline]
 pub fn high_pass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        HighPass2Data::Candles { candles, source } => source_type(candles, source),
+        HighPass2Data::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(48);
     let k: f64 = input.params.k.unwrap_or(0.707);
@@ -99,7 +121,7 @@ mod tests {
             period: Some(48),
             k: Some(0.707),
         };
-        let input = HighPass2Input::new(&candles, "close", params);
+        let input = HighPass2Input::from_candles(&candles, "close", params);
         let result = high_pass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         let expected_last_five = [
             445.29073821108943,
