@@ -45,14 +45,16 @@ impl<'a> VwmaInput<'a> {
 #[inline]
 pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
     let price: &[f64] = source_type(input.candles, input.source);
-    let volume = candles.select_candle_field("volume").expect("Failed to extract volume");
+    let volume: &[f64] = input
+        .candles
+        .select_candle_field("volume")
+        .expect("Failed to extract volume");
     let len: usize = price.len();
     let period: usize = input.params.period.unwrap_or(20);
 
-    if period == 0 || period > price.len() {
+    if period == 0 || period > len {
         return Err("Invalid period for VWMA calculation.".into());
     }
-    let len = price.len();
     if len != volume.len() {
         return Err("Price and volume mismatch.".into());
     }

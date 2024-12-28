@@ -44,12 +44,12 @@ impl<'a> SqwmaInput<'a> {
 #[inline]
 pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
-    let len: usize = data.len();
+    let n: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(14);
     if n == 0 {
         return Err("Empty data for SQWMA calculation.".into());
     }
 
-    let period = input.get_period();
     if period < 2 {
         return Err("SQWMA period must be >= 2.".into());
     }

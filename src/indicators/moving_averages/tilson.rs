@@ -30,7 +30,11 @@ pub struct TilsonInput<'a> {
 
 impl<'a> TilsonInput<'a> {
     pub fn new(candles: &'a Candles, source: &'a str, params: TilsonParams) -> Self {
-        TilsonInput { candles, source, params }
+        TilsonInput {
+            candles,
+            source,
+            params,
+        }
     }
 
     pub fn with_default_params(candles: &'a Candles) -> Self {
@@ -45,8 +49,8 @@ impl<'a> TilsonInput<'a> {
 pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let length: usize = data.len();
-    let opt_in_time_period = input.get_period();
-    let opt_in_v_factor = input.get_volume_factor();
+    let opt_in_time_period = input.params.period.unwrap_or(5);
+    let opt_in_v_factor = input.params.volume_factor.unwrap_or(0.0);
     let length = data.len();
     if opt_in_time_period == 0 || opt_in_time_period > length {
         return Err("Invalid period specified.".into());
@@ -54,7 +58,7 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
     let lookback_total = 6 * (opt_in_time_period - 1);
     let mut out_values = vec![std::f64::NAN; length];
     if lookback_total >= length {
-        return Ok(T3Output { values: out_values });
+        return Ok(TilsonOutput { values: out_values });
     }
     let start_idx = lookback_total;
     let end_idx = length - 1;
@@ -160,7 +164,7 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
         today += 1;
     }
 
-    Ok(T3Output { values: out_values })
+    Ok(TilsonOutput { values: out_values })
 }
 
 #[cfg(test)]
@@ -173,18 +177,27 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let default_params = TilsonParams { period: None, volume_factor: None };
+        let default_params = TilsonParams {
+            period: None,
+            volume_factor: None,
+        };
         let input_default = TilsonInput::new(&candles, "close", default_params);
         let output_default = tilson(&input_default).expect("Failed T3/Tilson with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
-        let params_custom_period = TilsonParams { period: Some(10), volume_factor: None };
+        let params_custom_period = TilsonParams {
+            period: Some(10),
+            volume_factor: None,
+        };
         let input_custom_period = TilsonInput::new(&candles, "hl2", params_custom_period);
         let output_custom_period =
             tilson(&input_custom_period).expect("Failed T3/Tilson with period=10, source=hl2");
         assert_eq!(output_custom_period.values.len(), candles.close.len());
 
-        let params_fully_custom = TilsonParams { period: Some(7), volume_factor: Some(0.9) };
+        let params_fully_custom = TilsonParams {
+            period: Some(7),
+            volume_factor: Some(0.9),
+        };
         let input_fully_custom = TilsonInput::new(&candles, "hlc3", params_fully_custom);
         let output_fully_custom =
             tilson(&input_fully_custom).expect("Failed T3/Tilson fully custom");

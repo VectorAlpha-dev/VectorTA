@@ -47,6 +47,7 @@ impl<'a> TrendFlexInput<'a> {
 pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
+    let trendflex_period: usize = input.params.period.unwrap_or(20);
 
     if data.is_empty() {
         return Err("No data provided to TrendFlex filter.".into());
@@ -82,7 +83,7 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Erro
         ssf[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
     }
 
-    let mut tf_values = vec![f64::NAN; len];
+    let mut tf_values: Vec<f64> = vec![f64::NAN; len];
     let mut ms_prev = 0.0;
 
     let tp_f = trendflex_period as f64;
@@ -108,7 +109,7 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Erro
         rolling_sum += ssf[i] - ssf[i - trendflex_period];
     }
 
-    Ok(tf_values)
+    Ok(TrendFlexOutput { values: tf_values })
 }
 
 #[cfg(test)]
@@ -123,13 +124,14 @@ mod tests {
 
         let default_params = TrendFlexParams { period: None };
         let input_default = TrendFlexInput::new(&candles, "close", default_params);
-        let output_default = trendflex(&input_default).expect("Failed TrendFlex with default params");
+        let output_default =
+            trendflex(&input_default).expect("Failed TrendFlex with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let custom_params = TrendFlexParams { period: Some(25) };
         let input_custom = TrendFlexInput::new(&candles, "hlc3", custom_params);
-        let output_custom = trendflex(&input_custom)
-            .expect("Failed TrendFlex with period=25, source=hlc3");
+        let output_custom =
+            trendflex(&input_custom).expect("Failed TrendFlex with period=25, source=hlc3");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
 
@@ -157,7 +159,8 @@ mod tests {
         assert!(result.values.len() >= 5);
         let start_index = result.values.len() - 5;
         let actual_last_five = &result.values[start_index..];
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(&expected_last_five).enumerate()
+        for (i, (&actual, &expected)) in
+            actual_last_five.iter().zip(&expected_last_five).enumerate()
         {
             let diff = (actual - expected).abs();
             assert!(

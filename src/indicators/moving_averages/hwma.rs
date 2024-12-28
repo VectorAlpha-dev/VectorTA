@@ -32,7 +32,11 @@ pub struct HwmaInput<'a> {
 
 impl<'a> HwmaInput<'a> {
     pub fn new(candles: &'a Candles, source: &'a str, params: HwmaParams) -> Self {
-        HwmaInput { candles, source, params }
+        HwmaInput {
+            candles,
+            source,
+            params,
+        }
     }
 
     pub fn with_default_params(candles: &'a Candles) -> Self {
@@ -47,7 +51,9 @@ impl<'a> HwmaInput<'a> {
 pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
-
+    let na = input.params.na.unwrap_or(0.2);
+    let nb = input.params.nb.unwrap_or(0.1);
+    let nc = input.params.nc.unwrap_or(0.1);
     if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
         return Err("Parameters (na, nb, nc) must be in (0,1).".into());
     }
@@ -89,15 +95,27 @@ mod tests {
     fn test_hwma_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params_default = HwmaParams { na: None, nb: None, nc: None };
+        let params_default = HwmaParams {
+            na: None,
+            nb: None,
+            nc: None,
+        };
         let input_default = HwmaInput::new(&candles, "close", params_default);
         let result_default = hwma(&input_default).expect("Failed HWMA default");
         assert_eq!(result_default.values.len(), candles.close.len());
-        let params_partial = HwmaParams { na: Some(0.3), nb: None, nc: None };
+        let params_partial = HwmaParams {
+            na: Some(0.3),
+            nb: None,
+            nc: None,
+        };
         let input_partial = HwmaInput::new(&candles, "hl2", params_partial);
         let result_partial = hwma(&input_partial).expect("Failed HWMA partial");
         assert_eq!(result_partial.values.len(), candles.close.len());
-        let params_custom = HwmaParams { na: Some(0.25), nb: Some(0.15), nc: Some(0.05) };
+        let params_custom = HwmaParams {
+            na: Some(0.25),
+            nb: Some(0.15),
+            nc: Some(0.05),
+        };
         let input_custom = HwmaInput::new(&candles, "hlc3", params_custom);
         let result_custom = hwma(&input_custom).expect("Failed HWMA custom");
         assert_eq!(result_custom.values.len(), candles.close.len());
@@ -110,7 +128,11 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-        let params = HwmaParams { na: Some(0.2), nb: Some(0.1), nc: Some(0.1) };
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
         let input = HwmaInput::new(&candles, "close", params);
         let result = hwma(&input).expect("Failed to calculate HWMA");
         assert!(result.values.len() > 5);

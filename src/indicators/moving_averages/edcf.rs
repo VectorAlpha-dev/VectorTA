@@ -2,8 +2,12 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-pub struct EdcfOutput {
-    pub values: Vec<f64>,
+pub enum EdcfData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
@@ -18,25 +22,37 @@ impl Default for EdcfParams {
 }
 
 #[derive(Debug, Clone)]
+pub struct EdcfOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EdcfInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: EdcfData<'a>,
     pub params: EdcfParams,
 }
 
 impl<'a> EdcfInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: EdcfParams) -> Self {
-        EdcfInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: EdcfParams) -> Self {
+        Self {
+            data: EdcfData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        EdcfInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: EdcfParams) -> Self {
+        Self {
+            data: EdcfData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: EdcfData::Candles {
+                candles,
+                source: "close",
+            },
             params: EdcfParams::default(),
         }
     }
@@ -51,7 +67,10 @@ impl<'a> EdcfInput<'a> {
 
 #[inline]
 pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        EdcfData::Candles { candles, source } => source_type(candles, source),
+        EdcfData::Slice(slice) => slice,
+    };
     let period: usize = input.get_period();
     let len: usize = data.len();
 
@@ -109,7 +128,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = EdcfInput::new(&candles, "hl2", EdcfParams { period: Some(15) });
+        let input = EdcfInput::from_candles(&candles, "hl2", EdcfParams { period: Some(15) });
 
         let edcf_result = edcf(&input).expect("EDCF calculation failed");
         let edcf_values = &edcf_result.values;

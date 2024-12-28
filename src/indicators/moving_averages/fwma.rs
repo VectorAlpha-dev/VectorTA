@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum FwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct FwmaOutput {
     pub values: Vec<f64>,
 }
@@ -19,24 +28,31 @@ impl FwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct FwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: FwmaData<'a>,
     pub params: FwmaParams,
 }
 
 impl<'a> FwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: FwmaParams) -> Self {
-        FwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: FwmaParams) -> Self {
+        Self {
+            data: FwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        FwmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: FwmaParams) -> Self {
+        Self {
+            data: FwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: FwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: FwmaParams::with_default_params(),
         }
     }
@@ -44,7 +60,10 @@ impl<'a> FwmaInput<'a> {
 
 #[inline]
 pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        FwmaData::Candles { candles, source } => source_type(candles, source),
+        FwmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(5);
     let mut values = vec![f64::NAN; len];
@@ -91,12 +110,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input_default = FwmaInput::with_default_params(&candles);
+        let input_default = FwmaInput::with_default_candles(&candles);
         let output_default = fwma(&input_default).expect("Failed FWMA with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_period_only = FwmaParams { period: Some(10) };
-        let input_period_only = FwmaInput::new(&candles, "hl2", params_period_only);
+        let input_period_only = FwmaInput::from_candles(&candles, "hl2", params_period_only);
         let output_period_only =
             fwma(&input_period_only).expect("Failed FWMA with period=10, source=hl2");
         assert_eq!(output_period_only.values.len(), candles.close.len());
@@ -107,7 +126,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = FwmaInput::with_default_params(&candles);
+        let input = FwmaInput::with_default_candles(&candles);
         let result = fwma(&input).expect("Failed to calculate FWMA");
 
         let expected_last_five = [

@@ -55,14 +55,14 @@ fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
 }
 #[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
-    let len: usize = data.len();
+    let src: &[f64] = source_type(input.candles, input.source);
+    let len: usize = src.len();
     if len < 10 {
         return Err("Not enough data".into());
     }
 
-    let fast_limit = input.params.fast_limit;
-    let slow_limit = input.params.slow_limit;
+    let fast_limit = input.params.fast_limit.unwrap_or(0.5);
+    let slow_limit = input.params.slow_limit.unwrap_or(0.05);
 
     let mut mama_values = vec![0.0; len];
     let mut fama_values = vec![0.0; len];

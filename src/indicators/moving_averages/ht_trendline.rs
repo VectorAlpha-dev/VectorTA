@@ -229,6 +229,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = EhlersITrendInput::with_default_params(&candles);
         let eit_result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        let close_prices: &[f64] = candles.select_candle_field("close").unwrap();
 
         assert_eq!(
             eit_result.values.len(),

@@ -46,7 +46,7 @@ impl<'a> SwmaInput<'a> {
 pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
-
+    let period: usize = input.params.period.unwrap_or(5);
     if data.is_empty() {
         return Ok(SwmaOutput { values: vec![] });
     }
@@ -133,9 +133,10 @@ mod tests {
 
     #[test]
     fn test_swma_accuracy() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let source = candles
+        let file_path: &str = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles: Candles =
+            read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let close_prices: &[f64] = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
@@ -143,7 +144,7 @@ mod tests {
         let input = SwmaInput::new(&candles, "close", default_params);
         let result = swma(&input).expect("SWMA calculation failed");
         let len = result.values.len();
-        assert_eq!(len, candles.close.len(), "Length mismatch");
+        assert_eq!(len, close_prices.len(), "Length mismatch");
 
         let expected_last_five = [
             59288.22222222222,
@@ -158,7 +159,11 @@ mod tests {
         );
         let start_index = len - expected_last_five.len();
         let actual_last_five = &result.values[start_index..];
-        for (i, (&actual, &expected)) in actual_last_five.iter().zip(expected_last_five.iter()).enumerate() {
+        for (i, (&actual, &expected)) in actual_last_five
+            .iter()
+            .zip(expected_last_five.iter())
+            .enumerate()
+        {
             let diff = (actual - expected).abs();
             assert!(
                 diff < 1e-8,

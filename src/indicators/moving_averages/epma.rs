@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum EpmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct EpmaOutput {
     pub values: Vec<f64>,
 }
@@ -23,32 +32,41 @@ impl EpmaParams {
 
 #[derive(Debug, Clone)]
 pub struct EpmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: EpmaData<'a>,
     pub params: EpmaParams,
 }
 
 impl<'a> EpmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: EpmaParams) -> Self {
-        EpmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: EpmaParams) -> Self {
+        Self {
+            data: EpmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        EpmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: EpmaParams) -> Self {
+        Self {
+            data: EpmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: EpmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: EpmaParams::with_default_params(),
         }
     }
 }
 
-#[inline]
 pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        EpmaData::Candles { candles, source } => source_type(candles, source),
+        EpmaData::Slice(slice) => slice,
+    };
     let n: usize = data.len();
     if n == 0 {
         return Err("Empty data slice for EPMA calculation.".into());
@@ -116,7 +134,7 @@ mod tests {
             period: None,
             offset: None,
         };
-        let input = EpmaInput::new(&candles, "close", default_params);
+        let input = EpmaInput::from_candles(&candles, "close", default_params);
         let output = epma(&input).expect("Failed EPMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
 
@@ -124,7 +142,7 @@ mod tests {
             period: Some(14),
             offset: None,
         };
-        let input2 = EpmaInput::new(&candles, "hl2", params_period_14);
+        let input2 = EpmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = epma(&input2).expect("Failed EPMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
 
@@ -132,7 +150,7 @@ mod tests {
             period: Some(10),
             offset: Some(5),
         };
-        let input3 = EpmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = EpmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = epma(&input3).expect("Failed EPMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -143,7 +161,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let default_params = EpmaParams::with_default_params();
-        let input = EpmaInput::new(&candles, "close", default_params);
+        let input = EpmaInput::from_candles(&candles, "close", default_params);
         let result = epma(&input).expect("Failed to calculate EPMA");
 
         let expected_last_five = [59174.48, 59201.04, 59167.60, 59200.32, 59117.04];

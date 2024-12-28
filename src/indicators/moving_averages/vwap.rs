@@ -206,12 +206,11 @@ mod tests {
             59274.6155462414,
             58730.0,
         ];
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let file_path: &str = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles: Candles =
+            read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let timestamps = candles.get_timestamp().unwrap();
-        let volumes = candles.select_candle_field("volume").unwrap();
-        let prices = candles.get_calculated_field("hlc3").unwrap();
+        let prices: &[f64] = candles.get_calculated_field("hlc3").unwrap();
 
         let params = VwapParams {
             anchor: Some("1D".to_string()),
@@ -221,7 +220,7 @@ mod tests {
             source: "hlc3",
             params,
         };
-        let result = calculate_vwap(&input).expect("Failed to calculate VWAP");
+        let result = vwap(&input).expect("Failed to calculate VWAP");
         assert_eq!(
             result.values.len(),
             prices.len(),

@@ -26,7 +26,11 @@ pub struct SmaInput<'a> {
 
 impl<'a> SmaInput<'a> {
     pub fn new(candles: &'a Candles, source: &'a str, params: SmaParams) -> Self {
-        SmaInput { candles, source, params }
+        SmaInput {
+            candles,
+            source,
+            params,
+        }
     }
 
     pub fn with_default_params(candles: &'a Candles) -> Self {
@@ -41,6 +45,7 @@ impl<'a> SmaInput<'a> {
 pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
+    let period = input.params.period.unwrap_or(9);
     if period == 0 || period > data.len() {
         return Err("Invalid period specified for SMA calculation.".into());
     }
@@ -81,7 +86,8 @@ mod tests {
 
         let params_period_14 = SmaParams { period: Some(14) };
         let input_period_14 = SmaInput::new(&candles, "hl2", params_period_14);
-        let output_period_14 = sma(&input_period_14).expect("Failed SMA with period=14, source=hl2");
+        let output_period_14 =
+            sma(&input_period_14).expect("Failed SMA with period=14, source=hl2");
         assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = SmaParams { period: Some(20) };
@@ -102,10 +108,14 @@ mod tests {
         let input = SmaInput::new(&candles, "close", params);
         let sma_result = sma(&input).expect("Failed to calculate SMA");
 
-        assert_eq!(sma_result.values.len(), close_prices.len());
+        assert_eq!(
+            sma_result.values.len(),
+            close_prices.len(),
+            "SMA length mismatch"
+        );
 
         let expected_last_five_sma = [59180.8, 59175.0, 59129.4, 59085.4, 59133.7];
-        assert!(sma_result.values.len() >= 5);
+        assert!(sma_result.values.len() >= 5, "SMA length too short");
         let start_index = sma_result.values.len() - 5;
         let result_last_five_sma = &sma_result.values[start_index..];
         for (i, &value) in result_last_five_sma.iter().enumerate() {
@@ -119,7 +129,7 @@ mod tests {
             );
         }
 
-        let period = params.period.unwrap();
+        let period: usize = 9;
         for i in 0..(period - 1) {
             assert!(sma_result.values[i].is_nan());
         }

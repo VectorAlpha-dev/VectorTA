@@ -13,9 +13,7 @@ pub struct LinRegParams {
 
 impl LinRegParams {
     pub fn with_default_params() -> Self {
-        LinRegParams {
-            period: None,
-        }
+        LinRegParams { period: None }
     }
 }
 
@@ -28,7 +26,11 @@ pub struct LinRegInput<'a> {
 
 impl<'a> LinRegInput<'a> {
     pub fn new(candles: &'a Candles, source: &'a str, params: LinRegParams) -> Self {
-        LinRegInput { candles, source, params }
+        LinRegInput {
+            candles,
+            source,
+            params,
+        }
     }
 
     pub fn with_default_params(candles: &'a Candles) -> Self {
@@ -43,7 +45,7 @@ impl<'a> LinRegInput<'a> {
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let size: usize = data.len();
-
+    let period: usize = input.params.period.unwrap_or(14);
     if period < 1 {
         return Err("Invalid period (<1) for linear regression.".into());
     }

@@ -57,9 +57,9 @@ pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
         return Err("JMA calculation: input data is empty.".into());
     }
 
-    let period = input.get_period();
-    let phase = input.get_phase();
-    let power = input.get_power();
+    let period = input.params.period.unwrap_or(7);
+    let phase = input.params.phase.unwrap_or(50.0);
+    let power = input.params.power.unwrap_or(2);
 
     let phase_ratio = if phase < -100.0 {
         0.5
@@ -145,7 +145,7 @@ mod tests {
             phase: Some(50.0),
             power: Some(2),
         };
-        let input = JmaInput::new(&candles,"close", jma_params);
+        let input = JmaInput::new(&candles, "close", jma_params);
         let jma_result = jma(&input).expect("Failed to calculate JMA");
 
         let expected_last_five = [
@@ -156,8 +156,15 @@ mod tests {
             58918.89223153998,
         ];
 
-        assert!(jma_result.values.len() >= 5, "Not enough JMA values for the test");
-        assert_eq!(jma_result.values.len(), close_prices.len(), "JMA values count mismatch");
+        assert!(
+            jma_result.values.len() >= 5,
+            "Not enough JMA values for the test"
+        );
+        assert_eq!(
+            jma_result.values.len(),
+            close_prices.len(),
+            "JMA values count mismatch"
+        );
         let start_index = jma_result.values.len() - 5;
         let result_last_five = &jma_result.values[start_index..];
         for (i, &value) in result_last_five.iter().enumerate() {

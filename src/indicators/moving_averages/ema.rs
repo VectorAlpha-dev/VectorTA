@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum EmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct EmaOutput {
     pub values: Vec<f64>,
 }
@@ -19,29 +28,35 @@ impl Default for EmaParams {
 
 #[derive(Debug, Clone)]
 pub struct EmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: EmaData<'a>,
     pub params: EmaParams,
 }
 
 impl<'a> EmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: EmaParams) -> Self {
-        EmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: EmaParams) -> Self {
+        Self {
+            data: EmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        EmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: EmaParams) -> Self {
+        Self {
+            data: EmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: EmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: EmaParams::default(),
         }
     }
 
-    #[inline]
     fn get_period(&self) -> usize {
         self.params
             .period
@@ -51,7 +66,10 @@ impl<'a> EmaInput<'a> {
 
 #[inline]
 pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data = match &input.data {
+        EmaData::Candles { candles, source } => source_type(candles, source),
+        EmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.get_period();
 
@@ -87,11 +105,7 @@ mod tests {
         let close_prices = &candles.close;
         let params = EmaParams { period: Some(9) };
 
-        let old_style_input = EmaInput {
-            candles: &candles,
-            source: "close",
-            params,
-        };
+        let old_style_input = EmaInput::from_candles(&candles, "close", params);
         let ema_result = ema(&old_style_input).expect("Failed to calculate EMA");
 
         let expected_last_five_ema = [59302.2, 59277.9, 59230.2, 59215.1, 59103.1];
@@ -119,7 +133,7 @@ mod tests {
             );
         }
 
-        let default_input = EmaInput::with_default_params(&candles);
+        let default_input = EmaInput::with_default_candles(&candles);
         let default_ema_result = ema(&default_input).expect("Failed to calculate default EMA");
         assert!(
             !default_ema_result.values.is_empty(),

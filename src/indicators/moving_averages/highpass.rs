@@ -3,8 +3,12 @@ use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
-pub struct HighPassOutput {
-    pub values: Vec<f64>,
+pub enum HighPassData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
@@ -19,25 +23,39 @@ impl HighPassParams {
 }
 
 #[derive(Debug, Clone)]
+pub struct HighPassOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct HighPassInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: HighPassData<'a>,
     pub params: HighPassParams,
 }
 
 impl<'a> HighPassInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: HighPassParams) -> Self {
-        HighPassInput {
-            candles,
-            source,
+    // For candles-based usage:
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: HighPassParams) -> Self {
+        Self {
+            data: HighPassData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        HighPassInput {
-            candles,
-            source: "close",
+    // For slice-based usage:
+    pub fn from_slice(slice: &'a [f64], params: HighPassParams) -> Self {
+        Self {
+            data: HighPassData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: HighPassData::Candles {
+                candles,
+                source: "close",
+            },
             params: HighPassParams::with_default_params(),
         }
     }
@@ -45,7 +63,10 @@ impl<'a> HighPassInput<'a> {
 
 #[inline]
 pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        HighPassData::Candles { candles, source } => source_type(candles, source),
+        HighPassData::Slice(slice) => slice,
+    };
     let period: usize = input.params.period.unwrap_or(48);
     let len: usize = data.len();
     if len <= 2 || period == 0 || period > len {
@@ -83,11 +104,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let default_params = HighPassParams { period: None };
-        let input_default = HighPassInput::new(&candles, "close", default_params);
+        let input_default = HighPassInput::from_candles(&candles, "close", default_params);
         let output_default = highpass(&input_default).expect("Failed highpass with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
         let params_period = HighPassParams { period: Some(36) };
-        let input_period = HighPassInput::new(&candles, "hl2", params_period);
+        let input_period = HighPassInput::from_candles(&candles, "hl2", params_period);
         let output_period =
             highpass(&input_period).expect("Failed highpass with period=36, source=hl2");
         assert_eq!(output_period.values.len(), candles.close.len());
@@ -97,7 +118,7 @@ mod tests {
     fn test_highpass_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = HighPassInput::with_default_params(&candles);
+        let input = HighPassInput::with_default_candles(&candles);
         let result = highpass(&input).expect("Failed to calculate highpass");
         let expected_last_five = [
             -265.1027020005024,

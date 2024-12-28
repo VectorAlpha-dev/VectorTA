@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum AlmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct AlmaOutput {
     pub values: Vec<f64>,
 }
@@ -25,24 +34,31 @@ impl AlmaParams {
 
 #[derive(Debug, Clone)]
 pub struct AlmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: AlmaData<'a>,
     pub params: AlmaParams,
 }
 
 impl<'a> AlmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: AlmaParams) -> Self {
-        AlmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: AlmaParams) -> Self {
+        Self {
+            data: AlmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        AlmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: AlmaParams) -> Self {
+        Self {
+            data: AlmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: AlmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: AlmaParams::with_default_params(),
         }
     }
@@ -50,7 +66,10 @@ impl<'a> AlmaInput<'a> {
 
 #[inline]
 pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        AlmaData::Candles { candles, source } => source_type(candles, source),
+        AlmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
 
     let period: usize = input.params.period.unwrap_or(9);
@@ -113,7 +132,7 @@ mod tests {
             offset: None,
             sigma: None,
         };
-        let input = AlmaInput::new(&candles, "close", default_params);
+        let input = AlmaInput::from_candles(&candles, "close", default_params);
         let output = alma(&input).expect("Failed ALMA with default params");
         assert_eq!(output.values.len(), candles.close.len());
 
@@ -122,7 +141,7 @@ mod tests {
             offset: None,
             sigma: None,
         };
-        let input2 = AlmaInput::new(&candles, "hl2", params_period_14);
+        let input2 = AlmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = alma(&input2).expect("Failed ALMA with period=14, source=hl2");
         assert_eq!(output2.values.len(), candles.close.len());
 
@@ -131,7 +150,7 @@ mod tests {
             offset: Some(0.9),
             sigma: Some(5.0),
         };
-        let input3 = AlmaInput::new(&candles, "hlc3", params_custom);
+        let input3 = AlmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = alma(&input3).expect("Failed ALMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
@@ -143,7 +162,7 @@ mod tests {
 
         let default_params = AlmaParams::with_default_params();
 
-        let input = AlmaInput::new(&candles, "close", default_params);
+        let input = AlmaInput::from_candles(&candles, "close", default_params);
         let result = alma(&input).expect("Failed to calculate ALMA");
 
         let expected_last_five = [59286.7222, 59273.5343, 59204.3729, 59155.9338, 59026.9253];

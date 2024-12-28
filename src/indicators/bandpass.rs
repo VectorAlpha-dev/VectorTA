@@ -1,7 +1,7 @@
+use crate::indicators::highpass::{highpass, HighPassInput, HighPassParams};
+use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
-
-use crate::indicators::highpass::{calculate_highpass, HighPassInput, HighPassParams};
 
 #[derive(Debug, Clone)]
 pub struct BandPassParams {
@@ -9,39 +9,37 @@ pub struct BandPassParams {
     pub bandwidth: Option<f64>,
 }
 
-impl Default for BandPassParams {
-    fn default() -> Self {
+impl BandPassParams {
+    pub fn with_default_params() -> Self {
         BandPassParams {
-            period: Some(20),
-            bandwidth: Some(0.3),
+            period: None,
+            bandwidth: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct BandPassInput<'a> {
-    pub data: &'a [f64],
+    pub candles: &'a Candles,
+    pub source: &'a str,
     pub params: BandPassParams,
 }
 
 impl<'a> BandPassInput<'a> {
-    pub fn new(data: &'a [f64], params: BandPassParams) -> Self {
-        BandPassInput { data, params }
-    }
-
-    pub fn with_default_params(data: &'a [f64]) -> Self {
+    pub fn new(candles: &'a Candles, source: &'a str, params: BandPassParams) -> Self {
         BandPassInput {
-            data,
-            params: BandPassParams::default(),
+            candles,
+            source,
+            params,
         }
     }
 
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(20)
-    }
-
-    fn get_bandwidth(&self) -> f64 {
-        self.params.bandwidth.unwrap_or(0.3)
+    pub fn with_default_params(candles: &'a Candles) -> Self {
+        BandPassInput {
+            candles,
+            source: "close",
+            params: BandPassParams::with_default_params(),
+        }
     }
 }
 
@@ -54,11 +52,11 @@ pub struct BandPassOutput {
 }
 
 #[inline]
-pub fn calculate_bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>> {
-    let data = input.data;
-    let period = input.get_period();
-    let bandwidth = input.get_bandwidth();
-    let len = data.len();
+pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>> {
+    let data: &[f64] = source_type(input.candles, input.source);
+    let len: usize = data.len();
+    let period: usize = input.params.period.unwrap_or(20);
+    let bandwidth: f64 = input.params.bandwidth.unwrap_or(0.3);
 
     if len == 0 {
         return Err("No data available.".into());
@@ -73,14 +71,11 @@ pub fn calculate_bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<d
         return Err("hp_period is too small after rounding.".into());
     }
 
-    let mut hp_params = HighPassParams::default();
+    let mut hp_params = HighPassParams::with_default_params();
     hp_params.period = Some(hp_period);
 
-    let hp_input = HighPassInput {
-        data,
-        params: hp_params,
-    };
-    let hp_result = calculate_highpass(&hp_input)?;
+    let hp_input = HighPassInput::from_slice(data, hp_params);
+    let hp_result = highpass(&hp_input)?;
     let hp = hp_result.values;
 
     let beta = (2.0 * PI / period as f64).cos();
@@ -117,14 +112,11 @@ pub fn calculate_bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<d
     if trigger_period < 2 {
         return Err("trigger_period is too small after rounding.".into());
     }
-    let mut trigger_params = HighPassParams::default();
+    let mut trigger_params = HighPassParams::with_default_params();
     trigger_params.period = Some(trigger_period);
+    let trigger_input = HighPassInput::from_slice(&bp_normalized, trigger_params);
 
-    let trigger_input = HighPassInput {
-        data: &bp_normalized,
-        params: trigger_params,
-    };
-    let trigger_result = calculate_highpass(&trigger_input)?;
+    let trigger_result = highpass(&trigger_input)?;
     let trigger = trigger_result.values;
 
     let mut signal = vec![0.0; len];
@@ -152,16 +144,31 @@ pub fn calculate_bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<d
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    #[test]
+    fn test_bandpass_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
+        // Use default BandPass parameters
+        let default_input = BandPassInput::with_default_params(&candles);
+        let default_output = bandpass(&default_input).expect("Failed bandpass with default params");
+        assert_eq!(default_output.bp.len(), candles.close.len());
+
+        // Custom parameters
+        let custom_params = BandPassParams {
+            period: Some(30),
+            bandwidth: Some(0.5),
+        };
+        let custom_input = BandPassInput::new(&candles, "hl2", custom_params);
+        let custom_output = bandpass(&custom_input).expect("Failed bandpass with custom params");
+        assert_eq!(custom_output.bp.len(), candles.close.len());
+    }
     #[test]
     fn test_bandpass_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let data = &candles.close;
-
-        let input = BandPassInput::with_default_params(data);
-        let result = calculate_bandpass(&input).expect("Failed to calculate bandpass");
+        let input = BandPassInput::with_default_params(&candles);
+        let result = bandpass(&input).expect("Failed to calculate bandpass");
 
         let expected_bp_last_five = [
             -236.23678021132827,

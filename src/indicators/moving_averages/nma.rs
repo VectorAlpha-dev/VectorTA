@@ -13,9 +13,7 @@ pub struct NmaParams {
 
 impl NmaParams {
     pub fn with_default_params() -> Self {
-        NmaParams {
-            period: None,
-        }
+        NmaParams { period: None }
     }
 }
 
@@ -28,7 +26,11 @@ pub struct NmaInput<'a> {
 
 impl<'a> NmaInput<'a> {
     pub fn new(candles: &'a Candles, source: &'a str, params: NmaParams) -> Self {
-        NmaInput { candles, source, params }
+        NmaInput {
+            candles,
+            source,
+            params,
+        }
     }
 
     pub fn with_default_params(candles: &'a Candles) -> Self {
@@ -48,16 +50,13 @@ pub fn nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
     if period == 0 {
         return Err("NMA period cannot be zero.".into());
     }
-    if data.len() < (period + 1) {
+    if len < (period + 1) {
         return Err(format!(
             "Not enough data ({}) for NMA with period {} (need at least period+1).",
-            data.len(),
-            period
+            len, period
         )
         .into());
     }
-
-    let len = data.len();
 
     let mut ln_values = Vec::with_capacity(len);
     ln_values.extend(data.iter().map(|&val| {
@@ -110,7 +109,8 @@ mod tests {
 
         let params_14 = NmaParams { period: Some(14) };
         let input_period_14 = NmaInput::new(&candles, "hl2", params_14);
-        let output_period_14 = nma(&input_period_14).expect("Failed NMA with period=14, source=hl2");
+        let output_period_14 =
+            nma(&input_period_14).expect("Failed NMA with period=14, source=hl2");
         assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = NmaParams { period: Some(20) };
@@ -137,7 +137,7 @@ mod tests {
             "NMA values count should match the input data length"
         );
 
-        let period = params.period.unwrap();
+        let period = 40;
         for i in 0..=period {
             assert!(
                 nma_result.values[i].is_nan(),
@@ -171,7 +171,8 @@ mod tests {
         }
 
         let default_input = NmaInput::with_default_params(&candles);
-        let default_nma_result = nma(&default_input).expect("Failed to calculate NMA with defaults");
+        let default_nma_result =
+            nma(&default_input).expect("Failed to calculate NMA with defaults");
         assert_eq!(
             default_nma_result.values.len(),
             close_prices.len(),

@@ -45,22 +45,22 @@ impl<'a> JsaInput<'a> {
 pub fn jsa(input: &JsaInput) -> Result<JsaOutput, Box<dyn Error>> {
     let data: &[f64] = source_type(input.candles, input.source);
     let len: usize = data.len();
-    if n == 0 {
+    if len == 0 {
         return Err("No data provided for JSA calculation.".into());
     }
 
-    let period = input.get_period();
+    let period = input.params.period.unwrap_or(30);
     if period == 0 {
         return Err("JSA period must be > 0.".into());
     }
-    if period >= n {
-        let output = vec![f64::NAN; n];
+    if period >= len {
+        let output = vec![f64::NAN; len];
         return Ok(JsaOutput { values: output });
     }
 
-    let mut output = vec![f64::NAN; n];
+    let mut output = vec![f64::NAN; len];
 
-    for i in period..n {
+    for i in period..len {
         output[i] = (data[i] + data[i - period]) * 0.5;
     }
 
@@ -101,13 +101,26 @@ mod tests {
         let default_params = JsaParams::with_default_params();
         let input = JsaInput::new(&candles, "close", default_params);
         let result = jsa(&input).expect("Failed to calculate JSA");
-        assert_eq!(result.values.len(), candles.close.len(), "JSA result length mismatch");
-        assert!(result.values.len() >= 5, "Not enough data to compare last 5 JSA values");
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "JSA result length mismatch"
+        );
+        assert!(
+            result.values.len() >= 5,
+            "Not enough data to compare last 5 JSA values"
+        );
         let start_idx = result.values.len() - 5;
         let actual_last_five = &result.values[start_idx..];
         for (i, &val) in actual_last_five.iter().enumerate() {
             let expected = expected_last_five[i];
-            assert!((val - expected).abs() < 1e-5, "JSA mismatch at index {} => expected {}, got {}", i, expected, val);
+            assert!(
+                (val - expected).abs() < 1e-5,
+                "JSA mismatch at index {} => expected {}, got {}",
+                i,
+                expected,
+                val
+            );
         }
         for val in result.values.iter() {
             if !val.is_nan() {
@@ -116,6 +129,10 @@ mod tests {
         }
         let default_input = JsaInput::with_default_params(&candles);
         let default_result = jsa(&default_input).expect("Failed to calculate JSA default");
-        assert_eq!(default_result.values.len(), candles.close.len(), "Default JSA result length mismatch");
+        assert_eq!(
+            default_result.values.len(),
+            candles.close.len(),
+            "Default JSA result length mismatch"
+        );
     }
 }

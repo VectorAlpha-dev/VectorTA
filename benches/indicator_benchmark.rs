@@ -51,7 +51,7 @@ use my_project::indicators::{
     supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput},
     swma::{swma, SwmaInput},
     tema::{tema, TemaInput},
-    tilson::{t3, T3Input},
+    tilson::{tilson, TilsonInput},
     trendflex::{trendflex, TrendFlexInput},
     trima::{trima, TrimaInput},
     vpwma::{vpwma, VpwmaInput},
@@ -276,8 +276,8 @@ fn benchmark_indicators(c: &mut Criterion) {
 
     // T3
     group.bench_function(BenchmarkId::new("T3", 0), |b| {
-        let input = T3Input::with_default_params(&candles);
-        b.iter(|| t3(black_box(&input)).expect("Failed to calculate T3"))
+        let input = TilsonInput::with_default_params(&candles);
+        b.iter(|| tilson(black_box(&input)).expect("Failed to calculate T3"))
     });
 
     // KAMA

@@ -2,6 +2,15 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
+pub enum CwmaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct CwmaOutput {
     pub values: Vec<f64>,
 }
@@ -19,24 +28,31 @@ impl Default for CwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct CwmaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: CwmaData<'a>,
     pub params: CwmaParams,
 }
 
 impl<'a> CwmaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: CwmaParams) -> Self {
-        CwmaInput {
-            candles,
-            source,
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: CwmaParams) -> Self {
+        Self {
+            data: CwmaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
-        CwmaInput {
-            candles,
-            source: "close",
+    pub fn from_slice(slice: &'a [f64], params: CwmaParams) -> Self {
+        Self {
+            data: CwmaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: CwmaData::Candles {
+                candles,
+                source: "close",
+            },
             params: CwmaParams::default(),
         }
     }
@@ -51,7 +67,10 @@ impl<'a> CwmaInput<'a> {
 
 #[inline]
 pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        CwmaData::Candles { candles, source } => source_type(candles, source),
+        CwmaData::Slice(slice) => slice,
+    };
     let len: usize = data.len();
     let period: usize = input.get_period();
 
@@ -102,7 +121,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = CwmaInput::with_default_params(&candles);
+        let input = CwmaInput::with_default_candles(&candles);
 
         let cwma_result = cwma(&input).expect("CWMA calculation failed");
         let cwma_values = &cwma_result.values;

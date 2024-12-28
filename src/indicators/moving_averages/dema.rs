@@ -2,8 +2,12 @@ use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-pub struct DemaOutput {
-    pub values: Vec<f64>,
+pub enum DemaData<'a> {
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
+    Slice(&'a [f64]),
 }
 
 #[derive(Debug, Clone)]
@@ -18,25 +22,37 @@ impl Default for DemaParams {
 }
 
 #[derive(Debug, Clone)]
+pub struct DemaOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DemaInput<'a> {
-    pub candles: &'a Candles,
-    pub source: &'a str,
+    pub data: DemaData<'a>,
     pub params: DemaParams,
 }
 
 impl<'a> DemaInput<'a> {
-    pub fn new(candles: &'a Candles, source: &'a str, params: DemaParams) -> Self {
+    pub fn from_candles(candles: &'a Candles, source: &'a str, params: DemaParams) -> Self {
         Self {
-            candles,
-            source,
+            data: DemaData::Candles { candles, source },
             params,
         }
     }
 
-    pub fn with_default_params(candles: &'a Candles) -> Self {
+    pub fn from_slice(slice: &'a [f64], params: DemaParams) -> Self {
         Self {
-            candles,
-            source: "close",
+            data: DemaData::Slice(slice),
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: DemaData::Candles {
+                candles,
+                source: "close",
+            },
             params: DemaParams::default(),
         }
     }
@@ -49,7 +65,10 @@ impl<'a> DemaInput<'a> {
 
 #[inline]
 pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
-    let data: &[f64] = source_type(input.candles, input.source);
+    let data: &[f64] = match &input.data {
+        DemaData::Candles { candles, source } => source_type(candles, source),
+        DemaData::Slice(slice) => slice,
+    };
     let size: usize = data.len();
     let period: usize = input.get_period();
 
@@ -96,7 +115,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let input = DemaInput::with_default_params(&candles);
+        let input = DemaInput::with_default_candles(&candles);
 
         let result = dema(&input).expect("Failed to calculate DEMA");
 
