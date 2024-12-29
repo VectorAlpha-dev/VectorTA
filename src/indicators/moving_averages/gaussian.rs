@@ -60,17 +60,12 @@ impl<'a> GaussianInput<'a> {
             params: GaussianParams::default(),
         }
     }
-
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
-    }
-
-    fn get_poles(&self) -> usize {
-        self.params.poles.unwrap_or(4)
-    }
 }
 
 pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
+    let period = input.params.period.unwrap_or(14);
+    let poles = input.params.poles.unwrap_or(4);
+
     let data: &[f64] = match &input.data {
         GaussianData::Candles { candles, source } => source_type(candles, source),
         GaussianData::Slice(slice) => slice,
@@ -80,11 +75,11 @@ pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>>
     if n == 0 {
         return Err("No data provided to Gaussian filter.".into());
     }
-
-    let period = input.get_period();
-    let poles = input.get_poles();
     if !(1..=4).contains(&poles) {
         return Err("Gaussian filter poles must be in 1..4.".into());
+    }
+    if data.len() < input.params.period.unwrap_or(14) {
+        return Err("Gaussian filter period is longer than the data.".into());
     }
 
     use std::f64::consts::PI;
@@ -229,12 +224,149 @@ mod tests {
             );
         }
 
-        let skip = input.get_poles();
+        let skip = input.params.poles.unwrap_or(4);
         for val in gaussian_result.values.iter().skip(skip) {
             assert!(
                 val.is_finite(),
                 "Gaussian output should be finite once settled."
             );
+        }
+    }
+    #[test]
+    fn test_gaussian_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = GaussianInput::with_default_candles(&candles);
+        match input.data {
+            GaussianData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected GaussianData::Candles"),
+        }
+        let period = input.params.period.unwrap_or(14);
+        let poles = input.params.poles.unwrap_or(4);
+        assert_eq!(period, 14);
+        assert_eq!(poles, 4);
+    }
+
+    #[test]
+    fn test_gaussian_with_default_params() {
+        let default_params = GaussianParams::default();
+        assert_eq!(default_params.period, Some(14));
+        assert_eq!(default_params.poles, Some(4));
+    }
+
+    #[test]
+    fn test_gaussian_with_no_data() {
+        let data: [f64; 0] = [];
+        let input = GaussianInput::from_slice(
+            &data,
+            GaussianParams {
+                period: Some(14),
+                poles: Some(4),
+            },
+        );
+        let result = gaussian(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("No data provided to Gaussian filter"));
+        }
+    }
+
+    #[test]
+    fn test_gaussian_with_out_of_range_poles() {
+        let data = [10.0, 20.0, 30.0];
+        let input = GaussianInput::from_slice(
+            &data,
+            GaussianParams {
+                period: Some(14),
+                poles: Some(5),
+            },
+        );
+        let result = gaussian(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Gaussian filter poles must be in 1..4."));
+        }
+    }
+
+    #[test]
+    fn test_gaussian_very_small_data_set() {
+        let data = [42.0];
+        let input = GaussianInput::from_slice(
+            &data,
+            GaussianParams {
+                period: Some(14),
+                poles: Some(4),
+            },
+        );
+        let result = gaussian(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("period is longer than the data."));
+        }
+    }
+
+    #[test]
+    fn test_gaussian_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input = GaussianInput::from_candles(
+            &candles,
+            "close",
+            GaussianParams {
+                period: Some(14),
+                poles: Some(4),
+            },
+        );
+        let first_result = gaussian(&first_input).expect("First Gaussian filter failed");
+        let second_input = GaussianInput::from_slice(
+            &first_result.values,
+            GaussianParams {
+                period: Some(7),
+                poles: Some(2),
+            },
+        );
+        let second_result = gaussian(&second_input).expect("Second Gaussian filter failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_gaussian_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = GaussianInput::from_candles(
+            &candles,
+            "close",
+            GaussianParams {
+                period: None,
+                poles: None,
+            },
+        );
+        let result = gaussian(&input).expect("Gaussian calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_gaussian_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = GaussianInput::from_candles(
+            &candles,
+            "close",
+            GaussianParams {
+                period: Some(14),
+                poles: Some(4),
+            },
+        );
+        let result = gaussian(&input).expect("Gaussian calculation failed");
+        let start_index = input.params.poles.unwrap_or(4);
+        for i in start_index..result.values.len() {
+            assert!(!result.values[i].is_nan());
         }
     }
 }

@@ -194,4 +194,104 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn test_epma_params_with_default_params() {
+        let default_params = EpmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+        assert_eq!(default_params.offset, None);
+    }
+
+    #[test]
+    fn test_epma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = EpmaInput::with_default_candles(&candles);
+        match input.data {
+            EpmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected EpmaData variant"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.offset, None);
+    }
+
+    #[test]
+    fn test_epma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = EpmaParams {
+            period: Some(0),
+            offset: Some(2),
+        };
+        let input = EpmaInput::from_slice(&input_data, params);
+        let result = epma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("EPMA period must be >= 2."));
+        }
+    }
+
+    #[test]
+    fn test_epma_with_period_offset_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = EpmaParams {
+            period: Some(11),
+            offset: Some(4),
+        };
+        let input = EpmaInput::from_slice(&input_data, params);
+        let result = epma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_epma_very_small_data_set() {
+        let input_data = [42.0, 43.0];
+        let params = EpmaParams {
+            period: Some(2),
+            offset: Some(1),
+        };
+        let input = EpmaInput::from_slice(&input_data, params);
+        let result = epma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_epma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = EpmaParams {
+            period: Some(5),
+            offset: Some(2),
+        };
+        let first_input = EpmaInput::from_candles(&candles, "close", first_params);
+        let first_result = epma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = EpmaParams {
+            period: Some(3),
+            offset: Some(1),
+        };
+        let second_input = EpmaInput::from_slice(&first_result.values, second_params);
+        let second_result = epma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_epma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = EpmaParams {
+            period: Some(11),
+            offset: Some(4),
+        };
+        let input = EpmaInput::from_candles(&candles, "close", params.clone());
+        let epma_result = epma(&input).unwrap();
+        for i in 0..epma_result.values.len() {
+            let val = epma_result.values[i];
+            if i < (params.period.unwrap() + params.offset.unwrap() + 1) {
+                assert_eq!(val, candles.close[i]);
+            } else {
+                assert!(!val.is_nan());
+            }
+        }
+    }
 }
