@@ -111,6 +111,28 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_dema_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = DemaParams { period: None };
+        let input_default = DemaInput::from_candles(&candles, "close", default_params);
+        let output_default = dema(&input_default).expect("Failed DEMA with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_period_14 = DemaParams { period: Some(14) };
+        let input_period_14 = DemaInput::from_candles(&candles, "hl2", params_period_14);
+        let output_period_14 =
+            dema(&input_period_14).expect("Failed DEMA with period=14, source=hl2");
+        assert_eq!(output_period_14.values.len(), candles.close.len());
+
+        let params_custom = DemaParams { period: Some(20) };
+        let input_custom = DemaInput::from_candles(&candles, "hlc3", params_custom);
+        let output_custom = dema(&input_custom).expect("Failed DEMA fully custom");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_dema_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -145,6 +167,106 @@ mod tests {
                 exp,
                 val
             );
+        }
+    }
+
+    #[test]
+    fn test_dema_params_with_default_params() {
+        let default_params = DemaParams::default();
+        assert_eq!(
+            default_params.period,
+            Some(30),
+            "Expected default period to be Some(30)"
+        );
+    }
+
+    #[test]
+    fn test_dema_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = DemaInput::with_default_candles(&candles);
+        match input.data {
+            DemaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected DemaData::Candles variant"),
+        }
+        assert_eq!(
+            input.params.period,
+            Some(30),
+            "Expected default period to be Some(30)"
+        );
+    }
+
+    #[test]
+    fn test_dema_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = DemaParams { period: Some(0) };
+        let input = DemaInput::from_slice(&input_data, params);
+        let result = dema(&input);
+        assert!(result.is_err(), "Expected an error for zero period");
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Invalid DEMA period"),
+                "Expected 'Invalid DEMA period' error message, got: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_dema_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = DemaParams { period: Some(10) };
+        let input = DemaInput::from_slice(&input_data, params);
+        let result = dema(&input);
+        assert!(result.is_err(), "Expected an error for period > data.len()");
+    }
+
+    #[test]
+    fn test_dema_very_small_data_set() {
+        let input_data = [42.0];
+        let params = DemaParams { period: Some(9) };
+        let input = DemaInput::from_slice(&input_data, params);
+        let result = dema(&input);
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than required length"
+        );
+    }
+
+    #[test]
+    fn test_dema_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = DemaParams { period: Some(9) };
+        let first_input = DemaInput::from_candles(&candles, "close", first_params);
+        let first_result = dema(&first_input).expect("Failed to calculate first DEMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = DemaParams { period: Some(5) };
+        let second_input = DemaInput::from_slice(&first_result.values, second_params);
+        let second_result = dema(&second_input).expect("Failed to calculate second DEMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_dema_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let period = 30;
+        let params = DemaParams {
+            period: Some(period),
+        };
+        let input = DemaInput::from_candles(&candles, "close", params);
+        let result = dema(&input).expect("Failed to calculate DEMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 120 {
+            for i in 120..result.values.len() {
+                assert!(!result.values[i].is_nan(), "Unexpected NaN at index {}", i);
+            }
         }
     }
 }

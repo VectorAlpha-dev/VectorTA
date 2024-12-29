@@ -116,6 +116,26 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_cwma_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let default_params = CwmaParams { period: None };
+        let input_default = CwmaInput::from_candles(&candles, "close", default_params);
+        let output_default = cwma(&input_default).unwrap();
+        assert_eq!(output_default.values.len(), candles.close.len());
+
+        let params_period_14 = CwmaParams { period: Some(14) };
+        let input_period_14 = CwmaInput::from_candles(&candles, "hl2", params_period_14);
+        let output_period_14 = cwma(&input_period_14).unwrap();
+        assert_eq!(output_period_14.values.len(), candles.close.len());
+
+        let params_custom = CwmaParams { period: Some(20) };
+        let input_custom = CwmaInput::from_candles(&candles, "hlc3", params_custom);
+        let output_custom = cwma(&input_custom).unwrap();
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_cwma_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -167,6 +187,85 @@ mod tests {
                 "Expected CWMA to remain the same as original for index {}",
                 i
             );
+        }
+    }
+    #[test]
+    fn test_cwma_params_with_default_params() {
+        let default_params = CwmaParams::default();
+        assert_eq!(default_params.period, Some(14));
+    }
+
+    #[test]
+    fn test_cwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = CwmaInput::with_default_candles(&candles);
+        match input.data {
+            CwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, Some(14));
+    }
+
+    #[test]
+    fn test_cwma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = CwmaParams { period: Some(0) };
+        let input = CwmaInput::from_slice(&input_data, params);
+        let result = cwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("CWMA period must be >= 1."));
+        }
+    }
+
+    #[test]
+    fn test_cwma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = CwmaParams { period: Some(10) };
+        let input = CwmaInput::from_slice(&input_data, params);
+        let result = cwma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_cwma_very_small_data_set() {
+        let input_data = [42.0];
+        let params = CwmaParams { period: Some(9) };
+        let input = CwmaInput::from_slice(&input_data, params);
+        let result = cwma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_cwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = CwmaParams { period: Some(9) };
+        let first_input = CwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = cwma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = CwmaParams { period: Some(5) };
+        let second_input = CwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = cwma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_cwma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let close_prices = &candles.close;
+        let params = CwmaParams { period: Some(9) };
+        let input = CwmaInput::from_candles(&candles, "close", params);
+        let cwma_result = cwma(&input).unwrap();
+        assert_eq!(cwma_result.values.len(), close_prices.len());
+        if cwma_result.values.len() > 240 {
+            for i in 240..cwma_result.values.len() {
+                assert!(!cwma_result.values[i].is_nan());
+            }
         }
     }
 }

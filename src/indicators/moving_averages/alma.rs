@@ -192,4 +192,105 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn test_alma_params_with_default_params() {
+        let params = AlmaParams::with_default_params();
+        assert_eq!(params.period, None);
+        assert_eq!(params.offset, None);
+        assert_eq!(params.sigma, None);
+    }
+
+    #[test]
+    fn test_alma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AlmaInput::with_default_candles(&candles);
+        match input.data {
+            AlmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected AlmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.offset, None);
+        assert_eq!(input.params.sigma, None);
+    }
+
+    #[test]
+    fn test_alma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = AlmaParams {
+            period: Some(0),
+            offset: None,
+            sigma: None,
+        };
+        let input = AlmaInput::from_slice(&input_data, params);
+        let result = alma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_alma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = AlmaParams {
+            period: Some(10),
+            offset: None,
+            sigma: None,
+        };
+        let input = AlmaInput::from_slice(&input_data, params);
+        let result = alma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_alma_very_small_data_set() {
+        let input_data = [42.0];
+        let params = AlmaParams {
+            period: Some(9),
+            offset: None,
+            sigma: None,
+        };
+        let input = AlmaInput::from_slice(&input_data, params);
+        let result = alma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_alma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = AlmaParams {
+            period: Some(9),
+            offset: None,
+            sigma: None,
+        };
+        let first_input = AlmaInput::from_candles(&candles, "close", first_params);
+        let first_result = alma(&first_input).expect("Failed first ALMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = AlmaParams {
+            period: Some(5),
+            offset: Some(0.8),
+            sigma: Some(4.0),
+        };
+        let second_input = AlmaInput::from_slice(&first_result.values, second_params);
+        let second_result = alma(&second_input).expect("Failed second ALMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_alma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = AlmaParams {
+            period: Some(9),
+            offset: None,
+            sigma: None,
+        };
+        let input = AlmaInput::from_candles(&candles, "close", params);
+        let result = alma(&input).expect("Failed ALMA calculation");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

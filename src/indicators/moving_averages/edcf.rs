@@ -170,4 +170,105 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_edcf_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EdcfInput::with_default_candles(&candles);
+        match input.data {
+            EdcfData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected EdcfData::Candles"),
+        }
+        let period = input.get_period();
+        assert_eq!(period, 15);
+    }
+
+    #[test]
+    fn test_edcf_with_default_params() {
+        let default_params = EdcfParams::default();
+        assert_eq!(default_params.period, Some(15));
+    }
+
+    #[test]
+    fn test_edcf_with_zero_period() {
+        let data = [10.0, 20.0, 30.0];
+        let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(0) });
+        let result = edcf(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("period must be >= 1"));
+        }
+    }
+
+    #[test]
+    fn test_edcf_with_no_data() {
+        let data: [f64; 0] = [];
+        let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
+        let result = edcf(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("No data provided"));
+        }
+    }
+
+    #[test]
+    fn test_edcf_with_period_exceeding_data_length() {
+        let data = [10.0, 20.0, 30.0];
+        let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(10) });
+        let result = edcf(&input).unwrap();
+        assert_eq!(result.values.len(), data.len());
+        for i in 0..result.values.len() {
+            if i < 2 * 10 {
+                assert!(result.values[i].is_nan());
+            }
+        }
+    }
+
+    #[test]
+    fn test_edcf_very_small_data_set() {
+        let data = [42.0];
+        let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
+        let result = edcf(&input).unwrap();
+        assert_eq!(result.values.len(), data.len());
+        assert!(result.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_edcf_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input =
+            EdcfInput::from_candles(&candles, "close", EdcfParams { period: Some(15) });
+        let first_result = edcf(&first_input).expect("First EDCF failed");
+        let second_input =
+            EdcfInput::from_slice(&first_result.values, EdcfParams { period: Some(5) });
+        let second_result = edcf(&second_input).expect("Second EDCF failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_edcf_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: None });
+        let result = edcf(&input).expect("EDCF calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_edcf_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: Some(15) });
+        let result = edcf(&input).expect("EDCF calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        let start_index = 2 * 15;
+        if result.values.len() > start_index {
+            for i in start_index..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

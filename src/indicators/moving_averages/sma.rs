@@ -157,4 +157,127 @@ mod tests {
         let default_sma_result = sma(&default_input).expect("Failed to calculate SMA defaults");
         assert_eq!(default_sma_result.values.len(), close_prices.len());
     }
+
+    #[test]
+    fn test_sma_params_with_default_params() {
+        let default_params = SmaParams::with_default_params();
+        assert_eq!(
+            default_params.period, None,
+            "Expected period to be None in default parameters"
+        );
+    }
+
+    #[test]
+    fn test_sma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = SmaInput::with_default_candles(&candles);
+        match input.data {
+            SmaData::Candles { source, .. } => {
+                assert_eq!(source, "close", "Expected default source to be 'close'");
+            }
+            _ => panic!("Expected SmaData::Candles variant"),
+        }
+        assert_eq!(
+            input.params.period, None,
+            "Expected default period to be None"
+        );
+    }
+
+    #[test]
+    fn test_sma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SmaParams { period: Some(0) };
+        let input = SmaInput::from_slice(&input_data, params);
+
+        let result = sma(&input);
+        assert!(result.is_err(), "Expected an error for zero period");
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Invalid period"),
+                "Expected 'Invalid period' error message, got: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_sma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SmaParams { period: Some(10) };
+        let input = SmaInput::from_slice(&input_data, params);
+
+        let result = sma(&input);
+        assert!(result.is_err(), "Expected an error for period > data.len()");
+    }
+
+    #[test]
+    fn test_sma_very_small_data_set() {
+        let input_data = [42.0];
+        let params = SmaParams { period: Some(9) };
+        let input = SmaInput::from_slice(&input_data, params);
+
+        let result = sma(&input);
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than period"
+        );
+    }
+
+    #[test]
+    fn test_sma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = SmaParams { period: Some(9) };
+        let first_input = SmaInput::from_candles(&candles, "close", first_params);
+        let first_result = sma(&first_input).expect("Failed to calculate first SMA");
+
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "First SMA output length mismatch"
+        );
+
+        let second_params = SmaParams { period: Some(5) };
+        let second_input = SmaInput::from_slice(&first_result.values, second_params);
+        let second_result = sma(&second_input).expect("Failed to calculate second SMA");
+
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "Second SMA output length mismatch"
+        );
+    }
+
+    #[test]
+    fn test_sma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let close_prices = &candles.close;
+
+        let period = 9;
+        let params = SmaParams {
+            period: Some(period),
+        };
+        let input = SmaInput::from_candles(&candles, "close", params);
+        let sma_result = sma(&input).expect("Failed to calculate SMA");
+
+        assert_eq!(
+            sma_result.values.len(),
+            close_prices.len(),
+            "SMA length mismatch"
+        );
+
+        if sma_result.values.len() > 240 {
+            for i in 240..sma_result.values.len() {
+                assert!(
+                    !sma_result.values[i].is_nan(),
+                    "Expected no NaN after index 240, but found NaN at index {}",
+                    i
+                );
+            }
+        }
+    }
 }
