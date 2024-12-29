@@ -203,4 +203,21 @@ mod tests {
         let result = vwma(&input).expect("VWMA on custom prices");
         assert_eq!(result.values.len(), custom_prices.len());
     }
+
+    #[test]
+    fn test_vwma_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params_first = VwmaParams { period: Some(20) };
+        let input_first = VwmaInput::from_candles(&candles, "close", params_first);
+        let result_first = vwma(&input_first).expect("First pass VWMA failed");
+        assert_eq!(result_first.values.len(), candles.close.len());
+
+        let params_second = VwmaParams { period: Some(10) };
+        let input_second =
+            VwmaInput::from_candles_plus_prices(&candles, &result_first.values, params_second);
+        let result_second = vwma(&input_second).expect("Second pass VWMA failed");
+        assert_eq!(result_second.values.len(), result_first.values.len());
+    }
 }

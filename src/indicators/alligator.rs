@@ -183,6 +183,25 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_alligator_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = AlligatorParams {
+            jaw_period: Some(14),
+            jaw_offset: None,
+            teeth_period: None,
+            teeth_offset: None,
+            lips_period: None,
+            lips_offset: Some(2),
+        };
+        let input = AlligatorInput::from_candles(&candles, "hl2", partial_params);
+        let result = alligator(&input).expect("Failed to calculate alligator with partial params");
+        assert_eq!(result.jaw.len(), candles.close.len());
+        assert_eq!(result.teeth.len(), candles.close.len());
+        assert_eq!(result.lips.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_alligator_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -259,5 +278,76 @@ mod tests {
         };
         let custom_input = AlligatorInput::from_candles(&candles, "hl2", custom_params);
         let _ = alligator(&custom_input).expect("Alligator calculation with custom params failed");
+    }
+    #[test]
+    fn test_alligator_params_with_default_params() {
+        let default_params = AlligatorParams::default();
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AlligatorInput::from_candles(&candles, "hl2", default_params);
+        let result = alligator(&input).expect("Failed to calculate alligator");
+        assert_eq!(result.jaw.len(), candles.close.len());
+        assert_eq!(result.teeth.len(), candles.close.len());
+        assert_eq!(result.lips.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_alligator_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AlligatorInput::with_default_candles(&candles);
+        match input.data {
+            AlligatorData::Candles { source, .. } => {
+                assert_eq!(source, "hl2");
+            }
+            _ => panic!("Expected AlligatorData::Candles variant"),
+        }
+        assert!(input.params.jaw_period.is_some());
+        assert!(input.params.jaw_offset.is_some());
+        assert!(input.params.teeth_period.is_some());
+        assert!(input.params.teeth_offset.is_some());
+        assert!(input.params.lips_period.is_some());
+        assert!(input.params.lips_offset.is_some());
+    }
+
+    #[test]
+    fn test_alligator_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input = AlligatorInput::with_default_candles(&candles);
+        let first_result = alligator(&first_input).expect("Failed to calculate first alligator");
+        let second_input =
+            AlligatorInput::from_slice(&first_result.jaw, AlligatorParams::default());
+        let second_result = alligator(&second_input).expect("Failed to calculate second alligator");
+        assert_eq!(second_result.jaw.len(), first_result.jaw.len());
+        assert_eq!(second_result.teeth.len(), first_result.teeth.len());
+        assert_eq!(second_result.lips.len(), first_result.lips.len());
+    }
+
+    #[test]
+    fn test_alligator_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AlligatorInput::with_default_candles(&candles);
+        let result = alligator(&input).expect("Failed to calculate alligator");
+        if result.jaw.len() > 50 {
+            for i in 50..result.jaw.len() {
+                assert!(
+                    !result.jaw[i].is_nan(),
+                    "Expected no NaN in jaw after index {}, found NaN",
+                    i
+                );
+                assert!(
+                    !result.teeth[i].is_nan(),
+                    "Expected no NaN in teeth after index {}, found NaN",
+                    i
+                );
+                assert!(
+                    !result.lips[i].is_nan(),
+                    "Expected no NaN in lips after index {}, found NaN",
+                    i
+                );
+            }
+        }
     }
 }

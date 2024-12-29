@@ -77,11 +77,12 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(20);
     let bandwidth: f64 = input.params.bandwidth.unwrap_or(0.3);
-    if len == 0 {
-        return Err("No data available.".into());
+    if len == 0 || len < period {
+        return Err("Not enough data available.".into());
     }
+
     if period < 2 {
-        return Err("BandPass period must be >= 2".into());
+        return Err("BandPass period must be greater than data input.".into());
     }
 
     let hp_period_f = 4.0 * (period as f64) / bandwidth;
@@ -163,17 +164,16 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+
     #[test]
     fn test_bandpass_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        // Use default BandPass parameters
         let default_input = BandPassInput::with_default_candles(&candles);
         let default_output = bandpass(&default_input).expect("Failed bandpass with default params");
         assert_eq!(default_output.bp.len(), candles.close.len());
 
-        // Custom parameters
         let custom_params = BandPassParams {
             period: Some(30),
             bandwidth: Some(0.5),
@@ -308,6 +308,112 @@ mod tests {
         }
         for val in &result.trigger {
             assert!(val.is_finite(), "Trigger output should be finite");
+        }
+    }
+    #[test]
+    fn test_bandpass_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = BandPassInput::with_default_candles(&candles);
+        match input.data {
+            BandPassData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected BandPassData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.bandwidth, None);
+    }
+
+    #[test]
+    fn test_bandpass_params_with_default_params() {
+        let default_params = BandPassParams::with_default_params();
+        assert_eq!(default_params.period, None);
+        assert_eq!(default_params.bandwidth, None);
+    }
+
+    #[test]
+    fn test_bandpass_with_zero_period() {
+        let data = [10.0, 11.0, 12.0];
+        let params = BandPassParams {
+            period: Some(0),
+            bandwidth: Some(0.3),
+        };
+        let input = BandPassInput::from_slice(&data, params);
+        let result = bandpass(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("BandPass period must be greater than data input."));
+        }
+    }
+
+    #[test]
+    fn test_bandpass_with_data_len_less_than_period() {
+        let data = [10.0, 11.0];
+        let params = BandPassParams {
+            period: Some(5),
+            bandwidth: Some(0.3),
+        };
+        let input = BandPassInput::from_slice(&data, params);
+        let result = bandpass(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Not enough data available"));
+        }
+    }
+
+    #[test]
+    fn test_bandpass_with_empty_data() {
+        let data: [f64; 0] = [];
+        let params = BandPassParams {
+            period: Some(20),
+            bandwidth: Some(0.3),
+        };
+        let input = BandPassInput::from_slice(&data, params);
+        let result = bandpass(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Not enough data available."));
+        }
+    }
+
+    #[test]
+    fn test_bandpass_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = BandPassParams {
+            period: Some(20),
+            bandwidth: Some(0.3),
+        };
+        let first_input = BandPassInput::from_candles(&candles, "close", first_params);
+        let first_result = bandpass(&first_input).expect("Failed to calculate first bandpass");
+        assert_eq!(first_result.bp.len(), candles.close.len());
+        let second_params = BandPassParams {
+            period: Some(30),
+            bandwidth: Some(0.5),
+        };
+        let second_input = BandPassInput::from_slice(&first_result.bp, second_params);
+        let second_result = bandpass(&second_input).expect("Failed to calculate second bandpass");
+        assert_eq!(second_result.bp.len(), first_result.bp.len());
+    }
+
+    #[test]
+    fn test_bandpass_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = BandPassParams {
+            period: Some(20),
+            bandwidth: Some(0.3),
+        };
+        let input = BandPassInput::from_candles(&candles, "close", params);
+        let result = bandpass(&input).expect("Failed to calculate bandpass");
+        if result.bp.len() > 30 {
+            for i in 30..result.bp.len() {
+                assert!(!result.bp[i].is_nan());
+                assert!(!result.bp_normalized[i].is_nan());
+                assert!(!result.signal[i].is_nan());
+                assert!(!result.trigger[i].is_nan());
+            }
         }
     }
 }

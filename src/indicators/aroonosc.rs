@@ -131,6 +131,16 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_aroon_osc_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = AroonOscParams { length: Some(20) };
+        let input = AroonOscInput::from_candles(&candles, partial_params);
+        let result = aroon_osc(&input).expect("Failed to calculate Aroon Osc with partial params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_aroon_osc_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -164,6 +174,62 @@ mod tests {
                 assert!(
                     val.is_finite(),
                     "Aroon Osc should be finite after enough data"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aroon_osc_params_with_default_params() {
+        let default_params = AroonOscParams::default();
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AroonOscInput::from_candles(&candles, default_params);
+        let result = aroon_osc(&input).expect("Failed to calculate Aroon Osc");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_aroon_osc_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AroonOscInput::with_default_candles(&candles);
+        match input.data {
+            AroonOscData::Candles { .. } => {}
+            _ => panic!("Expected AroonOscData::Candles variant"),
+        }
+        assert!(input.params.length.is_some());
+    }
+
+    #[test]
+    fn test_aroon_osc_with_slices_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = AroonOscParams { length: Some(10) };
+        let first_input = AroonOscInput::from_candles(&candles, first_params);
+        let first_result = aroon_osc(&first_input).expect("Failed to calculate first Aroon Osc");
+        let second_params = AroonOscParams { length: Some(5) };
+        let second_input = AroonOscInput::from_slices_hl(
+            &first_result.values,
+            &first_result.values,
+            second_params,
+        );
+        let second_result = aroon_osc(&second_input).expect("Failed to calculate second Aroon Osc");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_aroon_osc_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AroonOscInput::with_default_candles(&candles);
+        let result = aroon_osc(&input).expect("Failed to calculate Aroon Osc");
+        if result.values.len() > 50 {
+            for i in 50..result.values.len() {
+                assert!(
+                    !result.values[i].is_nan(),
+                    "Expected no NaN after index {}, but found NaN",
+                    i
                 );
             }
         }

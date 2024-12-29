@@ -144,4 +144,69 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_ad_params_with_default_params() {
+        let default_params = AdParams::default();
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdInput::from_candles(&candles, default_params);
+        let result = ad(&input).expect("Failed to calculate AD");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_ad_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdInput::with_default_candles(&candles);
+        match input.data {
+            AdData::Candles { .. } => {}
+            _ => panic!("Expected AdData::Candles variant"),
+        }
+    }
+
+    #[test]
+    fn test_ad_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = AdParams {};
+        let input = AdInput::from_candles(&candles, partial_params);
+        let result = ad(&input).expect("Failed to calculate AD with partial params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_ad_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input = AdInput::with_default_candles(&candles);
+        let first_result = ad(&first_input).expect("Failed to calculate first AD");
+        let second_input = AdInput::from_slices(
+            &first_result.values,
+            &first_result.values,
+            &first_result.values,
+            &first_result.values,
+            AdParams::default(),
+        );
+        let second_result = ad(&second_input).expect("Failed to calculate second AD");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_ad_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdInput::with_default_candles(&candles);
+        let ad_result = ad(&input).expect("Failed to calculate AD");
+        assert_eq!(ad_result.values.len(), candles.close.len());
+        if ad_result.values.len() > 50 {
+            for i in 50..ad_result.values.len() {
+                assert!(
+                    !ad_result.values[i].is_nan(),
+                    "Expected no NaN after index 50, but found NaN at index {}",
+                    i
+                );
+            }
+        }
+    }
 }

@@ -127,6 +127,74 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_ao_params_with_default_params() {
+        let default_params = AoParams::default();
+        assert_eq!(default_params.short_period, Some(5));
+        assert_eq!(default_params.long_period, Some(34));
+    }
+
+    #[test]
+    fn test_ao_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = AoInput::with_default_candles(&candles);
+        match input.data {
+            AoData::Candles { source, .. } => {
+                assert_eq!(source, "hl2");
+            }
+            _ => panic!("Expected AoData::Candles variant"),
+        }
+        let default_params = AoParams::default();
+        assert_eq!(input.params.short_period, default_params.short_period);
+        assert_eq!(input.params.long_period, default_params.long_period);
+    }
+
+    #[test]
+    fn test_ao_with_zero_period() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let zero_short_params = AoParams {
+            short_period: Some(0),
+            long_period: Some(34),
+        };
+        let input_zero_short = AoInput::from_candles(&candles, "hl2", zero_short_params);
+        let result_zero_short = ao(&input_zero_short);
+        assert!(result_zero_short.is_err());
+
+        let zero_long_params = AoParams {
+            short_period: Some(5),
+            long_period: Some(0),
+        };
+        let input_zero_long = AoInput::from_candles(&candles, "hl2", zero_long_params);
+        let result_zero_long = ao(&input_zero_long);
+        assert!(result_zero_long.is_err());
+    }
+
+    #[test]
+    fn test_ao_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let partial_params = AoParams {
+            short_period: Some(3),
+            long_period: None,
+        };
+        let input_partial = AoInput::from_candles(&candles, "hl2", partial_params);
+        let result_partial = ao(&input_partial).expect("Failed AO with partial params");
+        assert_eq!(result_partial.values.len(), candles.close.len());
+
+        let missing_short_params = AoParams {
+            short_period: None,
+            long_period: Some(40),
+        };
+        let input_missing_short = AoInput::from_candles(&candles, "hl2", missing_short_params);
+        let result_missing_short = ao(&input_missing_short).expect("Failed AO with missing short");
+        assert_eq!(result_missing_short.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_ao_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -171,6 +239,96 @@ mod tests {
                 val.is_finite(),
                 "AO output should be finite at valid indices"
             );
+        }
+    }
+    #[test]
+    fn test_ao_invalid_period_relationship() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let invalid_params = AoParams {
+            short_period: Some(40),
+            long_period: Some(10),
+        };
+        let input = AoInput::from_candles(&candles, "hl2", invalid_params);
+        let result = ao(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ao_period_exceeding_data_length() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let too_long_params = AoParams {
+            short_period: Some(5),
+            long_period: Some(candles.close.len() + 10),
+        };
+        let input_too_long = AoInput::from_candles(&candles, "hl2", too_long_params);
+        let result_too_long =
+            ao(&input_too_long).expect("Failed AO calculation with too long period");
+
+        assert_eq!(result_too_long.values.len(), candles.close.len());
+        let nan_count = result_too_long
+            .values
+            .iter()
+            .filter(|&&val| val.is_nan())
+            .count();
+        assert_eq!(nan_count, candles.close.len());
+    }
+
+    #[test]
+    fn test_ao_very_small_data_set() {
+        let data = [42.0];
+        let params = AoParams {
+            short_period: Some(5),
+            long_period: Some(34),
+        };
+        let input = AoInput::from_slice(&data, params);
+        let result = ao(&input).expect("Failed AO on very small data set");
+        assert_eq!(result.values.len(), 1);
+        assert!(result.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_ao_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = AoParams {
+            short_period: Some(5),
+            long_period: Some(34),
+        };
+        let first_input = AoInput::from_candles(&candles, "hl2", first_params);
+        let first_result = ao(&first_input).expect("Failed AO (first run)");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = AoParams {
+            short_period: Some(3),
+            long_period: Some(10),
+        };
+        let second_input = AoInput::from_slice(&first_result.values, second_params);
+        let second_result = ao(&second_input).expect("Failed AO (second run)");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_ao_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params = AoParams {
+            short_period: Some(5),
+            long_period: Some(34),
+        };
+        let input = AoInput::from_candles(&candles, "hl2", params);
+        let result = ao(&input).expect("Failed to calculate AO");
+        assert_eq!(result.values.len(), candles.close.len());
+
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
         }
     }
 }

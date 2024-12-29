@@ -251,4 +251,110 @@ mod tests {
             "Should produce ADX values with default params"
         );
     }
+
+    #[test]
+    fn test_adx_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = AdxParams { period: None };
+        let input_default = AdxInput::from_candles(&candles, default_params);
+        let output_default = adx(&input_default).expect("Failed ADX with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+        let params_period_14 = AdxParams { period: Some(14) };
+        let input_period_14 = AdxInput::from_candles(&candles, params_period_14);
+        let output_period_14 = adx(&input_period_14).expect("Failed ADX with period=14");
+        assert_eq!(output_period_14.values.len(), candles.close.len());
+        let params_custom = AdxParams { period: Some(20) };
+        let input_custom = AdxInput::from_candles(&candles, params_custom);
+        let output_custom = adx(&input_custom).expect("Failed ADX with custom period");
+        assert_eq!(output_custom.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adx_params_with_default_params() {
+        let default_params = AdxParams::default();
+        assert_eq!(default_params.period, Some(14));
+    }
+
+    #[test]
+    fn test_adx_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdxInput::with_default_candles(&candles);
+        match input.data {
+            AdxData::Candles { .. } => {}
+            _ => panic!("Expected AdxData::Candles variant"),
+        }
+        assert_eq!(input.params.period, Some(14));
+    }
+
+    #[test]
+    fn test_adx_with_zero_period() {
+        let high = [10.0, 20.0, 30.0];
+        let low = [5.0, 15.0, 25.0];
+        let close = [9.0, 19.0, 29.0];
+        let params = AdxParams { period: Some(0) };
+        let input = AdxInput::from_slices(&high, &low, &close, params);
+        let result = adx(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period"));
+        }
+    }
+
+    #[test]
+    fn test_adx_with_period_exceeding_data_length() {
+        let high = [10.0, 20.0, 30.0];
+        let low = [5.0, 15.0, 25.0];
+        let close = [9.0, 19.0, 29.0];
+        let params = AdxParams { period: Some(10) };
+        let input = AdxInput::from_slices(&high, &low, &close, params);
+        let result = adx(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adx_very_small_data_set() {
+        let high = [42.0];
+        let low = [41.0];
+        let close = [40.5];
+        let params = AdxParams { period: Some(14) };
+        let input = AdxInput::from_slices(&high, &low, &close, params);
+        let result = adx(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adx_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = AdxParams { period: Some(14) };
+        let first_input = AdxInput::from_candles(&candles, first_params);
+        let first_result = adx(&first_input).expect("Failed to calculate first ADX");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = AdxParams { period: Some(5) };
+        let second_input = AdxInput::from_slices(
+            &candles.high,
+            &candles.low,
+            &first_result.values,
+            second_params,
+        );
+        let second_result = adx(&second_input).expect("Failed to calculate second ADX");
+        assert_eq!(second_result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adx_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = AdxParams { period: Some(14) };
+        let input = AdxInput::from_candles(&candles, params);
+        let adx_result = adx(&input).expect("Failed to calculate ADX");
+        assert_eq!(adx_result.values.len(), candles.close.len());
+        if adx_result.values.len() > 100 {
+            for i in 100..adx_result.values.len() {
+                assert!(!adx_result.values[i].is_nan());
+            }
+        }
+    }
 }

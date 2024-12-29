@@ -130,6 +130,16 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_rsi_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = RsiParams { period: None };
+        let input = RsiInput::from_candles(&candles, "close", partial_params);
+        let result = rsi(&input).expect("Failed RSI with partial params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_rsi_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -174,5 +184,90 @@ mod tests {
             !default_rsi_result.values.is_empty(),
             "Should produce RSI values with default params"
         );
+    }
+    #[test]
+    fn test_rsi_params_with_default_params() {
+        let default_params = RsiParams::default();
+        assert_eq!(default_params.period, Some(14));
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = RsiInput::from_candles(&candles, "close", default_params);
+        let result = rsi(&input).expect("Failed RSI with default params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_rsi_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = RsiInput::with_default_candles(&candles);
+        match input.data {
+            RsiData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected RsiData::Candles variant"),
+        }
+        let result = rsi(&input).expect("Failed RSI with default candles");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_rsi_with_zero_period() {
+        let slice = [10.0, 11.0, 12.0];
+        let params = RsiParams { period: Some(0) };
+        let input = RsiInput::from_slice(&slice, params);
+        let result = rsi(&input);
+        assert!(result.is_err(), "Expected an error for zero period");
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period"));
+        }
+    }
+
+    #[test]
+    fn test_rsi_with_period_exceeding_data_length() {
+        let slice = [10.0, 11.0, 12.0];
+        let params = RsiParams { period: Some(10) };
+        let input = RsiInput::from_slice(&slice, params);
+        let result = rsi(&input);
+        assert!(result.is_err(), "Expected an error for period > data.len()");
+    }
+
+    #[test]
+    fn test_rsi_very_small_data_set() {
+        let slice = [42.0];
+        let params = RsiParams { period: Some(14) };
+        let input = RsiInput::from_slice(&slice, params);
+        let result = rsi(&input);
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than period"
+        );
+    }
+
+    #[test]
+    fn test_rsi_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = RsiParams { period: Some(14) };
+        let first_input = RsiInput::from_candles(&candles, "close", first_params);
+        let first_result = rsi(&first_input).expect("Failed first RSI");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = RsiParams { period: Some(5) };
+        let second_input = RsiInput::from_slice(&first_result.values, second_params);
+        let second_result = rsi(&second_input).expect("Failed second RSI");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_rsi_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = RsiParams { period: Some(14) };
+        let input = RsiInput::from_candles(&candles, "close", params);
+        let result = rsi(&input).expect("Failed RSI calculation");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan(), "Found NaN in RSI at {}", i);
+            }
+        }
     }
 }

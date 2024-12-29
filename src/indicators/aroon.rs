@@ -202,4 +202,118 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_aroon_params_with_default_params() {
+        let default_params = AroonParams::default();
+        assert_eq!(default_params.length, Some(14));
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AroonInput::from_candles(&candles, default_params);
+        let result = aroon(&input).expect("Failed Aroon with default params");
+        assert_eq!(result.aroon_up.len(), candles.close.len());
+        assert_eq!(result.aroon_down.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_aroon_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AroonInput::with_default_candles(&candles);
+        match input.data {
+            AroonData::Candles { .. } => {}
+            _ => panic!("Expected AroonData::Candles variant"),
+        }
+        let result = aroon(&input).expect("Failed to calculate Aroon with default candles");
+        assert_eq!(result.aroon_up.len(), candles.close.len());
+        assert_eq!(result.aroon_down.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_aroon_with_zero_length() {
+        let high = [10.0, 11.0, 12.0];
+        let low = [9.0, 10.0, 11.0];
+        let params = AroonParams { length: Some(0) };
+        let input = AroonInput::from_slices_hl(&high, &low, params);
+        let result = aroon(&input);
+        assert!(result.is_err(), "Expected error for zero length");
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid length"));
+        }
+    }
+
+    #[test]
+    fn test_aroon_with_length_exceeding_data_length() {
+        let high = [10.0, 11.0, 12.0];
+        let low = [9.0, 10.0, 11.0];
+        let params = AroonParams { length: Some(14) };
+        let input = AroonInput::from_slices_hl(&high, &low, params);
+        let result = aroon(&input);
+        assert!(result.is_err(), "Expected error for length > data.len()");
+    }
+
+    #[test]
+    fn test_aroon_very_small_data_set() {
+        let high = [100.0];
+        let low = [99.5];
+        let params = AroonParams { length: Some(14) };
+        let input = AroonInput::from_slices_hl(&high, &low, params);
+        let result = aroon(&input);
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than length"
+        );
+    }
+
+    #[test]
+    fn test_aroon_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = AroonParams { length: Some(14) };
+        let first_input = AroonInput::from_candles(&candles, first_params);
+        let first_result = aroon(&first_input).expect("Failed Aroon calculation");
+        assert_eq!(first_result.aroon_up.len(), candles.close.len());
+        assert_eq!(first_result.aroon_down.len(), candles.close.len());
+        let second_params = AroonParams { length: Some(5) };
+        let second_input = AroonInput::from_slices_hl(&candles.high, &candles.low, second_params);
+        let second_result = aroon(&second_input).expect("Failed second Aroon calculation");
+        assert_eq!(second_result.aroon_up.len(), candles.close.len());
+        assert_eq!(second_result.aroon_down.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_aroon_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = AroonParams { length: Some(14) };
+        let input = AroonInput::from_candles(&candles, params);
+        let result = aroon(&input).expect("Failed Aroon calculation");
+        assert_eq!(result.aroon_up.len(), candles.close.len());
+        assert_eq!(result.aroon_down.len(), candles.close.len());
+        if result.aroon_up.len() > 240 {
+            for i in 240..result.aroon_up.len() {
+                assert!(
+                    !result.aroon_up[i].is_nan(),
+                    "Found NaN in aroon_up at {}",
+                    i
+                );
+                assert!(
+                    !result.aroon_down[i].is_nan(),
+                    "Found NaN in aroon_down at {}",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aroon_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = AroonParams { length: None };
+        let input = AroonInput::from_candles(&candles, partial_params);
+        let result = aroon(&input).expect("Failed Aroon with partial params");
+        assert_eq!(result.aroon_up.len(), candles.close.len());
+        assert_eq!(result.aroon_down.len(), candles.close.len());
+    }
 }

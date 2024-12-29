@@ -79,12 +79,13 @@ pub fn apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
         ApoData::Slice(slice) => slice,
     };
 
-    if data.len() < long {
-        return Err("Not enough data points to calculate APO".into());
-    }
     let len = data.len();
     if len == 0 {
         return Err("No candles available.".into());
+    }
+
+    if data.len() < long {
+        return Err("Not enough data points to calculate APO".into());
     }
 
     let mut apo_values = Vec::with_capacity(len);
@@ -154,6 +155,150 @@ mod tests {
                 val.is_finite(),
                 "APO output should be finite after EMAs are established"
             );
+        }
+    }
+
+    #[test]
+    fn test_apo_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let default_params = ApoParams {
+            short_period: None,
+            long_period: None,
+        };
+        let input_default = ApoInput::from_candles(&candles, "close", default_params);
+        let output_default = apo(&input_default).expect("Failed APO with default params");
+        assert_eq!(output_default.values.len(), candles.close.len());
+        let params_5_15 = ApoParams {
+            short_period: Some(5),
+            long_period: Some(15),
+        };
+        let input_5_15 = ApoInput::from_candles(&candles, "hl2", params_5_15);
+        let output_5_15 = apo(&input_5_15).expect("Failed APO with short=5, long=15");
+        assert_eq!(output_5_15.values.len(), candles.close.len());
+        let params_12_26 = ApoParams {
+            short_period: Some(12),
+            long_period: Some(26),
+        };
+        let input_12_26 = ApoInput::from_candles(&candles, "hlc3", params_12_26);
+        let output_12_26 = apo(&input_12_26).expect("Failed APO with short=12, long=26");
+        assert_eq!(output_12_26.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_apo_params_with_default_params() {
+        let default_params = ApoParams::default();
+        assert_eq!(default_params.short_period, Some(10));
+        assert_eq!(default_params.long_period, Some(20));
+    }
+
+    #[test]
+    fn test_apo_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = ApoInput::with_default_candles(&candles);
+        match input.data {
+            ApoData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected ApoData::Candles variant"),
+        }
+        assert_eq!(input.params.short_period, Some(10));
+        assert_eq!(input.params.long_period, Some(20));
+    }
+
+    #[test]
+    fn test_apo_with_zero_period() {
+        let data = [10.0, 11.0, 12.0, 13.0];
+        let params = ApoParams {
+            short_period: Some(0),
+            long_period: Some(20),
+        };
+        let input = ApoInput::from_slice(&data, params);
+        let result = apo(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period"));
+        }
+    }
+
+    #[test]
+    fn test_apo_short_period_not_less_than_long_period() {
+        let data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let params = ApoParams {
+            short_period: Some(20),
+            long_period: Some(10),
+        };
+        let input = ApoInput::from_slice(&data, params);
+        let result = apo(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Short period must be less"));
+        }
+    }
+
+    #[test]
+    fn test_apo_with_data_len_less_than_long_period() {
+        let data = [10.0, 11.0, 12.0];
+        let params = ApoParams {
+            short_period: Some(1),
+            long_period: Some(5),
+        };
+        let input = ApoInput::from_slice(&data, params);
+        let result = apo(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Not enough data points"));
+        }
+    }
+
+    #[test]
+    fn test_apo_with_empty_data() {
+        let data: [f64; 0] = [];
+        let params = ApoParams {
+            short_period: Some(5),
+            long_period: Some(10),
+        };
+        let input = ApoInput::from_slice(&data, params);
+        let result = apo(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("No candles available"));
+        }
+    }
+
+    #[test]
+    fn test_apo_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = ApoParams {
+            short_period: Some(10),
+            long_period: Some(20),
+        };
+        let first_input = ApoInput::from_candles(&candles, "close", first_params);
+        let first_result = apo(&first_input).expect("Failed to calculate first APO");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = ApoParams {
+            short_period: Some(5),
+            long_period: Some(15),
+        };
+        let second_input = ApoInput::from_slice(&first_result.values, second_params);
+        let second_result = apo(&second_input).expect("Failed to calculate second APO");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_apo_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = ApoParams {
+            short_period: Some(10),
+            long_period: Some(20),
+        };
+        let input = ApoInput::from_candles(&candles, "close", params);
+        let result = apo(&input).expect("Failed to calculate APO");
+        if result.values.len() > 30 {
+            for i in 30..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
         }
     }
 }

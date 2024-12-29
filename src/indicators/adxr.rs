@@ -232,6 +232,16 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_adxr_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let partial_params = AdxrParams { period: None };
+        let input = AdxrInput::from_candles(&candles, partial_params);
+        let result = adxr(&input).expect("Failed ADXR with partial params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_adxr_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -273,5 +283,104 @@ mod tests {
             !default_adxr_result.values.is_empty(),
             "Should produce ADXR values with default params"
         );
+    }
+    #[test]
+    fn test_adxr_params_with_default_params() {
+        let default_params = AdxrParams::default();
+        assert_eq!(default_params.period, Some(14));
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdxrInput::from_candles(&candles, default_params);
+        let result = adxr(&input).expect("Failed ADXR with default params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adxr_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = AdxrInput::with_default_candles(&candles);
+        match input.data {
+            AdxrData::Candles { .. } => {}
+            _ => panic!("Expected AdxrData::Candles variant"),
+        }
+        let result = adxr(&input).expect("Failed ADXR with default_candles");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adxr_with_zero_period() {
+        let high = [10.0, 20.0, 30.0];
+        let low = [9.0, 19.0, 29.0];
+        let close = [9.5, 19.5, 29.5];
+        let params = AdxrParams { period: Some(0) };
+        let input = AdxrInput::from_slices(&high, &low, &close, params);
+        let result = adxr(&input);
+        assert!(result.is_err(), "Expected an error for zero period");
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period"));
+        }
+    }
+
+    #[test]
+    fn test_adxr_with_period_exceeding_data_length() {
+        let high = [10.0, 20.0];
+        let low = [9.0, 19.0];
+        let close = [9.5, 19.5];
+        let params = AdxrParams { period: Some(10) };
+        let input = AdxrInput::from_slices(&high, &low, &close, params);
+        let result = adxr(&input);
+        assert!(result.is_err(), "Expected an error for period > data.len()");
+    }
+
+    #[test]
+    fn test_adxr_very_small_data_set() {
+        let high = [100.0];
+        let low = [99.0];
+        let close = [99.5];
+        let params = AdxrParams { period: Some(14) };
+        let input = AdxrInput::from_slices(&high, &low, &close, params);
+        let result = adxr(&input);
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than period"
+        );
+    }
+
+    #[test]
+    fn test_adxr_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = AdxrParams { period: Some(14) };
+        let first_input = AdxrInput::from_candles(&candles, params);
+        let first_result = adxr(&first_input).expect("Failed to calculate first ADXR");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let high_reinput = &candles.high;
+        let low_reinput = &candles.low;
+        let close_reinput = &candles.close;
+        let second_params = AdxrParams { period: Some(5) };
+        let second_input =
+            AdxrInput::from_slices(high_reinput, low_reinput, close_reinput, second_params);
+        let second_result = adxr(&second_input).expect("Failed second ADXR");
+        assert_eq!(second_result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adxr_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = AdxrParams { period: Some(14) };
+        let input = AdxrInput::from_candles(&candles, params);
+        let adxr_result = adxr(&input).expect("Failed to calculate ADXR");
+        assert_eq!(adxr_result.values.len(), candles.close.len());
+        if adxr_result.values.len() > 240 {
+            for i in 240..adxr_result.values.len() {
+                assert!(
+                    !adxr_result.values[i].is_nan(),
+                    "Found NaN in ADXR at {}",
+                    i
+                );
+            }
+        }
     }
 }

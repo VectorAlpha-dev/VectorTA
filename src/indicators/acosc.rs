@@ -172,6 +172,18 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
+    fn test_acosc_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let default_params = AcoscParams::default();
+        let input_default = AcoscInput::from_candles(&candles, default_params);
+        let output_default = acosc(&input_default).expect("Failed ACOSC with default params");
+        assert_eq!(output_default.osc.len(), candles.close.len());
+        assert_eq!(output_default.change.len(), candles.close.len());
+    }
+
+    #[test]
     fn test_acosc_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -220,6 +232,82 @@ mod tests {
                 expected_last_five_acosc_change[i],
                 value
             );
+        }
+    }
+    #[test]
+    fn test_acosc_params_with_default_params() {
+        let default_params = AcoscParams::default();
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = AcoscInput::from_candles(&candles, default_params);
+        let result = acosc(&input).expect("Failed acosc with default params");
+        assert_eq!(result.osc.len(), candles.close.len());
+        assert_eq!(result.change.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_acosc_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = AcoscInput::with_default_candles(&candles);
+        match input.data {
+            AcoscData::Candles { .. } => {}
+            _ => panic!("Expected AcoscData::Candles variant"),
+        }
+    }
+
+    #[test]
+    fn test_acosc_with_small_data_set() {
+        let high = [100.0, 101.0];
+        let low = [99.0, 98.0];
+        let params = AcoscParams::default();
+        let input = AcoscInput::from_slices(&high, &low, params);
+        let result = acosc(&input);
+        assert!(result.is_err(), "Expected error for not enough data");
+    }
+
+    #[test]
+    fn test_acosc_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_input = AcoscInput::with_default_candles(&candles);
+        let first_result = acosc(&first_input).expect("Failed first acosc");
+
+        assert_eq!(first_result.osc.len(), candles.close.len());
+        assert_eq!(first_result.change.len(), candles.close.len());
+
+        let high_reinput = &candles.high;
+        let low_reinput = &candles.low;
+        let second_params = AcoscParams::default();
+        let second_input = AcoscInput::from_slices(high_reinput, low_reinput, second_params);
+        let second_result = acosc(&second_input).expect("Failed second acosc");
+
+        assert_eq!(second_result.osc.len(), candles.close.len());
+        assert_eq!(second_result.change.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_acosc_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = AcoscInput::with_default_candles(&candles);
+        let acosc_result = acosc(&input).expect("Failed to calculate acosc");
+        assert_eq!(acosc_result.osc.len(), candles.close.len());
+        assert_eq!(acosc_result.change.len(), candles.close.len());
+
+        if acosc_result.osc.len() > 240 {
+            for i in 240..acosc_result.osc.len() {
+                assert!(!acosc_result.osc[i].is_nan(), "Found NaN in osc at {}", i);
+                assert!(
+                    !acosc_result.change[i].is_nan(),
+                    "Found NaN in change at {}",
+                    i
+                );
+            }
         }
     }
 }

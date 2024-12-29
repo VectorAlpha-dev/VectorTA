@@ -231,4 +231,163 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_adosc_params_with_default_params() {
+        let default_params = AdoscParams::default();
+        assert_eq!(default_params.short_period, Some(3));
+        assert_eq!(default_params.long_period, Some(10));
+    }
+
+    #[test]
+    fn test_adosc_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let input = AdoscInput::with_default_candles(&candles);
+        match input.data {
+            AdoscData::Candles { .. } => {}
+            _ => panic!("Expected AdoscData::Candles variant"),
+        }
+        let default_params = AdoscParams::default();
+        assert_eq!(input.params.short_period, default_params.short_period);
+        assert_eq!(input.params.long_period, default_params.long_period);
+    }
+
+    #[test]
+    fn test_adosc_with_zero_period() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let zero_short = AdoscParams {
+            short_period: Some(0),
+            long_period: Some(10),
+        };
+        let input_zero_short = AdoscInput::from_candles(&candles, zero_short);
+        let result_zero_short = adosc(&input_zero_short);
+        assert!(result_zero_short.is_err());
+
+        let zero_long = AdoscParams {
+            short_period: Some(3),
+            long_period: Some(0),
+        };
+        let input_zero_long = AdoscInput::from_candles(&candles, zero_long);
+        let result_zero_long = adosc(&input_zero_long);
+        assert!(result_zero_long.is_err());
+    }
+
+    #[test]
+    fn test_adosc_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let partial_params = AdoscParams {
+            short_period: Some(2),
+            long_period: None,
+        };
+        let input_partial = AdoscInput::from_candles(&candles, partial_params);
+        let result_partial = adosc(&input_partial).expect("Failed ADOSC with partial params");
+        assert_eq!(result_partial.values.len(), candles.close.len());
+
+        let one_missing_short = AdoscParams {
+            short_period: None,
+            long_period: Some(12),
+        };
+        let input_missing_short = AdoscInput::from_candles(&candles, one_missing_short);
+        let result_missing_short = adosc(&input_missing_short).expect("Failed ADOSC missing short");
+        assert_eq!(result_missing_short.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_adosc_invalid_period_relationship() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params = AdoscParams {
+            short_period: Some(10),
+            long_period: Some(5),
+        };
+        let input = AdoscInput::from_candles(&candles, params);
+        let result = adosc(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adosc_period_exceeding_data_length() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let too_long = AdoscParams {
+            short_period: Some(3),
+            long_period: Some(candles.close.len() + 1),
+        };
+        let input_too_long = AdoscInput::from_candles(&candles, too_long);
+        let result_too_long = adosc(&input_too_long);
+        assert!(result_too_long.is_err());
+    }
+
+    #[test]
+    fn test_adosc_very_small_data_set() {
+        let short = 3;
+        let long = 10;
+        let high = [10.0];
+        let low = [5.0];
+        let close = [7.0];
+        let volume = [1000.0];
+
+        let params = AdoscParams {
+            short_period: Some(short),
+            long_period: Some(long),
+        };
+        let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
+        let result = adosc(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adosc_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = AdoscParams {
+            short_period: Some(3),
+            long_period: Some(10),
+        };
+        let first_input = AdoscInput::from_candles(&candles, first_params);
+        let first_result = adosc(&first_input).expect("Failed to calculate ADOSC (first)");
+
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = AdoscParams {
+            short_period: Some(2),
+            long_period: Some(6),
+        };
+        let second_input = AdoscInput::from_slices(
+            &first_result.values,
+            &first_result.values,
+            &first_result.values,
+            &first_result.values,
+            second_params,
+        );
+        let second_result = adosc(&second_input).expect("Failed to calculate ADOSC (second)");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_adosc_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params = AdoscParams {
+            short_period: Some(3),
+            long_period: Some(10),
+        };
+        let input = AdoscInput::from_candles(&candles, params);
+        let result = adosc(&input).expect("Failed to calculate ADOSC");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

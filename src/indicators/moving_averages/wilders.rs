@@ -155,4 +155,59 @@ mod tests {
         let default_output = wilders(&input_default).expect("Wilder's default calculation failed");
         assert!(!default_output.values.is_empty());
     }
+
+    #[test]
+    fn test_wilders_params_with_default_params() {
+        let default_params = WildersParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_wilders_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = WildersInput::with_default_candles(&candles);
+        match input.data {
+            WildersData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected WildersData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_wilders_invalid_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = WildersParams { period: Some(0) };
+        let input = WildersInput::from_slice(&input_data, params);
+        let result = wilders(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period specified"));
+        }
+    }
+
+    #[test]
+    fn test_wilders_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = WildersParams { period: Some(5) };
+        let input = WildersInput::from_slice(&input_data, params);
+        let result = wilders(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid period specified"));
+        }
+    }
+
+    #[test]
+    fn test_wilders_very_small_data_set() {
+        let input_data = [42.0, 43.0];
+        let params = WildersParams { period: Some(2) };
+        let input = WildersInput::from_slice(&input_data, params);
+        let result = wilders(&input).expect("Failed on very small data set");
+        assert_eq!(result.values.len(), input_data.len());
+        assert!(result.values[0].is_nan());
+        assert!((result.values[1] - 42.5).abs() < f64::EPSILON);
+    }
 }
