@@ -179,4 +179,87 @@ mod tests {
         let output3 = tema(&input3).expect("Failed TEMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
+    #[test]
+    fn test_tema_params_with_default() {
+        let default_params = TemaParams::default();
+        assert_eq!(default_params.period, Some(9));
+    }
+
+    #[test]
+    fn test_tema_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = TemaInput::with_default_candles(&candles);
+        match input.data {
+            TemaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected TemaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, Some(9));
+    }
+
+    #[test]
+    fn test_tema_zero_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = TemaParams { period: Some(0) };
+        let input = TemaInput::from_slice(&data, params);
+        let result = tema(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Period cannot be zero"),
+                "Unexpected error: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_tema_period_exceeding_data_length() {
+        let data = [10.0, 20.0, 30.0];
+        let params = TemaParams { period: Some(5) };
+        let input = TemaInput::from_slice(&data, params);
+        let result = tema(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tema_very_small_data_set() {
+        let data = [42.0; 10];
+        let params = TemaParams { period: Some(9) };
+        let input = TemaInput::from_slice(&data, params);
+        let result = tema(&input).expect("Should handle near-minimal data");
+        assert_eq!(result.values.len(), data.len());
+    }
+
+    #[test]
+    fn test_tema_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = TemaParams { period: Some(9) };
+        let first_input = TemaInput::from_candles(&candles, "close", first_params);
+        let first_result = tema(&first_input).expect("Failed to calculate first TEMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = TemaParams { period: Some(5) };
+        let second_input = TemaInput::from_slice(&first_result.values, second_params);
+        let second_result = tema(&second_input).expect("Failed to calculate second TEMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_tema_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = TemaParams { period: Some(9) };
+        let input = TemaInput::from_candles(&candles, "close", params);
+        let result = tema(&input).expect("Failed to calculate TEMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 50 {
+            for i in 50..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

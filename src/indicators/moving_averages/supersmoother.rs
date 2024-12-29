@@ -167,4 +167,78 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_supersmoother_params_with_default_params() {
+        let params = SuperSmootherParams::with_default_params();
+        assert_eq!(params.period, None);
+    }
+
+    #[test]
+    fn test_supersmoother_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SuperSmootherInput::with_default_candles(&candles);
+        match input.data {
+            SuperSmootherData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected SuperSmootherData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_supersmoother_invalid_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = SuperSmootherParams { period: Some(0) };
+        let input = SuperSmootherInput::from_slice(&data, params);
+        let result = supersmoother(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_supersmoother_empty_data() {
+        let data: [f64; 0] = [];
+        let params = SuperSmootherParams { period: Some(14) };
+        let input = SuperSmootherInput::from_slice(&data, params);
+        let result = supersmoother(&input).expect("Should return empty output, not err");
+        assert_eq!(result.values.len(), 0);
+    }
+
+    #[test]
+    fn test_supersmoother_small_data() {
+        let data = [42.0];
+        let params = SuperSmootherParams { period: Some(14) };
+        let input = SuperSmootherInput::from_slice(&data, params);
+        let result = supersmoother(&input).expect("Should work for small data set");
+        assert_eq!(result.values.len(), 1);
+        assert_eq!(result.values[0], data[0]);
+    }
+
+    #[test]
+    fn test_supersmoother_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_1 = SuperSmootherParams { period: Some(14) };
+        let input_1 = SuperSmootherInput::from_candles(&candles, "close", params_1);
+        let result_1 = supersmoother(&input_1).expect("Failed first smoother");
+        assert_eq!(result_1.values.len(), candles.close.len());
+        let params_2 = SuperSmootherParams { period: Some(10) };
+        let input_2 = SuperSmootherInput::from_slice(&result_1.values, params_2);
+        let result_2 = supersmoother(&input_2).expect("Failed second smoother");
+        assert_eq!(result_2.values.len(), result_1.values.len());
+    }
+
+    #[test]
+    fn test_supersmoother_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = SuperSmootherParams { period: Some(14) };
+        let input = SuperSmootherInput::from_candles(&candles, "close", params);
+        let result = supersmoother(&input).expect("Failed supersmoother");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

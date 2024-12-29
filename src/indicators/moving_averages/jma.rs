@@ -197,4 +197,110 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_jma_params_with_default_params() {
+        let default_params = JmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+        assert_eq!(default_params.phase, None);
+        assert_eq!(default_params.power, None);
+    }
+
+    #[test]
+    fn test_jma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = JmaInput::with_default_candles(&candles);
+        match input.data {
+            JmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.phase, None);
+        assert_eq!(input.params.power, None);
+    }
+
+    #[test]
+    fn test_jma_with_empty_data() {
+        let input_data: [f64; 0] = [];
+        let params = JmaParams {
+            period: Some(7),
+            phase: Some(50.0),
+            power: Some(2),
+        };
+        let input = JmaInput::from_slice(&input_data, params);
+        let result = jma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("input data is empty"));
+        }
+    }
+
+    #[test]
+    fn test_jma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = JmaParams {
+            period: Some(0),
+            phase: Some(50.0),
+            power: Some(2),
+        };
+        let input = JmaInput::from_slice(&input_data, params);
+        let result = jma(&input);
+        assert!(
+            result.is_ok(),
+            "Zero period is not explicitly handled, but let's see if it fails gracefully"
+        );
+    }
+
+    #[test]
+    fn test_jma_negative_phase() {
+        let input_data = [10.0, 20.0, 30.0, 40.0];
+        let params = JmaParams {
+            period: Some(5),
+            phase: Some(-150.0),
+            power: Some(2),
+        };
+        let input = JmaInput::from_slice(&input_data, params);
+        let result = jma(&input).unwrap();
+        assert_eq!(result.values.len(), input_data.len());
+    }
+
+    #[test]
+    fn test_jma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = JmaParams {
+            period: Some(7),
+            phase: Some(50.0),
+            power: Some(2),
+        };
+        let first_input = JmaInput::from_candles(&candles, "close", first_params);
+        let first_result = jma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = JmaParams {
+            period: Some(4),
+            phase: Some(-100.0),
+            power: Some(1),
+        };
+        let second_input = JmaInput::from_slice(&first_result.values, second_params);
+        let second_result = jma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_jma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = JmaParams {
+            period: Some(7),
+            phase: Some(50.0),
+            power: Some(2),
+        };
+        let input = JmaInput::from_candles(&candles, "close", params);
+        let jma_result = jma(&input).unwrap();
+        for &val in &jma_result.values {
+            assert!(!val.is_nan());
+        }
+    }
 }

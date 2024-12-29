@@ -190,4 +190,60 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_kama_with_default_params() {
+        let default_params = KamaParams::default();
+        assert_eq!(default_params.period, Some(30));
+    }
+
+    #[test]
+    fn test_kama_with_no_data() {
+        let data: [f64; 0] = [];
+        let input = KamaInput::from_slice(&data, KamaParams { period: Some(30) });
+        let result = kama(&input).expect("KAMA calculation failed on empty data");
+        assert_eq!(result.values.len(), data.len());
+    }
+
+    #[test]
+    fn test_kama_very_small_data_set() {
+        let data = [42.0];
+        let input = KamaInput::from_slice(&data, KamaParams { period: Some(30) });
+        let result = kama(&input).expect("KAMA calculation failed on very small data set");
+        assert_eq!(result.values.len(), data.len());
+        assert!(result.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_kama_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input =
+            KamaInput::from_candles(&candles, "close", KamaParams { period: Some(30) });
+        let first_result = kama(&first_input).expect("First KAMA failed");
+        let second_input =
+            KamaInput::from_slice(&first_result.values, KamaParams { period: Some(10) });
+        let second_result = kama(&second_input).expect("Second KAMA failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_kama_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = KamaInput::from_candles(&candles, "close", KamaParams { period: None });
+        let result = kama(&input).expect("KAMA calculation failed with partial params");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_kama_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = KamaInput::from_candles(&candles, "close", KamaParams { period: Some(30) });
+        let result = kama(&input).expect("KAMA calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        for val in result.values.iter().skip(30) {
+            assert!(val.is_finite());
+        }
+    }
 }

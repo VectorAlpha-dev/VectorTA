@@ -187,4 +187,95 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_reflex_params_with_default_params() {
+        let default_params = ReflexParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_reflex_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = ReflexInput::with_default_candles(&candles);
+        match input.data {
+            ReflexData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected ReflexData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_reflex_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = ReflexParams { period: Some(0) };
+        let input = ReflexInput::from_slice(&input_data, params);
+        let result = reflex(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Reflex period must be >=2"),
+                "Unexpected error: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_reflex_with_period_less_than_two() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = ReflexParams { period: Some(1) };
+        let input = ReflexInput::from_slice(&input_data, params);
+        let result = reflex(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reflex_very_small_data_set() {
+        let input_data = [42.0];
+        let params = ReflexParams { period: Some(2) };
+        let input = ReflexInput::from_slice(&input_data, params);
+        let result = reflex(&input);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.values.len(), 1);
+        assert_eq!(output.values[0], 0.0);
+    }
+
+    #[test]
+    fn test_reflex_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = ReflexParams { period: Some(14) };
+        let first_input = ReflexInput::from_candles(&candles, "close", first_params);
+        let first_result = reflex(&first_input).expect("Failed to calculate first Reflex");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = ReflexParams { period: Some(10) };
+        let second_input = ReflexInput::from_slice(&first_result.values, second_params);
+        let second_result = reflex(&second_input).expect("Failed to calculate second Reflex");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_reflex_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let period = 14;
+        let params = ReflexParams {
+            period: Some(period),
+        };
+        let input = ReflexInput::from_candles(&candles, "close", params);
+        let result = reflex(&input).expect("Failed to calculate Reflex");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > period {
+            for i in period..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

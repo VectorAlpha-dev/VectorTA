@@ -140,4 +140,98 @@ mod tests {
             assert!(diff < 1e-6);
         }
     }
+    #[test]
+    fn test_high_pass_2_pole_params_with_default_params() {
+        let params = HighPass2Params::with_default_params();
+        assert_eq!(params.period, None);
+        assert_eq!(params.k, None);
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = HighPass2Input::with_default_candles(&candles);
+        match input.data {
+            HighPass2Data::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected HighPass2Data::Candles"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.k, None);
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_invalid_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = HighPass2Params {
+            period: Some(1),
+            k: Some(0.707),
+        };
+        let input = HighPass2Input::from_slice(&data, params);
+        let result = high_pass_2_pole(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_no_data() {
+        let data: [f64; 0] = [];
+        let params = HighPass2Params {
+            period: Some(48),
+            k: Some(0.707),
+        };
+        let input = HighPass2Input::from_slice(&data, params);
+        let result = high_pass_2_pole(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_very_small_data_set() {
+        let data = [42.0];
+        let params = HighPass2Params {
+            period: Some(2),
+            k: Some(0.707),
+        };
+        let input = HighPass2Input::from_slice(&data, params);
+        let result = high_pass_2_pole(&input).expect("Should handle single data with period=2");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values[0], data[0]);
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = HighPass2Params {
+            period: Some(48),
+            k: Some(0.707),
+        };
+        let first_input = HighPass2Input::from_candles(&candles, "close", first_params);
+        let first_result = high_pass_2_pole(&first_input).expect("Failed first pass");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = HighPass2Params {
+            period: Some(32),
+            k: Some(0.9),
+        };
+        let second_input = HighPass2Input::from_slice(&first_result.values, second_params);
+        let second_result = high_pass_2_pole(&second_input).expect("Failed second pass");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_high_pass_2_pole_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = HighPass2Params {
+            period: Some(48),
+            k: Some(0.707),
+        };
+        let input = HighPass2Input::from_candles(&candles, "close", params);
+        let result = high_pass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

@@ -180,4 +180,83 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_supersmoother_3_pole_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SuperSmoother3PoleInput::with_default_candles(&candles);
+        match input.data {
+            SuperSmoother3PoleData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected SuperSmoother3PoleData::Candles"),
+        }
+    }
+
+    #[test]
+    fn test_supersmoother_3_pole_with_default_params() {
+        let default_params = SuperSmoother3PoleParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_supersmoother_3_pole_with_no_data() {
+        let data: [f64; 0] = [];
+        let input = SuperSmoother3PoleInput::from_slice(
+            &data,
+            SuperSmoother3PoleParams { period: Some(14) },
+        );
+        let result = supersmoother_3_pole(&input).expect("No-data 3-pole SS should succeed");
+        assert_eq!(result.values.len(), 0);
+    }
+
+    #[test]
+    fn test_supersmoother_3_pole_very_small_data_set() {
+        let data = [10.0, 20.0];
+        let input = SuperSmoother3PoleInput::from_slice(
+            &data,
+            SuperSmoother3PoleParams { period: Some(14) },
+        );
+        let result =
+            supersmoother_3_pole(&input).expect("Very small data 3-pole SS should succeed");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values[0], 10.0);
+        if result.values.len() > 1 {
+            assert_eq!(result.values[1], 20.0);
+        }
+    }
+
+    #[test]
+    fn test_supersmoother_3_pole_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input = SuperSmoother3PoleInput::from_candles(
+            &candles,
+            "close",
+            SuperSmoother3PoleParams { period: Some(14) },
+        );
+        let first_result = supersmoother_3_pole(&first_input).expect("First 3-pole SS failed");
+        let second_input = SuperSmoother3PoleInput::from_slice(
+            &first_result.values,
+            SuperSmoother3PoleParams { period: Some(7) },
+        );
+        let second_result = supersmoother_3_pole(&second_input).expect("Second 3-pole SS failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_supersmoother_3_pole_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SuperSmoother3PoleInput::from_candles(
+            &candles,
+            "close",
+            SuperSmoother3PoleParams { period: Some(14) },
+        );
+        let result = supersmoother_3_pole(&input).expect("3-pole SS calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        for (idx, &val) in result.values.iter().enumerate() {
+            assert!(val.is_finite(), "NaN found at index {}", idx);
+        }
+    }
 }

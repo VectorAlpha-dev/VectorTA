@@ -164,4 +164,89 @@ mod tests {
         let output3 = srwma(&input3).expect("Failed SRWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
+    #[test]
+    fn test_srwma_params_with_default() {
+        let default_params = SrwmaParams::default();
+        assert_eq!(default_params.period, Some(14));
+    }
+
+    #[test]
+    fn test_srwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SrwmaInput::with_default_candles(&candles);
+        match input.data {
+            SrwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected SrwmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, Some(14));
+    }
+
+    #[test]
+    fn test_srwma_with_zero_period() {
+        let data = [10.0, 20.0, 30.0, 40.0];
+        let params = SrwmaParams { period: Some(0) };
+        let input = SrwmaInput::from_slice(&data, params);
+        let result = srwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("SRWMA period must be >= 1"),
+                "Unexpected error: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_srwma_with_period_exceeding_data_length() {
+        let data = [10.0, 20.0, 30.0];
+        let params = SrwmaParams { period: Some(10) };
+        let input = SrwmaInput::from_slice(&data, params);
+        let result = srwma(&input).expect("Should handle period > data.len()");
+        assert_eq!(result.values, data);
+    }
+
+    #[test]
+    fn test_srwma_very_small_data_set() {
+        let data = [42.0, 52.0];
+        let params = SrwmaParams { period: Some(3) };
+        let input = SrwmaInput::from_slice(&data, params);
+        let result = srwma(&input).expect("Should handle data smaller than period");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values, data);
+    }
+
+    #[test]
+    fn test_srwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = SrwmaParams { period: Some(14) };
+        let first_input = SrwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = srwma(&first_input).expect("Failed to calculate first SRWMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = SrwmaParams { period: Some(5) };
+        let second_input = SrwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = srwma(&second_input).expect("Failed to calculate second SRWMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_srwma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = SrwmaParams { period: Some(14) };
+        let input = SrwmaInput::from_candles(&candles, "close", params);
+        let result = srwma(&input).expect("Failed to calculate SRWMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 50 {
+            for i in 50..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

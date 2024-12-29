@@ -190,4 +190,96 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_swma_params_with_default_params() {
+        let default_params = SwmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_swma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = SwmaInput::with_default_candles(&candles);
+        match input.data {
+            SwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected SwmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_swma_empty_data() {
+        let input_data: [f64; 0] = [];
+        let params = SwmaParams { period: Some(5) };
+        let input = SwmaInput::from_slice(&input_data, params);
+        let result = swma(&input).unwrap();
+        assert_eq!(result.values.len(), 0);
+    }
+
+    #[test]
+    fn test_swma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SwmaParams { period: Some(0) };
+        let input = SwmaInput::from_slice(&input_data, params);
+        let result = swma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("SWMA period must be >= 1."));
+        }
+    }
+
+    #[test]
+    fn test_swma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SwmaParams { period: Some(10) };
+        let input = SwmaInput::from_slice(&input_data, params);
+        let result = swma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("SWMA period cannot exceed data length."));
+        }
+    }
+
+    #[test]
+    fn test_swma_very_small_data_set() {
+        let input_data = [42.0, 43.0];
+        let params = SwmaParams { period: Some(2) };
+        let input = SwmaInput::from_slice(&input_data, params);
+        let result = swma(&input).unwrap();
+        assert_eq!(result.values.len(), input_data.len());
+        assert!(result.values[0].is_nan());
+        assert!(!result.values[1].is_nan());
+    }
+
+    #[test]
+    fn test_swma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = SwmaParams { period: Some(5) };
+        let first_input = SwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = swma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = SwmaParams { period: Some(3) };
+        let second_input = SwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = swma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_swma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = SwmaParams { period: Some(5) };
+        let input = SwmaInput::from_candles(&candles, "close", params);
+        let swma_result = swma(&input).unwrap();
+        for &val in &swma_result.values {
+            assert!(val.is_nan() || val.is_finite());
+        }
+    }
 }

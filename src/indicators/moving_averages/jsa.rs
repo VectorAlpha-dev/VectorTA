@@ -155,4 +155,97 @@ mod tests {
             "Default JSA result length mismatch"
         );
     }
+    #[test]
+    fn test_jsa_params_with_default_params() {
+        let default_params = JsaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_jsa_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = JsaInput::with_default_candles(&candles);
+        match input.data {
+            JsaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected JsaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_jsa_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = JsaParams { period: Some(0) };
+        let input = JsaInput::from_slice(&input_data, params);
+        let result = jsa(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("JSA period must be > 0"),
+                "Expected 'JSA period must be > 0' error, got: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_jsa_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = JsaParams { period: Some(10) };
+        let input = JsaInput::from_slice(&input_data, params);
+        let result = jsa(&input).expect("Should not panic with large period");
+        for &val in &result.values {
+            assert!(val.is_nan());
+        }
+    }
+
+    #[test]
+    fn test_jsa_very_small_data_set() {
+        let input_data = [42.0];
+        let params = JsaParams { period: Some(5) };
+        let input = JsaInput::from_slice(&input_data, params);
+        let result = jsa(&input).expect("Should not panic on small data");
+        for &val in &result.values {
+            assert!(val.is_nan());
+        }
+    }
+
+    #[test]
+    fn test_jsa_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = JsaParams { period: Some(10) };
+        let first_input = JsaInput::from_candles(&candles, "close", first_params);
+        let first_result = jsa(&first_input).expect("Failed to calculate first JSA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = JsaParams { period: Some(5) };
+        let second_input = JsaInput::from_slice(&first_result.values, second_params);
+        let second_result = jsa(&second_input).expect("Failed to calculate second JSA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_jsa_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let period = 10;
+        let params = JsaParams {
+            period: Some(period),
+        };
+        let input = JsaInput::from_candles(&candles, "close", params);
+        let result = jsa(&input).expect("Failed to calculate JSA");
+        assert_eq!(result.values.len(), candles.close.len());
+
+        if result.values.len() > period {
+            for i in period..result.values.len() {
+                assert!(!result.values[i].is_nan(), "Unexpected NaN at index {}", i);
+            }
+        }
+    }
 }

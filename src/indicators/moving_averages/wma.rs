@@ -167,4 +167,95 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn test_wma_params_with_default() {
+        let default_params = WmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_wma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = WmaInput::with_default_candles(&candles);
+        match input.data {
+            WmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected WmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_wma_with_zero_or_one_period() {
+        let data = [10.0, 20.0, 30.0];
+        for &p in &[0, 1] {
+            let params = WmaParams { period: Some(p) };
+            let input = WmaInput::from_slice(&data, params);
+            let result = wma(&input);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(
+                    e.to_string().contains("Invalid period"),
+                    "Unexpected error: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_wma_with_period_exceeding_data_length() {
+        let data = [10.0, 20.0, 30.0];
+        let params = WmaParams { period: Some(5) };
+        let input = WmaInput::from_slice(&data, params);
+        let result = wma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("greater than data length"),
+                "Unexpected error: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_wma_very_small_data_set() {
+        let data = [42.0, 50.0];
+        let params = WmaParams { period: Some(2) };
+        let input = WmaInput::from_slice(&data, params);
+        let result = wma(&input).expect("Should handle data with exact period length");
+        assert_eq!(result.values.len(), data.len());
+    }
+
+    #[test]
+    fn test_wma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = WmaParams { period: Some(14) };
+        let first_input = WmaInput::from_candles(&candles, "close", first_params);
+        let first_result = wma(&first_input).expect("Failed to calculate first WMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = WmaParams { period: Some(5) };
+        let second_input = WmaInput::from_slice(&first_result.values, second_params);
+        let second_result = wma(&second_input).expect("Failed to calculate second WMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_wma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = WmaParams { period: Some(14) };
+        let input = WmaInput::from_candles(&candles, "close", params);
+        let result = wma(&input).expect("Failed to calculate WMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 50 {
+            for i in 50..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

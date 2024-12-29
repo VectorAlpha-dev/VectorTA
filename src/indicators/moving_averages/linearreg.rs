@@ -155,4 +155,80 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_linreg_params_with_default_params() {
+        let params = LinRegParams::with_default_params();
+        assert_eq!(params.period, None);
+    }
+
+    #[test]
+    fn test_linreg_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = LinRegInput::with_default_candles(&candles);
+        match input.data {
+            LinRegData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected LinRegData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_linreg_invalid_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = LinRegParams { period: Some(0) };
+        let input = LinRegInput::from_slice(&data, params);
+        let result = linreg(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linreg_no_data() {
+        let data: [f64; 0] = [];
+        let params = LinRegParams { period: Some(14) };
+        let input = LinRegInput::from_slice(&data, params);
+        let result = linreg(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linreg_small_data() {
+        let data = [10.0, 20.0, 30.0];
+        let params = LinRegParams { period: Some(14) };
+        let input = LinRegInput::from_slice(&data, params);
+        let result = linreg(&input).expect("Should handle data smaller than period");
+        assert_eq!(result.values.len(), data.len());
+        for &val in &result.values {
+            assert!(val.is_nan());
+        }
+    }
+
+    #[test]
+    fn test_linreg_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_first = LinRegParams { period: Some(14) };
+        let input_first = LinRegInput::from_candles(&candles, "close", params_first);
+        let result_first = linreg(&input_first).expect("Failed first LinReg");
+        assert_eq!(result_first.values.len(), candles.close.len());
+        let params_second = LinRegParams { period: Some(10) };
+        let input_second = LinRegInput::from_slice(&result_first.values, params_second);
+        let result_second = linreg(&input_second).expect("Failed second LinReg");
+        assert_eq!(result_second.values.len(), result_first.values.len());
+    }
+
+    #[test]
+    fn test_linreg_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = LinRegParams { period: Some(14) };
+        let input = LinRegInput::from_candles(&candles, "close", params);
+        let result = linreg(&input).expect("Failed LinReg");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

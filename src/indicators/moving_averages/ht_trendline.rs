@@ -277,4 +277,117 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_ht_trendline_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EhlersITrendInput::with_default_candles(&candles);
+        match input.data {
+            EhlersITrendData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected EhlersITrendData::Candles"),
+        }
+        let warmup_bars = input.get_warmup_bars();
+        let max_dc_period = input.get_max_dc_period();
+        assert_eq!(warmup_bars, 12);
+        assert_eq!(max_dc_period, 50);
+    }
+
+    #[test]
+    fn test_ht_trendline_with_default_params() {
+        let default_params = EhlersITrendParams::default();
+        assert_eq!(default_params.warmup_bars, Some(12));
+        assert_eq!(default_params.max_dc_period, Some(50));
+    }
+
+    #[test]
+    fn test_ht_trendline_with_no_data() {
+        let data: [f64; 0] = [];
+        let input = EhlersITrendInput::from_slice(
+            &data,
+            EhlersITrendParams {
+                warmup_bars: Some(12),
+                max_dc_period: Some(50),
+            },
+        );
+        let result = ht_trendline(&input).expect("HT Trendline with empty data failed");
+        assert_eq!(result.values.len(), 0);
+    }
+
+    #[test]
+    fn test_ht_trendline_very_small_data_set() {
+        let data = [42.0];
+        let input = EhlersITrendInput::from_slice(
+            &data,
+            EhlersITrendParams {
+                warmup_bars: Some(12),
+                max_dc_period: Some(50),
+            },
+        );
+        let result = ht_trendline(&input).expect("HT Trendline failed for very small data set");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values[0], data[0]);
+    }
+
+    #[test]
+    fn test_ht_trendline_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input = EhlersITrendInput::from_candles(
+            &candles,
+            "close",
+            EhlersITrendParams {
+                warmup_bars: Some(12),
+                max_dc_period: Some(50),
+            },
+        );
+        let first_result = ht_trendline(&first_input).expect("HT Trendline failed on first input");
+        let second_input = EhlersITrendInput::from_slice(
+            &first_result.values,
+            EhlersITrendParams {
+                warmup_bars: Some(6),
+                max_dc_period: Some(25),
+            },
+        );
+        let second_result =
+            ht_trendline(&second_input).expect("HT Trendline failed on second input");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_ht_trendline_partial_params() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EhlersITrendInput::from_candles(
+            &candles,
+            "close",
+            EhlersITrendParams {
+                warmup_bars: None,
+                max_dc_period: None,
+            },
+        );
+        let result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_ht_trendline_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = EhlersITrendInput::from_candles(
+            &candles,
+            "close",
+            EhlersITrendParams {
+                warmup_bars: Some(12),
+                max_dc_period: Some(50),
+            },
+        );
+        let result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        let warmup_bars = input.get_warmup_bars();
+        for (idx, &val) in result.values.iter().enumerate().skip(warmup_bars) {
+            assert!(val.is_finite(), "NaN found at index {}", idx);
+        }
+    }
 }

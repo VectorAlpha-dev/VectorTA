@@ -181,4 +181,107 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_hwma_params_with_default_params() {
+        let params = HwmaParams::with_default_params();
+        assert_eq!(params.na, None);
+        assert_eq!(params.nb, None);
+        assert_eq!(params.nc, None);
+    }
+
+    #[test]
+    fn test_hwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = HwmaInput::with_default_candles(&candles);
+        match input.data {
+            HwmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected HwmaData::Candles variant"),
+        }
+        assert_eq!(input.params.na, None);
+        assert_eq!(input.params.nb, None);
+        assert_eq!(input.params.nc, None);
+    }
+
+    #[test]
+    fn test_hwma_invalid_params() {
+        let data = [10.0, 20.0, 30.0];
+        let params = HwmaParams {
+            na: Some(-0.2),
+            nb: Some(1.1),
+            nc: Some(0.1),
+        };
+        let input = HwmaInput::from_slice(&data, params);
+        let result = hwma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hwma_empty_data() {
+        let data: [f64; 0] = [];
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
+        let input = HwmaInput::from_slice(&data, params);
+        let result = hwma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hwma_small_data() {
+        let data = [42.0];
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
+        let input = HwmaInput::from_slice(&data, params);
+        let result = hwma(&input).expect("Should handle single data point");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values[0], data[0] + 0.0 + 0.5 * 0.0);
+    }
+
+    #[test]
+    fn test_hwma_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_1 = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
+        let input_1 = HwmaInput::from_candles(&candles, "close", params_1);
+        let result_1 = hwma(&input_1).expect("Failed first HWMA");
+        assert_eq!(result_1.values.len(), candles.close.len());
+        let params_2 = HwmaParams {
+            na: Some(0.3),
+            nb: Some(0.15),
+            nc: Some(0.05),
+        };
+        let input_2 = HwmaInput::from_slice(&result_1.values, params_2);
+        let result_2 = hwma(&input_2).expect("Failed second HWMA");
+        assert_eq!(result_2.values.len(), result_1.values.len());
+    }
+
+    #[test]
+    fn test_hwma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
+        let input = HwmaInput::from_candles(&candles, "close", params);
+        let result = hwma(&input).expect("Failed to calculate HWMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

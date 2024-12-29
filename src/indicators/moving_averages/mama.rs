@@ -322,4 +322,98 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_mama_params_with_default_params() {
+        let default_params = MamaParams::with_default_params();
+        assert_eq!(default_params.fast_limit, None);
+        assert_eq!(default_params.slow_limit, None);
+    }
+
+    #[test]
+    fn test_mama_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = MamaInput::with_default_candles(&candles);
+        match input.data {
+            MamaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected MamaData::Candles variant"),
+        }
+        assert_eq!(input.params.fast_limit, None);
+        assert_eq!(input.params.slow_limit, None);
+    }
+
+    #[test]
+    fn test_mama_with_insufficient_data() {
+        let input_data = vec![100.0; 9];
+        let params = MamaParams {
+            fast_limit: Some(0.5),
+            slow_limit: Some(0.05),
+        };
+        let input = MamaInput::from_slice(&input_data, params);
+        let result = mama(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mama_very_small_data_set() {
+        let input_data = [42.0; 10];
+        let params = MamaParams::with_default_params();
+        let input = MamaInput::from_slice(&input_data, params);
+        let result = mama(&input).expect("Should handle minimal data length");
+        assert_eq!(result.mama_values.len(), input_data.len());
+        assert_eq!(result.fama_values.len(), input_data.len());
+    }
+
+    #[test]
+    fn test_mama_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = MamaParams {
+            fast_limit: Some(0.5),
+            slow_limit: Some(0.05),
+        };
+        let first_input = MamaInput::from_candles(&candles, "close", first_params);
+        let first_result = mama(&first_input).expect("Failed to calculate first MAMA");
+        assert_eq!(first_result.mama_values.len(), candles.close.len());
+        assert_eq!(first_result.fama_values.len(), candles.close.len());
+
+        let second_params = MamaParams {
+            fast_limit: Some(0.7),
+            slow_limit: Some(0.1),
+        };
+        let second_input = MamaInput::from_slice(&first_result.mama_values, second_params);
+        let second_result = mama(&second_input).expect("Failed to calculate second MAMA");
+        assert_eq!(
+            second_result.mama_values.len(),
+            first_result.mama_values.len()
+        );
+        assert_eq!(
+            second_result.fama_values.len(),
+            first_result.mama_values.len()
+        );
+    }
+
+    #[test]
+    fn test_mama_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = MamaParams::with_default_params();
+        let input = MamaInput::from_candles(&candles, "close", params);
+        let result = mama(&input).expect("Failed to calculate MAMA");
+        assert_eq!(result.mama_values.len(), candles.close.len());
+        assert_eq!(result.fama_values.len(), candles.close.len());
+        for (i, &val) in result.mama_values.iter().enumerate() {
+            if i > 20 {
+                assert!(!val.is_nan());
+            }
+        }
+        for (i, &val) in result.fama_values.iter().enumerate() {
+            if i > 20 {
+                assert!(!val.is_nan());
+            }
+        }
+    }
 }

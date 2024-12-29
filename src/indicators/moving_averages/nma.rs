@@ -199,4 +199,68 @@ mod tests {
             "Should produce full-length NMA values with default params"
         );
     }
+    #[test]
+    fn test_nma_params_with_default_params() {
+        let params = NmaParams::with_default_params();
+        assert_eq!(params.period, None);
+    }
+
+    #[test]
+    fn test_nma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = NmaInput::with_default_candles(&candles);
+        match input.data {
+            NmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected NmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_nma_period_zero() {
+        let data = [10.0, 20.0, 30.0];
+        let params = NmaParams { period: Some(0) };
+        let input = NmaInput::from_slice(&data, params);
+        let result = nma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nma_not_enough_data() {
+        let data = [10.0, 20.0, 30.0];
+        let params = NmaParams { period: Some(40) };
+        let input = NmaInput::from_slice(&data, params);
+        let result = nma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nma_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_1 = NmaParams { period: Some(40) };
+        let input_1 = NmaInput::from_candles(&candles, "close", params_1);
+        let result_1 = nma(&input_1).expect("Failed first NMA");
+        assert_eq!(result_1.values.len(), candles.close.len());
+        let params_2 = NmaParams { period: Some(20) };
+        let input_2 = NmaInput::from_slice(&result_1.values, params_2);
+        let result_2 = nma(&input_2).expect("Failed second NMA");
+        assert_eq!(result_2.values.len(), result_1.values.len());
+    }
+
+    #[test]
+    fn test_nma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = NmaParams { period: Some(40) };
+        let input = NmaInput::from_candles(&candles, "close", params);
+        let nma_result = nma(&input).expect("Failed to calculate NMA");
+        assert_eq!(nma_result.values.len(), candles.close.len());
+        if nma_result.values.len() > 240 {
+            for i in 240..nma_result.values.len() {
+                assert!(!nma_result.values[i].is_nan());
+            }
+        }
+    }
 }

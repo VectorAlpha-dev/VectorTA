@@ -168,4 +168,78 @@ mod tests {
         let output3 = sinwma(&input3).expect("Failed SINWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
+
+    #[test]
+    fn test_sinwma_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SinWmaInput::with_default_candles(&candles);
+        match input.data {
+            SinWmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected SinWmaData::Candles"),
+        }
+        let period = input.get_period();
+        assert_eq!(period, 14);
+    }
+
+    #[test]
+    fn test_sinwma_with_default_params() {
+        let default_params = SinWmaParams::default();
+        assert_eq!(default_params.period, Some(14));
+    }
+
+    #[test]
+    fn test_sinwma_with_no_data() {
+        let data: [f64; 0] = [];
+        let params = SinWmaParams { period: Some(14) };
+        let input = SinWmaInput::from_slice(&data, params);
+        let result = sinwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period for SINWMA calculation."));
+        }
+    }
+
+    #[test]
+    fn test_sinwma_very_small_data_set() {
+        let data = [42.0];
+        let params = SinWmaParams { period: Some(14) };
+        let input = SinWmaInput::from_slice(&data, params);
+        let result = sinwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period for SINWMA calculation."));
+        }
+    }
+
+    #[test]
+    fn test_sinwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input =
+            SinWmaInput::from_candles(&candles, "close", SinWmaParams { period: Some(14) });
+        let first_result = sinwma(&first_input).expect("First SINWMA failed");
+        let second_input =
+            SinWmaInput::from_slice(&first_result.values, SinWmaParams { period: Some(5) });
+        let second_result = sinwma(&second_input).expect("Second SINWMA failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_sinwma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SinWmaInput::from_candles(&candles, "close", SinWmaParams { period: Some(14) });
+        let result = sinwma(&input).expect("Failed to calculate SINWMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        for val in result.values.iter().skip(14) {
+            assert!(val.is_finite());
+        }
+    }
 }

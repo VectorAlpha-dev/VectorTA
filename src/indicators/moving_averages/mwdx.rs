@@ -147,4 +147,83 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_mwdx_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = MwdxInput::with_default_candles(&candles);
+        match input.data {
+            MwdxData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected MwdxData::Candles"),
+        }
+        let factor = input.get_factor();
+        assert!((factor - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mwdx_with_default_params() {
+        let default_params = MwdxParams::default();
+        assert_eq!(default_params.factor, Some(0.2));
+    }
+
+    #[test]
+    fn test_mwdx_with_no_data() {
+        let data: [f64; 0] = [];
+        let params = MwdxParams { factor: Some(0.2) };
+        let input = MwdxInput::from_slice(&data, params);
+        let result = mwdx(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Empty data slice"));
+        }
+    }
+
+    #[test]
+    fn test_mwdx_negative_factor() {
+        let data = [10.0, 20.0, 30.0];
+        let params = MwdxParams { factor: Some(-0.5) };
+        let input = MwdxInput::from_slice(&data, params);
+        let result = mwdx(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Factor must be > 0"));
+        }
+    }
+
+    #[test]
+    fn test_mwdx_very_small_data_set() {
+        let data = [42.0];
+        let params = MwdxParams { factor: Some(0.2) };
+        let input = MwdxInput::from_slice(&data, params);
+        let result = mwdx(&input).expect("MWDX failed on very small data set");
+        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values[0], 42.0);
+    }
+
+    #[test]
+    fn test_mwdx_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_input =
+            MwdxInput::from_candles(&candles, "close", MwdxParams { factor: Some(0.2) });
+        let first_result = mwdx(&first_input).expect("First MWDX failed");
+        let second_input =
+            MwdxInput::from_slice(&first_result.values, MwdxParams { factor: Some(0.3) });
+        let second_result = mwdx(&second_input).expect("Second MWDX failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_mwdx_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = MwdxInput::from_candles(&candles, "close", MwdxParams { factor: Some(0.2) });
+        let result = mwdx(&input).expect("MWDX calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        for (i, &val) in result.values.iter().enumerate() {
+            assert!(val.is_finite(), "NaN found at index {}", i);
+        }
+    }
 }

@@ -144,4 +144,68 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_smma_params_with_default_params() {
+        let params = SmmaParams::with_default_params();
+        assert_eq!(params.period, None);
+    }
+
+    #[test]
+    fn test_smma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = SmmaInput::with_default_candles(&candles);
+        match input.data {
+            SmmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected SmmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_smma_zero_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = SmmaParams { period: Some(0) };
+        let input = SmmaInput::from_slice(&data, params);
+        let result = smma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_smma_period_exceeding_data_length() {
+        let data = [10.0, 20.0, 30.0];
+        let params = SmmaParams { period: Some(10) };
+        let input = SmmaInput::from_slice(&data, params);
+        let result = smma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_smma_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_first = SmmaParams { period: Some(7) };
+        let input_first = SmmaInput::from_candles(&candles, "close", params_first);
+        let result_first = smma(&input_first).expect("Failed first SMMA");
+        assert_eq!(result_first.values.len(), candles.close.len());
+        let params_second = SmmaParams { period: Some(5) };
+        let input_second = SmmaInput::from_slice(&result_first.values, params_second);
+        let result_second = smma(&input_second).expect("Failed second SMMA");
+        assert_eq!(result_second.values.len(), result_first.values.len());
+    }
+
+    #[test]
+    fn test_smma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = SmmaParams { period: Some(7) };
+        let input = SmmaInput::from_candles(&candles, "close", params);
+        let result = smma(&input).expect("Failed SMMA calculation");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

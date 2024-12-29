@@ -177,4 +177,30 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_vwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = VwmaInput::with_default_candles(&candles);
+        match input.data {
+            VwmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            VwmaData::CandlesPlusPrices { .. } => panic!("Expected VwmaData::Candles"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_vwma_candles_plus_prices() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let custom_prices = candles
+            .close
+            .iter()
+            .map(|v| v * 1.001)
+            .collect::<Vec<f64>>();
+        let params = VwmaParams { period: Some(20) };
+        let input = VwmaInput::from_candles_plus_prices(&candles, &custom_prices, params);
+        let result = vwma(&input).expect("VWMA on custom prices");
+        assert_eq!(result.values.len(), custom_prices.len());
+    }
 }

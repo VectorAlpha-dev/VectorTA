@@ -191,4 +191,87 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_trendflex_params_with_default_params() {
+        let params = TrendFlexParams::with_default_params();
+        assert_eq!(params.period, None);
+    }
+
+    #[test]
+    fn test_trendflex_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = TrendFlexInput::with_default_candles(&candles);
+        match input.data {
+            TrendFlexData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected TrendFlexData::Candles"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_trendflex_no_data() {
+        let data: [f64; 0] = [];
+        let params = TrendFlexParams { period: Some(20) };
+        let input = TrendFlexInput::from_slice(&data, params);
+        let result = trendflex(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trendflex_zero_period() {
+        let data = [10.0, 20.0, 30.0];
+        let params = TrendFlexParams { period: Some(0) };
+        let input = TrendFlexInput::from_slice(&data, params);
+        let result = trendflex(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trendflex_period_exceeding_length() {
+        let data = [10.0, 20.0, 30.0];
+        let params = TrendFlexParams { period: Some(10) };
+        let input = TrendFlexInput::from_slice(&data, params);
+        let result = trendflex(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trendflex_small_data() {
+        let data = [42.0];
+        let params = TrendFlexParams { period: Some(1) };
+        let input = TrendFlexInput::from_slice(&data, params);
+        let result = trendflex(&input).expect("Should handle single data point with period=1");
+        assert_eq!(result.values.len(), data.len());
+        assert!(result.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_trendflex_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params_1 = TrendFlexParams { period: Some(20) };
+        let input_1 = TrendFlexInput::from_candles(&candles, "close", params_1);
+        let result_1 = trendflex(&input_1).expect("TrendFlex pass 1 failed");
+        assert_eq!(result_1.values.len(), candles.close.len());
+        let params_2 = TrendFlexParams { period: Some(10) };
+        let input_2 = TrendFlexInput::from_slice(&result_1.values, params_2);
+        let result_2 = trendflex(&input_2).expect("TrendFlex pass 2 failed");
+        assert_eq!(result_2.values.len(), result_1.values.len());
+    }
+
+    #[test]
+    fn test_trendflex_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = TrendFlexParams { period: Some(20) };
+        let input = TrendFlexInput::from_candles(&candles, "close", params);
+        let result = trendflex(&input).expect("TrendFlex failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

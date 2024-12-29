@@ -176,4 +176,92 @@ mod tests {
         let default_result = sqwma(&default_input).expect("Failed default SQWMA");
         assert_eq!(default_result.values.len(), source.len());
     }
+    #[test]
+    fn test_sqwma_params_with_default_params() {
+        let default_params = SqwmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_sqwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = SqwmaInput::with_default_candles(&candles);
+        match input.data {
+            SqwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_sqwma_with_empty_data() {
+        let input_data: [f64; 0] = [];
+        let params = SqwmaParams { period: Some(14) };
+        let input = SqwmaInput::from_slice(&input_data, params);
+        let result = sqwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Empty data for SQWMA calculation"));
+        }
+    }
+
+    #[test]
+    fn test_sqwma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SqwmaParams { period: Some(0) };
+        let input = SqwmaInput::from_slice(&input_data, params);
+        let result = sqwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("SQWMA period must be >= 2"));
+        }
+    }
+
+    #[test]
+    fn test_sqwma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = SqwmaParams { period: Some(14) };
+        let input = SqwmaInput::from_slice(&input_data, params);
+        let result = sqwma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_sqwma_very_small_data_set() {
+        let input_data = [42.0, 43.0, 44.0];
+        let params = SqwmaParams { period: Some(3) };
+        let input = SqwmaInput::from_slice(&input_data, params);
+        let result = sqwma(&input).unwrap();
+        assert_eq!(result.values, input_data);
+    }
+
+    #[test]
+    fn test_sqwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = SqwmaParams { period: Some(14) };
+        let first_input = SqwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = sqwma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = SqwmaParams { period: Some(7) };
+        let second_input = SqwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = sqwma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_sqwma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = SqwmaParams { period: Some(14) };
+        let input = SqwmaInput::from_candles(&candles, "close", params);
+        let sqwma_result = sqwma(&input).unwrap();
+        for &val in &sqwma_result.values {
+            assert!(!val.is_nan());
+        }
+    }
 }

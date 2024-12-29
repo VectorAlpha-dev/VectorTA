@@ -182,4 +182,119 @@ mod tests {
         let output3 = vpwma(&input3).expect("Failed VPWMA fully custom");
         assert_eq!(output3.values.len(), candles.close.len());
     }
+    #[test]
+    fn test_vpwma_params_with_default() {
+        let default_params = VpwmaParams::default();
+        assert_eq!(default_params.period, Some(14));
+        assert_eq!(default_params.power, Some(0.382));
+    }
+
+    #[test]
+    fn test_vpwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = VpwmaInput::with_default_candles(&candles);
+        match input.data {
+            VpwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Expected VpwmaData::Candles variant"),
+        }
+        assert_eq!(input.params.period, Some(14));
+        assert_eq!(input.params.power, Some(0.382));
+    }
+
+    #[test]
+    fn test_vpwma_insufficient_data() {
+        let data = [42.0, 43.0, 44.0];
+        let params = VpwmaParams {
+            period: Some(5),
+            power: Some(0.382),
+        };
+        let input = VpwmaInput::from_slice(&data, params);
+        let result = vpwma(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vpwma_with_invalid_period() {
+        let data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let params = VpwmaParams {
+            period: Some(1),
+            power: Some(0.382),
+        };
+        let input = VpwmaInput::from_slice(&data, params);
+        let result = vpwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("VPWMA period must be >= 2"));
+        }
+    }
+
+    #[test]
+    fn test_vpwma_nan_power() {
+        let data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let params = VpwmaParams {
+            period: Some(2),
+            power: Some(f64::NAN),
+        };
+        let input = VpwmaInput::from_slice(&data, params);
+        let result = vpwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("power cannot be NaN"));
+        }
+    }
+
+    #[test]
+    fn test_vpwma_very_small_data_set() {
+        let data = [100.0; 16];
+        let params = VpwmaParams {
+            period: Some(14),
+            power: Some(0.382),
+        };
+        let input = VpwmaInput::from_slice(&data, params);
+        let result = vpwma(&input).expect("Should handle minimal data length");
+        assert_eq!(result.values.len(), data.len());
+    }
+
+    #[test]
+    fn test_vpwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let first_params = VpwmaParams {
+            period: Some(14),
+            power: Some(0.382),
+        };
+        let first_input = VpwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = vpwma(&first_input).expect("Failed to calculate first VPWMA");
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = VpwmaParams {
+            period: Some(5),
+            power: Some(0.5),
+        };
+        let second_input = VpwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = vpwma(&second_input).expect("Failed to calculate second VPWMA");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_vpwma_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = VpwmaParams {
+            period: Some(14),
+            power: Some(0.382),
+        };
+        let input = VpwmaInput::from_candles(&candles, "close", params);
+        let result = vpwma(&input).expect("Failed to calculate VPWMA");
+        assert_eq!(result.values.len(), candles.close.len());
+        if result.values.len() > 50 {
+            for i in 50..result.values.len() {
+                assert!(!result.values[i].is_nan());
+            }
+        }
+    }
 }

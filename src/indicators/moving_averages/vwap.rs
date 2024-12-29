@@ -93,7 +93,9 @@ pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
     if n == 0 {
         return Err("No data for VWAP calculation".into());
     }
-
+    if n != volumes.len() {
+        return Err("Mismatch in length of prices and volumes".into());
+    }
     let (count, unit_char) = parse_anchor(input.get_anchor())?;
 
     let mut vwap_values = vec![f64::NAN; n];
@@ -268,5 +270,85 @@ mod tests {
                 vwap_val
             );
         }
+    }
+    #[test]
+    fn test_vwap_with_candles_plus_prices() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let source_prices = candles
+            .get_calculated_field("hl2")
+            .expect("Missing hl2 prices");
+        let params = VwapParams {
+            anchor: Some("1d".to_string()),
+        };
+        let input = VwapInput::from_candles_plus_prices(&candles, source_prices, params);
+        let result = vwap(&input).expect("Failed VWAP with candles + prices");
+        assert_eq!(result.values.len(), candles.close.len());
+    }
+
+    #[test]
+    fn test_vwap_anchor_parsing_error() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let params = VwapParams {
+            anchor: Some("xyz".to_string()),
+        };
+        let input = VwapInput::from_candles(&candles, "hlc3", params);
+        let result = vwap(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vwap_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = VwapParams {
+            anchor: Some("1d".to_string()),
+        };
+        let first_input = VwapInput::from_candles(&candles, "close", first_params);
+        let first_result = vwap(&first_input).expect("First VWAP failed");
+        let second_params = VwapParams {
+            anchor: Some("1h".to_string()),
+        };
+        let source_prices = &first_result.values;
+        let second_input =
+            VwapInput::from_candles_plus_prices(&candles, source_prices, second_params);
+        let second_result = vwap(&second_input).expect("Second VWAP failed");
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_vwap_accuracy_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = VwapInput::with_default_candles(&candles);
+        let result = vwap(&input).expect("VWAP calculation failed");
+        assert_eq!(result.values.len(), candles.close.len());
+        for &val in &result.values {
+            if !val.is_nan() {
+                assert!(val.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn test_vwap_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = VwapInput::with_default_candles(&candles);
+        match input.data {
+            VwapData::Candles { source, .. } => {
+                assert_eq!(source, "hlc3");
+            }
+            _ => panic!("Expected VwapData::Candles"),
+        }
+        let anchor = input.get_anchor();
+        assert_eq!(anchor, "1d");
+    }
+
+    #[test]
+    fn test_vwap_with_default_params() {
+        let default_params = VwapParams::with_default_params();
+        assert_eq!(default_params.anchor, Some("1d".to_string()));
     }
 }

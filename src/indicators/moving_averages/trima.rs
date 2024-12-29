@@ -225,4 +225,78 @@ mod tests {
             "Should produce some TRIMA values with default params"
         );
     }
+    #[test]
+    fn test_trima_params_with_default_params() {
+        let default_params = TrimaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_trima_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = TrimaInput::with_default_candles(&candles);
+        match input.data {
+            TrimaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_trima_with_insufficient_data() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = TrimaParams { period: Some(14) };
+        let input = TrimaInput::from_slice(&input_data, params);
+        let result = trima(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Not enough data points"));
+        }
+    }
+
+    #[test]
+    fn test_trima_period_too_small() {
+        let input_data = [10.0, 20.0, 30.0, 40.0];
+        let params = TrimaParams { period: Some(3) };
+        let input = TrimaInput::from_slice(&input_data, params);
+        let result = trima(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("TRIMA period must be greater than 3."));
+        }
+    }
+
+    #[test]
+    fn test_trima_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = TrimaParams { period: Some(14) };
+        let first_input = TrimaInput::from_candles(&candles, "close", first_params);
+        let first_result = trima(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = TrimaParams { period: Some(10) };
+        let second_input = TrimaInput::from_slice(&first_result.values, second_params);
+        let second_result = trima(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_trima_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = TrimaParams { period: Some(14) };
+        let input = TrimaInput::from_candles(&candles, "close", params);
+        let trima_result = trima(&input).unwrap();
+        for &val in &trima_result.values {
+            if !val.is_nan() {
+                assert!(val.is_finite());
+            }
+        }
+    }
 }

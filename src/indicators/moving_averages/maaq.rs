@@ -190,4 +190,99 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_maaq_params_with_default_params() {
+        let default_params = MaaqParams::with_default_params();
+        assert_eq!(default_params.period, None);
+        assert_eq!(default_params.fast_period, None);
+        assert_eq!(default_params.slow_period, None);
+    }
+
+    #[test]
+    fn test_maaq_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = MaaqInput::with_default_candles(&candles);
+        match input.data {
+            MaaqData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.fast_period, None);
+        assert_eq!(input.params.slow_period, None);
+    }
+
+    #[test]
+    fn test_maaq_with_zero_periods() {
+        let input_data = [10.0, 20.0, 30.0, 40.0];
+        let params = MaaqParams {
+            period: Some(0),
+            fast_period: Some(0),
+            slow_period: Some(0),
+        };
+        let input = MaaqInput::from_slice(&input_data, params);
+        let result = maaq(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("MAAQ periods cannot be zero"));
+        }
+    }
+
+    #[test]
+    fn test_maaq_insufficient_data() {
+        let input_data = [42.0, 43.0, 44.0];
+        let params = MaaqParams {
+            period: Some(5),
+            fast_period: Some(2),
+            slow_period: Some(3),
+        };
+        let input = MaaqInput::from_slice(&input_data, params);
+        let result = maaq(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Not enough data"));
+        }
+    }
+
+    #[test]
+    fn test_maaq_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = MaaqParams {
+            period: Some(11),
+            fast_period: Some(2),
+            slow_period: Some(30),
+        };
+        let first_input = MaaqInput::from_candles(&candles, "close", first_params);
+        let first_result = maaq(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = MaaqParams {
+            period: Some(5),
+            fast_period: Some(2),
+            slow_period: Some(10),
+        };
+        let second_input = MaaqInput::from_slice(&first_result.values, second_params);
+        let second_result = maaq(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_maaq_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = MaaqParams {
+            period: Some(11),
+            fast_period: Some(2),
+            slow_period: Some(30),
+        };
+        let input = MaaqInput::from_candles(&candles, "close", params);
+        let maaq_result = maaq(&input).unwrap();
+        for &val in &maaq_result.values {
+            if !val.is_nan() {
+                assert!(val.is_finite());
+            }
+        }
+    }
 }

@@ -171,4 +171,91 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn test_pwma_params_with_default_params() {
+        let default_params = PwmaParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_pwma_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = PwmaInput::with_default_candles(&candles);
+        match input.data {
+            PwmaData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_pwma_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = PwmaParams { period: Some(0) };
+        let input = PwmaInput::from_slice(&input_data, params);
+        let result = pwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period specified for PWMA calculation"));
+        }
+    }
+
+    #[test]
+    fn test_pwma_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0];
+        let params = PwmaParams { period: Some(5) };
+        let input = PwmaInput::from_slice(&input_data, params);
+        let result = pwma(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period specified for PWMA calculation"));
+        }
+    }
+
+    #[test]
+    fn test_pwma_very_small_data_set() {
+        let input_data = [42.0, 43.0];
+        let params = PwmaParams { period: Some(2) };
+        let input = PwmaInput::from_slice(&input_data, params);
+        let result = pwma(&input).unwrap();
+        assert_eq!(result.values.len(), input_data.len());
+        assert!(result.values[0].is_nan());
+        assert!(!result.values[1].is_nan());
+    }
+
+    #[test]
+    fn test_pwma_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = PwmaParams { period: Some(5) };
+        let first_input = PwmaInput::from_candles(&candles, "close", first_params);
+        let first_result = pwma(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+
+        let second_params = PwmaParams { period: Some(3) };
+        let second_input = PwmaInput::from_slice(&first_result.values, second_params);
+        let second_result = pwma(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_pwma_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = PwmaParams { period: Some(5) };
+        let input = PwmaInput::from_candles(&candles, "close", params);
+        let pwma_result = pwma(&input).unwrap();
+        for &val in &pwma_result.values {
+            if !val.is_nan() {
+                assert!(val.is_finite());
+            }
+        }
+    }
 }

@@ -34,7 +34,6 @@ pub struct HighPassInput<'a> {
 }
 
 impl<'a> HighPassInput<'a> {
-    // For candles-based usage:
     pub fn from_candles(candles: &'a Candles, source: &'a str, params: HighPassParams) -> Self {
         Self {
             data: HighPassData::Candles { candles, source },
@@ -42,7 +41,6 @@ impl<'a> HighPassInput<'a> {
         }
     }
 
-    // For slice-based usage:
     pub fn from_slice(slice: &'a [f64], params: HighPassParams) -> Self {
         Self {
             data: HighPassData::Slice(slice),
@@ -141,6 +139,88 @@ mod tests {
         }
         for val in &result.values {
             assert!(val.is_finite());
+        }
+    }
+    #[test]
+    fn test_highpass_params_with_default_params() {
+        let default_params = HighPassParams::with_default_params();
+        assert_eq!(default_params.period, None);
+    }
+
+    #[test]
+    fn test_highpass_input_with_default_candles() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let input = HighPassInput::with_default_candles(&candles);
+        match input.data {
+            HighPassData::Candles { source, .. } => {
+                assert_eq!(source, "close");
+            }
+            _ => panic!("Unexpected data variant"),
+        }
+        assert_eq!(input.params.period, None);
+    }
+
+    #[test]
+    fn test_highpass_with_zero_period() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = HighPassParams { period: Some(0) };
+        let input = HighPassInput::from_slice(&input_data, params);
+        let result = highpass(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period or insufficient data"));
+        }
+    }
+
+    #[test]
+    fn test_highpass_with_period_exceeding_data_length() {
+        let input_data = [10.0, 20.0, 30.0];
+        let params = HighPassParams { period: Some(48) };
+        let input = HighPassInput::from_slice(&input_data, params);
+        let result = highpass(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_highpass_very_small_data_set() {
+        let input_data = [42.0, 43.0];
+        let params = HighPassParams { period: Some(2) };
+        let input = HighPassInput::from_slice(&input_data, params);
+        let result = highpass(&input);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e
+                .to_string()
+                .contains("Invalid period or insufficient data"));
+        }
+    }
+
+    #[test]
+    fn test_highpass_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let first_params = HighPassParams { period: Some(36) };
+        let first_input = HighPassInput::from_candles(&candles, "close", first_params);
+        let first_result = highpass(&first_input).unwrap();
+        assert_eq!(first_result.values.len(), candles.close.len());
+        let second_params = HighPassParams { period: Some(24) };
+        let second_input = HighPassInput::from_slice(&first_result.values, second_params);
+        let second_result = highpass(&second_input).unwrap();
+        assert_eq!(second_result.values.len(), first_result.values.len());
+    }
+
+    #[test]
+    fn test_highpass_nan_check() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        let params = HighPassParams { period: Some(48) };
+        let input = HighPassInput::from_candles(&candles, "close", params);
+        let highpass_result = highpass(&input).unwrap();
+        for val in &highpass_result.values {
+            assert!(!val.is_nan());
         }
     }
 }
