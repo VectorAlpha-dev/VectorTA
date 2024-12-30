@@ -63,7 +63,7 @@ impl<'a> HighPass2Input<'a> {
     }
 }
 
-pub fn high_pass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
+pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
     let data: &[f64] = match &input.data {
         HighPass2Data::Candles { candles, source } => source_type(candles, source),
         HighPass2Data::Slice(slice) => slice,
@@ -122,7 +122,7 @@ mod tests {
             k: Some(0.707),
         };
         let input = HighPass2Input::from_candles(&candles, "close", params);
-        let result = high_pass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
+        let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         let expected_last_five = [
             445.29073821108943,
             359.51467478973296,
@@ -168,7 +168,7 @@ mod tests {
             k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
-        let result = high_pass_2_pole(&input);
+        let result = highpass_2_pole(&input);
         assert!(result.is_err());
     }
 
@@ -180,7 +180,7 @@ mod tests {
             k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
-        let result = high_pass_2_pole(&input);
+        let result = highpass_2_pole(&input);
         assert!(result.is_err());
     }
 
@@ -192,7 +192,7 @@ mod tests {
             k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
-        let result = high_pass_2_pole(&input).expect("Should handle single data with period=2");
+        let result = highpass_2_pole(&input).expect("Should handle single data with period=2");
         assert_eq!(result.values.len(), data.len());
         assert_eq!(result.values[0], data[0]);
     }
@@ -206,14 +206,14 @@ mod tests {
             k: Some(0.707),
         };
         let first_input = HighPass2Input::from_candles(&candles, "close", first_params);
-        let first_result = high_pass_2_pole(&first_input).expect("Failed first pass");
+        let first_result = highpass_2_pole(&first_input).expect("Failed first pass");
         assert_eq!(first_result.values.len(), candles.close.len());
         let second_params = HighPass2Params {
             period: Some(32),
             k: Some(0.9),
         };
         let second_input = HighPass2Input::from_slice(&first_result.values, second_params);
-        let second_result = high_pass_2_pole(&second_input).expect("Failed second pass");
+        let second_result = highpass_2_pole(&second_input).expect("Failed second pass");
         assert_eq!(second_result.values.len(), first_result.values.len());
     }
 
@@ -226,7 +226,7 @@ mod tests {
             k: Some(0.707),
         };
         let input = HighPass2Input::from_candles(&candles, "close", params);
-        let result = high_pass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
+        let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         assert_eq!(result.values.len(), candles.close.len());
         if result.values.len() > 240 {
             for i in 240..result.values.len() {

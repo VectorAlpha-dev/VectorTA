@@ -73,11 +73,10 @@ pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
     let len: usize = data.len();
     let period: usize = input.get_period();
 
-    if period == 0 || period > data.len() {
+    if period == 0 || period > len {
         return Err("Invalid period specified for EMA calculation.".into());
     }
 
-    let len = data.len();
     let alpha = 2.0 / (period as f64 + 1.0);
     let mut ema_values = Vec::with_capacity(len);
 

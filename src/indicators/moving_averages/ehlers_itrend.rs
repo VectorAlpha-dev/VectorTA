@@ -75,7 +75,7 @@ impl<'a> EhlersITrendInput<'a> {
     }
 }
 
-pub fn ht_trendline(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
+pub fn ehlers_itrend(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
     let src: &[f64] = match &input.data {
         EhlersITrendData::Candles { candles, source } => source_type(candles, source),
         EhlersITrendData::Slice(slice) => slice,
@@ -239,7 +239,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = EhlersITrendInput::with_default_candles(&candles);
-        let eit_result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        let eit_result = ehlers_itrend(&input).expect("HT Trendline calculation failed");
         let close_prices: &[f64] = candles.select_candle_field("close").unwrap();
 
         assert_eq!(
@@ -278,7 +278,7 @@ mod tests {
         }
     }
     #[test]
-    fn test_ht_trendline_with_default_candles() {
+    fn test_ehlers_itrend_with_default_candles() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = EhlersITrendInput::with_default_candles(&candles);
@@ -295,14 +295,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ht_trendline_with_default_params() {
+    fn test_ehlers_itrend_with_default_params() {
         let default_params = EhlersITrendParams::default();
         assert_eq!(default_params.warmup_bars, Some(12));
         assert_eq!(default_params.max_dc_period, Some(50));
     }
 
     #[test]
-    fn test_ht_trendline_with_no_data() {
+    fn test_ehlers_itrend_with_no_data() {
         let data: [f64; 0] = [];
         let input = EhlersITrendInput::from_slice(
             &data,
@@ -311,12 +311,12 @@ mod tests {
                 max_dc_period: Some(50),
             },
         );
-        let result = ht_trendline(&input).expect("HT Trendline with empty data failed");
+        let result = ehlers_itrend(&input).expect("HT Trendline with empty data failed");
         assert_eq!(result.values.len(), 0);
     }
 
     #[test]
-    fn test_ht_trendline_very_small_data_set() {
+    fn test_ehlers_itrend_very_small_data_set() {
         let data = [42.0];
         let input = EhlersITrendInput::from_slice(
             &data,
@@ -325,13 +325,13 @@ mod tests {
                 max_dc_period: Some(50),
             },
         );
-        let result = ht_trendline(&input).expect("HT Trendline failed for very small data set");
+        let result = ehlers_itrend(&input).expect("HT Trendline failed for very small data set");
         assert_eq!(result.values.len(), data.len());
         assert_eq!(result.values[0], data[0]);
     }
 
     #[test]
-    fn test_ht_trendline_with_slice_data_reinput() {
+    fn test_ehlers_itrend_with_slice_data_reinput() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let first_input = EhlersITrendInput::from_candles(
@@ -342,7 +342,7 @@ mod tests {
                 max_dc_period: Some(50),
             },
         );
-        let first_result = ht_trendline(&first_input).expect("HT Trendline failed on first input");
+        let first_result = ehlers_itrend(&first_input).expect("HT Trendline failed on first input");
         let second_input = EhlersITrendInput::from_slice(
             &first_result.values,
             EhlersITrendParams {
@@ -351,12 +351,12 @@ mod tests {
             },
         );
         let second_result =
-            ht_trendline(&second_input).expect("HT Trendline failed on second input");
+            ehlers_itrend(&second_input).expect("HT Trendline failed on second input");
         assert_eq!(second_result.values.len(), first_result.values.len());
     }
 
     #[test]
-    fn test_ht_trendline_partial_params() {
+    fn test_ehlers_itrend_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = EhlersITrendInput::from_candles(
@@ -367,12 +367,12 @@ mod tests {
                 max_dc_period: None,
             },
         );
-        let result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        let result = ehlers_itrend(&input).expect("HT Trendline calculation failed");
         assert_eq!(result.values.len(), candles.close.len());
     }
 
     #[test]
-    fn test_ht_trendline_accuracy_nan_check() {
+    fn test_ehlers_itrend_accuracy_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = EhlersITrendInput::from_candles(
@@ -383,7 +383,7 @@ mod tests {
                 max_dc_period: Some(50),
             },
         );
-        let result = ht_trendline(&input).expect("HT Trendline calculation failed");
+        let result = ehlers_itrend(&input).expect("HT Trendline calculation failed");
         assert_eq!(result.values.len(), candles.close.len());
         let warmup_bars = input.get_warmup_bars();
         for (idx, &val) in result.values.iter().enumerate().skip(warmup_bars) {
