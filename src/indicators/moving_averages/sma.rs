@@ -64,23 +64,32 @@ pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
         SmaData::Candles { candles, source } => source_type(candles, source),
         SmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
     let period = input.params.period.unwrap_or(9);
     if period == 0 || period > data.len() {
         return Err("Invalid period specified for SMA calculation.".into());
     }
 
-    let mut sma_values = vec![f64::NAN; len];
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Err("All values in input data are NaN.".into());
+        }
+    };
 
-    let inv_period = 1.0 / period as f64;
-    let mut sum: f64 = 0.0;
+    if (data.len() - first_valid_idx) < period {
+        return Err("Not enough valid data points to compute SMA.".into());
+    }
 
-    for &value in data.iter().take(period) {
+    let mut sma_values = vec![f64::NAN; data.len()];
+    let mut sum = 0.0;
+    for &value in data[first_valid_idx..(first_valid_idx + period)].iter() {
         sum += value;
     }
-    sma_values[period - 1] = sum * inv_period;
 
-    for i in period..len {
+    let inv_period = 1.0 / (period as f64);
+    sma_values[first_valid_idx + period - 1] = sum * inv_period;
+
+    for i in (first_valid_idx + period)..data.len() {
         sum += data[i] - data[i - period];
         sma_values[i] = sum * inv_period;
     }
@@ -230,7 +239,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let first_params = SmaParams { period: Some(9) };
+        let first_params = SmaParams { period: Some(14) };
         let first_input = SmaInput::from_candles(&candles, "close", first_params);
         let first_result = sma(&first_input).expect("Failed to calculate first SMA");
 
@@ -240,7 +249,7 @@ mod tests {
             "First SMA output length mismatch"
         );
 
-        let second_params = SmaParams { period: Some(5) };
+        let second_params = SmaParams { period: Some(14) };
         let second_input = SmaInput::from_slice(&first_result.values, second_params);
         let second_result = sma(&second_input).expect("Failed to calculate second SMA");
 
@@ -249,6 +258,14 @@ mod tests {
             first_result.values.len(),
             "Second SMA output length mismatch"
         );
+
+        for i in 28..second_result.values.len() {
+            assert!(
+                !second_result.values[i].is_nan(),
+                "Expected no NaN after index 14, but found NaN at index {}",
+                i
+            );
+        }
     }
 
     #[test]

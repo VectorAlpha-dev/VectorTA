@@ -996,7 +996,7 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));
 
-            let slice_result = ma(ma_type, MaData::Slice(&candles.close), period)
+            let slice_result = ma(ma_type, MaData::Slice(&candles_result), period)
                 .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));
 
             assert_eq!(
