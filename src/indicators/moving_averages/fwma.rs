@@ -64,42 +64,47 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
         FwmaData::Candles { candles, source } => source_type(candles, source),
         FwmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(5);
-    let mut values = vec![f64::NAN; len];
+    let len = data.len();
+    if len == 0 {
+        return Err("No data provided.".into());
+    }
+    let period = input.params.period.unwrap_or(5);
     if period == 0 || period > len {
-        return Err("Invalid period specified for FWMA calculation.".into());
+        return Err("Invalid period.".into());
+    }
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values are NaN.".into()),
+    };
+    if (len - first_valid_idx) < period {
+        return Err("Not enough valid data.".into());
+    }
+    if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
+        return Err("NaN found after first valid index.".into());
     }
     let mut fib = Vec::with_capacity(period);
-    {
-        let mut a = 1;
-        let mut b = 1;
-        fib.push(a as f64);
-        for _ in 1..period {
-            let c = a + b;
-            a = b;
-            b = c;
-            fib.push(a as f64);
-        }
+    fib.push(1.0);
+    if period > 1 {
+        fib.push(1.0);
+    }
+    for i in 2..period {
+        let next = fib[i - 1] + fib[i - 2];
+        fib.push(next);
     }
     let fib_sum: f64 = fib.iter().sum();
-    for w in fib.iter_mut() {
-        *w /= fib_sum;
-    }
-    let end_offset = period - 1;
+    fib.iter_mut().for_each(|w| *w /= fib_sum);
+    let mut values = vec![f64::NAN; len];
+    let end_offset = first_valid_idx + period - 1;
     for i in end_offset..len {
         let start = i + 1 - period;
         let mut sum = 0.0;
-        let fib_slice = &fib[..];
-        let data_slice = &data[start..start + period];
         for j in 0..period {
-            sum += data_slice[j] * fib_slice[j];
+            sum += data[start + j] * fib[j];
         }
         values[i] = sum;
     }
     Ok(FwmaOutput { values })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -70,6 +70,14 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
         AlmaData::Candles { candles, source } => source_type(candles, source),
         AlmaData::Slice(slice) => slice,
     };
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Err("All values in input data are NaN.".into());
+        }
+    };
+
     let len: usize = data.len();
 
     let period: usize = input.params.period.unwrap_or(9);
@@ -78,6 +86,10 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
 
     if period == 0 || period > len {
         return Err("Invalid period specified for ALMA calculation.".into());
+    }
+
+    if (len - first_valid_idx) < period {
+        return Err("Not enough valid data points to compute ALMA.".into());
     }
 
     let m: f64 = offset * (period - 1) as f64;
@@ -102,7 +114,7 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
     alma_values
         .iter_mut()
         .enumerate()
-        .skip(period - 1)
+        .skip(first_valid_idx + period - 1)
         .for_each(|(i, value)| {
             let start: usize = i + 1 - period;
             let mut sum: f64 = 0.0;
@@ -258,7 +270,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let first_params = AlmaParams {
-            period: Some(9),
+            period: Some(80),
             offset: None,
             sigma: None,
         };
@@ -266,13 +278,18 @@ mod tests {
         let first_result = alma(&first_input).expect("Failed first ALMA");
         assert_eq!(first_result.values.len(), candles.close.len());
         let second_params = AlmaParams {
-            period: Some(5),
+            period: Some(50),
             offset: Some(0.8),
             sigma: Some(4.0),
         };
         let second_input = AlmaInput::from_slice(&first_result.values, second_params);
         let second_result = alma(&second_input).expect("Failed second ALMA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

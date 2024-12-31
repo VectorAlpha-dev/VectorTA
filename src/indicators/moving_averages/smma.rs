@@ -64,30 +64,33 @@ pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
         SmmaData::Candles { candles, source } => source_type(candles, source),
         SmmaData::Slice(slice) => slice,
     };
+    let first_valid_idx: usize = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values in input data are NaN.".into()),
+    };
     let len: usize = data.len();
     let period: usize = input.params.period.unwrap_or(7);
-
     if period == 0 || period > len {
         return Err("Invalid period specified for SMMA calculation.".into());
     }
-
-    let mut smma_values = Vec::with_capacity(len);
-
-    for _ in 0..(period - 1) {
-        smma_values.push(f64::NAN);
+    if (len - first_valid_idx) < period {
+        return Err("Not enough valid data points to compute SMMA.".into());
     }
-
-    let sum_first_period: f64 = data[..period].iter().sum();
-    let first_smma = sum_first_period / (period as f64);
-    smma_values.push(first_smma);
-
+    if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
+        return Err("NaN found in data after the first valid index.".into());
+    }
+    let mut smma_values: Vec<f64> = vec![f64::NAN; len];
+    let start: usize = first_valid_idx;
+    let end: usize = start + period;
+    let sum_first_period: f64 = data[start..end].iter().sum();
+    let first_smma: f64 = sum_first_period / period as f64;
+    smma_values[end - 1] = first_smma;
     let mut prev_smma = first_smma;
-    for &value in &data[period..] {
-        let new_smma = (prev_smma * (period as f64 - 1.0) + value) / (period as f64);
-        smma_values.push(new_smma);
+    for i in end..len {
+        let new_smma = (prev_smma * (period as f64 - 1.0) + data[i]) / (period as f64);
+        smma_values[i] = new_smma;
         prev_smma = new_smma;
     }
-
     Ok(SmmaOutput {
         values: smma_values,
     })

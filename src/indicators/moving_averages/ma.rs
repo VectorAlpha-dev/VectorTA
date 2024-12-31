@@ -985,7 +985,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         for &ma_type in &ma_types {
-            let period = 14;
+            let period = 80;
             let candles_result = ma(
                 ma_type,
                 MaData::Candles {
@@ -996,7 +996,7 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));
 
-            let slice_result = ma(ma_type, MaData::Slice(&candles_result), period)
+            let slice_result = ma(ma_type, MaData::Slice(&candles_result), 60)
                 .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));
 
             assert_eq!(

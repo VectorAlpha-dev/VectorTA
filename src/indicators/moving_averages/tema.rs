@@ -68,6 +68,12 @@ pub fn tema(input: &TemaInput) -> Result<TemaOutput, Box<dyn Error>> {
         TemaData::Candles { candles, source } => source_type(candles, source),
         TemaData::Slice(slice) => slice,
     };
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Err("All values in input data are NaN.".into());
+        }
+    };
     let n: usize = data.len();
     let period: usize = input.get_period();
 
@@ -89,13 +95,13 @@ pub fn tema(input: &TemaInput) -> Result<TemaOutput, Box<dyn Error>> {
     let per = 2.0 / (period as f64 + 1.0);
     let per1 = 1.0 - per;
 
-    let mut ema1 = data[0];
+    let mut ema1 = data[first_valid_idx];
     let mut ema2 = 0.0;
     let mut ema3 = 0.0;
 
     let mut tema_values = vec![f64::NAN; n];
 
-    for i in 0..n {
+    for i in first_valid_idx..n {
         let price = data[i];
 
         ema1 = ema1 * per1 + price * per;

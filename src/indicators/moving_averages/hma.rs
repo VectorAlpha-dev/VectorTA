@@ -58,6 +58,7 @@ impl<'a> HmaInput<'a> {
     }
 }
 
+#[inline]
 pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
     let data: &[f64] = match &input.data {
         HmaData::Candles { candles, source } => source_type(candles, source),

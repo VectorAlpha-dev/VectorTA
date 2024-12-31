@@ -56,13 +56,6 @@ impl<'a> CwmaInput<'a> {
             params: CwmaParams::default(),
         }
     }
-
-    #[inline]
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| CwmaParams::default().period.unwrap())
-    }
 }
 
 #[inline]
@@ -71,8 +64,14 @@ pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
         CwmaData::Candles { candles, source } => source_type(candles, source),
         CwmaData::Slice(slice) => slice,
     };
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Err("All values in input data are NaN.".into());
+        }
+    };
     let len: usize = data.len();
-    let period: usize = input.get_period();
+    let period: usize = input.params.period.unwrap_or(14);
 
     if data.is_empty() {
         return Ok(CwmaOutput { values: vec![] });
@@ -89,7 +88,7 @@ pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
 
     let p_minus_1 = period - 1;
     let mut weights = Vec::with_capacity(p_minus_1);
-    for i in 0..p_minus_1 {
+    for i in first_valid_idx..first_valid_idx + p_minus_1 {
         let w = ((period - i) as f64).powi(3);
         weights.push(w);
     }
@@ -97,7 +96,7 @@ pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
 
     let mut cwma_values = data.to_vec();
 
-    for j in (period + 1)..len {
+    for j in (first_valid_idx + period + 1)..len {
         let mut my_sum = 0.0;
         for (i, &w) in weights.iter().enumerate() {
             my_sum += data[j - i] * w;
@@ -178,14 +177,16 @@ mod tests {
             );
         }
 
-        let period = input.get_period();
-        for i in 0..=period {
-            let orig_val = candles.close[i];
-            let cwma_val = cwma_values[i];
+        let period = input.params.period.unwrap_or(14);
+        for (orig_val, cwma_val) in candles
+            .close
+            .iter()
+            .zip(cwma_values.iter())
+            .take(period + 1)
+        {
             assert!(
-                (orig_val - cwma_val).abs() < f64::EPSILON,
-                "Expected CWMA to remain the same as original for index {}",
-                i
+                (*orig_val - *cwma_val).abs() < f64::EPSILON,
+                "Expected CWMA to remain the same as original"
             );
         }
     }
@@ -243,14 +244,19 @@ mod tests {
     fn test_cwma_with_slice_data_reinput() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).unwrap();
-        let first_params = CwmaParams { period: Some(9) };
+        let first_params = CwmaParams { period: Some(80) };
         let first_input = CwmaInput::from_candles(&candles, "close", first_params);
         let first_result = cwma(&first_input).unwrap();
         assert_eq!(first_result.values.len(), candles.close.len());
-        let second_params = CwmaParams { period: Some(5) };
+        let second_params = CwmaParams { period: Some(60) };
         let second_input = CwmaInput::from_slice(&first_result.values, second_params);
         let second_result = cwma(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

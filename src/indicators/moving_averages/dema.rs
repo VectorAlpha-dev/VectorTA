@@ -69,6 +69,14 @@ pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
         DemaData::Candles { candles, source } => source_type(candles, source),
         DemaData::Slice(slice) => slice,
     };
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Err("All values in input data are NaN.".into());
+        }
+    };
+
     let size: usize = data.len();
     let period: usize = input.get_period();
 
@@ -84,10 +92,10 @@ pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
 
     let mut output = vec![f64::NAN; size];
 
-    let mut ema = data[0];
+    let mut ema = data[first_valid_idx];
     let mut ema2 = ema;
 
-    for i in 0..size {
+    for i in first_valid_idx..size {
         ema = ema * alpha_1 + data[i] * alpha;
 
         if i == (period - 1) {
@@ -241,12 +249,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let first_params = DemaParams { period: Some(9) };
+        let first_params = DemaParams { period: Some(80) };
         let first_input = DemaInput::from_candles(&candles, "close", first_params);
         let first_result = dema(&first_input).expect("Failed to calculate first DEMA");
         assert_eq!(first_result.values.len(), candles.close.len());
 
-        let second_params = DemaParams { period: Some(5) };
+        let second_params = DemaParams { period: Some(60) };
         let second_input = DemaInput::from_slice(&first_result.values, second_params);
         let second_result = dema(&second_input).expect("Failed to calculate second DEMA");
         assert_eq!(second_result.values.len(), first_result.values.len());

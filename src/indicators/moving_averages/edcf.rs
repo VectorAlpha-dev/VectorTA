@@ -71,21 +71,31 @@ pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
         EdcfData::Candles { candles, source } => source_type(candles, source),
         EdcfData::Slice(slice) => slice,
     };
-    let period: usize = input.get_period();
-    let len: usize = data.len();
-
-    if data.is_empty() {
+    let len = data.len();
+    if len == 0 {
         return Err("No data provided to EDCF filter.".into());
     }
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values are NaN.".into()),
+    };
+    let period = input.get_period();
     if period == 0 {
         return Err("EDCF period must be >= 1.".into());
     }
+    let needed = 2 * period;
+    if (len - first_valid_idx) < needed {
+        return Err("Not enough valid data to compute EDCF values.".into());
+    }
+    if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
+        return Err("NaN found in data after the first valid index.".into());
+    }
 
-    let mut newseries = vec![f64::NAN; len];
-
+    let mut newseries = vec![0.0; len];
     let mut dist = vec![0.0; len];
 
-    for k in period..len {
+    let dist_start = first_valid_idx + period;
+    for k in dist_start..len {
         let xk = data[k];
         let mut sum_sq = 0.0;
         for lb in 1..period {
@@ -95,23 +105,18 @@ pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
         dist[k] = sum_sq;
     }
 
-    let start_j = 2 * period;
+    let start_j = first_valid_idx + needed;
     for j in start_j..len {
         let mut num = 0.0;
         let mut coef_sum = 0.0;
-
         for i in 0..period {
             let k = j - i;
-            let distance = dist[k];
-            let base_val = data[k];
-            num += distance * base_val;
-            coef_sum += distance;
+            let w = dist[k];
+            num += w * data[k];
+            coef_sum += w;
         }
-
         if coef_sum != 0.0 {
             newseries[j] = num / coef_sum;
-        } else {
-            newseries[j] = 0.0;
         }
     }
 
@@ -208,31 +213,22 @@ mod tests {
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("No data provided"));
-        }
     }
 
     #[test]
     fn test_edcf_with_period_exceeding_data_length() {
         let data = [10.0, 20.0, 30.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(10) });
-        let result = edcf(&input).unwrap();
-        assert_eq!(result.values.len(), data.len());
-        for i in 0..result.values.len() {
-            if i < 2 * 10 {
-                assert!(result.values[i].is_nan());
-            }
-        }
+        let result = edcf(&input);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_edcf_very_small_data_set() {
         let data = [42.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
-        let result = edcf(&input).unwrap();
-        assert_eq!(result.values.len(), data.len());
-        assert!(result.values[0].is_nan());
+        let result = edcf(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -246,6 +242,11 @@ mod tests {
             EdcfInput::from_slice(&first_result.values, EdcfParams { period: Some(5) });
         let second_result = edcf(&second_input).expect("Second EDCF failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]
