@@ -22,12 +22,12 @@ pub struct AlmaParams {
     pub sigma: Option<f64>,
 }
 
-impl AlmaParams {
-    pub fn with_default_params() -> Self {
-        AlmaParams {
-            period: None,
-            offset: None,
-            sigma: None,
+impl Default for AlmaParams {
+    fn default() -> Self {
+        Self {
+            period: Some(9),
+            offset: Some(0.85),
+            sigma: Some(6.0),
         }
     }
 }
@@ -59,8 +59,26 @@ impl<'a> AlmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: AlmaParams::with_default_params(),
+            params: AlmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| AlmaParams::default().period.unwrap())
+    }
+
+    pub fn get_offset(&self) -> f64 {
+        self.params
+            .offset
+            .unwrap_or_else(|| AlmaParams::default().offset.unwrap())
+    }
+
+    pub fn get_sigma(&self) -> f64 {
+        self.params
+            .sigma
+            .unwrap_or_else(|| AlmaParams::default().sigma.unwrap())
     }
 }
 
@@ -80,9 +98,9 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
 
     let len: usize = data.len();
 
-    let period: usize = input.params.period.unwrap_or(9);
-    let offset: f64 = input.params.offset.unwrap_or(0.85);
-    let sigma: f64 = input.params.sigma.unwrap_or(6.0);
+    let period: usize = input.get_period();
+    let offset: f64 = input.get_offset();
+    let sigma: f64 = input.get_sigma();
 
     if period == 0 || period > len {
         return Err("Invalid period specified for ALMA calculation.".into());
@@ -172,7 +190,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let default_params = AlmaParams::with_default_params();
+        let default_params = AlmaParams::default();
 
         let input = AlmaInput::from_candles(&candles, "close", default_params);
         let result = alma(&input).expect("Failed to calculate ALMA");
@@ -204,13 +222,6 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn test_alma_params_with_default_params() {
-        let params = AlmaParams::with_default_params();
-        assert_eq!(params.period, None);
-        assert_eq!(params.offset, None);
-        assert_eq!(params.sigma, None);
-    }
 
     #[test]
     fn test_alma_input_with_default_candles() {
@@ -221,9 +232,6 @@ mod tests {
             AlmaData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected AlmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.offset, None);
-        assert_eq!(input.params.sigma, None);
     }
 
     #[test]
