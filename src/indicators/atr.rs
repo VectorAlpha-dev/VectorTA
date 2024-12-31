@@ -56,6 +56,12 @@ impl<'a> AtrInput<'a> {
             params: AtrParams::default(),
         }
     }
+
+    fn get_length(&self) -> usize {
+        self.params
+            .length
+            .unwrap_or_else(|| AtrParams::default().length.unwrap())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +71,7 @@ pub struct AtrOutput {
 
 #[inline]
 pub fn atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
-    let length: usize = input.params.length.unwrap_or(14);
+    let length = input.get_length();
     if length == 0 {
         return Err("Invalid length for ATR calculation.".into());
     }
@@ -254,6 +260,11 @@ mod tests {
         );
         let second_result = atr(&second_input).expect("Failed ATR (second run)");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

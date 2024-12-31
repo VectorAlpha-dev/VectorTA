@@ -21,9 +21,9 @@ pub struct TrendFlexParams {
     pub period: Option<usize>,
 }
 
-impl TrendFlexParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for TrendFlexParams {
+    fn default() -> Self {
+        Self { period: Some(20) }
     }
 }
 
@@ -54,8 +54,14 @@ impl<'a> TrendFlexInput<'a> {
                 candles,
                 source: "close",
             },
-            params: TrendFlexParams::with_default_params(),
+            params: TrendFlexParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| TrendFlexParams::default().period.unwrap())
     }
 }
 
@@ -66,7 +72,7 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Erro
         TrendFlexData::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let trendflex_period: usize = input.params.period.unwrap_or(20);
+    let trendflex_period = input.get_period();
 
     if data.is_empty() {
         return Err("No data provided to TrendFlex filter.".into());
@@ -193,8 +199,8 @@ mod tests {
     }
     #[test]
     fn test_trendflex_params_with_default_params() {
-        let params = TrendFlexParams::with_default_params();
-        assert_eq!(params.period, None);
+        let params = TrendFlexParams::default();
+        assert_eq!(params.period, Some(20));
     }
 
     #[test]
@@ -206,7 +212,6 @@ mod tests {
             TrendFlexData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected TrendFlexData::Candles"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -258,6 +263,11 @@ mod tests {
         let input_2 = TrendFlexInput::from_slice(&result_1.values, params_2);
         let result_2 = trendflex(&input_2).expect("TrendFlex pass 2 failed");
         assert_eq!(result_2.values.len(), result_1.values.len());
+        if result_2.values.len() > 240 {
+            for i in 240..result_2.values.len() {
+                assert!(!result_2.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

@@ -18,11 +18,11 @@ pub struct BandPassParams {
     pub bandwidth: Option<f64>,
 }
 
-impl BandPassParams {
-    pub fn with_default_params() -> Self {
+impl Default for BandPassParams {
+    fn default() -> Self {
         Self {
-            period: None,
-            bandwidth: None,
+            period: Some(20),
+            bandwidth: Some(0.3),
         }
     }
 }
@@ -54,8 +54,20 @@ impl<'a> BandPassInput<'a> {
                 candles,
                 source: "close",
             },
-            params: BandPassParams::with_default_params(),
+            params: BandPassParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| BandPassParams::default().period.unwrap())
+    }
+
+    pub fn get_bandwidth(&self) -> f64 {
+        self.params
+            .bandwidth
+            .unwrap_or_else(|| BandPassParams::default().bandwidth.unwrap())
     }
 }
 
@@ -75,8 +87,8 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
     };
 
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(20);
-    let bandwidth: f64 = input.params.bandwidth.unwrap_or(0.3);
+    let period = input.get_period();
+    let bandwidth = input.get_bandwidth();
     if len == 0 || len < period {
         return Err("Not enough data available.".into());
     }
@@ -319,15 +331,13 @@ mod tests {
             BandPassData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected BandPassData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.bandwidth, None);
     }
 
     #[test]
     fn test_bandpass_params_with_default_params() {
-        let default_params = BandPassParams::with_default_params();
-        assert_eq!(default_params.period, None);
-        assert_eq!(default_params.bandwidth, None);
+        let default_params = BandPassParams::default();
+        assert_eq!(default_params.period, Some(20));
+        assert_eq!(default_params.bandwidth, Some(0.3));
     }
 
     #[test]
@@ -395,6 +405,12 @@ mod tests {
         let second_input = BandPassInput::from_slice(&first_result.bp, second_params);
         let second_result = bandpass(&second_input).expect("Failed to calculate second bandpass");
         assert_eq!(second_result.bp.len(), first_result.bp.len());
+        for i in 0..240 {
+            assert!(second_result.bp[i].is_nan());
+            assert!(second_result.bp_normalized[i].is_nan());
+            assert!(second_result.signal[i].is_nan());
+            assert!(second_result.trigger[i].is_nan());
+        }
     }
 
     #[test]

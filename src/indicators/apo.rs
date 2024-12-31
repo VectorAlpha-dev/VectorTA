@@ -55,6 +55,18 @@ impl<'a> ApoInput<'a> {
             params: ApoParams::default(),
         }
     }
+
+    pub fn get_short_period(&self) -> usize {
+        self.params
+            .short_period
+            .unwrap_or_else(|| ApoParams::default().short_period.unwrap())
+    }
+
+    pub fn get_long_period(&self) -> usize {
+        self.params
+            .long_period
+            .unwrap_or_else(|| ApoParams::default().long_period.unwrap())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,8 +76,8 @@ pub struct ApoOutput {
 
 #[inline]
 pub fn apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
-    let short: usize = input.params.short_period.unwrap_or(10);
-    let long: usize = input.params.long_period.unwrap_or(20);
+    let short = input.get_short_period();
+    let long = input.get_long_period();
 
     if short == 0 || long == 0 {
         return Err("Invalid period specified for APO calculation.".into());
@@ -283,6 +295,9 @@ mod tests {
         let second_input = ApoInput::from_slice(&first_result.values, second_params);
         let second_result = apo(&second_input).expect("Failed to calculate second APO");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in second_result.values.iter().skip(240) {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

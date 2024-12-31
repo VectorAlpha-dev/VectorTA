@@ -20,9 +20,9 @@ pub struct SwmaParams {
     pub period: Option<usize>,
 }
 
-impl SwmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SwmaParams {
+    fn default() -> Self {
+        Self { period: Some(5) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> SwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SwmaParams::with_default_params(),
+            params: SwmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SwmaParams::default().period.unwrap())
     }
 }
 
@@ -65,7 +71,7 @@ pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
         SwmaData::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(5);
+    let period = input.get_period();
     if data.is_empty() {
         return Ok(SwmaOutput { values: vec![] });
     }
@@ -156,7 +162,7 @@ mod tests {
             .select_candle_field("close")
             .expect("Failed to extract close prices");
 
-        let default_params = SwmaParams::with_default_params();
+        let default_params = SwmaParams::default();
         let input = SwmaInput::from_candles(&candles, "close", default_params);
         let result = swma(&input).expect("SWMA calculation failed");
         let len = result.values.len();
@@ -192,8 +198,8 @@ mod tests {
     }
     #[test]
     fn test_swma_params_with_default_params() {
-        let default_params = SwmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = SwmaParams::default();
+        assert_eq!(default_params.period, Some(5));
     }
 
     #[test]
@@ -207,7 +213,6 @@ mod tests {
             }
             _ => panic!("Expected SwmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -269,6 +274,9 @@ mod tests {
         let second_input = SwmaInput::from_slice(&first_result.values, second_params);
         let second_result = swma(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in &second_result.values[240..] {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

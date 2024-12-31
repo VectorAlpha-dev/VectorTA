@@ -21,9 +21,9 @@ pub struct SuperSmootherParams {
     pub period: Option<usize>,
 }
 
-impl SuperSmootherParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SuperSmootherParams {
+    fn default() -> Self {
+        Self { period: Some(14) }
     }
 }
 
@@ -58,8 +58,14 @@ impl<'a> SuperSmootherInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SuperSmootherParams::with_default_params(),
+            params: SuperSmootherParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SuperSmootherParams::default().period.unwrap())
     }
 }
 
@@ -69,7 +75,7 @@ pub fn supersmoother(input: &SuperSmootherInput) -> Result<SuperSmootherOutput, 
         SuperSmootherData::Candles { candles, source } => source_type(candles, source),
         SuperSmootherData::Slice(slice) => slice,
     };
-    let period: usize = input.params.period.unwrap_or(14);
+    let period = input.get_period();
 
     if data.is_empty() {
         return Ok(SuperSmootherOutput { values: vec![] });
@@ -169,8 +175,8 @@ mod tests {
     }
     #[test]
     fn test_supersmoother_params_with_default_params() {
-        let params = SuperSmootherParams::with_default_params();
-        assert_eq!(params.period, None);
+        let params = SuperSmootherParams::default();
+        assert_eq!(params.period, Some(14));
     }
 
     #[test]
@@ -182,7 +188,6 @@ mod tests {
             SuperSmootherData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected SuperSmootherData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -237,7 +242,7 @@ mod tests {
         assert_eq!(result.values.len(), candles.close.len());
         if result.values.len() > 240 {
             for i in 240..result.values.len() {
-                assert!(!result.values[i].is_nan());
+                assert!(result.values[i].is_finite());
             }
         }
     }

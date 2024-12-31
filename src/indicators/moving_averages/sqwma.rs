@@ -20,9 +20,9 @@ pub struct SqwmaParams {
     pub period: Option<usize>,
 }
 
-impl SqwmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SqwmaParams {
+    fn default() -> Self {
+        Self { period: Some(14) }
     }
 }
 
@@ -53,11 +53,16 @@ impl<'a> SqwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SqwmaParams::with_default_params(),
+            params: SqwmaParams::default(),
         }
     }
-}
 
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SqwmaParams::default().period.unwrap())
+    }
+}
 #[inline]
 pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
     let data: &[f64] = match &input.data {
@@ -65,7 +70,7 @@ pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
         SqwmaData::Slice(slice) => slice,
     };
     let n: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(14);
+    let period = input.get_period();
     if n == 0 {
         return Err("Empty data for SQWMA calculation.".into());
     }
@@ -155,7 +160,7 @@ mod tests {
         let source = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-        let default_params = SqwmaParams::with_default_params();
+        let default_params = SqwmaParams::default();
         let input = SqwmaInput::from_candles(&candles, "close", default_params);
         let result = sqwma(&input).expect("Failed to calculate SQWMA");
         assert_eq!(result.values.len(), source.len());
@@ -178,8 +183,8 @@ mod tests {
     }
     #[test]
     fn test_sqwma_params_with_default_params() {
-        let default_params = SqwmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = SqwmaParams::default();
+        assert_eq!(default_params.period, Some(14));
     }
 
     #[test]
@@ -193,7 +198,6 @@ mod tests {
             }
             _ => panic!("Unexpected data variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -251,6 +255,9 @@ mod tests {
         let second_input = SqwmaInput::from_slice(&first_result.values, second_params);
         let second_result = sqwma(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(second_result.values[i].is_finite());
+        }
     }
 
     #[test]

@@ -63,6 +63,30 @@ impl<'a> AlligatorInput<'a> {
             params: AlligatorParams::default(),
         }
     }
+
+    fn get_jaw_period(&self) -> usize {
+        self.params.jaw_period.unwrap_or(13)
+    }
+
+    fn get_jaw_offset(&self) -> usize {
+        self.params.jaw_offset.unwrap_or(8)
+    }
+
+    fn get_teeth_period(&self) -> usize {
+        self.params.teeth_period.unwrap_or(8)
+    }
+
+    fn get_teeth_offset(&self) -> usize {
+        self.params.teeth_offset.unwrap_or(5)
+    }
+
+    fn get_lips_period(&self) -> usize {
+        self.params.lips_period.unwrap_or(5)
+    }
+
+    fn get_lips_offset(&self) -> usize {
+        self.params.lips_offset.unwrap_or(3)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,12 +104,12 @@ pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Erro
     };
     let len: usize = data.len();
 
-    let jaw_period = input.params.jaw_period.unwrap_or(13);
-    let jaw_offset = input.params.jaw_offset.unwrap_or(8);
-    let teeth_period = input.params.teeth_period.unwrap_or(8);
-    let teeth_offset = input.params.teeth_offset.unwrap_or(5);
-    let lips_period = input.params.lips_period.unwrap_or(5);
-    let lips_offset = input.params.lips_offset.unwrap_or(3);
+    let jaw_period = input.get_jaw_period();
+    let jaw_offset = input.get_jaw_offset();
+    let teeth_period = input.get_teeth_period();
+    let teeth_offset = input.get_teeth_offset();
+    let lips_period = input.get_lips_period();
+    let lips_offset = input.get_lips_offset();
 
     let mut jaw = vec![f64::NAN; len];
     let mut teeth = vec![f64::NAN; len];
@@ -322,6 +346,11 @@ mod tests {
         assert_eq!(second_result.jaw.len(), first_result.jaw.len());
         assert_eq!(second_result.teeth.len(), first_result.teeth.len());
         assert_eq!(second_result.lips.len(), first_result.lips.len());
+        for i in 240..second_result.jaw.len() {
+            assert!(!second_result.jaw[i].is_nan());
+            assert!(!second_result.teeth[i].is_nan());
+            assert!(!second_result.lips[i].is_nan());
+        }
     }
 
     #[test]

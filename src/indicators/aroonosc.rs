@@ -45,6 +45,12 @@ impl<'a> AroonOscInput<'a> {
             params: AroonOscParams::default(),
         }
     }
+
+    pub fn get_length(&self) -> usize {
+        self.params
+            .length
+            .unwrap_or_else(|| AroonOscParams::default().length.unwrap())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +60,7 @@ pub struct AroonOscOutput {
 
 #[inline]
 pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<dyn Error>> {
-    let length = input.params.length.unwrap_or(14);
+    let length = input.get_length();
     if length == 0 {
         return Err("Invalid length specified for Aroon Osc calculation.".into());
     }
@@ -216,6 +222,9 @@ mod tests {
         );
         let second_result = aroon_osc(&second_input).expect("Failed to calculate second Aroon Osc");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

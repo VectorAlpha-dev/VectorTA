@@ -21,11 +21,11 @@ pub struct TilsonParams {
     pub volume_factor: Option<f64>,
 }
 
-impl TilsonParams {
-    pub fn with_default_params() -> Self {
+impl Default for TilsonParams {
+    fn default() -> Self {
         Self {
-            period: None,
-            volume_factor: None,
+            period: Some(5),
+            volume_factor: Some(0.0),
         }
     }
 }
@@ -57,8 +57,20 @@ impl<'a> TilsonInput<'a> {
                 candles,
                 source: "close",
             },
-            params: TilsonParams::with_default_params(),
+            params: TilsonParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| TilsonParams::default().period.unwrap())
+    }
+
+    pub fn get_volume_factor(&self) -> f64 {
+        self.params
+            .volume_factor
+            .unwrap_or_else(|| TilsonParams::default().volume_factor.unwrap())
     }
 }
 
@@ -69,9 +81,8 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
         TilsonData::Slice(slice) => slice,
     };
     let length: usize = data.len();
-    let opt_in_time_period = input.params.period.unwrap_or(5);
-    let opt_in_v_factor = input.params.volume_factor.unwrap_or(0.0);
-    let length = data.len();
+    let opt_in_time_period = input.get_period();
+    let opt_in_v_factor = input.get_volume_factor();
     if opt_in_time_period == 0 || opt_in_time_period > length {
         return Err("Invalid period specified.".into());
     }
@@ -287,9 +298,9 @@ mod tests {
 
     #[test]
     fn test_tilson_with_default_params() {
-        let default_params = TilsonParams::with_default_params();
-        assert_eq!(default_params.period, None);
-        assert_eq!(default_params.volume_factor, None);
+        let default_params = TilsonParams::default();
+        assert_eq!(default_params.period, Some(5));
+        assert_eq!(default_params.volume_factor, Some(0.0));
     }
 
     #[test]
@@ -344,6 +355,9 @@ mod tests {
         );
         let second_result = tilson(&second_input).expect("Second T3/Tilson failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(second_result.values[i].is_finite());
+        }
     }
 
     #[test]

@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(second_result.values.len(), first_result.values.len());
         for i in 240..second_result.values.len() {
             assert!(
-                !second_result.values[i].is_nan(),
+                second_result.values[i].is_finite(),
                 "NaN found at index {}",
                 i
             );

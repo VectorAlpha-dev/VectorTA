@@ -80,7 +80,7 @@ pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Error>> {
         SinWmaData::Candles { candles, source } => source_type(candles, source),
         SinWmaData::Slice(slice) => slice,
     };
-    let period: usize = input.get_period();
+    let period = input.get_period();
     if period == 0 || period > data.len() {
         return Err("Invalid period for SINWMA calculation.".into());
     }
@@ -229,6 +229,9 @@ mod tests {
             SinWmaInput::from_slice(&first_result.values, SinWmaParams { period: Some(5) });
         let second_result = sinwma(&second_input).expect("Second SINWMA failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for &val in second_result.values.iter().skip(240) {
+            assert!(val.is_finite());
+        }
     }
 
     #[test]

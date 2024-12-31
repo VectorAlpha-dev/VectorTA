@@ -20,9 +20,9 @@ pub struct WildersParams {
     pub period: Option<usize>,
 }
 
-impl WildersParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for WildersParams {
+    fn default() -> Self {
+        Self { period: Some(5) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> WildersInput<'a> {
                 candles,
                 source: "close",
             },
-            params: WildersParams::with_default_params(),
+            params: WildersParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| WildersParams::default().period.unwrap())
     }
 }
 
@@ -65,7 +71,7 @@ pub fn wilders(input: &WildersInput) -> Result<WildersOutput, Box<dyn Error>> {
         WildersData::Slice(slice) => slice,
     };
     let n: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(5);
+    let period: usize = input.get_period();
 
     if period == 0 || period > n {
         return Err("Invalid period specified for Wilder's Moving Average.".into());
@@ -158,8 +164,8 @@ mod tests {
 
     #[test]
     fn test_wilders_params_with_default_params() {
-        let default_params = WildersParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = WildersParams::default();
+        assert_eq!(default_params.period, Some(5));
     }
 
     #[test]
@@ -173,7 +179,6 @@ mod tests {
             }
             _ => panic!("Expected WildersData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -209,5 +214,24 @@ mod tests {
         assert_eq!(result.values.len(), input_data.len());
         assert!(result.values[0].is_nan());
         assert!((result.values[1] - 42.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_wilders_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
+        let params_first = WildersParams { period: Some(20) };
+        let input_first = WildersInput::from_candles(&candles, "close", params_first);
+        let result_first = wilders(&input_first).expect("First pass wilders failed");
+        assert_eq!(result_first.values.len(), candles.close.len());
+
+        let params_second = WildersParams { period: Some(10) };
+        let input_second = WildersInput::from_slice(&result_first.values, params_second);
+        let result_second = wilders(&input_second).expect("Second pass wilders failed");
+        assert_eq!(result_second.values.len(), result_first.values.len());
+        for i in 240..result_second.values.len() {
+            assert!(!result_second.values[i].is_nan());
+        }
     }
 }

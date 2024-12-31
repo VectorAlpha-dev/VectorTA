@@ -20,9 +20,9 @@ pub struct WmaParams {
     pub period: Option<usize>,
 }
 
-impl WmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for WmaParams {
+    fn default() -> Self {
+        Self { period: Some(30) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> WmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: WmaParams::with_default_params(),
+            params: WmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| WmaParams::default().period.unwrap())
     }
 }
 
@@ -128,7 +134,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let data = &candles.close;
-        let default_params = WmaParams::with_default_params();
+        let default_params = WmaParams::default();
         let input = WmaInput::from_candles(&candles, "close", default_params);
         let result = wma(&input).expect("Failed to calculate WMA");
 
@@ -169,8 +175,8 @@ mod tests {
     }
     #[test]
     fn test_wma_params_with_default() {
-        let default_params = WmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = WmaParams::default();
+        assert_eq!(default_params.period, Some(30));
     }
 
     #[test]
@@ -184,7 +190,6 @@ mod tests {
             }
             _ => panic!("Expected WmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -242,6 +247,9 @@ mod tests {
         let second_input = WmaInput::from_slice(&first_result.values, second_params);
         let second_result = wma(&second_input).expect("Failed to calculate second WMA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in &second_result.values[240..] {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

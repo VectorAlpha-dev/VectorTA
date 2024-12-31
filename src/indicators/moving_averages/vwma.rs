@@ -36,9 +36,9 @@ pub struct VwmaParams {
     pub period: Option<usize>,
 }
 
-impl VwmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for VwmaParams {
+    fn default() -> Self {
+        Self { period: Some(20) }
     }
 }
 
@@ -73,8 +73,14 @@ impl<'a> VwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: VwmaParams::with_default_params(),
+            params: VwmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| VwmaParams::default().period.unwrap())
     }
 }
 
@@ -87,7 +93,7 @@ pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
         VwmaData::CandlesPlusPrices { prices, .. } => prices,
     };
     let len: usize = price.len();
-    let period: usize = input.params.period.unwrap_or(20);
+    let period: usize = input.get_period();
 
     if period == 0 || period > len {
         return Err("Invalid period for VWMA calculation.".into());
@@ -186,7 +192,6 @@ mod tests {
             VwmaData::Candles { source, .. } => assert_eq!(source, "close"),
             VwmaData::CandlesPlusPrices { .. } => panic!("Expected VwmaData::Candles"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -219,5 +224,8 @@ mod tests {
             VwmaInput::from_candles_plus_prices(&candles, &result_first.values, params_second);
         let result_second = vwma(&input_second).expect("Second pass VWMA failed");
         assert_eq!(result_second.values.len(), result_first.values.len());
+        for i in 240..result_second.values.len() {
+            assert!(!result_second.values[i].is_nan());
+        }
     }
 }

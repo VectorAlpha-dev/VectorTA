@@ -20,9 +20,9 @@ pub struct NmaParams {
     pub period: Option<usize>,
 }
 
-impl NmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for NmaParams {
+    fn default() -> Self {
+        Self { period: Some(40) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> NmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: NmaParams::with_default_params(),
+            params: NmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| NmaParams::default().period.unwrap())
     }
 }
 
@@ -65,7 +71,7 @@ pub fn nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
         NmaData::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(40);
+    let period = input.get_period();
 
     if period == 0 {
         return Err("NMA period cannot be zero.".into());
@@ -201,8 +207,8 @@ mod tests {
     }
     #[test]
     fn test_nma_params_with_default_params() {
-        let params = NmaParams::with_default_params();
-        assert_eq!(params.period, None);
+        let params = NmaParams::default();
+        assert_eq!(params.period, Some(40));
     }
 
     #[test]
@@ -214,7 +220,6 @@ mod tests {
             NmaData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected NmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -247,6 +252,11 @@ mod tests {
         let input_2 = NmaInput::from_slice(&result_1.values, params_2);
         let result_2 = nma(&input_2).expect("Failed second NMA");
         assert_eq!(result_2.values.len(), result_1.values.len());
+        if result_2.values.len() > 240 {
+            for i in 240..result_2.values.len() {
+                assert!(result_2.values[i].is_finite());
+            }
+        }
     }
 
     #[test]

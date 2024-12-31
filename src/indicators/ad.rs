@@ -190,6 +190,9 @@ mod tests {
         );
         let second_result = ad(&second_input).expect("Failed to calculate second AD");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

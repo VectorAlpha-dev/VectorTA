@@ -214,6 +214,9 @@ mod tests {
             ZlemaInput::from_slice(&first_result.values, ZlemaParams { period: Some(7) });
         let second_result = zlema(&second_input).expect("Failed ZLEMA on second input");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for (idx, &val) in second_result.values.iter().enumerate().skip(240) {
+            assert!(val.is_finite(), "NaN found at index {}", idx);
+        }
     }
 
     #[test]

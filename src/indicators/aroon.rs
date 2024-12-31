@@ -45,6 +45,12 @@ impl<'a> AroonInput<'a> {
             params: AroonParams::default(),
         }
     }
+
+    pub fn get_length(&self) -> usize {
+        self.params
+            .length
+            .unwrap_or_else(|| AroonParams::default().length.unwrap())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +81,7 @@ pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
             (*high, *low)
         }
     };
-    let length = input.params.length.unwrap_or(14);
+    let length = input.get_length();
     if high.len() < length {
         return Err(format!(
             "Not enough data points ({} total) for Aroon length {}.",
@@ -279,6 +285,20 @@ mod tests {
         let second_result = aroon(&second_input).expect("Failed second Aroon calculation");
         assert_eq!(second_result.aroon_up.len(), candles.close.len());
         assert_eq!(second_result.aroon_down.len(), candles.close.len());
+        if first_result.aroon_up.len() > 240 {
+            for i in 240..first_result.aroon_up.len() {
+                assert!(
+                    !first_result.aroon_up[i].is_nan(),
+                    "Found NaN in aroon_up at {}",
+                    i
+                );
+                assert!(
+                    !first_result.aroon_down[i].is_nan(),
+                    "Found NaN in aroon_down at {}",
+                    i
+                );
+            }
+        }
     }
 
     #[test]

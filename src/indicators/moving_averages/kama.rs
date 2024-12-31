@@ -225,7 +225,7 @@ mod tests {
         let second_result = kama(&second_input).expect("Second KAMA failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
         for val in second_result.values.iter().skip(240) {
-            assert!(val.is_nan());
+            assert!(val.is_finite());
         }
     }
 

@@ -233,6 +233,9 @@ mod tests {
         let second_input = SrwmaInput::from_slice(&first_result.values, second_params);
         let second_result = srwma(&second_input).expect("Failed to calculate second SRWMA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(second_result.values[i].is_finite());
+        }
     }
 
     #[test]

@@ -51,6 +51,12 @@ impl<'a> RsiInput<'a> {
             params: RsiParams::default(),
         }
     }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| RsiParams::default().period.unwrap())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +70,7 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
         RsiData::Candles { candles, source } => source_type(candles, source),
         RsiData::Slice(slice) => slice,
     };
-    let period = input.params.period.unwrap_or(14);
+    let period = input.get_period();
 
     if data.len() < period {
         return Err("Not enough data points to compute RSI.".into());
@@ -254,6 +260,15 @@ mod tests {
         let second_input = RsiInput::from_slice(&first_result.values, second_params);
         let second_result = rsi(&second_input).expect("Failed second RSI");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(
+                    !second_result.values[i].is_nan(),
+                    "Found NaN in RSI at {}",
+                    i
+                );
+            }
+        }
     }
 
     #[test]

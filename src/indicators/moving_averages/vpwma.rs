@@ -278,6 +278,11 @@ mod tests {
         let second_input = VpwmaInput::from_slice(&first_result.values, second_params);
         let second_result = vpwma(&second_input).expect("Failed to calculate second VPWMA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

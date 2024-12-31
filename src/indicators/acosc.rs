@@ -287,6 +287,20 @@ mod tests {
 
         assert_eq!(second_result.osc.len(), candles.close.len());
         assert_eq!(second_result.change.len(), candles.close.len());
+        if second_result.osc.len() > 240 {
+            for i in 240..second_result.osc.len() {
+                assert!(
+                    !second_result.osc[i].is_nan(),
+                    "Found NaN in osc at index {}",
+                    i
+                );
+                assert!(
+                    !second_result.change[i].is_nan(),
+                    "Found NaN in change at index {}",
+                    i
+                );
+            }
+        }
     }
 
     #[test]

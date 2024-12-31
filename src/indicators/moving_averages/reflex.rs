@@ -21,9 +21,9 @@ pub struct ReflexParams {
     pub period: Option<usize>,
 }
 
-impl ReflexParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for ReflexParams {
+    fn default() -> Self {
+        Self { period: Some(20) }
     }
 }
 
@@ -54,8 +54,14 @@ impl<'a> ReflexInput<'a> {
                 candles,
                 source: "close",
             },
-            params: ReflexParams::with_default_params(),
+            params: ReflexParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| ReflexParams::default().period.unwrap())
     }
 }
 
@@ -66,7 +72,7 @@ pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
         ReflexData::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(20);
+    let period = input.get_period();
 
     if len == 0 {
         return Err("No data available for Reflex.".into());
@@ -157,7 +163,7 @@ mod tests {
     fn test_reflex_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let default_params = ReflexParams::with_default_params();
+        let default_params = ReflexParams::default();
         let input = ReflexInput::from_candles(&candles, "close", default_params);
         let result = reflex(&input).expect("Failed to calculate Reflex");
         assert_eq!(
@@ -190,8 +196,8 @@ mod tests {
 
     #[test]
     fn test_reflex_params_with_default_params() {
-        let default_params = ReflexParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = ReflexParams::default();
+        assert_eq!(default_params.period, Some(20));
     }
 
     #[test]
@@ -205,7 +211,6 @@ mod tests {
             }
             _ => panic!("Expected ReflexData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -259,6 +264,9 @@ mod tests {
         let second_input = ReflexInput::from_slice(&first_result.values, second_params);
         let second_result = reflex(&second_input).expect("Failed to calculate second Reflex");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(second_result.values[i].is_finite());
+        }
     }
 
     #[test]
@@ -274,7 +282,11 @@ mod tests {
         assert_eq!(result.values.len(), candles.close.len());
         if result.values.len() > period {
             for i in period..result.values.len() {
-                assert!(!result.values[i].is_nan());
+                assert!(
+                    result.values[i].is_finite(),
+                    "Unexpected NaN at index {}",
+                    i
+                );
             }
         }
     }

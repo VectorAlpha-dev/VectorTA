@@ -24,12 +24,18 @@ pub struct MamaParams {
     pub slow_limit: Option<f64>,
 }
 
+impl Default for MamaParams {
+    fn default() -> Self {
+        Self {
+            fast_limit: Some(0.5),
+            slow_limit: Some(0.05),
+        }
+    }
+}
+
 impl MamaParams {
     pub fn with_default_params() -> Self {
-        Self {
-            fast_limit: None,
-            slow_limit: None,
-        }
+        Self::default()
     }
 }
 
@@ -63,6 +69,18 @@ impl<'a> MamaInput<'a> {
             params: MamaParams::with_default_params(),
         }
     }
+
+    pub fn get_fast_limit(&self) -> f64 {
+        self.params
+            .fast_limit
+            .unwrap_or_else(|| MamaParams::default().fast_limit.unwrap())
+    }
+
+    pub fn get_slow_limit(&self) -> f64 {
+        self.params
+            .slow_limit
+            .unwrap_or_else(|| MamaParams::default().slow_limit.unwrap())
+    }
 }
 
 #[inline(always)]
@@ -81,8 +99,8 @@ pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
         return Err("Not enough data".into());
     }
 
-    let fast_limit = input.params.fast_limit.unwrap_or(0.5);
-    let slow_limit = input.params.slow_limit.unwrap_or(0.05);
+    let fast_limit = input.get_fast_limit();
+    let slow_limit = input.get_slow_limit();
 
     let mut mama_values = vec![0.0; len];
     let mut fama_values = vec![0.0; len];
@@ -325,8 +343,8 @@ mod tests {
     #[test]
     fn test_mama_params_with_default_params() {
         let default_params = MamaParams::with_default_params();
-        assert_eq!(default_params.fast_limit, None);
-        assert_eq!(default_params.slow_limit, None);
+        assert_eq!(default_params.fast_limit, Some(0.5));
+        assert_eq!(default_params.slow_limit, Some(0.05));
     }
 
     #[test]
@@ -340,8 +358,6 @@ mod tests {
             }
             _ => panic!("Expected MamaData::Candles variant"),
         }
-        assert_eq!(input.params.fast_limit, None);
-        assert_eq!(input.params.slow_limit, None);
     }
 
     #[test]
@@ -394,6 +410,16 @@ mod tests {
             second_result.fama_values.len(),
             first_result.mama_values.len()
         );
+        for (i, &val) in second_result.mama_values.iter().enumerate() {
+            if i > 240 {
+                assert!(val.is_nan());
+            }
+        }
+        for (i, &val) in second_result.fama_values.iter().enumerate() {
+            if i > 240 {
+                assert!(val.is_nan());
+            }
+        }
     }
 
     #[test]
@@ -407,12 +433,12 @@ mod tests {
         assert_eq!(result.fama_values.len(), candles.close.len());
         for (i, &val) in result.mama_values.iter().enumerate() {
             if i > 20 {
-                assert!(!val.is_nan());
+                assert!(val.is_finite());
             }
         }
         for (i, &val) in result.fama_values.iter().enumerate() {
             if i > 20 {
-                assert!(!val.is_nan());
+                assert!(val.is_finite());
             }
         }
     }

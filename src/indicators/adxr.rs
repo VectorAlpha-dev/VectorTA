@@ -363,6 +363,15 @@ mod tests {
             AdxrInput::from_slices(high_reinput, low_reinput, close_reinput, second_params);
         let second_result = adxr(&second_input).expect("Failed second ADXR");
         assert_eq!(second_result.values.len(), candles.close.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(
+                    !second_result.values[i].is_nan(),
+                    "Found NaN in ADXR at {}",
+                    i
+                );
+            }
+        }
     }
 
     #[test]

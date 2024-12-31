@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(result_second.values.len(), result_first.values.len());
         if result_second.values.len() > 240 {
             for i in 240..result_second.values.len() {
-                assert!(!result_second.values[i].is_nan());
+                assert!(result_second.values[i].is_finite());
             }
         }
     }

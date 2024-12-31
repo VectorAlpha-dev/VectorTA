@@ -20,9 +20,9 @@ pub struct SmaParams {
     pub period: Option<usize>,
 }
 
-impl SmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SmaParams {
+    fn default() -> Self {
+        Self { period: Some(9) }
     }
 }
 
@@ -53,18 +53,23 @@ impl<'a> SmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SmaParams::with_default_params(),
+            params: SmaParams::default(),
         }
     }
-}
 
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SmaParams::default().period.unwrap())
+    }
+}
 #[inline]
 pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
     let data: &[f64] = match &input.data {
         SmaData::Candles { candles, source } => source_type(candles, source),
         SmaData::Slice(slice) => slice,
     };
-    let period = input.params.period.unwrap_or(9);
+    let period = input.get_period();
     if period == 0 || period > data.len() {
         return Err("Invalid period specified for SMA calculation.".into());
     }
@@ -169,9 +174,10 @@ mod tests {
 
     #[test]
     fn test_sma_params_with_default_params() {
-        let default_params = SmaParams::with_default_params();
+        let default_params = SmaParams::default();
         assert_eq!(
-            default_params.period, None,
+            default_params.period,
+            Some(9),
             "Expected period to be None in default parameters"
         );
     }
@@ -188,10 +194,6 @@ mod tests {
             }
             _ => panic!("Expected SmaData::Candles variant"),
         }
-        assert_eq!(
-            input.params.period, None,
-            "Expected default period to be None"
-        );
     }
 
     #[test]

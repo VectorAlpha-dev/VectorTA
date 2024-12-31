@@ -310,6 +310,9 @@ mod tests {
         let second_input = AoInput::from_slice(&first_result.values, second_params);
         let second_result = ao(&second_input).expect("Failed AO (second run)");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in &second_result.values[240..] {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

@@ -20,9 +20,9 @@ pub struct PwmaParams {
     pub period: Option<usize>,
 }
 
-impl PwmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for PwmaParams {
+    fn default() -> Self {
+        Self { period: Some(5) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> PwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: PwmaParams::with_default_params(),
+            params: PwmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| PwmaParams::default().period.unwrap())
     }
 }
 
@@ -64,7 +70,7 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, Box<dyn Error>> {
         PwmaData::Candles { candles, source } => source_type(candles, source),
         PwmaData::Slice(slice) => slice,
     };
-    let period: usize = input.params.period.unwrap_or(5);
+    let period = input.get_period();
     let len: usize = data.len();
     if period == 0 || period > len {
         return Err("Invalid period specified for PWMA calculation.".into());
@@ -173,8 +179,8 @@ mod tests {
     }
     #[test]
     fn test_pwma_params_with_default_params() {
-        let default_params = PwmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = PwmaParams::default();
+        assert_eq!(default_params.period, Some(5));
     }
 
     #[test]
@@ -188,7 +194,6 @@ mod tests {
             }
             _ => panic!("Unexpected data variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -243,6 +248,9 @@ mod tests {
         let second_input = PwmaInput::from_slice(&first_result.values, second_params);
         let second_result = pwma(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(second_result.values[i].is_finite());
+        }
     }
 
     #[test]

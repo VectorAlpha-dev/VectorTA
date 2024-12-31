@@ -341,6 +341,9 @@ mod tests {
         );
         let second_result = adx(&second_input).expect("Failed to calculate second ADX");
         assert_eq!(second_result.values.len(), candles.close.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

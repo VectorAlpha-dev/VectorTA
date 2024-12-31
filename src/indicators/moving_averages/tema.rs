@@ -52,8 +52,10 @@ impl<'a> TemaInput<'a> {
         }
     }
 
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(9)
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| TemaParams::default().period.unwrap())
     }
 }
 
@@ -252,6 +254,9 @@ mod tests {
         let second_input = TemaInput::from_slice(&first_result.values, second_params);
         let second_result = tema(&second_input).expect("Failed to calculate second TEMA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

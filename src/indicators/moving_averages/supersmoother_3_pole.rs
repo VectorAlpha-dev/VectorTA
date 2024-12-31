@@ -21,9 +21,9 @@ pub struct SuperSmoother3PoleParams {
     pub period: Option<usize>,
 }
 
-impl SuperSmoother3PoleParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SuperSmoother3PoleParams {
+    fn default() -> Self {
+        Self { period: Some(14) }
     }
 }
 
@@ -58,11 +58,18 @@ impl<'a> SuperSmoother3PoleInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SuperSmoother3PoleParams::with_default_params(),
+            params: SuperSmoother3PoleParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SuperSmoother3PoleParams::default().period.unwrap())
     }
 }
 
+#[inline]
 pub fn supersmoother_3_pole(
     input: &SuperSmoother3PoleInput,
 ) -> Result<SuperSmoother3PoleOutput, Box<dyn Error>> {
@@ -71,7 +78,7 @@ pub fn supersmoother_3_pole(
         SuperSmoother3PoleData::Slice(slice) => slice,
     };
     let n: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(14);
+    let period: usize = input.get_period();
 
     if data.is_empty() {
         return Ok(SuperSmoother3PoleOutput { values: vec![] });
@@ -195,8 +202,8 @@ mod tests {
 
     #[test]
     fn test_supersmoother_3_pole_with_default_params() {
-        let default_params = SuperSmoother3PoleParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = SuperSmoother3PoleParams::default();
+        assert_eq!(default_params.period, Some(14));
     }
 
     #[test]
@@ -242,6 +249,11 @@ mod tests {
         );
         let second_result = supersmoother_3_pole(&second_input).expect("Second 3-pole SS failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(second_result.values[i].is_finite());
+            }
+        }
     }
 
     #[test]

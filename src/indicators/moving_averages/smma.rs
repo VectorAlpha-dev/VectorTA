@@ -20,9 +20,9 @@ pub struct SmmaParams {
     pub period: Option<usize>,
 }
 
-impl SmmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for SmmaParams {
+    fn default() -> Self {
+        Self { period: Some(7) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> SmmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: SmmaParams::with_default_params(),
+            params: SmmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| SmmaParams::default().period.unwrap())
     }
 }
 
@@ -69,7 +75,7 @@ pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
         None => return Err("All values in input data are NaN.".into()),
     };
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(7);
+    let period = input.get_period();
     if period == 0 || period > len {
         return Err("Invalid period specified for SMMA calculation.".into());
     }
@@ -149,8 +155,8 @@ mod tests {
     }
     #[test]
     fn test_smma_params_with_default_params() {
-        let params = SmmaParams::with_default_params();
-        assert_eq!(params.period, None);
+        let params = SmmaParams::default();
+        assert_eq!(params.period, Some(7));
     }
 
     #[test]
@@ -162,7 +168,6 @@ mod tests {
             SmmaData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected SmmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -195,6 +200,11 @@ mod tests {
         let input_second = SmmaInput::from_slice(&result_first.values, params_second);
         let result_second = smma(&input_second).expect("Failed second SMMA");
         assert_eq!(result_second.values.len(), result_first.values.len());
+        if result_second.values.len() > 240 {
+            for i in 240..result_second.values.len() {
+                assert!(result_second.values[i].is_finite());
+            }
+        }
     }
 
     #[test]

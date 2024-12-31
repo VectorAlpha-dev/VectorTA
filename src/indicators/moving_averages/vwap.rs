@@ -19,8 +19,8 @@ pub struct VwapParams {
     pub anchor: Option<String>,
 }
 
-impl VwapParams {
-    pub fn with_default_params() -> Self {
+impl Default for VwapParams {
+    fn default() -> Self {
         Self {
             anchor: Some("1d".to_string()),
         }
@@ -58,7 +58,7 @@ impl<'a> VwapInput<'a> {
                 candles,
                 source: "hlc3",
             },
-            params: VwapParams::with_default_params(),
+            params: VwapParams::default(),
         }
     }
 
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_vwap_with_default_params() {
-        let default_params = VwapParams::with_default_params();
+        let default_params = VwapParams::default();
         assert_eq!(default_params.anchor, Some("1d".to_string()));
     }
 }
