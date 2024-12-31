@@ -30,13 +30,5 @@ lto = true
 opt-level = 3
 codegen-units = 1
 
-[profile.bench]
-inherits = "release"
-lto = true
-opt-level = 3
-codegen-units = 1
-debug = false
-incremental = false
-
 [build]
 rustflags = ["-C", "target-cpu=native"]

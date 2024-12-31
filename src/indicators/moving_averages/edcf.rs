@@ -81,12 +81,16 @@ pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
     };
     let period = input.get_period();
     if period == 0 {
-        return Err("EDCF period must be >= 1.".into());
+        return Err("EDCF period must be > 0.".into());
     }
     let needed = 2 * period;
     if (len - first_valid_idx) < needed {
-        return Err("Not enough valid data to compute EDCF values.".into());
+        return Err(format!(
+            "Not enough valid data points to compute EDCF. Need at least {} valid points after index {}.",
+            needed, first_valid_idx
+        ).into());
     }
+
     if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
         return Err("NaN found in data after the first valid index.".into());
     }
@@ -129,12 +133,11 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    fn test_edcf_accuracy() {
+    fn test_edcf_accuracy_last_five_values() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let input = EdcfInput::from_candles(&candles, "hl2", EdcfParams { period: Some(15) });
-
         let edcf_result = edcf(&input).expect("EDCF calculation failed");
         let edcf_values = &edcf_result.values;
 
@@ -175,25 +178,31 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn test_edcf_with_default_candles() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
         let input = EdcfInput::with_default_candles(&candles);
         match input.data {
             EdcfData::Candles { source, .. } => {
-                assert_eq!(source, "close");
+                assert_eq!(source, "close", "Default source should be 'close'.");
             }
-            _ => panic!("Expected EdcfData::Candles"),
+            _ => panic!("Expected EdcfData::Candles variant"),
         }
         let period = input.get_period();
-        assert_eq!(period, 15);
+        assert_eq!(period, 15, "Default period should be 15.");
     }
 
     #[test]
     fn test_edcf_with_default_params() {
         let default_params = EdcfParams::default();
-        assert_eq!(default_params.period, Some(15));
+        assert_eq!(
+            default_params.period,
+            Some(15),
+            "Expected default period to be Some(15)."
+        );
     }
 
     #[test]
@@ -203,7 +212,10 @@ mod tests {
         let result = edcf(&input);
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("period must be >= 1"));
+            assert!(
+                e.to_string().contains("period must be > 0"),
+                "Error should mention 'period must be > 0'"
+            );
         }
     }
 
@@ -213,6 +225,12 @@ mod tests {
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf(&input);
         assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("No data provided"),
+                "Error should mention no data was provided"
+            );
+        }
     }
 
     #[test]
@@ -220,7 +238,7 @@ mod tests {
         let data = [10.0, 20.0, 30.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(10) });
         let result = edcf(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for period > data.len()");
     }
 
     #[test]
@@ -228,23 +246,41 @@ mod tests {
         let data = [42.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for insufficient data");
     }
 
     #[test]
     fn test_edcf_with_slice_data_reinput() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
         let first_input =
             EdcfInput::from_candles(&candles, "close", EdcfParams { period: Some(15) });
         let first_result = edcf(&first_input).expect("First EDCF failed");
-        let second_input =
-            EdcfInput::from_slice(&first_result.values, EdcfParams { period: Some(5) });
+        let first_values = first_result.values;
+
+        assert_eq!(
+            first_values.len(),
+            candles.close.len(),
+            "First EDCF output length mismatch!"
+        );
+
+        let second_input = EdcfInput::from_slice(&first_values, EdcfParams { period: Some(5) });
         let second_result = edcf(&second_input).expect("Second EDCF failed");
-        assert_eq!(second_result.values.len(), first_result.values.len());
+
+        assert_eq!(
+            second_result.values.len(),
+            first_values.len(),
+            "Second EDCF output length mismatch!"
+        );
+
         if second_result.values.len() > 240 {
-            for i in 240..second_result.values.len() {
-                assert!(!second_result.values[i].is_nan());
+            for (i, &val) in second_result.values.iter().enumerate().skip(240) {
+                assert!(
+                    !val.is_nan(),
+                    "Found NaN in second EDCF output at index {}",
+                    i
+                );
             }
         }
     }
@@ -253,22 +289,44 @@ mod tests {
     fn test_edcf_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+
         let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: None });
         let result = edcf(&input).expect("EDCF calculation failed");
-        assert_eq!(result.values.len(), candles.close.len());
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "EDCF output length mismatch"
+        );
     }
 
     #[test]
     fn test_edcf_accuracy_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: Some(15) });
+
+        let period = 15;
+        let input = EdcfInput::from_candles(
+            &candles,
+            "close",
+            EdcfParams {
+                period: Some(period),
+            },
+        );
         let result = edcf(&input).expect("EDCF calculation failed");
-        assert_eq!(result.values.len(), candles.close.len());
-        let start_index = 2 * 15;
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "EDCF output length mismatch"
+        );
+
+        let start_index = 2 * period;
         if result.values.len() > start_index {
-            for i in start_index..result.values.len() {
-                assert!(!result.values[i].is_nan());
+            for (i, &val) in result.values.iter().enumerate().skip(start_index) {
+                assert!(
+                    !val.is_nan(),
+                    "Found NaN in EDCF output at index {} (>= 2 * period)",
+                    i
+                );
             }
         }
     }

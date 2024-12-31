@@ -20,9 +20,9 @@ pub struct HmaParams {
     pub period: Option<usize>,
 }
 
-impl HmaParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for HmaParams {
+    fn default() -> Self {
+        Self { period: Some(5) }
     }
 }
 
@@ -53,30 +53,33 @@ impl<'a> HmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: HmaParams::with_default_params(),
+            params: HmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| HmaParams::default().period.unwrap())
     }
 }
 
 #[inline]
 pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
-    let data: &[f64] = match &input.data {
+    let data = match &input.data {
         HmaData::Candles { candles, source } => source_type(candles, source),
         HmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(5);
+    let len = data.len();
+    let period = input.get_period();
     let mut values = vec![f64::NAN; len];
-
     if period == 0 || period > len {
         return Ok(HmaOutput { values });
     }
-
     let half = period / 2;
     if half == 0 {
         return Ok(HmaOutput { values });
     }
-
     let sqrtp = (period as f64).sqrt().floor() as usize;
     if sqrtp == 0 {
         return Ok(HmaOutput { values });
@@ -275,7 +278,7 @@ mod tests {
         assert_eq!(output_default.values.len(), candles.close.len());
         let params_period = HmaParams { period: Some(10) };
         let input_period = HmaInput::from_candles(&candles, "hl2", params_period);
-        let output_period = hma(&input_period).expect("Failed hma with period=10, source=hl2");
+        let output_period = hma(&input_period).expect("Failed hma with period=10");
         assert_eq!(output_period.values.len(), candles.close.len());
     }
 
@@ -298,19 +301,14 @@ mod tests {
         let last_five = &result.values[start..];
         for (i, &val) in last_five.iter().enumerate() {
             let exp = expected_last_five[i];
-            assert!(
-                (val - exp).abs() < 1e-3,
-                "HMA mismatch at {}: expected {}, got {}",
-                i,
-                exp,
-                val
-            );
+            assert!((val - exp).abs() < 1e-3);
         }
     }
+
     #[test]
     fn test_hma_params_with_default_params() {
-        let default_params = HmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = HmaParams::default();
+        assert_eq!(default_params.period, Some(5));
     }
 
     #[test]
@@ -319,12 +317,10 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = HmaInput::with_default_candles(&candles);
         match input.data {
-            HmaData::Candles { source, .. } => {
-                assert_eq!(source, "close");
-            }
+            HmaData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected HmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
+        assert_eq!(input.params.period, Some(5));
     }
 
     #[test]
@@ -368,21 +364,22 @@ mod tests {
         let first_input = HmaInput::from_candles(&candles, "close", first_params);
         let first_result = hma(&first_input).expect("Failed first hma");
         assert_eq!(first_result.values.len(), candles.close.len());
-
         let second_params = HmaParams { period: Some(3) };
         let second_input = HmaInput::from_slice(&first_result.values, second_params);
         let second_result = hma(&second_input).expect("Failed second hma");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(!second_result.values[i].is_nan());
+            }
+        }
     }
 
     #[test]
     fn test_hma_accuracy_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let period = 5;
-        let params = HmaParams {
-            period: Some(period),
-        };
+        let params = HmaParams::default();
         let input = HmaInput::from_candles(&candles, "close", params);
         let result = hma(&input).expect("Failed hma");
         assert_eq!(result.values.len(), candles.close.len());

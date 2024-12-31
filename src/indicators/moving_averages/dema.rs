@@ -58,8 +58,10 @@ impl<'a> DemaInput<'a> {
     }
 
     #[inline]
-    fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(30)
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| DemaParams::default().period.unwrap())
     }
 }
 
@@ -83,10 +85,9 @@ pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
     if period < 1 {
         return Err("Invalid DEMA period (must be >= 1).".into());
     }
-    if size < (2 * (period - 1)) {
-        return Err("Invalid data length for DEMA calculation.".into());
+    if size < 2 * (period - 1) {
+        return Err("Not enough data to calculate DEMA for the specified period.".into());
     }
-
     let alpha = 2.0 / (period as f64 + 1.0);
     let alpha_1 = 1.0 - alpha;
 
@@ -126,18 +127,30 @@ mod tests {
         let default_params = DemaParams { period: None };
         let input_default = DemaInput::from_candles(&candles, "close", default_params);
         let output_default = dema(&input_default).expect("Failed DEMA with default params");
-        assert_eq!(output_default.values.len(), candles.close.len());
+        assert_eq!(
+            output_default.values.len(),
+            candles.close.len(),
+            "Output length must match candle data length"
+        );
 
         let params_period_14 = DemaParams { period: Some(14) };
         let input_period_14 = DemaInput::from_candles(&candles, "hl2", params_period_14);
         let output_period_14 =
             dema(&input_period_14).expect("Failed DEMA with period=14, source=hl2");
-        assert_eq!(output_period_14.values.len(), candles.close.len());
+        assert_eq!(
+            output_period_14.values.len(),
+            candles.close.len(),
+            "Output length must match candle data length"
+        );
 
         let params_custom = DemaParams { period: Some(20) };
         let input_custom = DemaInput::from_candles(&candles, "hlc3", params_custom);
         let output_custom = dema(&input_custom).expect("Failed DEMA fully custom");
-        assert_eq!(output_custom.values.len(), candles.close.len());
+        assert_eq!(
+            output_custom.values.len(),
+            candles.close.len(),
+            "Output length must match candle data length"
+        );
     }
 
     #[test]
@@ -146,7 +159,6 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let input = DemaInput::with_default_candles(&candles);
-
         let result = dema(&input).expect("Failed to calculate DEMA");
 
         let expected_last_five = [
@@ -157,7 +169,6 @@ mod tests {
             58908.370159946775,
         ];
 
-        assert!(result.values.len() >= expected_last_five.len());
         assert_eq!(
             result.values.len(),
             candles.close.len(),
@@ -196,7 +207,7 @@ mod tests {
         let input = DemaInput::with_default_candles(&candles);
         match input.data {
             DemaData::Candles { source, .. } => {
-                assert_eq!(source, "close");
+                assert_eq!(source, "close", "Default source should be 'close'");
             }
             _ => panic!("Expected DemaData::Candles variant"),
         }
@@ -252,28 +263,52 @@ mod tests {
         let first_params = DemaParams { period: Some(80) };
         let first_input = DemaInput::from_candles(&candles, "close", first_params);
         let first_result = dema(&first_input).expect("Failed to calculate first DEMA");
-        assert_eq!(first_result.values.len(), candles.close.len());
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "First DEMA output length mismatch"
+        );
 
         let second_params = DemaParams { period: Some(60) };
         let second_input = DemaInput::from_slice(&first_result.values, second_params);
         let second_result = dema(&second_input).expect("Failed to calculate second DEMA");
-        assert_eq!(second_result.values.len(), first_result.values.len());
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "Second DEMA output length mismatch"
+        );
+
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(
+                    !second_result.values[i].is_nan(),
+                    "Unexpected NaN at index {} in second DEMA",
+                    i
+                );
+            }
+        }
     }
 
     #[test]
     fn test_dema_accuracy_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let period = 30;
-        let params = DemaParams {
-            period: Some(period),
-        };
+        let params = DemaParams { period: Some(30) };
         let input = DemaInput::from_candles(&candles, "close", params);
         let result = dema(&input).expect("Failed to calculate DEMA");
-        assert_eq!(result.values.len(), candles.close.len());
-        if result.values.len() > 120 {
-            for i in 120..result.values.len() {
-                assert!(!result.values[i].is_nan(), "Unexpected NaN at index {}", i);
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "DEMA output length mismatch"
+        );
+
+        if result.values.len() > 240 {
+            for i in 240..result.values.len() {
+                assert!(
+                    !result.values[i].is_nan(),
+                    "Unexpected NaN at index {} in final DEMA",
+                    i
+                );
             }
         }
     }

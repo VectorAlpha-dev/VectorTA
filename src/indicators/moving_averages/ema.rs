@@ -22,7 +22,7 @@ pub struct EmaParams {
 
 impl Default for EmaParams {
     fn default() -> Self {
-        EmaParams { period: Some(9) }
+        Self { period: Some(9) }
     }
 }
 
@@ -70,22 +70,25 @@ pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
         EmaData::Candles { candles, source } => source_type(candles, source),
         EmaData::Slice(slice) => slice,
     };
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All input data are NaN.".into()),
+    };
     let len: usize = data.len();
     let period: usize = input.get_period();
 
     if period == 0 || period > len {
-        return Err("Invalid period specified for EMA calculation.".into());
+        return Err("Invalid period for EMA.".into());
+    }
+    if (len - first_valid_idx) < period {
+        return Err("Not enough valid data to compute EMA.".into());
     }
 
+    let mut ema_values = vec![f64::NAN; len];
     let alpha = 2.0 / (period as f64 + 1.0);
-    let mut ema_values = Vec::with_capacity(len);
-
-    let mut last_ema = data[0];
-    ema_values.push(last_ema);
-
-    for &value in &data[1..] {
-        last_ema = alpha * value + (1.0 - alpha) * last_ema;
-        ema_values.push(last_ema);
+    ema_values[first_valid_idx] = data[first_valid_idx];
+    for i in (first_valid_idx + 1)..len {
+        ema_values[i] = alpha * data[i] + (1.0 - alpha) * ema_values[i - 1];
     }
 
     Ok(EmaOutput { values: ema_values })
@@ -99,46 +102,24 @@ mod tests {
     #[test]
     fn test_ema_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path).unwrap();
         let close_prices = &candles.close;
         let params = EmaParams { period: Some(9) };
-
-        let old_style_input = EmaInput::from_candles(&candles, "close", params);
-        let ema_result = ema(&old_style_input).expect("Failed to calculate EMA");
-
-        let expected_last_five_ema = [59302.2, 59277.9, 59230.2, 59215.1, 59103.1];
-
-        assert!(
-            ema_result.values.len() >= 5,
-            "Not enough EMA values for the test"
-        );
-        assert_eq!(
-            ema_result.values.len(),
-            close_prices.len(),
-            "EMA output length does not match input length"
-        );
-
-        let start_index = ema_result.values.len().saturating_sub(5);
-        let result_last_five_ema = &ema_result.values[start_index..];
-
-        for (i, &value) in result_last_five_ema.iter().enumerate() {
-            assert!(
-                (value - expected_last_five_ema[i]).abs() < 1e-1,
-                "EMA value mismatch at index {}: expected {}, got {}",
-                i,
-                expected_last_five_ema[i],
-                value
-            );
+        let input = EmaInput::from_candles(&candles, "close", params);
+        let result = ema(&input).unwrap();
+        let expected_last_five = [59302.2, 59277.9, 59230.2, 59215.1, 59103.1];
+        assert!(result.values.len() >= 5);
+        assert_eq!(result.values.len(), close_prices.len());
+        let start_index = result.values.len().saturating_sub(5);
+        let last_five = &result.values[start_index..];
+        for (i, &val) in last_five.iter().enumerate() {
+            assert!((val - expected_last_five[i]).abs() < 1e-1);
         }
-
         let default_input = EmaInput::with_default_candles(&candles);
-        let default_ema_result = ema(&default_input).expect("Failed to calculate default EMA");
-        assert!(
-            !default_ema_result.values.is_empty(),
-            "Should produce EMA values with default params"
-        );
+        let default_result = ema(&default_input).unwrap();
+        assert!(!default_result.values.is_empty());
     }
+
     #[test]
     fn test_ema_params_with_default_period() {
         let params = EmaParams::default();
@@ -148,11 +129,11 @@ mod tests {
     #[test]
     fn test_ema_input_with_default_candles() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path).unwrap();
         let input = EmaInput::with_default_candles(&candles);
         match input.data {
             EmaData::Candles { source, .. } => assert_eq!(source, "close"),
-            _ => panic!("Expected EmaData::Candles variant"),
+            _ => panic!(),
         }
         assert_eq!(input.params.period, Some(9));
     }
@@ -187,24 +168,29 @@ mod tests {
     #[test]
     fn test_ema_slice_data_reinput() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path).unwrap();
         let params_first = EmaParams { period: Some(9) };
         let input_first = EmaInput::from_candles(&candles, "close", params_first);
-        let result_first = ema(&input_first).expect("Failed to calculate first EMA");
+        let result_first = ema(&input_first).unwrap();
         assert_eq!(result_first.values.len(), candles.close.len());
         let params_second = EmaParams { period: Some(5) };
         let input_second = EmaInput::from_slice(&result_first.values, params_second);
-        let result_second = ema(&input_second).expect("Failed to calculate second EMA");
+        let result_second = ema(&input_second).unwrap();
         assert_eq!(result_second.values.len(), result_first.values.len());
+        if result_second.values.len() > 240 {
+            for i in 240..result_second.values.len() {
+                assert!(!result_second.values[i].is_nan());
+            }
+        }
     }
 
     #[test]
     fn test_ema_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path).unwrap();
         let params = EmaParams { period: Some(9) };
         let input = EmaInput::from_candles(&candles, "close", params);
-        let result = ema(&input).expect("Failed to calculate EMA");
+        let result = ema(&input).unwrap();
         assert_eq!(result.values.len(), candles.close.len());
         if result.values.len() > 240 {
             for i in 240..result.values.len() {

@@ -71,13 +71,11 @@ pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
     if n == 0 {
         return Err("Empty data slice for EPMA calculation.".into());
     }
-
     let period = input.params.period.unwrap_or(11);
     let offset = input.params.offset.unwrap_or(4);
     if period < 2 {
         return Err("EPMA period must be >= 2.".into());
     }
-
     let start_index = period + offset + 1;
     if start_index >= n {
         return Ok(EpmaOutput {

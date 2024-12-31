@@ -164,7 +164,7 @@ mod tests {
         };
         let input = AlmaInput::from_candles(&candles, "close", default_params);
         let output = alma(&input).expect("Failed ALMA with default params");
-        assert_eq!(output.values.len(), candles.close.len());
+        assert_eq!(output.values.len(), candles.close.len(), "Length mismatch");
 
         let params_period_14 = AlmaParams {
             period: Some(14),
@@ -173,7 +173,7 @@ mod tests {
         };
         let input2 = AlmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = alma(&input2).expect("Failed ALMA with period=14, source=hl2");
-        assert_eq!(output2.values.len(), candles.close.len());
+        assert_eq!(output2.values.len(), candles.close.len(), "Length mismatch");
 
         let params_custom = AlmaParams {
             period: Some(10),
@@ -182,7 +182,7 @@ mod tests {
         };
         let input3 = AlmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = alma(&input3).expect("Failed ALMA fully custom");
-        assert_eq!(output3.values.len(), candles.close.len());
+        assert_eq!(output3.values.len(), candles.close.len(), "Length mismatch");
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input = AlmaInput::with_default_candles(&candles);
         match input.data {
-            AlmaData::Candles { source, .. } => assert_eq!(source, "close"),
+            AlmaData::Candles { source, .. } => assert_eq!(source, "close", "Unexpected source"),
             _ => panic!("Expected AlmaData::Candles variant"),
         }
     }
@@ -244,7 +244,7 @@ mod tests {
         };
         let input = AlmaInput::from_slice(&input_data, params);
         let result = alma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "ALMA should fail with zero period");
     }
 
     #[test]
@@ -257,7 +257,10 @@ mod tests {
         };
         let input = AlmaInput::from_slice(&input_data, params);
         let result = alma(&input);
-        assert!(result.is_err());
+        assert!(
+            result.is_err(),
+            "ALMA should fail with period exceeding data length"
+        );
     }
 
     #[test]
@@ -270,7 +273,7 @@ mod tests {
         };
         let input = AlmaInput::from_slice(&input_data, params);
         let result = alma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "ALMA should fail with insufficient data");
     }
 
     #[test]
@@ -284,7 +287,11 @@ mod tests {
         };
         let first_input = AlmaInput::from_candles(&candles, "close", first_params);
         let first_result = alma(&first_input).expect("Failed first ALMA");
-        assert_eq!(first_result.values.len(), candles.close.len());
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "Length mismatch"
+        );
         let second_params = AlmaParams {
             period: Some(50),
             offset: Some(0.8),
@@ -292,10 +299,18 @@ mod tests {
         };
         let second_input = AlmaInput::from_slice(&first_result.values, second_params);
         let second_result = alma(&second_input).expect("Failed second ALMA");
-        assert_eq!(second_result.values.len(), first_result.values.len());
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "Length mismatch"
+        );
         if second_result.values.len() > 240 {
             for i in 240..second_result.values.len() {
-                assert!(!second_result.values[i].is_nan());
+                assert!(
+                    !second_result.values[i].is_nan(),
+                    "Unexpected NaN at index {}",
+                    i
+                );
             }
         }
     }
@@ -311,10 +326,14 @@ mod tests {
         };
         let input = AlmaInput::from_candles(&candles, "close", params);
         let result = alma(&input).expect("Failed ALMA calculation");
-        assert_eq!(result.values.len(), candles.close.len());
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "ALMA output length mismatch"
+        );
         if result.values.len() > 240 {
             for i in 240..result.values.len() {
-                assert!(!result.values[i].is_nan());
+                assert!(!result.values[i].is_nan(), "Unexpected NaN at index {}", i);
             }
         }
     }
