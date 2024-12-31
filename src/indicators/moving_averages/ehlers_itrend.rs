@@ -290,21 +290,29 @@ mod tests {
         let input = EhlersITrendInput::with_default_candles(&candles);
         match input.data {
             EhlersITrendData::Candles { source, .. } => {
-                assert_eq!(source, "close");
+                assert_eq!(source, "close", "Expected close price as default source");
             }
             _ => panic!("Expected EhlersITrendData::Candles"),
         }
         let warmup_bars = input.get_warmup_bars();
         let max_dc_period = input.get_max_dc_period();
-        assert_eq!(warmup_bars, 12);
-        assert_eq!(max_dc_period, 50);
+        assert_eq!(warmup_bars, 12, "Expected default warmup_bars to be 12");
+        assert_eq!(max_dc_period, 50, "Expected default max_dc_period to be 50");
     }
 
     #[test]
     fn test_ehlers_itrend_with_default_params() {
         let default_params = EhlersITrendParams::default();
-        assert_eq!(default_params.warmup_bars, Some(12));
-        assert_eq!(default_params.max_dc_period, Some(50));
+        assert_eq!(
+            default_params.warmup_bars,
+            Some(12),
+            "Expected default warmup_bars to be 12"
+        );
+        assert_eq!(
+            default_params.max_dc_period,
+            Some(50),
+            "Expected default max_dc_period to be 50"
+        );
     }
 
     #[test]
@@ -363,7 +371,7 @@ mod tests {
             },
         );
         let result = ehlers_itrend(&input).expect("HT Trendline failed for very small data set");
-        assert_eq!(result.values.len(), data.len());
+        assert_eq!(result.values.len(), data.len(), "Result length mismatch");
     }
 
     #[test]
@@ -390,7 +398,11 @@ mod tests {
         let second_result =
             ehlers_itrend(&second_input).expect("HT Trendline failed on second input");
 
-        assert_eq!(second_result.values.len(), first_result.values.len());
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "Result length mismatch"
+        );
         if second_result.values.len() > 240 {
             for i in 240..second_result.values.len() {
                 assert!(
@@ -415,7 +427,11 @@ mod tests {
             },
         );
         let result = ehlers_itrend(&input).expect("HT Trendline calculation failed");
-        assert_eq!(result.values.len(), candles.close.len());
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "Result length mismatch"
+        );
     }
 
     #[test]
@@ -431,7 +447,11 @@ mod tests {
             },
         );
         let result = ehlers_itrend(&input).expect("HT Trendline calculation failed");
-        assert_eq!(result.values.len(), candles.close.len());
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "Result length mismatch"
+        );
         if result.values.len() > 240 {
             for i in 240..result.values.len() {
                 assert!(

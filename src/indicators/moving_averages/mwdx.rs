@@ -213,6 +213,13 @@ mod tests {
             MwdxInput::from_slice(&first_result.values, MwdxParams { factor: Some(0.3) });
         let second_result = mwdx(&second_input).expect("Second MWDX failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(
+                !second_result.values[i].is_nan(),
+                "NaN found at index {}",
+                i
+            );
+        }
     }
 
     #[test]

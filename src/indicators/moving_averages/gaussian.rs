@@ -60,11 +60,23 @@ impl<'a> GaussianInput<'a> {
             params: GaussianParams::default(),
         }
     }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| GaussianParams::default().period.unwrap())
+    }
+
+    pub fn get_poles(&self) -> usize {
+        self.params
+            .poles
+            .unwrap_or_else(|| GaussianParams::default().poles.unwrap())
+    }
 }
 
 pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
-    let period = input.params.period.unwrap_or(14);
-    let poles = input.params.poles.unwrap_or(4);
+    let period = input.get_period();
+    let poles = input.get_poles();
 
     let data: &[f64] = match &input.data {
         GaussianData::Candles { candles, source } => source_type(candles, source),
@@ -243,8 +255,8 @@ mod tests {
             }
             _ => panic!("Expected GaussianData::Candles"),
         }
-        let period = input.params.period.unwrap_or(14);
-        let poles = input.params.poles.unwrap_or(4);
+        let period = input.get_period();
+        let poles = input.get_poles();
         assert_eq!(period, 14);
         assert_eq!(poles, 4);
     }
@@ -312,30 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gaussian_with_slice_data_reinput() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let first_input = GaussianInput::from_candles(
-            &candles,
-            "close",
-            GaussianParams {
-                period: Some(14),
-                poles: Some(4),
-            },
-        );
-        let first_result = gaussian(&first_input).expect("First Gaussian filter failed");
-        let second_input = GaussianInput::from_slice(
-            &first_result.values,
-            GaussianParams {
-                period: Some(7),
-                poles: Some(2),
-            },
-        );
-        let second_result = gaussian(&second_input).expect("Second Gaussian filter failed");
-        assert_eq!(second_result.values.len(), first_result.values.len());
-    }
-
-    #[test]
     fn test_gaussian_partial_params() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
@@ -367,6 +355,41 @@ mod tests {
         let start_index = input.params.poles.unwrap_or(4);
         for i in start_index..result.values.len() {
             assert!(!result.values[i].is_nan());
+        }
+    }
+    #[test]
+    fn test_gaussian_with_slice_data_reinput() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let first_params = GaussianParams {
+            period: Some(14),
+            poles: Some(4),
+        };
+        let first_input = GaussianInput::from_candles(&candles, "close", first_params);
+        let first_result = gaussian(&first_input).expect("Failed to calculate first gaussian");
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "gaussian output length mismatch"
+        );
+
+        let second_params = GaussianParams {
+            period: Some(7),
+            poles: Some(2),
+        };
+        let second_input = GaussianInput::from_slice(&first_result.values, second_params);
+        let second_result = gaussian(&second_input).expect("Failed to calculate second gaussian");
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "gaussian output length mismatch"
+        );
+        for i in 240..second_result.values.len() {
+            assert!(
+                !second_result.values[i].is_nan(),
+                "NaN found at index {}",
+                i
+            );
         }
     }
 }

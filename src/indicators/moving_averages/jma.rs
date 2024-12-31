@@ -22,12 +22,12 @@ pub struct JmaParams {
     pub power: Option<u32>,
 }
 
-impl JmaParams {
-    pub fn with_default_params() -> Self {
-        JmaParams {
-            period: None,
-            phase: None,
-            power: None,
+impl Default for JmaParams {
+    fn default() -> Self {
+        Self {
+            period: Some(7),
+            phase: Some(50.0),
+            power: Some(2),
         }
     }
 }
@@ -59,8 +59,20 @@ impl<'a> JmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: JmaParams::with_default_params(),
+            params: JmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(7)
+    }
+
+    pub fn get_phase(&self) -> f64 {
+        self.params.phase.unwrap_or(50.0)
+    }
+
+    pub fn get_power(&self) -> u32 {
+        self.params.power.unwrap_or(2)
     }
 }
 
@@ -76,9 +88,9 @@ pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
         return Err("JMA calculation: input data is empty.".into());
     }
 
-    let period = input.params.period.unwrap_or(7);
-    let phase = input.params.phase.unwrap_or(50.0);
-    let power = input.params.power.unwrap_or(2);
+    let period = input.get_period();
+    let phase = input.get_phase();
+    let power = input.get_power();
 
     let phase_ratio = if phase < -100.0 {
         0.5
@@ -199,10 +211,10 @@ mod tests {
     }
     #[test]
     fn test_jma_params_with_default_params() {
-        let default_params = JmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
-        assert_eq!(default_params.phase, None);
-        assert_eq!(default_params.power, None);
+        let default_params = JmaParams::default();
+        assert_eq!(default_params.period, Some(7));
+        assert_eq!(default_params.phase, Some(50.0));
+        assert_eq!(default_params.power, Some(2));
     }
 
     #[test]
@@ -216,9 +228,6 @@ mod tests {
             }
             _ => panic!("Unexpected data variant"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.phase, None);
-        assert_eq!(input.params.power, None);
     }
 
     #[test]
@@ -286,6 +295,9 @@ mod tests {
         let second_input = JmaInput::from_slice(&first_result.values, second_params);
         let second_result = jma(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

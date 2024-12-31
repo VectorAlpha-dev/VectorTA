@@ -20,9 +20,9 @@ pub struct FwmaParams {
     pub period: Option<usize>,
 }
 
-impl FwmaParams {
-    pub fn with_default_params() -> Self {
-        FwmaParams { period: None }
+impl Default for FwmaParams {
+    fn default() -> Self {
+        Self { period: Some(5) }
     }
 }
 
@@ -53,11 +53,16 @@ impl<'a> FwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: FwmaParams::with_default_params(),
+            params: FwmaParams::default(),
         }
     }
-}
 
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| FwmaParams::default().period.unwrap())
+    }
+}
 #[inline]
 pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
     let data: &[f64] = match &input.data {
@@ -68,7 +73,7 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
     if len == 0 {
         return Err("No data provided.".into());
     }
-    let period = input.params.period.unwrap_or(5);
+    let period = input.get_period();
     if period == 0 || period > len {
         return Err("Invalid period.".into());
     }
@@ -116,13 +121,21 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let input_default = FwmaInput::with_default_candles(&candles);
         let output_default = fwma(&input_default).expect("Failed FWMA with default params");
-        assert_eq!(output_default.values.len(), candles.close.len());
+        assert_eq!(
+            output_default.values.len(),
+            candles.close.len(),
+            "FWMA output length mismatch"
+        );
 
         let params_period_only = FwmaParams { period: Some(10) };
         let input_period_only = FwmaInput::from_candles(&candles, "hl2", params_period_only);
         let output_period_only =
             fwma(&input_period_only).expect("Failed FWMA with period=10, source=hl2");
-        assert_eq!(output_period_only.values.len(), candles.close.len());
+        assert_eq!(
+            output_period_only.values.len(),
+            candles.close.len(),
+            "FWMA output length mismatch"
+        );
     }
 
     #[test]
@@ -163,8 +176,8 @@ mod tests {
     }
     #[test]
     fn test_fwma_params_with_default_params() {
-        let default_params = FwmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = FwmaParams::default();
+        assert_eq!(default_params.period, Some(5), "Default period should be 5");
     }
 
     #[test]
@@ -178,7 +191,6 @@ mod tests {
             }
             _ => panic!("Expected FwmaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -187,7 +199,7 @@ mod tests {
         let params = FwmaParams { period: Some(0) };
         let input = FwmaInput::from_slice(&input_data, params);
         let result = fwma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for zero period");
         if let Err(e) = result {
             assert!(e.to_string().contains("Invalid period"));
         }
@@ -199,7 +211,7 @@ mod tests {
         let params = FwmaParams { period: Some(10) };
         let input = FwmaInput::from_slice(&input_data, params);
         let result = fwma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for insufficient data");
     }
 
     #[test]
@@ -208,7 +220,7 @@ mod tests {
         let params = FwmaParams { period: Some(5) };
         let input = FwmaInput::from_slice(&input_data, params);
         let result = fwma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for insufficient data");
     }
 
     #[test]
@@ -218,12 +230,27 @@ mod tests {
         let first_params = FwmaParams { period: Some(5) };
         let first_input = FwmaInput::from_candles(&candles, "close", first_params);
         let first_result = fwma(&first_input).expect("Failed to calculate first FWMA");
-        assert_eq!(first_result.values.len(), candles.close.len());
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "FWMA output length mismatch"
+        );
 
         let second_params = FwmaParams { period: Some(3) };
         let second_input = FwmaInput::from_slice(&first_result.values, second_params);
         let second_result = fwma(&second_input).expect("Failed to calculate second FWMA");
-        assert_eq!(second_result.values.len(), first_result.values.len());
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "FWMA output length mismatch"
+        );
+        for i in 240..second_result.values.len() {
+            assert!(
+                !second_result.values[i].is_nan(),
+                "NaN found at index {}",
+                i
+            );
+        }
     }
 
     #[test]
@@ -236,10 +263,14 @@ mod tests {
         };
         let input = FwmaInput::from_candles(&candles, "close", params);
         let result = fwma(&input).expect("Failed to calculate FWMA");
-        assert_eq!(result.values.len(), candles.close.len());
+        assert_eq!(
+            result.values.len(),
+            candles.close.len(),
+            "FWMA output length mismatch"
+        );
         if result.values.len() > 50 {
             for i in 50..result.values.len() {
-                assert!(!result.values[i].is_nan());
+                assert!(!result.values[i].is_nan(), "NaN found at index {}", i);
             }
         }
     }

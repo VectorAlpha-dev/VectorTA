@@ -20,9 +20,9 @@ pub struct JsaParams {
     pub period: Option<usize>,
 }
 
-impl JsaParams {
-    pub fn with_default_params() -> Self {
-        JsaParams { period: None }
+impl Default for JsaParams {
+    fn default() -> Self {
+        Self { period: Some(30) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> JsaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: JsaParams::with_default_params(),
+            params: JsaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| JsaParams::default().period.unwrap())
     }
 }
 
@@ -69,7 +75,7 @@ pub fn jsa(input: &JsaInput) -> Result<JsaOutput, Box<dyn Error>> {
         return Err("No data provided for JSA calculation.".into());
     }
 
-    let period = input.params.period.unwrap_or(30);
+    let period = input.get_period();
     if period == 0 {
         return Err("JSA period must be > 0.".into());
     }
@@ -118,7 +124,7 @@ mod tests {
         let expected_last_five = [61640.0, 61418.0, 61240.0, 61060.5, 60889.5];
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let default_params = JsaParams::with_default_params();
+        let default_params = JsaParams::default();
         let input = JsaInput::from_candles(&candles, "close", default_params);
         let result = jsa(&input).expect("Failed to calculate JSA");
         assert_eq!(
@@ -157,8 +163,12 @@ mod tests {
     }
     #[test]
     fn test_jsa_params_with_default_params() {
-        let default_params = JsaParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = JsaParams::default();
+        assert_eq!(
+            default_params.period,
+            Some(30),
+            "Default period should be 30"
+        );
     }
 
     #[test]
@@ -172,7 +182,6 @@ mod tests {
             }
             _ => panic!("Expected JsaData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -227,6 +236,13 @@ mod tests {
         let second_input = JsaInput::from_slice(&first_result.values, second_params);
         let second_result = jsa(&second_input).expect("Failed to calculate second JSA");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(
+                !second_result.values[i].is_nan(),
+                "NaN found at index {}",
+                i
+            );
+        }
     }
 
     #[test]

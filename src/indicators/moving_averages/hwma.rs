@@ -22,12 +22,12 @@ pub struct HwmaParams {
     pub nc: Option<f64>,
 }
 
-impl HwmaParams {
-    pub fn with_default_params() -> Self {
-        HwmaParams {
-            na: None,
-            nb: None,
-            nc: None,
+impl Default for HwmaParams {
+    fn default() -> Self {
+        Self {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
         }
     }
 }
@@ -59,8 +59,26 @@ impl<'a> HwmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: HwmaParams::with_default_params(),
+            params: HwmaParams::default(),
         }
+    }
+
+    pub fn get_na(&self) -> f64 {
+        self.params
+            .na
+            .unwrap_or_else(|| HwmaParams::default().na.unwrap())
+    }
+
+    pub fn get_nb(&self) -> f64 {
+        self.params
+            .nb
+            .unwrap_or_else(|| HwmaParams::default().nb.unwrap())
+    }
+
+    pub fn get_nc(&self) -> f64 {
+        self.params
+            .nc
+            .unwrap_or_else(|| HwmaParams::default().nc.unwrap())
     }
 }
 
@@ -71,9 +89,9 @@ pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
         HwmaData::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let na = input.params.na.unwrap_or(0.2);
-    let nb = input.params.nb.unwrap_or(0.1);
-    let nc = input.params.nc.unwrap_or(0.1);
+    let na = input.get_na();
+    let nb = input.get_nb();
+    let nc = input.get_nc();
     if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
         return Err("Parameters (na, nb, nc) must be in (0,1).".into());
     }
@@ -184,10 +202,10 @@ mod tests {
 
     #[test]
     fn test_hwma_params_with_default_params() {
-        let params = HwmaParams::with_default_params();
-        assert_eq!(params.na, None);
-        assert_eq!(params.nb, None);
-        assert_eq!(params.nc, None);
+        let params = HwmaParams::default();
+        assert_eq!(params.na, Some(0.2));
+        assert_eq!(params.nb, Some(0.1));
+        assert_eq!(params.nc, Some(0.1));
     }
 
     #[test]
@@ -199,9 +217,9 @@ mod tests {
             HwmaData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected HwmaData::Candles variant"),
         }
-        assert_eq!(input.params.na, None);
-        assert_eq!(input.params.nb, None);
-        assert_eq!(input.params.nc, None);
+        assert_eq!(input.params.na, Some(0.2));
+        assert_eq!(input.params.nb, Some(0.1));
+        assert_eq!(input.params.nc, Some(0.1));
     }
 
     #[test]
@@ -264,6 +282,9 @@ mod tests {
         let input_2 = HwmaInput::from_slice(&result_1.values, params_2);
         let result_2 = hwma(&input_2).expect("Failed second HWMA");
         assert_eq!(result_2.values.len(), result_1.values.len());
+        for i in 240..result_2.values.len() {
+            assert!(!result_2.values[i].is_nan());
+        }
     }
 
     #[test]

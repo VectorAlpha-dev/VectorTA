@@ -22,12 +22,12 @@ pub struct MaaqParams {
     pub slow_period: Option<usize>,
 }
 
-impl MaaqParams {
-    pub fn with_default_params() -> Self {
+impl Default for MaaqParams {
+    fn default() -> Self {
         Self {
-            period: None,
-            fast_period: None,
-            slow_period: None,
+            period: Some(11),
+            fast_period: Some(2),
+            slow_period: Some(30),
         }
     }
 }
@@ -59,8 +59,26 @@ impl<'a> MaaqInput<'a> {
                 candles,
                 source: "close",
             },
-            params: MaaqParams::with_default_params(),
+            params: MaaqParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| MaaqParams::default().period.unwrap())
+    }
+
+    pub fn get_fast_period(&self) -> usize {
+        self.params
+            .fast_period
+            .unwrap_or_else(|| MaaqParams::default().fast_period.unwrap())
+    }
+
+    pub fn get_slow_period(&self) -> usize {
+        self.params
+            .slow_period
+            .unwrap_or_else(|| MaaqParams::default().slow_period.unwrap())
     }
 }
 
@@ -70,9 +88,9 @@ pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
         MaaqData::Candles { candles, source } => source_type(candles, source),
         MaaqData::Slice(slice) => slice,
     };
-    let period: usize = input.params.period.unwrap_or(11);
-    let fast_p: usize = input.params.fast_period.unwrap_or(2);
-    let slow_p: usize = input.params.slow_period.unwrap_or(30);
+    let period = input.get_period();
+    let fast_p = input.get_fast_period();
+    let slow_p = input.get_slow_period();
     let len: usize = data.len();
     if len < period {
         return Err(format!("Not enough data: length={} < period={}", len, period).into());
@@ -192,10 +210,10 @@ mod tests {
     }
     #[test]
     fn test_maaq_params_with_default_params() {
-        let default_params = MaaqParams::with_default_params();
-        assert_eq!(default_params.period, None);
-        assert_eq!(default_params.fast_period, None);
-        assert_eq!(default_params.slow_period, None);
+        let default_params = MaaqParams::default();
+        assert_eq!(default_params.period, Some(11));
+        assert_eq!(default_params.fast_period, Some(2));
+        assert_eq!(default_params.slow_period, Some(30));
     }
 
     #[test]
@@ -209,9 +227,6 @@ mod tests {
             }
             _ => panic!("Unexpected data variant"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.fast_period, None);
-        assert_eq!(input.params.slow_period, None);
     }
 
     #[test]
@@ -266,6 +281,9 @@ mod tests {
         let second_input = MaaqInput::from_slice(&first_result.values, second_params);
         let second_result = maaq(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in &second_result.values[240..] {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

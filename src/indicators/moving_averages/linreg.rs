@@ -20,9 +20,9 @@ pub struct LinRegParams {
     pub period: Option<usize>,
 }
 
-impl LinRegParams {
-    pub fn with_default_params() -> Self {
-        Self { period: None }
+impl Default for LinRegParams {
+    fn default() -> Self {
+        Self { period: Some(14) }
     }
 }
 
@@ -53,8 +53,14 @@ impl<'a> LinRegInput<'a> {
                 candles,
                 source: "close",
             },
-            params: LinRegParams::with_default_params(),
+            params: LinRegParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| LinRegParams::default().period.unwrap())
     }
 }
 
@@ -65,7 +71,7 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
         LinRegData::Slice(slice) => slice,
     };
     let size: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(14);
+    let period = input.get_period();
     if period < 1 {
         return Err("Invalid period (<1) for linear regression.".into());
     }
@@ -157,8 +163,8 @@ mod tests {
     }
     #[test]
     fn test_linreg_params_with_default_params() {
-        let params = LinRegParams::with_default_params();
-        assert_eq!(params.period, None);
+        let params = LinRegParams::default();
+        assert_eq!(params.period, Some(14));
     }
 
     #[test]
@@ -170,7 +176,6 @@ mod tests {
             LinRegData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected LinRegData::Candles variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -215,6 +220,11 @@ mod tests {
         let input_second = LinRegInput::from_slice(&result_first.values, params_second);
         let result_second = linreg(&input_second).expect("Failed second LinReg");
         assert_eq!(result_second.values.len(), result_first.values.len());
+        if result_second.values.len() > 240 {
+            for i in 240..result_second.values.len() {
+                assert!(!result_second.values[i].is_nan());
+            }
+        }
     }
 
     #[test]

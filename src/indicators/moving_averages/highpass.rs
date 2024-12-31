@@ -16,9 +16,9 @@ pub struct HighPassParams {
     pub period: Option<usize>,
 }
 
-impl HighPassParams {
-    pub fn with_default_params() -> Self {
-        HighPassParams { period: None }
+impl Default for HighPassParams {
+    fn default() -> Self {
+        Self { period: Some(48) }
     }
 }
 
@@ -54,8 +54,14 @@ impl<'a> HighPassInput<'a> {
                 candles,
                 source: "close",
             },
-            params: HighPassParams::with_default_params(),
+            params: HighPassParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| HighPassParams::default().period.unwrap())
     }
 }
 
@@ -143,8 +149,8 @@ mod tests {
     }
     #[test]
     fn test_highpass_params_with_default_params() {
-        let default_params = HighPassParams::with_default_params();
-        assert_eq!(default_params.period, None);
+        let default_params = HighPassParams::default();
+        assert_eq!(default_params.period, Some(48));
     }
 
     #[test]
@@ -158,7 +164,6 @@ mod tests {
             }
             _ => panic!("Unexpected data variant"),
         }
-        assert_eq!(input.params.period, None);
     }
 
     #[test]
@@ -210,6 +215,9 @@ mod tests {
         let second_input = HighPassInput::from_slice(&first_result.values, second_params);
         let second_result = highpass(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for val in &second_result.values[240..] {
+            assert!(!val.is_nan());
+        }
     }
 
     #[test]

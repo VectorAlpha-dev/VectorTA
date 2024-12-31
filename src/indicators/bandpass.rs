@@ -91,7 +91,7 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
         return Err("hp_period is too small after rounding.".into());
     }
 
-    let mut hp_params = HighPassParams::with_default_params();
+    let mut hp_params = HighPassParams::default();
     hp_params.period = Some(hp_period);
 
     let hp_input = HighPassInput::from_slice(data, hp_params);
@@ -132,7 +132,7 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
     if trigger_period < 2 {
         return Err("trigger_period is too small after rounding.".into());
     }
-    let mut trigger_params = HighPassParams::with_default_params();
+    let mut trigger_params = HighPassParams::default();
     trigger_params.period = Some(trigger_period);
     let trigger_input = HighPassInput::from_slice(&bp_normalized, trigger_params);
 

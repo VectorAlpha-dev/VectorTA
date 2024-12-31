@@ -22,11 +22,11 @@ pub struct HighPass2Params {
     pub k: Option<f64>,
 }
 
-impl HighPass2Params {
-    pub fn with_default_params() -> Self {
-        HighPass2Params {
-            period: None,
-            k: None,
+impl Default for HighPass2Params {
+    fn default() -> Self {
+        Self {
+            period: Some(48),
+            k: Some(0.707),
         }
     }
 }
@@ -58,8 +58,20 @@ impl<'a> HighPass2Input<'a> {
                 candles,
                 source: "close",
             },
-            params: HighPass2Params::with_default_params(),
+            params: HighPass2Params::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| HighPass2Params::default().period.unwrap())
+    }
+
+    pub fn get_k(&self) -> f64 {
+        self.params
+            .k
+            .unwrap_or_else(|| HighPass2Params::default().k.unwrap())
     }
 }
 
@@ -69,8 +81,8 @@ pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dy
         HighPass2Data::Slice(slice) => slice,
     };
     let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(48);
-    let k: f64 = input.params.k.unwrap_or(0.707);
+    let period: usize = input.get_period();
+    let k: f64 = input.get_k();
     if period < 2 || len == 0 {
         return Err("Invalid period (<2) or no data for 2-pole high-pass.".into());
     }
@@ -142,9 +154,9 @@ mod tests {
     }
     #[test]
     fn test_high_pass_2_pole_params_with_default_params() {
-        let params = HighPass2Params::with_default_params();
-        assert_eq!(params.period, None);
-        assert_eq!(params.k, None);
+        let params = HighPass2Params::default();
+        assert_eq!(params.period, Some(48));
+        assert_eq!(params.k, Some(0.707));
     }
 
     #[test]
@@ -156,8 +168,6 @@ mod tests {
             HighPass2Data::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected HighPass2Data::Candles"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.k, None);
     }
 
     #[test]
@@ -215,6 +225,9 @@ mod tests {
         let second_input = HighPass2Input::from_slice(&first_result.values, second_params);
         let second_result = highpass_2_pole(&second_input).expect("Failed second pass");
         assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 240..second_result.values.len() {
+            assert!(!second_result.values[i].is_nan());
+        }
     }
 
     #[test]

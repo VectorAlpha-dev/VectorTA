@@ -21,11 +21,11 @@ pub struct EpmaParams {
     pub offset: Option<usize>,
 }
 
-impl EpmaParams {
-    pub fn with_default_params() -> Self {
-        EpmaParams {
-            period: None,
-            offset: None,
+impl Default for EpmaParams {
+    fn default() -> Self {
+        Self {
+            period: Some(11),
+            offset: Some(4),
         }
     }
 }
@@ -57,8 +57,20 @@ impl<'a> EpmaInput<'a> {
                 candles,
                 source: "close",
             },
-            params: EpmaParams::with_default_params(),
+            params: EpmaParams::default(),
         }
+    }
+
+    pub fn get_period(&self) -> usize {
+        self.params
+            .period
+            .unwrap_or_else(|| EpmaParams::default().period.unwrap())
+    }
+
+    pub fn get_offset(&self) -> usize {
+        self.params
+            .offset
+            .unwrap_or_else(|| EpmaParams::default().offset.unwrap())
     }
 }
 
@@ -71,8 +83,8 @@ pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
     if n == 0 {
         return Err("Empty data slice for EPMA calculation.".into());
     }
-    let period = input.params.period.unwrap_or(11);
-    let offset = input.params.offset.unwrap_or(4);
+    let period = input.get_period();
+    let offset = input.get_offset();
     if period < 2 {
         return Err("EPMA period must be >= 2.".into());
     }
@@ -134,7 +146,7 @@ mod tests {
         };
         let input = EpmaInput::from_candles(&candles, "close", default_params);
         let output = epma(&input).expect("Failed EPMA with default params");
-        assert_eq!(output.values.len(), candles.close.len());
+        assert_eq!(output.values.len(), candles.close.len(), "Length mismatch");
 
         let params_period_14 = EpmaParams {
             period: Some(14),
@@ -142,7 +154,7 @@ mod tests {
         };
         let input2 = EpmaInput::from_candles(&candles, "hl2", params_period_14);
         let output2 = epma(&input2).expect("Failed EPMA with period=14, source=hl2");
-        assert_eq!(output2.values.len(), candles.close.len());
+        assert_eq!(output2.values.len(), candles.close.len(), "Length mismatch");
 
         let params_custom = EpmaParams {
             period: Some(10),
@@ -150,7 +162,7 @@ mod tests {
         };
         let input3 = EpmaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = epma(&input3).expect("Failed EPMA fully custom");
-        assert_eq!(output3.values.len(), candles.close.len());
+        assert_eq!(output3.values.len(), candles.close.len(), "Length mismatch");
     }
 
     #[test]
@@ -158,7 +170,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
-        let default_params = EpmaParams::with_default_params();
+        let default_params = EpmaParams::default();
         let input = EpmaInput::from_candles(&candles, "close", default_params);
         let result = epma(&input).expect("Failed to calculate EPMA");
 
@@ -194,9 +206,9 @@ mod tests {
     }
     #[test]
     fn test_epma_params_with_default_params() {
-        let default_params = EpmaParams::with_default_params();
-        assert_eq!(default_params.period, None);
-        assert_eq!(default_params.offset, None);
+        let default_params = EpmaParams::default();
+        assert_eq!(default_params.period, Some(11), "Period should be 11");
+        assert_eq!(default_params.offset, Some(4), "Offset should be 4");
     }
 
     #[test]
@@ -210,8 +222,8 @@ mod tests {
             }
             _ => panic!("Unexpected EpmaData variant"),
         }
-        assert_eq!(input.params.period, None);
-        assert_eq!(input.params.offset, None);
+        assert_eq!(input.params.period, Some(11), "Period should be 11");
+        assert_eq!(input.params.offset, Some(4), "Offset should be 4");
     }
 
     #[test]
@@ -223,7 +235,7 @@ mod tests {
         };
         let input = EpmaInput::from_slice(&input_data, params);
         let result = epma(&input);
-        assert!(result.is_err());
+        assert!(result.is_err(), "Expected an error for zero period");
         if let Err(e) = result {
             assert!(e.to_string().contains("EPMA period must be >= 2."));
         }
@@ -238,7 +250,7 @@ mod tests {
         };
         let input = EpmaInput::from_slice(&input_data, params);
         let result = epma(&input).unwrap();
-        assert_eq!(result.values, input_data);
+        assert_eq!(result.values, input_data, "Expected input data as output");
     }
 
     #[test]
@@ -250,7 +262,7 @@ mod tests {
         };
         let input = EpmaInput::from_slice(&input_data, params);
         let result = epma(&input).unwrap();
-        assert_eq!(result.values, input_data);
+        assert_eq!(result.values, input_data, "Expected input data as output");
     }
 
     #[test]
@@ -263,14 +275,31 @@ mod tests {
         };
         let first_input = EpmaInput::from_candles(&candles, "close", first_params);
         let first_result = epma(&first_input).unwrap();
-        assert_eq!(first_result.values.len(), candles.close.len());
+        assert_eq!(
+            first_result.values.len(),
+            candles.close.len(),
+            "Length mismatch"
+        );
         let second_params = EpmaParams {
             period: Some(3),
             offset: Some(1),
         };
         let second_input = EpmaInput::from_slice(&first_result.values, second_params);
         let second_result = epma(&second_input).unwrap();
-        assert_eq!(second_result.values.len(), first_result.values.len());
+        assert_eq!(
+            second_result.values.len(),
+            first_result.values.len(),
+            "Length mismatch"
+        );
+        if second_result.values.len() > 240 {
+            for i in 240..second_result.values.len() {
+                assert!(
+                    !second_result.values[i].is_nan(),
+                    "Found NaN at index {}.",
+                    i
+                );
+            }
+        }
     }
 
     #[test]
@@ -286,9 +315,9 @@ mod tests {
         for i in 0..epma_result.values.len() {
             let val = epma_result.values[i];
             if i < (params.period.unwrap() + params.offset.unwrap() + 1) {
-                assert_eq!(val, candles.close[i]);
+                assert_eq!(val, candles.close[i], "Mismatch at index {}", i);
             } else {
-                assert!(!val.is_nan());
+                assert!(!val.is_nan(), "Found NaN at index {}", i);
             }
         }
     }
