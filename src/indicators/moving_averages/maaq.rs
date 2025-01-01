@@ -82,21 +82,51 @@ impl<'a> MaaqInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MaaqError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+    #[error("Not enough data: needed = {needed}, got = {got}")]
+    NotEnoughData { needed: usize, got: usize },
+    #[error("MAAQ periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}")]
+    ZeroPeriods {
+        period: usize,
+        fast_p: usize,
+        slow_p: usize,
+    },
+}
+
 #[inline]
-pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, Box<dyn Error>> {
+pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, MaaqError> {
     let data: &[f64] = match &input.data {
         MaaqData::Candles { candles, source } => source_type(candles, source),
         MaaqData::Slice(slice) => slice,
     };
+
+    if data.iter().all(|&x| x.is_nan()) {
+        return Err(MaaqError::AllValuesNaN);
+    }
+
     let period = input.get_period();
     let fast_p = input.get_fast_period();
     let slow_p = input.get_slow_period();
-    let len: usize = data.len();
+    let len = data.len();
+
     if len < period {
-        return Err(format!("Not enough data: length={} < period={}", len, period).into());
+        return Err(MaaqError::NotEnoughData {
+            needed: period,
+            got: len,
+        });
     }
+
     if period == 0 || fast_p == 0 || slow_p == 0 {
-        return Err("MAAQ periods cannot be zero.".into());
+        return Err(MaaqError::ZeroPeriods {
+            period,
+            fast_p,
+            slow_p,
+        });
     }
 
     let fast_sc = 2.0 / (fast_p as f64 + 1.0);

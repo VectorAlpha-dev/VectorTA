@@ -74,18 +74,53 @@ impl<'a> TilsonInput<'a> {
     }
 }
 
+use std::f64;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TilsonError {
+    #[error("No data available: data length = 0")]
+    EmptyData,
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Invalid volume factor: {v_factor}")]
+    InvalidVolumeFactor { v_factor: f64 },
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+}
+
 #[inline]
-pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, Box<dyn Error>> {
+pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, TilsonError> {
     let data: &[f64] = match &input.data {
         TilsonData::Candles { candles, source } => source_type(candles, source),
         TilsonData::Slice(slice) => slice,
     };
-    let length: usize = data.len();
-    let opt_in_time_period = input.get_period();
-    let opt_in_v_factor = input.get_volume_factor();
-    if opt_in_time_period == 0 || opt_in_time_period > length {
-        return Err("Invalid period specified.".into());
+
+    let length = data.len();
+    if length == 0 {
+        return Err(TilsonError::EmptyData);
     }
+
+    let opt_in_time_period = input.get_period();
+    if opt_in_time_period == 0 || opt_in_time_period > length {
+        return Err(TilsonError::InvalidPeriod {
+            period: opt_in_time_period,
+            data_len: length,
+        });
+    }
+
+    let opt_in_v_factor = input.get_volume_factor();
+    if opt_in_v_factor.is_nan() || opt_in_v_factor.is_infinite() {
+        return Err(TilsonError::InvalidVolumeFactor {
+            v_factor: opt_in_v_factor,
+        });
+    }
+
+    let first_valid_idx = data.iter().position(|&x| !x.is_nan());
+    if first_valid_idx.is_none() {
+        return Err(TilsonError::AllValuesNaN);
+    }
+
     let lookback_total = 6 * (opt_in_time_period - 1);
     let mut out_values = vec![std::f64::NAN; length];
     if lookback_total >= length {

@@ -69,22 +69,41 @@ impl<'a> SuperSmoother3PoleInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SuperSmoother3PoleError {
+    #[error("No data provided for 3-pole SuperSmoother.")]
+    EmptyData,
+    #[error("Period must be >= 1 for 3-pole SuperSmoother: period = {period}")]
+    InvalidPeriod { period: usize },
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+}
+
 #[inline]
 pub fn supersmoother_3_pole(
     input: &SuperSmoother3PoleInput,
-) -> Result<SuperSmoother3PoleOutput, Box<dyn Error>> {
+) -> Result<SuperSmoother3PoleOutput, SuperSmoother3PoleError> {
     let data: &[f64] = match &input.data {
         SuperSmoother3PoleData::Candles { candles, source } => source_type(candles, source),
         SuperSmoother3PoleData::Slice(slice) => slice,
     };
-    let n: usize = data.len();
-    let period: usize = input.get_period();
+
+    let n = data.len();
+    let period = input.get_period();
 
     if data.is_empty() {
-        return Ok(SuperSmoother3PoleOutput { values: vec![] });
+        return Err(SuperSmoother3PoleError::EmptyData);
     }
+
     if period < 1 {
-        return Err("Period must be >= 1 for 3-pole SuperSmoother.".into());
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+    }
+
+    let first_valid_idx = data.iter().position(|&x| !x.is_nan());
+    if first_valid_idx.is_none() {
+        return Err(SuperSmoother3PoleError::AllValuesNaN);
     }
 
     let mut output = vec![0.0; n];

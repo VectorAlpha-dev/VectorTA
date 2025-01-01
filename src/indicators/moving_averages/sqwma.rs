@@ -63,25 +63,45 @@ impl<'a> SqwmaInput<'a> {
             .unwrap_or_else(|| SqwmaParams::default().period.unwrap())
     }
 }
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SqwmaError {
+    #[error("Empty data for SQWMA calculation.")]
+    EmptyData,
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("SQWMA period must be >= 2. Provided: {period}")]
+    InvalidPeriod { period: usize },
+
+    #[error("Not enough data for SQWMA calculation: required at least {required}, found {found}")]
+    NotEnoughData { required: usize, found: usize },
+}
+
 #[inline]
-pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, Box<dyn Error>> {
+pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, SqwmaError> {
     let data: &[f64] = match &input.data {
         SqwmaData::Candles { candles, source } => source_type(candles, source),
         SqwmaData::Slice(slice) => slice,
     };
-    let n: usize = data.len();
+    let n = data.len();
     let period = input.get_period();
+
     if n == 0 {
-        return Err("Empty data for SQWMA calculation.".into());
+        return Err(SqwmaError::EmptyData);
     }
-
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(SqwmaError::AllValuesNaN);
+    }
     if period < 2 {
-        return Err("SQWMA period must be >= 2.".into());
+        return Err(SqwmaError::InvalidPeriod { period });
     }
-
     if period + 1 > n {
-        return Ok(SqwmaOutput {
-            values: data.to_vec(),
+        return Err(SqwmaError::NotEnoughData {
+            required: period + 1,
+            found: n,
         });
     }
 

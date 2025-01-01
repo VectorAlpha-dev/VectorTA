@@ -65,28 +65,61 @@ impl<'a> TrendFlexInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TrendFlexError {
+    #[error("No data provided to TrendFlex filter.")]
+    NoDataProvided,
+    #[error("All data values are NaN.")]
+    AllValuesNaN,
+    #[error("TrendFlex period must be >= 1: period = {period}")]
+    ZeroTrendFlexPeriod { period: usize },
+    #[error(
+        "TrendFlex period cannot exceed data length: period = {period}, data length = {data_len}"
+    )]
+    TrendFlexPeriodExceedsData { period: usize, data_len: usize },
+    #[error("Supersmoother period cannot exceed data length: ss_period = {ss_period}, data length = {data_len}")]
+    SmootherPeriodExceedsData { ss_period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, Box<dyn Error>> {
+pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexError> {
     let data: &[f64] = match &input.data {
         TrendFlexData::Candles { candles, source } => source_type(candles, source),
         TrendFlexData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
-    let trendflex_period = input.get_period();
 
     if data.is_empty() {
-        return Err("No data provided to TrendFlex filter.".into());
+        return Err(TrendFlexError::NoDataProvided);
     }
+
+    if data.iter().all(|v| v.is_nan()) {
+        return Err(TrendFlexError::AllValuesNaN);
+    }
+
+    let len = data.len();
+    let trendflex_period = input.get_period();
+
     if trendflex_period == 0 {
-        return Err("TrendFlex period must be >= 1.".into());
+        return Err(TrendFlexError::ZeroTrendFlexPeriod {
+            period: trendflex_period,
+        });
     }
+
     if trendflex_period > len {
-        return Err("TrendFlex period cannot exceed data length.".into());
+        return Err(TrendFlexError::TrendFlexPeriodExceedsData {
+            period: trendflex_period,
+            data_len: len,
+        });
     }
 
     let ss_period = ((trendflex_period as f64) / 2.0).round() as usize;
     if ss_period > len {
-        return Err("Supersmoother period cannot exceed data length.".into());
+        return Err(TrendFlexError::SmootherPeriodExceedsData {
+            ss_period,
+            data_len: len,
+        });
     }
 
     let mut ssf = vec![0.0; len];

@@ -64,22 +64,43 @@ impl<'a> SwmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SwmaError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("SWMA period must be >= 1. Provided: {period}")]
+    InvalidPeriod { period: usize },
+
+    #[error("SWMA period cannot exceed data length. Period: {period}, data length: {data_len}")]
+    PeriodExceedsLength { period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, Box<dyn Error>> {
+pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, SwmaError> {
     let data: &[f64] = match &input.data {
         SwmaData::Candles { candles, source } => source_type(candles, source),
         SwmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
+    let len = data.len();
     let period = input.get_period();
+
     if data.is_empty() {
         return Ok(SwmaOutput { values: vec![] });
     }
-    if period == 0 {
-        return Err("SWMA period must be >= 1.".into());
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(SwmaError::AllValuesNaN);
     }
-    if period > data.len() {
-        return Err("SWMA period cannot exceed data length.".into());
+    if period == 0 {
+        return Err(SwmaError::InvalidPeriod { period });
+    }
+    if period > len {
+        return Err(SwmaError::PeriodExceedsLength {
+            period,
+            data_len: len,
+        });
     }
     let weights = build_symmetric_triangle(period);
 

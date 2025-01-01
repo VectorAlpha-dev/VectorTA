@@ -65,20 +65,46 @@ impl<'a> ReflexInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ReflexError {
+    #[error("No data available for Reflex.")]
+    NoData,
+
+    #[error("Reflex period must be >=2. Provided period was {period}")]
+    InvalidPeriod { period: usize },
+
+    #[error("Not enough data: needed {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+}
+
 #[inline]
-pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, Box<dyn Error>> {
+pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, ReflexError> {
     let data: &[f64] = match &input.data {
         ReflexData::Candles { candles, source } => source_type(candles, source),
         ReflexData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
+    let len = data.len();
     let period = input.get_period();
 
     if len == 0 {
-        return Err("No data available for Reflex.".into());
+        return Err(ReflexError::NoData);
+    }
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(ReflexError::AllValuesNaN);
     }
     if period < 2 {
-        return Err("Reflex period must be >=2.".into());
+        return Err(ReflexError::InvalidPeriod { period });
+    }
+    if period > len {
+        return Err(ReflexError::NotEnoughData {
+            needed: period,
+            found: len,
+        });
     }
 
     let half_period = (period / 2).max(1);

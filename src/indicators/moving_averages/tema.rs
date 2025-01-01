@@ -64,27 +64,44 @@ pub struct TemaOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TemaError {
+    #[error("All values in input data are NaN for TEMA calculation.")]
+    AllValuesNaN,
+    #[error("Period cannot be zero or negative for TEMA. period = {period}")]
+    InvalidPeriod { period: usize },
+    #[error(
+        "Not enough data points to calculate TEMA. period = {period}, data length = {data_len}"
+    )]
+    NotEnoughDataPoints { period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn tema(input: &TemaInput) -> Result<TemaOutput, Box<dyn Error>> {
+pub fn tema(input: &TemaInput) -> Result<TemaOutput, TemaError> {
     let data: &[f64] = match &input.data {
         TemaData::Candles { candles, source } => source_type(candles, source),
         TemaData::Slice(slice) => slice,
     };
+
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => {
-            return Err("All values in input data are NaN.".into());
-        }
+        None => return Err(TemaError::AllValuesNaN),
     };
-    let n: usize = data.len();
-    let period: usize = input.get_period();
+
+    let n = data.len();
+    let period = input.get_period();
 
     if period < 1 {
-        return Err("Period cannot be zero or negative for TEMA.".into());
+        return Err(TemaError::InvalidPeriod { period });
     }
 
     if period > n {
-        return Err("Not enough data points to calculate TEMA.".into());
+        return Err(TemaError::NotEnoughDataPoints {
+            period,
+            data_len: n,
+        });
     }
 
     let lookback = (period - 1) * 3;

@@ -64,22 +64,39 @@ pub struct MwdxOutput {
     pub values: Vec<f64>,
 }
 
-pub fn mwdx(input: &MwdxInput) -> Result<MwdxOutput, Box<dyn Error>> {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MwdxError {
+    #[error("Empty data slice for MWDX calculation.")]
+    EmptyData,
+    #[error("Factor must be greater than 0 for MWDX. factor: {factor}")]
+    InvalidFactor { factor: f64 },
+    #[error("Factor leads to invalid denominator for MWDX. factor: {factor}")]
+    InvalidDenominator { factor: f64 },
+}
+
+#[inline]
+pub fn mwdx(input: &MwdxInput) -> Result<MwdxOutput, MwdxError> {
     let data: &[f64] = match &input.data {
         MwdxData::Candles { candles, source } => source_type(candles, source),
         MwdxData::Slice(slice) => slice,
     };
+
     let n: usize = data.len();
     if n == 0 {
-        return Err("Empty data slice for MWDX calculation.".into());
+        return Err(MwdxError::EmptyData);
     }
 
     let factor = input.get_factor();
-    if factor <= 0.0 {
-        return Err("Factor must be > 0 for MWDX.".into());
+    if factor <= 0.0 || factor.is_nan() || factor.is_infinite() {
+        return Err(MwdxError::InvalidFactor { factor });
     }
 
     let val2 = (2.0 / factor) - 1.0;
+    if val2 + 1.0 <= 0.0 {
+        return Err(MwdxError::InvalidDenominator { factor });
+    }
     let fac = 2.0 / (val2 + 1.0);
 
     let mut output = Vec::with_capacity(n);

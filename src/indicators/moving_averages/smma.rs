@@ -64,26 +64,51 @@ impl<'a> SmmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SmmaError {
+    #[error("All values in input data are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period specified for SMMA calculation: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Not enough valid data points to compute SMMA: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("NaN found in data after the first valid index (index = {first_valid_idx}).")]
+    NaNFound { first_valid_idx: usize },
+}
+
 #[inline]
-pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, Box<dyn Error>> {
+pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, SmmaError> {
     let data: &[f64] = match &input.data {
         SmmaData::Candles { candles, source } => source_type(candles, source),
         SmmaData::Slice(slice) => slice,
     };
-    let first_valid_idx: usize = match data.iter().position(|&x| !x.is_nan()) {
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => return Err("All values in input data are NaN.".into()),
+        None => return Err(SmmaError::AllValuesNaN),
     };
-    let len: usize = data.len();
+
+    let len = data.len();
     let period = input.get_period();
+
     if period == 0 || period > len {
-        return Err("Invalid period specified for SMMA calculation.".into());
+        return Err(SmmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
+
     if (len - first_valid_idx) < period {
-        return Err("Not enough valid data points to compute SMMA.".into());
+        return Err(SmmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
     }
+
     if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
-        return Err("NaN found in data after the first valid index.".into());
+        return Err(SmmaError::NaNFound { first_valid_idx });
     }
     let mut smma_values: Vec<f64> = vec![f64::NAN; len];
     let start: usize = first_valid_idx;

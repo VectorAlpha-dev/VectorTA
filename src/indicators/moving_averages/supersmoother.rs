@@ -69,22 +69,42 @@ impl<'a> SuperSmootherInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SuperSmootherError {
+    #[error("All input data for Super Smoother are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period for Super Smoother: period = {period}, data length = {data_len}. Period must be >= 1 and no greater than the data length.")]
+    InvalidPeriod { period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn supersmoother(input: &SuperSmootherInput) -> Result<SuperSmootherOutput, Box<dyn Error>> {
+pub fn supersmoother(
+    input: &SuperSmootherInput,
+) -> Result<SuperSmootherOutput, SuperSmootherError> {
     let data: &[f64] = match &input.data {
         SuperSmootherData::Candles { candles, source } => source_type(candles, source),
         SuperSmootherData::Slice(slice) => slice,
     };
-    let period = input.get_period();
 
     if data.is_empty() {
         return Ok(SuperSmootherOutput { values: vec![] });
     }
-    if period < 1 {
-        return Err("Period must be >= 1 for Super Smoother filter.".into());
+
+    if data.iter().all(|x| x.is_nan()) {
+        return Err(SuperSmootherError::AllValuesNaN);
     }
 
-    let len: usize = data.len();
+    let period = input.get_period();
+    let len = data.len();
+
+    if period < 1 || period > len {
+        return Err(SuperSmootherError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
     let mut output_values = vec![0.0; len];
 
     let a = (-1.414_f64 * PI / (period as f64)).exp();

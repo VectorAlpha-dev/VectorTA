@@ -64,19 +64,30 @@ pub struct SrwmaOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SrwmaError {
+    #[error("Data slice is empty for SRWMA calculation.")]
+    EmptyData,
+    #[error("Invalid period for SRWMA calculation. period = {period}")]
+    InvalidPeriod { period: usize },
+}
+
 #[inline]
-pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, Box<dyn Error>> {
+pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, SrwmaError> {
     let data: &[f64] = match &input.data {
         SrwmaData::Candles { candles, source } => source_type(candles, source),
         SrwmaData::Slice(slice) => slice,
     };
-    let period: usize = input.get_period();
 
     if data.is_empty() {
-        return Ok(SrwmaOutput { values: vec![] });
+        return Err(SrwmaError::EmptyData);
     }
+
+    let period = input.get_period();
     if period == 0 {
-        return Err("SRWMA period must be >= 1.".into());
+        return Err(SrwmaError::InvalidPeriod { period });
     }
 
     let len = data.len();

@@ -74,15 +74,37 @@ fn dot_product(a: &[f64], b: &[f64]) -> f64 {
     sum
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SinWmaError {
+    #[error("Data slice is empty for SINWMA calculation.")]
+    EmptyData,
+    #[error("Invalid period for SINWMA calculation. period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error(
+        "Sum of sines is zero or too close to zero, cannot compute SINWMA. sum_sines = {sum_sines}"
+    )]
+    ZeroSumSines { sum_sines: f64 },
+}
+
 #[inline]
-pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Error>> {
+pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, SinWmaError> {
     let data: &[f64] = match &input.data {
         SinWmaData::Candles { candles, source } => source_type(candles, source),
         SinWmaData::Slice(slice) => slice,
     };
+
+    if data.is_empty() {
+        return Err(SinWmaError::EmptyData);
+    }
+
     let period = input.get_period();
     if period == 0 || period > data.len() {
-        return Err("Invalid period for SINWMA calculation.".into());
+        return Err(SinWmaError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
     }
 
     let mut sines = Vec::with_capacity(period);
@@ -92,6 +114,10 @@ pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, Box<dyn Error>> {
         let val = angle.sin();
         sum_sines += val;
         sines.push(val);
+    }
+
+    if sum_sines.abs() < f64::EPSILON {
+        return Err(SinWmaError::ZeroSumSines { sum_sines });
     }
 
     let inv_sum = 1.0 / sum_sines;

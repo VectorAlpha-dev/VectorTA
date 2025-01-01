@@ -88,19 +88,45 @@ fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
     0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MamaError {
+    #[error("Not enough data: needed at least {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
+
+    #[error("Invalid fast limit: {fast_limit}")]
+    InvalidFastLimit { fast_limit: f64 },
+
+    #[error("Invalid slow limit: {slow_limit}")]
+    InvalidSlowLimit { slow_limit: f64 },
+}
+
 #[inline]
-pub fn mama(input: &MamaInput) -> Result<MamaOutput, Box<dyn Error>> {
+pub fn mama(input: &MamaInput) -> Result<MamaOutput, MamaError> {
     let src: &[f64] = match &input.data {
         MamaData::Candles { candles, source } => source_type(candles, source),
         MamaData::Slice(slice) => slice,
     };
+
     let len: usize = src.len();
     if len < 10 {
-        return Err("Not enough data".into());
+        return Err(MamaError::NotEnoughData {
+            needed: 10,
+            found: len,
+        });
     }
 
     let fast_limit = input.get_fast_limit();
     let slow_limit = input.get_slow_limit();
+
+    if fast_limit <= 0.0 || fast_limit.is_infinite() || fast_limit.is_nan() {
+        return Err(MamaError::InvalidFastLimit { fast_limit });
+    }
+
+    if slow_limit <= 0.0 || slow_limit.is_infinite() || slow_limit.is_nan() {
+        return Err(MamaError::InvalidSlowLimit { slow_limit });
+    }
 
     let mut mama_values = vec![0.0; len];
     let mut fama_values = vec![0.0; len];

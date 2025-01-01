@@ -64,24 +64,39 @@ impl<'a> NmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum NmaError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+    #[error("NMA period cannot be zero.")]
+    PeriodCannotBeZero,
+    #[error("Not enough data: len = {len}, period = {period} (need at least period + 1).")]
+    NotEnoughData { len: usize, period: usize },
+}
+
 #[inline]
-pub fn nma(input: &NmaInput) -> Result<NmaOutput, Box<dyn Error>> {
+pub fn nma(input: &NmaInput) -> Result<NmaOutput, NmaError> {
     let data: &[f64] = match &input.data {
         NmaData::Candles { candles, source } => source_type(candles, source),
         NmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
+
+    let len = data.len();
     let period = input.get_period();
 
     if period == 0 {
-        return Err("NMA period cannot be zero.".into());
+        return Err(NmaError::PeriodCannotBeZero);
     }
-    if len < (period + 1) {
-        return Err(format!(
-            "Not enough data ({}) for NMA with period {} (need at least period+1).",
-            len, period
-        )
-        .into());
+
+    if len < period + 1 {
+        return Err(NmaError::NotEnoughData { len, period });
+    }
+
+    let first_valid_idx = data.iter().position(|&x| !x.is_nan());
+    if first_valid_idx.is_none() {
+        return Err(NmaError::AllValuesNaN);
     }
 
     let mut ln_values = Vec::with_capacity(len);

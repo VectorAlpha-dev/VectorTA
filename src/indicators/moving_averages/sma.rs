@@ -63,26 +63,49 @@ impl<'a> SmaInput<'a> {
             .unwrap_or_else(|| SmaParams::default().period.unwrap())
     }
 }
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SmaError {
+    #[error("Empty data provided for SMA.")]
+    EmptyData,
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+}
+
 #[inline]
-pub fn sma(input: &SmaInput) -> Result<SmaOutput, Box<dyn Error>> {
+pub fn sma(input: &SmaInput) -> Result<SmaOutput, SmaError> {
     let data: &[f64] = match &input.data {
         SmaData::Candles { candles, source } => source_type(candles, source),
         SmaData::Slice(slice) => slice,
     };
+
+    if data.is_empty() {
+        return Err(SmaError::EmptyData);
+    }
+
     let period = input.get_period();
     if period == 0 || period > data.len() {
-        return Err("Invalid period specified for SMA calculation.".into());
+        return Err(SmaError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
     }
 
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => {
-            return Err("All values in input data are NaN.".into());
-        }
+        None => return Err(SmaError::AllValuesNaN),
     };
 
     if (data.len() - first_valid_idx) < period {
-        return Err("Not enough valid data points to compute SMA.".into());
+        return Err(SmaError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first_valid_idx,
+        });
     }
 
     let mut sma_values = vec![f64::NAN; data.len()];

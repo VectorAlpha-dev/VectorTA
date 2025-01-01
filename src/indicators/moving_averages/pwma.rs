@@ -64,16 +64,37 @@ impl<'a> PwmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum PwmaError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period specified for PWMA calculation: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Pascal weights sum to zero for period = {period}")]
+    PascalWeightsSumZero { period: usize },
+}
+
 #[inline]
-pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, Box<dyn Error>> {
+pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, PwmaError> {
     let data: &[f64] = match &input.data {
         PwmaData::Candles { candles, source } => source_type(candles, source),
         PwmaData::Slice(slice) => slice,
     };
+
+    if data.iter().all(|&x| x.is_nan()) {
+        return Err(PwmaError::AllValuesNaN);
+    }
+
     let period = input.get_period();
-    let len: usize = data.len();
+    let len = data.len();
+
     if period == 0 || period > len {
-        return Err("Invalid period specified for PWMA calculation.".into());
+        return Err(PwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
 
     let weights = pascal_weights(period)?;
@@ -93,7 +114,7 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, Box<dyn Error>> {
 }
 
 #[inline]
-fn pascal_weights(period: usize) -> Result<Vec<f64>, Box<dyn Error>> {
+fn pascal_weights(period: usize) -> Result<Vec<f64>, PwmaError> {
     let n = period - 1;
     let mut row = Vec::with_capacity(period);
 
@@ -104,8 +125,9 @@ fn pascal_weights(period: usize) -> Result<Vec<f64>, Box<dyn Error>> {
 
     let sum: f64 = row.iter().sum();
     if sum == 0.0 {
-        return Err("Pascal weights sum to zero, invalid period?".into());
+        return Err(PwmaError::PascalWeightsSumZero { period });
     }
+
     for val in row.iter_mut() {
         *val /= sum;
     }
