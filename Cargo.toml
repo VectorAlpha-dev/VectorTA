@@ -15,7 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 csv = "1.1"
 ndarray = "0.16.1"
 chrono = "0.4.39"
-
+thiserror = "2.0.9"
 
 [lib]
 path = "src/lib.rs"
@@ -29,6 +29,14 @@ path = "src/main.rs"
 lto = true
 opt-level = 3
 codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+lto = true
+opt-level = 3
+codegen-units = 1
+debug = false
+incremental = false
 
 [build]
 rustflags = ["-C", "target-cpu=native"]

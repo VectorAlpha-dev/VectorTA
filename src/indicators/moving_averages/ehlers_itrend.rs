@@ -74,7 +74,7 @@ impl<'a> EhlersITrendInput<'a> {
             .unwrap_or_else(|| EhlersITrendParams::default().max_dc_period.unwrap())
     }
 }
-
+#[inline]
 pub fn ehlers_itrend(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
     let src: &[f64] = match &input.data {
         EhlersITrendData::Candles { candles, source } => source_type(candles, source),

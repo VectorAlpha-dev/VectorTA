@@ -1,5 +1,4 @@
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AlmaData<'a> {
@@ -82,8 +81,28 @@ impl<'a> AlmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AlmaError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("Invalid sigma: {sigma}")]
+    InvalidSigma { sigma: f64 },
+
+    #[error("Invalid offset: {offset}")]
+    InvalidOffset { offset: f64 },
+}
+
 #[inline]
-pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
+pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, AlmaError> {
     let data: &[f64] = match &input.data {
         AlmaData::Candles { candles, source } => source_type(candles, source),
         AlmaData::Slice(slice) => slice,
@@ -91,25 +110,35 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, Box<dyn Error>> {
 
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => {
-            return Err("All values in input data are NaN.".into());
-        }
+        None => return Err(AlmaError::AllValuesNaN),
     };
 
-    let len: usize = data.len();
-
-    let period: usize = input.get_period();
-    let offset: f64 = input.get_offset();
-    let sigma: f64 = input.get_sigma();
+    let len = data.len();
+    let period = input.get_period();
+    let offset = input.get_offset();
+    let sigma = input.get_sigma();
 
     if period == 0 || period > len {
-        return Err("Invalid period specified for ALMA calculation.".into());
+        return Err(AlmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
 
     if (len - first_valid_idx) < period {
-        return Err("Not enough valid data points to compute ALMA.".into());
+        return Err(AlmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
     }
 
+    if sigma <= 0.0 {
+        return Err(AlmaError::InvalidSigma { sigma });
+    }
+
+    if offset.is_nan() || offset.is_infinite() {
+        return Err(AlmaError::InvalidOffset { offset });
+    }
     let m: f64 = offset * (period - 1) as f64;
     let s: f64 = period as f64 / sigma;
     let s_sq: f64 = s * s;
