@@ -63,29 +63,63 @@ impl<'a> FwmaInput<'a> {
             .unwrap_or_else(|| FwmaParams::default().period.unwrap())
     }
 }
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum FwmaError {
+    #[error("No data provided.")]
+    NoData,
+
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("NaN found after the first valid index.")]
+    NaNFound,
+
+    #[error("Fibonacci sum is zero. Cannot normalize weights.")]
+    ZeroFibonacciSum,
+}
+
 #[inline]
-pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
+pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, FwmaError> {
     let data: &[f64] = match &input.data {
         FwmaData::Candles { candles, source } => source_type(candles, source),
         FwmaData::Slice(slice) => slice,
     };
+
     let len = data.len();
     if len == 0 {
-        return Err("No data provided.".into());
+        return Err(FwmaError::NoData);
     }
+
     let period = input.get_period();
     if period == 0 || period > len {
-        return Err("Invalid period.".into());
+        return Err(FwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
+
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => return Err("All values are NaN.".into()),
+        None => return Err(FwmaError::AllValuesNaN),
     };
+
     if (len - first_valid_idx) < period {
-        return Err("Not enough valid data.".into());
+        return Err(FwmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
     }
+
     if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
-        return Err("NaN found after first valid index.".into());
+        return Err(FwmaError::NaNFound);
     }
     let mut fib = Vec::with_capacity(period);
     fib.push(1.0);
@@ -97,6 +131,9 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, Box<dyn Error>> {
         fib.push(next);
     }
     let fib_sum: f64 = fib.iter().sum();
+    if fib_sum == 0.0 {
+        return Err(FwmaError::ZeroFibonacciSum);
+    }
     fib.iter_mut().for_each(|w| *w /= fib_sum);
     let mut values = vec![f64::NAN; len];
     let end_offset = first_valid_idx + period - 1;

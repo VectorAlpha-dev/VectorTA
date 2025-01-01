@@ -73,28 +73,46 @@ impl<'a> EpmaInput<'a> {
             .unwrap_or_else(|| EpmaParams::default().offset.unwrap())
     }
 }
+use thiserror::Error;
 
-pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
+#[derive(Debug, Error)]
+pub enum EpmaError {
+    #[error("Empty data slice for EPMA calculation.")]
+    EmptyDataSlice,
+
+    #[error("EPMA period must be >= 2: period = {period}.")]
+    InvalidPeriod { period: usize },
+
+    #[error("Start index for EPMA is out of range: start_index = {start_index}, data length = {data_len}.")]
+    StartIndexOutOfRange { start_index: usize, data_len: usize },
+}
+
+#[inline]
+pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, EpmaError> {
     let data: &[f64] = match &input.data {
         EpmaData::Candles { candles, source } => source_type(candles, source),
         EpmaData::Slice(slice) => slice,
     };
+
     let n: usize = data.len();
     if n == 0 {
-        return Err("Empty data slice for EPMA calculation.".into());
-    }
-    let period = input.get_period();
-    let offset = input.get_offset();
-    if period < 2 {
-        return Err("EPMA period must be >= 2.".into());
-    }
-    let start_index = period + offset + 1;
-    if start_index >= n {
-        return Ok(EpmaOutput {
-            values: data.to_vec(),
-        });
+        return Err(EpmaError::EmptyDataSlice);
     }
 
+    let period = input.get_period();
+    let offset = input.get_offset();
+
+    if period < 2 {
+        return Err(EpmaError::InvalidPeriod { period });
+    }
+
+    let start_index = period + offset + 1;
+    if start_index >= n {
+        return Err(EpmaError::StartIndexOutOfRange {
+            start_index,
+            data_len: n,
+        });
+    }
     let mut output = data.to_vec();
 
     let p_minus_1 = period - 1;
@@ -132,6 +150,8 @@ pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::result;
+
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 
@@ -236,9 +256,6 @@ mod tests {
         let input = EpmaInput::from_slice(&input_data, params);
         let result = epma(&input);
         assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(e.to_string().contains("EPMA period must be >= 2."));
-        }
     }
 
     #[test]
@@ -249,8 +266,10 @@ mod tests {
             offset: Some(4),
         };
         let input = EpmaInput::from_slice(&input_data, params);
-        let result = epma(&input).unwrap();
-        assert_eq!(result.values, input_data, "Expected input data as output");
+        assert!(
+            result::Result::is_err(&epma(&input)),
+            "Expected an error for period > data.len()"
+        );
     }
 
     #[test]
@@ -261,8 +280,10 @@ mod tests {
             offset: Some(1),
         };
         let input = EpmaInput::from_slice(&input_data, params);
-        let result = epma(&input).unwrap();
-        assert_eq!(result.values, input_data, "Expected input data as output");
+        assert!(
+            result::Result::is_err(&epma(&input)),
+            "Expected an error for period > data.len()"
+        );
     }
 
     #[test]

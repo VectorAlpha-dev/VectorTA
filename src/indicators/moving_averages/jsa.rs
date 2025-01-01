@@ -64,20 +64,40 @@ impl<'a> JsaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum JsaError {
+    #[error("No data provided for JSA calculation.")]
+    NoDataProvided,
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("JSA period must be > 0: period = {period}")]
+    InvalidPeriod { period: usize },
+}
+
 #[inline]
-pub fn jsa(input: &JsaInput) -> Result<JsaOutput, Box<dyn Error>> {
+pub fn jsa(input: &JsaInput) -> Result<JsaOutput, JsaError> {
     let data: &[f64] = match &input.data {
         JsaData::Candles { candles, source } => source_type(candles, source),
         JsaData::Slice(slice) => slice,
     };
+
     let len: usize = data.len();
     if len == 0 {
-        return Err("No data provided for JSA calculation.".into());
+        return Err(JsaError::NoDataProvided);
     }
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(JsaError::AllValuesNaN),
+    };
 
     let period = input.get_period();
     if period == 0 {
-        return Err("JSA period must be > 0.".into());
+        return Err(JsaError::InvalidPeriod { period });
     }
     if period >= len {
         let output = vec![f64::NAN; len];

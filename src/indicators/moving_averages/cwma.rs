@@ -64,28 +64,43 @@ impl<'a> CwmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CwmaError {
+    #[error("All values in input data are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period specified for CWMA calculation: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+}
+
 #[inline]
-pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, Box<dyn Error>> {
+pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
     let data: &[f64] = match &input.data {
         CwmaData::Candles { candles, source } => source_type(candles, source),
         CwmaData::Slice(slice) => slice,
     };
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => {
-            return Err("All values in input data are NaN.".into());
-        }
+        None => return Err(CwmaError::AllValuesNaN),
     };
     let len: usize = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err("Invalid period specified for CWMA calculation.".into());
+        return Err(CwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first_valid_idx) < period {
-        return Err("Not enough valid data points to compute CWMA.".into());
+        return Err(CwmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
     }
-
     if period + 1 > len {
         return Ok(CwmaOutput {
             values: data.to_vec(),

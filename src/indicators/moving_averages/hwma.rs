@@ -82,8 +82,20 @@ impl<'a> HwmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HwmaError {
+    #[error("HWMA calculation received empty data array.")]
+    EmptyData,
+    #[error("All values in input data are NaN.")]
+    AllValuesNaN,
+    #[error("Parameters (na, nb, nc) must be in (0,1). Received: na={na}, nb={nb}, nc={nc}")]
+    InvalidParams { na: f64, nb: f64, nc: f64 },
+}
+
 #[inline]
-pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
+pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, HwmaError> {
     let data: &[f64] = match &input.data {
         HwmaData::Candles { candles, source } => source_type(candles, source),
         HwmaData::Slice(slice) => slice,
@@ -92,14 +104,15 @@ pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, Box<dyn Error>> {
     let na = input.get_na();
     let nb = input.get_nb();
     let nc = input.get_nc();
-    if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
-        return Err("Parameters (na, nb, nc) must be in (0,1).".into());
-    }
-
     if len == 0 {
-        return Err("HWMA calculation received empty data array.".into());
+        return Err(HwmaError::EmptyData);
     }
-
+    if data.iter().all(|&x| x.is_nan()) {
+        return Err(HwmaError::AllValuesNaN);
+    }
+    if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
+        return Err(HwmaError::InvalidParams { na, nb, nc });
+    }
     let mut hwma_values = Vec::with_capacity(len);
 
     let mut last_f = data[0];

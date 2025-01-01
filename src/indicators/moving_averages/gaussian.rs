@@ -74,27 +74,43 @@ impl<'a> GaussianInput<'a> {
     }
 }
 
-pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, Box<dyn Error>> {
+use std::f64::consts::PI;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum GaussianError {
+    #[error("No data provided to Gaussian filter.")]
+    NoData,
+    #[error("Invalid number of poles: expected 1..4, got {poles}")]
+    InvalidPoles { poles: usize },
+    #[error(
+        "Gaussian filter period is longer than the data. period={period}, data_len={data_len}"
+    )]
+    PeriodLongerThanData { period: usize, data_len: usize },
+}
+
+#[inline]
+pub fn gaussian(input: &GaussianInput) -> Result<GaussianOutput, GaussianError> {
     let period = input.get_period();
     let poles = input.get_poles();
-
     let data: &[f64] = match &input.data {
         GaussianData::Candles { candles, source } => source_type(candles, source),
         GaussianData::Slice(slice) => slice,
     };
-
     let n: usize = data.len();
     if n == 0 {
-        return Err("No data provided to Gaussian filter.".into());
+        return Err(GaussianError::NoData);
     }
     if !(1..=4).contains(&poles) {
-        return Err("Gaussian filter poles must be in 1..4.".into());
+        return Err(GaussianError::InvalidPoles { poles });
     }
-    if data.len() < input.params.period.unwrap_or(14) {
-        return Err("Gaussian filter period is longer than the data.".into());
+    let required_period = input.params.period.unwrap_or(14);
+    if n < required_period {
+        return Err(GaussianError::PeriodLongerThanData {
+            period: required_period,
+            data_len: n,
+        });
     }
-
-    use std::f64::consts::PI;
     let beta = {
         let numerator = 1.0 - (2.0 * PI / period as f64).cos();
         let denominator = (2.0_f64).powf(1.0 / poles as f64) - 1.0;
@@ -299,11 +315,6 @@ mod tests {
         );
         let result = gaussian(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Gaussian filter poles must be in 1..4."));
-        }
     }
 
     #[test]

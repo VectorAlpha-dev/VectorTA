@@ -75,7 +75,18 @@ impl<'a> HighPass2Input<'a> {
     }
 }
 
-pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dyn Error>> {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HighPass2Error {
+    #[error("Invalid period (<2) or no data for 2-pole high-pass: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Invalid k (cutoff) for 2-pole high-pass: k = {k}")]
+    InvalidK { k: f64 },
+}
+
+#[inline]
+pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPass2Error> {
     let data: &[f64] = match &input.data {
         HighPass2Data::Candles { candles, source } => source_type(candles, source),
         HighPass2Data::Slice(slice) => slice,
@@ -83,8 +94,15 @@ pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, Box<dy
     let len: usize = data.len();
     let period: usize = input.get_period();
     let k: f64 = input.get_k();
+
     if period < 2 || len == 0 {
-        return Err("Invalid period (<2) or no data for 2-pole high-pass.".into());
+        return Err(HighPass2Error::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if k <= 0.0 || k.is_nan() {
+        return Err(HighPass2Error::InvalidK { k });
     }
 
     let angle = 2.0 * PI * k / (period as f64);

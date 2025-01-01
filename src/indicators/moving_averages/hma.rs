@@ -64,25 +64,60 @@ impl<'a> HmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HmaError {
+    #[error("No data provided.")]
+    NoData,
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("Cannot calculate half of period: period = {period}")]
+    ZeroHalf { period: usize },
+
+    #[error("Cannot calculate sqrt of period: period = {period}")]
+    ZeroSqrtPeriod { period: usize },
+}
+
 #[inline]
-pub fn hma(input: &HmaInput) -> Result<HmaOutput, Box<dyn Error>> {
+pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     let data = match &input.data {
         HmaData::Candles { candles, source } => source_type(candles, source),
         HmaData::Slice(slice) => slice,
     };
+
     let len = data.len();
-    let period = input.get_period();
-    let mut values = vec![f64::NAN; len];
-    if period == 0 || period > len {
-        return Ok(HmaOutput { values });
+    if len == 0 {
+        return Err(HmaError::NoData);
     }
+
+    if data.iter().all(|&x| x.is_nan()) {
+        return Err(HmaError::AllValuesNaN);
+    }
+
+    let period = input.get_period();
+    if period == 0 || period > len {
+        return Err(HmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+
+    let mut values = vec![f64::NAN; len];
+
     let half = period / 2;
     if half == 0 {
-        return Ok(HmaOutput { values });
+        return Err(HmaError::ZeroHalf { period });
     }
+
     let sqrtp = (period as f64).sqrt().floor() as usize;
     if sqrtp == 0 {
-        return Ok(HmaOutput { values });
+        return Err(HmaError::ZeroSqrtPeriod { period });
     }
 
     let sum_w_half = (half * (half + 1)) >> 1;
@@ -328,10 +363,8 @@ mod tests {
         let input_data = [10.0, 20.0, 30.0];
         let params = HmaParams { period: Some(0) };
         let input = HmaInput::from_slice(&input_data, params);
-        let result = hma(&input).expect("Failed hma");
-        for &val in &result.values {
-            assert!(val.is_nan());
-        }
+        let result = hma(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -339,10 +372,8 @@ mod tests {
         let input_data = [10.0, 20.0, 30.0];
         let params = HmaParams { period: Some(10) };
         let input = HmaInput::from_slice(&input_data, params);
-        let result = hma(&input).expect("Failed hma");
-        for &val in &result.values {
-            assert!(val.is_nan());
-        }
+        let result = hma(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -350,10 +381,8 @@ mod tests {
         let input_data = [42.0];
         let params = HmaParams { period: Some(5) };
         let input = HmaInput::from_slice(&input_data, params);
-        let result = hma(&input).expect("Failed hma");
-        for &val in &result.values {
-            assert!(val.is_nan());
-        }
+        let result = hma(&input);
+        assert!(result.is_err());
     }
 
     #[test]

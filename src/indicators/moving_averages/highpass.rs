@@ -65,22 +65,50 @@ impl<'a> HighPassInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum HighPassError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period or insufficient data for highpass calculation: period = {period}, data length = {data_len}.")]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}")]
+    InvalidAlpha { cos_val: f64 },
+}
+
 #[inline]
-pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, Box<dyn Error>> {
+pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, HighPassError> {
     let data: &[f64] = match &input.data {
         HighPassData::Candles { candles, source } => source_type(candles, source),
         HighPassData::Slice(slice) => slice,
     };
-    let period: usize = input.params.period.unwrap_or(48);
-    let len: usize = data.len();
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(HighPassError::AllValuesNaN),
+    };
+
+    let len = data.len();
+    let period = input.params.period.unwrap_or(48);
     if len <= 2 || period == 0 || period > len {
-        return Err("Invalid period or insufficient data for highpass calculation.".into());
+        return Err(HighPassError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
 
     let k = 1.0;
-    let two_pi_k_div = 2.0 * PI * k / (period as f64);
+    let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
     let sin_val = two_pi_k_div.sin();
     let cos_val = two_pi_k_div.cos();
+
+    if cos_val.abs() < 1e-15 {
+        return Err(HighPassError::InvalidAlpha { cos_val });
+    }
+
     let alpha = 1.0 + (sin_val - 1.0) / cos_val;
 
     let one_minus_half_alpha = 1.0 - alpha / 2.0;

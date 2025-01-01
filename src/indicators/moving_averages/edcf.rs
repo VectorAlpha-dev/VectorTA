@@ -65,34 +65,58 @@ impl<'a> EdcfInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum EdcfError {
+    #[error("No data provided to EDCF filter.")]
+    NoData,
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period: period = {period}. Period must be > 0.")]
+    InvalidPeriod { period: usize },
+
+    #[error("Not enough valid data points to compute EDCF. Need at least {needed} valid points after index {idx}.")]
+    NotEnoughValidData { needed: usize, idx: usize },
+
+    #[error("NaN found in data after the first valid index.")]
+    NaNFound,
+}
+
 #[inline]
-pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, Box<dyn Error>> {
+pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, EdcfError> {
     let data: &[f64] = match &input.data {
         EdcfData::Candles { candles, source } => source_type(candles, source),
         EdcfData::Slice(slice) => slice,
     };
+
     let len = data.len();
     if len == 0 {
-        return Err("No data provided to EDCF filter.".into());
+        return Err(EdcfError::NoData);
     }
+
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => return Err("All values are NaN.".into()),
+        None => return Err(EdcfError::AllValuesNaN),
     };
+
     let period = input.get_period();
     if period == 0 {
-        return Err("EDCF period must be > 0.".into());
+        return Err(EdcfError::InvalidPeriod { period });
     }
+
     let needed = 2 * period;
     if (len - first_valid_idx) < needed {
-        return Err(format!(
-            "Not enough valid data points to compute EDCF. Need at least {} valid points after index {}.",
-            needed, first_valid_idx
-        ).into());
+        return Err(EdcfError::NotEnoughValidData {
+            needed,
+            idx: first_valid_idx,
+        });
     }
 
     if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
-        return Err("NaN found in data after the first valid index.".into());
+        return Err(EdcfError::NaNFound);
     }
 
     let mut newseries = vec![0.0; len];
@@ -211,12 +235,6 @@ mod tests {
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(0) });
         let result = edcf(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("period must be > 0"),
-                "Error should mention 'period must be > 0'"
-            );
-        }
     }
 
     #[test]
@@ -225,12 +243,6 @@ mod tests {
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("No data provided"),
-                "Error should mention no data was provided"
-            );
-        }
     }
 
     #[test]

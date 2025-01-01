@@ -74,30 +74,38 @@ impl<'a> EhlersITrendInput<'a> {
             .unwrap_or_else(|| EhlersITrendParams::default().max_dc_period.unwrap())
     }
 }
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum EhlersITrendError {
+    #[error("Input data is empty.")]
+    EmptyInputData,
+    #[error("All values in input data are NaN.")]
+    AllValuesNaN,
+    #[error("Not enough data for warmup. warmup_bars={warmup_bars} but data length={length}")]
+    NotEnoughDataForWarmup { warmup_bars: usize, length: usize },
+}
+
 #[inline]
-pub fn ehlers_itrend(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Box<dyn Error>> {
+pub fn ehlers_itrend(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, EhlersITrendError> {
     let src: &[f64] = match &input.data {
         EhlersITrendData::Candles { candles, source } => source_type(candles, source),
         EhlersITrendData::Slice(slice) => slice,
     };
     let length: usize = src.len();
     if length == 0 {
-        return Err("Input data is empty.".into());
+        return Err(EhlersITrendError::EmptyInputData);
     }
-
     if src.iter().all(|&x| x.is_nan()) {
-        return Err("All values in input data are NaN.".into());
+        return Err(EhlersITrendError::AllValuesNaN);
     }
-
     let warmup_bars = input.get_warmup_bars();
     let max_dc = input.get_max_dc_period().max(1);
-
     if warmup_bars >= length {
-        return Err(format!(
-            "Not enough data for warmup. warmup_bars={} but data length={}",
-            warmup_bars, length
-        )
-        .into());
+        return Err(EhlersITrendError::NotEnoughDataForWarmup {
+            warmup_bars,
+            length,
+        });
     }
 
     let mut out_eit = vec![0.0; length];

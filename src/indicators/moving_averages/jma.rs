@@ -76,8 +76,18 @@ impl<'a> JmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum JmaError {
+    #[error("JMA calculation: input data is empty.")]
+    EmptyData,
+    #[error("Invalid period for JMA: period = {period}")]
+    InvalidPeriod { period: usize },
+}
+
 #[inline]
-pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
+pub fn jma(input: &JmaInput) -> Result<JmaOutput, JmaError> {
     let data: &[f64] = match &input.data {
         JmaData::Candles { candles, source } => source_type(candles, source),
         JmaData::Slice(slice) => slice,
@@ -85,10 +95,13 @@ pub fn jma(input: &JmaInput) -> Result<JmaOutput, Box<dyn Error>> {
     let len: usize = data.len();
 
     if len == 0 {
-        return Err("JMA calculation: input data is empty.".into());
+        return Err(JmaError::EmptyData);
     }
 
     let period = input.get_period();
+    if period == 0 {
+        return Err(JmaError::InvalidPeriod { period });
+    }
     let phase = input.get_phase();
     let power = input.get_power();
 
@@ -256,10 +269,7 @@ mod tests {
         };
         let input = JmaInput::from_slice(&input_data, params);
         let result = jma(&input);
-        assert!(
-            result.is_ok(),
-            "Zero period is not explicitly handled, but let's see if it fails gracefully"
-        );
+        assert!(result.is_err());
     }
 
     #[test]

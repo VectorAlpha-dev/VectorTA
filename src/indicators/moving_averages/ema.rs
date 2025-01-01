@@ -64,24 +64,42 @@ impl<'a> EmaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum EmaError {
+    #[error("All input data are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period for EMA: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Not enough valid data to compute EMA: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+}
+
 #[inline]
-pub fn ema(input: &EmaInput) -> Result<EmaOutput, Box<dyn Error>> {
+pub fn ema(input: &EmaInput) -> Result<EmaOutput, EmaError> {
     let data: &[f64] = match &input.data {
         EmaData::Candles { candles, source } => source_type(candles, source),
         EmaData::Slice(slice) => slice,
     };
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => return Err("All input data are NaN.".into()),
+        None => return Err(EmaError::AllValuesNaN),
     };
     let len: usize = data.len();
     let period: usize = input.get_period();
 
     if period == 0 || period > len {
-        return Err("Invalid period for EMA.".into());
+        return Err(EmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first_valid_idx) < period {
-        return Err("Not enough valid data to compute EMA.".into());
+        return Err(EmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
     }
 
     let mut ema_values = vec![f64::NAN; len];

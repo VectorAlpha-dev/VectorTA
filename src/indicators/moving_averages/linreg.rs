@@ -64,8 +64,18 @@ impl<'a> LinRegInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum LinRegError {
+    #[error("Invalid period for linear regression: period={period}. Period must be >= 1.")]
+    InvalidPeriod { period: usize },
+    #[error("No data available for linear regression.")]
+    NoData,
+}
+
 #[inline]
-pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
+pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
     let data: &[f64] = match &input.data {
         LinRegData::Candles { candles, source } => source_type(candles, source),
         LinRegData::Slice(slice) => slice,
@@ -73,10 +83,10 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, Box<dyn Error>> {
     let size: usize = data.len();
     let period = input.get_period();
     if period < 1 {
-        return Err("Invalid period (<1) for linear regression.".into());
+        return Err(LinRegError::InvalidPeriod { period });
     }
     if size == 0 {
-        return Err("No data available for linear regression.".into());
+        return Err(LinRegError::NoData);
     }
     if size < period {
         return Ok(LinRegOutput {

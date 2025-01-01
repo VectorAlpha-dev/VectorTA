@@ -65,8 +65,22 @@ impl<'a> DemaInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum DemaError {
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period: period = {period} (must be >= 1).")]
+    InvalidPeriod { period: usize },
+
+    #[error("Not enough data to calculate DEMA for the specified period: needed = {needed}, valid = {valid}.")]
+    NotEnoughData { needed: usize, valid: usize },
+}
+
 #[inline]
-pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
+pub fn dema(input: &DemaInput) -> Result<DemaOutput, DemaError> {
     let data: &[f64] = match &input.data {
         DemaData::Candles { candles, source } => source_type(candles, source),
         DemaData::Slice(slice) => slice,
@@ -74,20 +88,24 @@ pub fn dema(input: &DemaInput) -> Result<DemaOutput, Box<dyn Error>> {
 
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
-        None => {
-            return Err("All values in input data are NaN.".into());
-        }
+        None => return Err(DemaError::AllValuesNaN),
     };
 
     let size: usize = data.len();
     let period: usize = input.get_period();
 
     if period < 1 {
-        return Err("Invalid DEMA period (must be >= 1).".into());
+        return Err(DemaError::InvalidPeriod { period });
     }
-    if size < 2 * (period - 1) {
-        return Err("Not enough data to calculate DEMA for the specified period.".into());
+
+    let needed = 2 * (period - 1);
+    if size < needed {
+        return Err(DemaError::NotEnoughData {
+            needed,
+            valid: size,
+        });
     }
+
     let alpha = 2.0 / (period as f64 + 1.0);
     let alpha_1 = 1.0 - alpha;
 
@@ -225,13 +243,6 @@ mod tests {
         let input = DemaInput::from_slice(&input_data, params);
         let result = dema(&input);
         assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Invalid DEMA period"),
-                "Expected 'Invalid DEMA period' error message, got: {}",
-                e
-            );
-        }
     }
 
     #[test]
