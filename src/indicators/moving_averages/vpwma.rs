@@ -74,23 +74,51 @@ pub struct VpwmaOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum VpwmaError {
+    #[error("Input data is empty, cannot compute VPWMA.")]
+    EmptyData,
+    #[error("Not enough data: length {data_len} < period+1={period_plus_1}")]
+    NotEnoughData {
+        data_len: usize,
+        period_plus_1: usize,
+    },
+    #[error("VPWMA period must be >= 2. period = {period}")]
+    InvalidPeriod { period: usize },
+    #[error("VPWMA power cannot be NaN or infinite. power = {power}")]
+    InvalidPower { power: f64 },
+}
+
 #[inline]
-pub fn vpwma(input: &VpwmaInput) -> Result<VpwmaOutput, Box<dyn Error>> {
+pub fn vpwma(input: &VpwmaInput) -> Result<VpwmaOutput, VpwmaError> {
     let data: &[f64] = match &input.data {
         VpwmaData::Candles { candles, source } => source_type(candles, source),
         VpwmaData::Slice(slice) => slice,
     };
-    let period: usize = input.get_period();
-    let power: f64 = input.get_power();
-    let len: usize = data.len();
+
+    if data.is_empty() {
+        return Err(VpwmaError::EmptyData);
+    }
+
+    let period = input.get_period();
+    let power = input.get_power();
+    let len = data.len();
+
     if len < period + 1 {
-        return Err(format!("Not enough data: length {} < period+1={}", len, period + 1).into());
+        return Err(VpwmaError::NotEnoughData {
+            data_len: len,
+            period_plus_1: period + 1,
+        });
     }
+
     if period < 2 {
-        return Err("VPWMA period must be >= 2.".into());
+        return Err(VpwmaError::InvalidPeriod { period });
     }
-    if power.is_nan() {
-        return Err("VPWMA power cannot be NaN.".into());
+
+    if power.is_nan() || power.is_infinite() {
+        return Err(VpwmaError::InvalidPower { power });
     }
 
     let mut vpwma_values = data.to_vec();

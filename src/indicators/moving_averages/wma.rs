@@ -64,20 +64,44 @@ impl<'a> WmaInput<'a> {
     }
 }
 
-pub fn wma(input: &WmaInput) -> Result<WmaOutput, Box<dyn Error>> {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum WmaError {
+    #[error("Data slice is empty, cannot compute WMA.")]
+    EmptyData,
+    #[error("Period {period} is greater than data length {data_len}.")]
+    PeriodExceedsDataLen { period: usize, data_len: usize },
+    #[error("Invalid period for WMA calculation, must be >= 2. period = {period}")]
+    InvalidPeriod { period: usize },
+}
+
+#[inline]
+pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
     let data: &[f64] = match &input.data {
         WmaData::Candles { candles, source } => source_type(candles, source),
         WmaData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
-    let period: usize = input.params.period.unwrap_or(30);
-    let mut values = vec![f64::NAN; len];
+
+    if data.is_empty() {
+        return Err(WmaError::EmptyData);
+    }
+
+    let len = data.len();
+    let period = input.get_period();
+
     if period > len {
-        return Err("period is greater than data length".into());
+        return Err(WmaError::PeriodExceedsDataLen {
+            period,
+            data_len: len,
+        });
     }
-    if period <= 1 {
-        return Err("Invalid period for WMA calculation".into());
+
+    if period < 2 {
+        return Err(WmaError::InvalidPeriod { period });
     }
+
+    let mut values = vec![f64::NAN; len];
 
     let lookback = period - 1;
     let sum_of_weights = (period * (period + 1)) >> 1;

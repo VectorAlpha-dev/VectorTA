@@ -63,19 +63,41 @@ impl<'a> TrimaInput<'a> {
             .unwrap_or_else(|| TrimaParams::default().period.unwrap())
     }
 }
-pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, Box<dyn Error>> {
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TrimaError {
+    #[error("Not enough data points to calculate TRIMA. Needed: {needed}, found: {found}")]
+    NotEnoughData { needed: usize, found: usize },
+
+    #[error("TRIMA period must be greater than 3. Provided: {period}")]
+    PeriodTooSmall { period: usize },
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+}
+#[inline]
+pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     let data: &[f64] = match &input.data {
         TrimaData::Candles { candles, source } => source_type(candles, source),
         TrimaData::Slice(slice) => slice,
     };
-    let n: usize = data.len();
+
+    let n = data.len();
     let period = input.get_period();
 
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(TrimaError::AllValuesNaN);
+    }
     if period > n {
-        return Err("Not enough data points to calculate TRIMA.".into());
+        return Err(TrimaError::NotEnoughData {
+            needed: period,
+            found: n,
+        });
     }
     if period <= 3 {
-        return Err("TRIMA period must be greater than 3.".into());
+        return Err(TrimaError::PeriodTooSmall { period });
     }
 
     let mut out = vec![f64::NAN; n];

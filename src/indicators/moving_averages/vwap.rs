@@ -72,31 +72,74 @@ pub struct VwapOutput {
     pub values: Vec<f64>,
 }
 
-pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum VwapError {
+    #[error("Mismatch in length of timestamps ({timestamps}), prices ({prices}), or volumes ({volumes}).")]
+    MismatchTimestampsPricesVolumes {
+        timestamps: usize,
+        prices: usize,
+        volumes: usize,
+    },
+    #[error("No data for VWAP calculation.")]
+    NoData,
+    #[error("Mismatch in length of prices ({prices}) and volumes ({volumes}).")]
+    MismatchPricesVolumes { prices: usize, volumes: usize },
+    #[error("Error parsing anchor: {msg}")]
+    ParseAnchorError { msg: String },
+    #[error("Unsupported anchor unit '{unit_char}'.")]
+    UnsupportedAnchorUnit { unit_char: char },
+    #[error("Error converting timestamp {ts_ms} to month-based anchor.")]
+    MonthConversionError { ts_ms: i64 },
+}
+
+#[inline]
+pub fn vwap(input: &VwapInput) -> Result<VwapOutput, VwapError> {
     let (timestamps, volumes, prices) = match &input.data {
         VwapData::Candles { candles, source } => {
-            let timestamps: &[i64] = candles.get_timestamp()?;
+            let timestamps: &[i64] = candles
+                .get_timestamp()
+                .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
             let prices: &[f64] = source_type(candles, source);
-            let volumes: &[f64] = candles.select_candle_field("volume")?;
-            (timestamps, volumes, prices)
+            let vols: &[f64] = candles
+                .select_candle_field("volume")
+                .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+            (timestamps, vols, prices)
         }
         VwapData::CandlesPlusPrices { candles, prices } => {
-            let timestamps: &[i64] = candles.get_timestamp()?;
-            let volumes: &[f64] = candles.select_candle_field("volume")?;
-            (timestamps, volumes, *prices)
+            let timestamps: &[i64] = candles
+                .get_timestamp()
+                .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+            let vols: &[f64] = candles
+                .select_candle_field("volume")
+                .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+            (timestamps, vols, *prices)
         }
     };
-    let n: usize = prices.len();
+
+    let n = prices.len();
     if timestamps.len() != n || volumes.len() != n {
-        return Err("Mismatch in length of timestamps, prices, or volumes".into());
+        return Err(VwapError::MismatchTimestampsPricesVolumes {
+            timestamps: timestamps.len(),
+            prices: n,
+            volumes: volumes.len(),
+        });
     }
+
     if n == 0 {
-        return Err("No data for VWAP calculation".into());
+        return Err(VwapError::NoData);
     }
+
     if n != volumes.len() {
-        return Err("Mismatch in length of prices and volumes".into());
+        return Err(VwapError::MismatchPricesVolumes {
+            prices: n,
+            volumes: volumes.len(),
+        });
     }
-    let (count, unit_char) = parse_anchor(input.get_anchor())?;
+
+    let (count, unit_char) = parse_anchor(input.get_anchor())
+        .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
 
     let mut vwap_values = vec![f64::NAN; n];
     let mut current_group_id = -1_i64;
@@ -121,8 +164,9 @@ pub fn vwap(input: &VwapInput) -> Result<VwapOutput, Box<dyn Error>> {
                 let bucket_ms = (count as i64) * 86_400_000;
                 ts_ms / bucket_ms
             }
-            'M' => floor_to_month(ts_ms, count)?,
-            _ => return Err(format!("Unsupported anchor unit '{}'", unit_char).into()),
+            'M' => floor_to_month(ts_ms, count)
+                .map_err(|_| VwapError::MonthConversionError { ts_ms })?,
+            _ => return Err(VwapError::UnsupportedAnchorUnit { unit_char }),
         };
 
         if group_id != current_group_id {

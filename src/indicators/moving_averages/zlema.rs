@@ -64,17 +64,41 @@ pub struct ZlemaOutput {
     pub values: Vec<f64>,
 }
 
-pub fn zlema(input: &ZlemaInput) -> Result<ZlemaOutput, Box<dyn Error>> {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ZlemaError {
+    #[error("Empty data provided for ZLEMA.")]
+    EmptyData,
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+}
+
+#[inline]
+pub fn zlema(input: &ZlemaInput) -> Result<ZlemaOutput, ZlemaError> {
     let data: &[f64] = match &input.data {
         ZlemaData::Candles { candles, source } => source_type(candles, source),
         ZlemaData::Slice(slice) => slice,
     };
 
-    let len: usize = data.len();
-    let period: usize = input.get_period();
+    let len = data.len();
+    if len == 0 {
+        return Err(ZlemaError::EmptyData);
+    }
 
+    let period = input.get_period();
     if period == 0 || period > len {
-        return Err("Invalid period specified for ZLEMA calculation.".into());
+        return Err(ZlemaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+
+    let first_valid_idx = data.iter().position(|&x| !x.is_nan());
+    if first_valid_idx.is_none() {
+        return Err(ZlemaError::AllValuesNaN);
     }
 
     let lag = (period - 1) / 2;

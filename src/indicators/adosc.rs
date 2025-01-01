@@ -86,6 +86,7 @@ pub struct AdoscOutput {
     pub values: Vec<f64>,
 }
 
+#[inline]
 pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
     let short: usize = input.get_short_period();
     let long: usize = input.get_long_period();

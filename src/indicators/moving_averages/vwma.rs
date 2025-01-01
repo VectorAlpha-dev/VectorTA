@@ -84,22 +84,56 @@ impl<'a> VwmaInput<'a> {
     }
 }
 
+use std::f64;
+use std::f64::NAN;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum VwmaError {
+    #[error(transparent)]
+    VolumeFieldError(#[from] Box<dyn std::error::Error>),
+    #[error("Invalid period for VWMA calculation: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("Price and volume mismatch: price length = {price_len}, volume length = {volume_len}")]
+    PriceVolumeMismatch { price_len: usize, volume_len: usize },
+    #[error("All price values are NaN.")]
+    AllPriceValuesNaN,
+    #[error("All volume values are NaN.")]
+    AllVolumeValuesNaN,
+}
+
 #[inline]
-pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, Box<dyn Error>> {
-    let volume: &[f64] = input.match_candles().select_candle_field("volume")?;
+pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, VwmaError> {
+    let volume = input.match_candles().select_candle_field("volume")?;
 
     let price: &[f64] = match &input.data {
         VwmaData::Candles { candles, source } => source_type(candles, source),
         VwmaData::CandlesPlusPrices { prices, .. } => prices,
     };
-    let len: usize = price.len();
-    let period: usize = input.get_period();
+
+    let len = price.len();
+    let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err("Invalid period for VWMA calculation.".into());
+        return Err(VwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
+
     if len != volume.len() {
-        return Err("Price and volume mismatch.".into());
+        return Err(VwmaError::PriceVolumeMismatch {
+            price_len: len,
+            volume_len: volume.len(),
+        });
+    }
+
+    if price.iter().all(|&p| p.is_nan()) {
+        return Err(VwmaError::AllPriceValuesNaN);
+    }
+
+    if volume.iter().all(|&v| v.is_nan()) {
+        return Err(VwmaError::AllVolumeValuesNaN);
     }
 
     let mut vwma_values = vec![f64::NAN; len];

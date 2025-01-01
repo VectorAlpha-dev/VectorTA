@@ -64,17 +64,40 @@ impl<'a> WildersInput<'a> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum WildersError {
+    #[error("No data provided for Wilder's Moving Average.")]
+    NoData,
+
+    #[error("All values are NaN.")]
+    AllValuesNaN,
+
+    #[error("Invalid period specified for Wilder's Moving Average. Period: {period}, data length: {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn wilders(input: &WildersInput) -> Result<WildersOutput, Box<dyn Error>> {
+pub fn wilders(input: &WildersInput) -> Result<WildersOutput, WildersError> {
     let data: &[f64] = match &input.data {
         WildersData::Candles { candles, source } => source_type(candles, source),
         WildersData::Slice(slice) => slice,
     };
-    let n: usize = data.len();
-    let period: usize = input.get_period();
+    let n = data.len();
+    let period = input.get_period();
 
+    if n == 0 {
+        return Err(WildersError::NoData);
+    }
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(WildersError::AllValuesNaN);
+    }
     if period == 0 || period > n {
-        return Err("Invalid period specified for Wilder's Moving Average.".into());
+        return Err(WildersError::InvalidPeriod {
+            period,
+            data_len: n,
+        });
     }
 
     let mut out_values = vec![f64::NAN; n];
