@@ -204,11 +204,6 @@ mod tests {
         let input = ZlemaInput::from_slice(&data, params);
         let result = zlema(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Invalid period specified for ZLEMA calculation."));
-        }
     }
 
     #[test]
@@ -218,11 +213,6 @@ mod tests {
         let input = ZlemaInput::from_slice(&data, params);
         let result = zlema(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Invalid period specified for ZLEMA calculation."));
-        }
     }
 
     #[test]

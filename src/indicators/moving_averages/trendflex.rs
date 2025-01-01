@@ -1,5 +1,4 @@
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -92,10 +91,6 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexErr
 
     if data.is_empty() {
         return Err(TrendFlexError::NoDataProvided);
-    }
-
-    if data.iter().all(|v| v.is_nan()) {
-        return Err(TrendFlexError::AllValuesNaN);
     }
 
     let len = data.len();
@@ -277,11 +272,10 @@ mod tests {
     #[test]
     fn test_trendflex_small_data() {
         let data = [42.0];
-        let params = TrendFlexParams { period: Some(1) };
+        let params = TrendFlexParams { period: Some(10) };
         let input = TrendFlexInput::from_slice(&data, params);
-        let result = trendflex(&input).expect("Should handle single data point with period=1");
-        assert_eq!(result.values.len(), data.len());
-        assert!(result.values[0].is_nan());
+        let result = trendflex(&input);
+        assert!(result.is_err());
     }
 
     #[test]

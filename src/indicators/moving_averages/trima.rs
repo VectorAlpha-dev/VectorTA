@@ -87,9 +87,6 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     let n = data.len();
     let period = input.get_period();
 
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(TrimaError::AllValuesNaN);
-    }
     if period > n {
         return Err(TrimaError::NotEnoughData {
             needed: period,

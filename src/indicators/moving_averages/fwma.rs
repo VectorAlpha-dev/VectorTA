@@ -118,9 +118,6 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, FwmaError> {
         });
     }
 
-    if data[first_valid_idx..].iter().any(|&v| v.is_nan()) {
-        return Err(FwmaError::NaNFound);
-    }
     let mut fib = Vec::with_capacity(period);
     fib.push(1.0);
     if period > 1 {

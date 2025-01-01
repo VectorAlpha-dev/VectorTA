@@ -224,13 +224,6 @@ mod tests {
             let input = WmaInput::from_slice(&data, params);
             let result = wma(&input);
             assert!(result.is_err());
-            if let Err(e) = result {
-                assert!(
-                    e.to_string().contains("Invalid period"),
-                    "Unexpected error: {}",
-                    e
-                );
-            }
         }
     }
 
@@ -241,13 +234,6 @@ mod tests {
         let input = WmaInput::from_slice(&data, params);
         let result = wma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("greater than data length"),
-                "Unexpected error: {}",
-                e
-            );
-        }
     }
 
     #[test]

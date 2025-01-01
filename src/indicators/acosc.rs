@@ -45,16 +45,39 @@ pub struct AcoscOutput {
     pub change: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AcoscError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("Mismatch in high/low candle data lengths: high_len={high_len}, low_len={low_len}")]
+    LengthMismatch { high_len: usize, low_len: usize },
+
+    #[error(
+        "Not enough data points to calculate AC oscillator: required={required}, actual={actual}"
+    )]
+    NotEnoughData { required: usize, actual: usize },
+}
+
 #[inline]
-pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>> {
+pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, AcoscError> {
     let (high_prices, low_prices) = match &input.data {
         AcoscData::Candles { candles } => {
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
             (high, low)
         }
         AcoscData::Slices { high, low } => (*high, *low),
     };
+
+    if high_prices.len() != low_prices.len() {
+        return Err(AcoscError::LengthMismatch {
+            high_len: high_prices.len(),
+            low_len: low_prices.len(),
+        });
+    }
 
     let len = low_prices.len();
     const PERIOD_SMA5: usize = 5;
@@ -64,7 +87,10 @@ pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, Box<dyn Error>> {
     const REQUIRED_LENGTH: usize = PERIOD_SMA34 + PERIOD_SMA5;
 
     if len < REQUIRED_LENGTH {
-        return Err("Not enough data points to calculate AC oscillator".into());
+        return Err(AcoscError::NotEnoughData {
+            required: REQUIRED_LENGTH,
+            actual: len,
+        });
     }
 
     let mut osc = vec![f64::NAN; len];

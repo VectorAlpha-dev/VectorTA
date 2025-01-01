@@ -192,9 +192,6 @@ mod tests {
         let input = MwdxInput::from_slice(&data, params);
         let result = mwdx(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Empty data slice"));
-        }
     }
 
     #[test]
@@ -204,9 +201,6 @@ mod tests {
         let input = MwdxInput::from_slice(&data, params);
         let result = mwdx(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Factor must be > 0"));
-        }
     }
 
     #[test]

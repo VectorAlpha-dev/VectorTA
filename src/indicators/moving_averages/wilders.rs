@@ -90,9 +90,6 @@ pub fn wilders(input: &WildersInput) -> Result<WildersOutput, WildersError> {
     if n == 0 {
         return Err(WildersError::NoData);
     }
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(WildersError::AllValuesNaN);
-    }
     if period == 0 || period > n {
         return Err(WildersError::InvalidPeriod {
             period,

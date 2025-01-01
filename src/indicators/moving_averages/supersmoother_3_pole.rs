@@ -232,8 +232,8 @@ mod tests {
             &data,
             SuperSmoother3PoleParams { period: Some(14) },
         );
-        let result = supersmoother_3_pole(&input).expect("No-data 3-pole SS should succeed");
-        assert_eq!(result.values.len(), 0);
+        let result = supersmoother_3_pole(&input);
+        assert!(result.is_err());
     }
 
     #[test]

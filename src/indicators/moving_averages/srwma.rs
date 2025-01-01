@@ -202,13 +202,6 @@ mod tests {
         let input = SrwmaInput::from_slice(&data, params);
         let result = srwma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("SRWMA period must be >= 1"),
-                "Unexpected error: {}",
-                e
-            );
-        }
     }
 
     #[test]

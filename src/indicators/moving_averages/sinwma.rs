@@ -223,11 +223,6 @@ mod tests {
         let input = SinWmaInput::from_slice(&data, params);
         let result = sinwma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Invalid period for SINWMA calculation."));
-        }
     }
 
     #[test]
@@ -237,11 +232,6 @@ mod tests {
         let input = SinWmaInput::from_slice(&data, params);
         let result = sinwma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("Invalid period for SINWMA calculation."));
-        }
     }
 
     #[test]

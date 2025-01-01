@@ -83,10 +83,6 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, PwmaError> {
         PwmaData::Slice(slice) => slice,
     };
 
-    if data.iter().all(|&x| x.is_nan()) {
-        return Err(PwmaError::AllValuesNaN);
-    }
-
     let period = input.get_period();
     let len = data.len();
 

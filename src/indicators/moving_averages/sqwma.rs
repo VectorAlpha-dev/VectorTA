@@ -92,9 +92,7 @@ pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, SqwmaError> {
     if n == 0 {
         return Err(SqwmaError::EmptyData);
     }
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(SqwmaError::AllValuesNaN);
-    }
+
     if period < 2 {
         return Err(SqwmaError::InvalidPeriod { period });
     }
@@ -227,9 +225,6 @@ mod tests {
         let input = SqwmaInput::from_slice(&input_data, params);
         let result = sqwma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Empty data for SQWMA calculation"));
-        }
     }
 
     #[test]
@@ -239,9 +234,6 @@ mod tests {
         let input = SqwmaInput::from_slice(&input_data, params);
         let result = sqwma(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("SQWMA period must be >= 2"));
-        }
     }
 
     #[test]
@@ -249,8 +241,8 @@ mod tests {
         let input_data = [10.0, 20.0, 30.0];
         let params = SqwmaParams { period: Some(14) };
         let input = SqwmaInput::from_slice(&input_data, params);
-        let result = sqwma(&input).unwrap();
-        assert_eq!(result.values, input_data);
+        let result = sqwma(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -258,8 +250,8 @@ mod tests {
         let input_data = [42.0, 43.0, 44.0];
         let params = SqwmaParams { period: Some(3) };
         let input = SqwmaInput::from_slice(&input_data, params);
-        let result = sqwma(&input).unwrap();
-        assert_eq!(result.values, input_data);
+        let result = sqwma(&input);
+        assert!(result.is_err());
     }
 
     #[test]

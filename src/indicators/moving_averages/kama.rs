@@ -91,10 +91,6 @@ pub fn kama(input: &KamaInput) -> Result<KamaOutput, KamaError> {
         return Err(KamaError::NoData);
     }
 
-    if data.iter().all(|&x| x.is_nan()) {
-        return Err(KamaError::AllValuesNaN);
-    }
-
     let period: usize = input.get_period();
     if period == 0 || period > len {
         return Err(KamaError::InvalidPeriod {

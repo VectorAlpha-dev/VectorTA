@@ -105,10 +105,6 @@ pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, MaaqError> {
         MaaqData::Slice(slice) => slice,
     };
 
-    if data.iter().all(|&x| x.is_nan()) {
-        return Err(MaaqError::AllValuesNaN);
-    }
-
     let period = input.get_period();
     let fast_p = input.get_fast_period();
     let slow_p = input.get_slow_period();

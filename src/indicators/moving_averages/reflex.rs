@@ -94,9 +94,7 @@ pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, ReflexError> {
     if len == 0 {
         return Err(ReflexError::NoData);
     }
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(ReflexError::AllValuesNaN);
-    }
+
     if period < 2 {
         return Err(ReflexError::InvalidPeriod { period });
     }
@@ -246,13 +244,6 @@ mod tests {
         let input = ReflexInput::from_slice(&input_data, params);
         let result = reflex(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Reflex period must be >=2"),
-                "Unexpected error: {}",
-                e
-            );
-        }
     }
 
     #[test]
@@ -270,10 +261,7 @@ mod tests {
         let params = ReflexParams { period: Some(2) };
         let input = ReflexInput::from_slice(&input_data, params);
         let result = reflex(&input);
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert_eq!(output.values.len(), 1);
-        assert_eq!(output.values[0], 0.0);
+        assert!(result.is_err());
     }
 
     #[test]

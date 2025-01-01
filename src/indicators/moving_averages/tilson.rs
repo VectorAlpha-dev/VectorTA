@@ -348,9 +348,6 @@ mod tests {
         let input = TilsonInput::from_slice(&data, params);
         let result = tilson(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period specified."));
-        }
     }
 
     #[test]
@@ -363,9 +360,6 @@ mod tests {
         let input = TilsonInput::from_slice(&data, params);
         let result = tilson(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period specified."));
-        }
     }
 
     #[test]

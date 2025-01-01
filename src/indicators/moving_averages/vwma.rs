@@ -85,7 +85,6 @@ impl<'a> VwmaInput<'a> {
 }
 
 use std::f64;
-use std::f64::NAN;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -96,10 +95,6 @@ pub enum VwmaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("Price and volume mismatch: price length = {price_len}, volume length = {volume_len}")]
     PriceVolumeMismatch { price_len: usize, volume_len: usize },
-    #[error("All price values are NaN.")]
-    AllPriceValuesNaN,
-    #[error("All volume values are NaN.")]
-    AllVolumeValuesNaN,
 }
 
 #[inline]
@@ -126,14 +121,6 @@ pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, VwmaError> {
             price_len: len,
             volume_len: volume.len(),
         });
-    }
-
-    if price.iter().all(|&p| p.is_nan()) {
-        return Err(VwmaError::AllPriceValuesNaN);
-    }
-
-    if volume.iter().all(|&v| v.is_nan()) {
-        return Err(VwmaError::AllVolumeValuesNaN);
     }
 
     let mut vwma_values = vec![f64::NAN; len];

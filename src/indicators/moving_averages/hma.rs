@@ -96,10 +96,6 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
         return Err(HmaError::NoData);
     }
 
-    if data.iter().all(|&x| x.is_nan()) {
-        return Err(HmaError::AllValuesNaN);
-    }
-
     let period = input.get_period();
     if period == 0 || period > len {
         return Err(HmaError::InvalidPeriod {

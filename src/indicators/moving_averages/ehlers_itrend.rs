@@ -96,9 +96,7 @@ pub fn ehlers_itrend(input: &EhlersITrendInput) -> Result<EhlersITrendOutput, Eh
     if length == 0 {
         return Err(EhlersITrendError::EmptyInputData);
     }
-    if src.iter().all(|&x| x.is_nan()) {
-        return Err(EhlersITrendError::AllValuesNaN);
-    }
+
     let warmup_bars = input.get_warmup_bars();
     let max_dc = input.get_max_dc_period().max(1);
     if warmup_bars >= length {

@@ -90,9 +90,7 @@ pub fn swma(input: &SwmaInput) -> Result<SwmaOutput, SwmaError> {
     if data.is_empty() {
         return Ok(SwmaOutput { values: vec![] });
     }
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(SwmaError::AllValuesNaN);
-    }
+
     if period == 0 {
         return Err(SwmaError::InvalidPeriod { period });
     }

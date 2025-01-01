@@ -77,6 +77,8 @@ pub enum SuperSmootherError {
     AllValuesNaN,
     #[error("Invalid period for Super Smoother: period = {period}, data length = {data_len}. Period must be >= 1 and no greater than the data length.")]
     InvalidPeriod { period: usize, data_len: usize },
+    #[error("Empty data provided for Super Smoother.")]
+    EmptyData,
 }
 
 #[inline]
@@ -89,11 +91,7 @@ pub fn supersmoother(
     };
 
     if data.is_empty() {
-        return Ok(SuperSmootherOutput { values: vec![] });
-    }
-
-    if data.iter().all(|x| x.is_nan()) {
-        return Err(SuperSmootherError::AllValuesNaN);
+        return Err(SuperSmootherError::EmptyData);
     }
 
     let period = input.get_period();
@@ -224,8 +222,8 @@ mod tests {
         let data: [f64; 0] = [];
         let params = SuperSmootherParams { period: Some(14) };
         let input = SuperSmootherInput::from_slice(&data, params);
-        let result = supersmoother(&input).expect("Should return empty output, not err");
-        assert_eq!(result.values.len(), 0);
+        let result = supersmoother(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -233,9 +231,8 @@ mod tests {
         let data = [42.0];
         let params = SuperSmootherParams { period: Some(14) };
         let input = SuperSmootherInput::from_slice(&data, params);
-        let result = supersmoother(&input).expect("Should work for small data set");
-        assert_eq!(result.values.len(), 1);
-        assert_eq!(result.values[0], data[0]);
+        let result = supersmoother(&input);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -250,6 +247,11 @@ mod tests {
         let input_2 = SuperSmootherInput::from_slice(&result_1.values, params_2);
         let result_2 = supersmoother(&input_2).expect("Failed second smoother");
         assert_eq!(result_2.values.len(), result_1.values.len());
+        if result_2.values.len() > 240 {
+            for i in 240..result_2.values.len() {
+                assert!(result_2.values[i].is_finite());
+            }
+        }
     }
 
     #[test]

@@ -107,9 +107,7 @@ pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, HwmaError> {
     if len == 0 {
         return Err(HwmaError::EmptyData);
     }
-    if data.iter().all(|&x| x.is_nan()) {
-        return Err(HwmaError::AllValuesNaN);
-    }
+
     if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
         return Err(HwmaError::InvalidParams { na, nb, nc });
     }
