@@ -62,14 +62,31 @@ pub struct AdOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AdError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+    #[error("Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
+    DataLengthMismatch {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+        volume_len: usize,
+    },
+    #[error("Not enough data points to calculate AD. Length={len}")]
+    NotEnoughData { len: usize },
+}
+
 #[inline]
-pub fn ad(input: &AdInput) -> Result<AdOutput, Box<dyn Error>> {
+pub fn ad(input: &AdInput) -> Result<AdOutput, AdError> {
     let (high, low, close, volume) = match &input.data {
         AdData::Candles { candles } => {
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
-            let close: &[f64] = candles.select_candle_field("close")?;
-            let volume: &[f64] = candles.select_candle_field("volume")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            let close = candles.select_candle_field("close")?;
+            let volume = candles.select_candle_field("volume")?;
             (high, low, close, volume)
         }
         AdData::Slices {
@@ -80,12 +97,22 @@ pub fn ad(input: &AdInput) -> Result<AdOutput, Box<dyn Error>> {
         } => (*high, *low, *close, *volume),
     };
 
-    let size: usize = high.len();
-    if size < 1 {
-        return Err("Not enough data points to calculate AD.".into());
+    if high.len() != low.len() || high.len() != close.len() || high.len() != volume.len() {
+        return Err(AdError::DataLengthMismatch {
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: close.len(),
+            volume_len: volume.len(),
+        });
     }
-    let mut output: Vec<f64> = Vec::with_capacity(size);
-    let mut sum: f64 = 0.0;
+
+    let size = high.len();
+    if size < 1 {
+        return Err(AdError::NotEnoughData { len: size });
+    }
+
+    let mut output = Vec::with_capacity(size);
+    let mut sum = 0.0;
 
     for ((&h, &l), (&c, &v)) in high
         .iter()

@@ -86,25 +86,59 @@ pub struct AdoscOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AdoscError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("Invalid period for ADOSC calculation: short={short}, long={long}")]
+    InvalidPeriod { short: usize, long: usize },
+
+    #[error(
+        "Short period must be less than the long period for ADOSC: short={short}, long={long}"
+    )]
+    ShortPeriodGreaterThanLong { short: usize, long: usize },
+
+    #[error("No candles available for ADOSC.")]
+    NoCandlesAvailable,
+
+    #[error("Not enough data points to calculate ADOSC: required={required}, have={have}")]
+    NotEnoughData { required: usize, have: usize },
+
+    #[error("One of the slices provided to ADOSC is empty: high={high}, low={low}, close={close}, volume={volume}")]
+    EmptySlices {
+        high: usize,
+        low: usize,
+        close: usize,
+        volume: usize,
+    },
+}
+
 #[inline]
-pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
-    let short: usize = input.get_short_period();
-    let long: usize = input.get_long_period();
+pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, AdoscError> {
+    let short = input.get_short_period();
+    let long = input.get_long_period();
 
     if short == 0 || long == 0 {
-        return Err("Invalid period specified for ADOSC calculation.".into());
+        return Err(AdoscError::InvalidPeriod { short, long });
     }
+
     if short >= long {
-        return Err("Short period must be less than the long period for ADOSC.".into());
+        return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
     }
 
     let (high, low, close, volume) = match &input.data {
         AdoscData::Candles { candles } => {
             if candles.close.is_empty() {
-                return Err("No candles available.".into());
+                return Err(AdoscError::NoCandlesAvailable);
             }
             if long > candles.close.len() {
-                return Err("Not enough data points to calculate ADOSC.".into());
+                return Err(AdoscError::NotEnoughData {
+                    required: long,
+                    have: candles.close.len(),
+                });
             }
             (
                 candles.select_candle_field("high")?,
@@ -120,11 +154,19 @@ pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, Box<dyn Error>> {
             volume,
         } => {
             if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
-                return Err("One of the slices provided to ADOSC is empty.".into());
+                return Err(AdoscError::EmptySlices {
+                    high: high.len(),
+                    low: low.len(),
+                    close: close.len(),
+                    volume: volume.len(),
+                });
             }
             let len = close.len();
             if long > len {
-                return Err("Not enough data points to calculate ADOSC.".into());
+                return Err(AdoscError::NotEnoughData {
+                    required: long,
+                    have: len,
+                });
             }
             (*high, *low, *close, *volume)
         }

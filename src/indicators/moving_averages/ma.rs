@@ -59,6 +59,7 @@ pub enum MaData<'a> {
     Slice(&'a [f64]),
 }
 
+#[inline]
 pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>, Box<dyn Error>> {
     match ma_type.to_lowercase().as_str() {
         "sma" => {
@@ -763,7 +764,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 let output = vpwma(&input)?;
                 Ok(output.values)
             } else {
-                // Default case
                 eprintln!("Unknown data type for 'vpwma'. Defaulting to 'sma'.");
 
                 let input = match data {
@@ -795,7 +795,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 let output = vwap(&input)?;
                 Ok(output.values)
             } else {
-                // Default case
                 eprintln!("Unknown data type for 'vwap'. Defaulting to 'sma'.");
 
                 let input = match data {
@@ -828,7 +827,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 let output = vwma(&input)?;
                 Ok(output.values)
             } else {
-                // Default case
                 eprintln!("Unknown data type for 'vpwma'. Defaulting to 'sma'.");
 
                 let input = match data {

@@ -62,15 +62,34 @@ pub struct AoOutput {
     pub values: Vec<f64>,
 }
 
-pub fn ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
-    let short: usize = input.params.short_period.unwrap_or(5);
-    let long: usize = input.params.long_period.unwrap_or(34);
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AoError {
+    #[error("Invalid periods for AO calculation: short={short}, long={long}. Both must be greater than 0.")]
+    InvalidPeriods { short: usize, long: usize },
+    #[error("Short period must be strictly less than long period: short={short}, long={long}")]
+    ShortPeriodNotLess { short: usize, long: usize },
+    #[error("No data provided (HL2 slice is empty).")]
+    NoData,
+    #[error(
+        "Not enough data to compute AO: requested long period = {long}, data length = {data_len}"
+    )]
+    NotEnoughData { long: usize, data_len: usize },
+    #[error("All values in the data are NaN.")]
+    AllValuesNaN,
+}
+
+#[inline]
+pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
+    let short = input.params.short_period.unwrap_or(5);
+    let long = input.params.long_period.unwrap_or(34);
 
     if short == 0 || long == 0 {
-        return Err("Periods must be greater than 0".into());
+        return Err(AoError::InvalidPeriods { short, long });
     }
     if short >= long {
-        return Err("Short period must be less than long period".into());
+        return Err(AoError::ShortPeriodNotLess { short, long });
     }
 
     let data: &[f64] = match &input.data {
@@ -78,18 +97,15 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, Box<dyn Error>> {
         AoData::Slice(slice) => slice,
     };
 
-    if short == 0 || long == 0 || short >= long {
-        return Err("Invalid periods for AO: short=0 or long=0 or short>=long".into());
+    if data.is_empty() {
+        return Err(AoError::NoData);
     }
 
     let len = data.len();
-    if len == 0 {
-        return Err("No HL2 data provided.".into());
-    }
-
     if long > len {
-        return Ok(AoOutput {
-            values: vec![f64::NAN; len],
+        return Err(AoError::NotEnoughData {
+            long,
+            data_len: len,
         });
     }
 
@@ -265,16 +281,8 @@ mod tests {
             long_period: Some(candles.close.len() + 10),
         };
         let input_too_long = AoInput::from_candles(&candles, "hl2", too_long_params);
-        let result_too_long =
-            ao(&input_too_long).expect("Failed AO calculation with too long period");
-
-        assert_eq!(result_too_long.values.len(), candles.close.len());
-        let nan_count = result_too_long
-            .values
-            .iter()
-            .filter(|&&val| val.is_nan())
-            .count();
-        assert_eq!(nan_count, candles.close.len());
+        let result_too_long = ao(&input_too_long);
+        assert!(result_too_long.is_err());
     }
 
     #[test]
@@ -285,9 +293,8 @@ mod tests {
             long_period: Some(34),
         };
         let input = AoInput::from_slice(&data, params);
-        let result = ao(&input).expect("Failed AO on very small data set");
-        assert_eq!(result.values.len(), 1);
-        assert!(result.values[0].is_nan());
+        let result = ao(&input);
+        assert!(result.is_err());
     }
 
     #[test]

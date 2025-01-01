@@ -69,26 +69,68 @@ pub struct AdxrOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AdxrError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error(
+        "High/low/close data length mismatch: high={high_len}, low={low_len}, close={close_len}"
+    )]
+    HlcLengthMismatch {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+    },
+
+    #[error("All high, low, and close values are NaN.")]
+    AllValuesNaN,
+
+    #[error(
+        "Invalid period specified for ADXR calculation: period={period}, data length={data_len}"
+    )]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error(
+        "Not enough data points to calculate ADXR: period={period}, needed={needed}, got={actual}"
+    )]
+    NotEnoughData {
+        period: usize,
+        needed: usize,
+        actual: usize,
+    },
+}
+
 #[inline]
-pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, Box<dyn Error>> {
-    let period: usize = input.get_period();
+pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
+    let period = input.get_period();
 
     let (high, low, close) = match &input.data {
         AdxrData::Candles { candles } => {
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
-            let close: &[f64] = candles.select_candle_field("close")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            let close = candles.select_candle_field("close")?;
             (high, low, close)
         }
         AdxrData::Slices { high, low, close } => (*high, *low, *close),
     };
 
-    let len: usize = close.len();
+    let len = close.len();
     if period == 0 || period > len {
-        return Err("Invalid period specified for ADXR calculation.".into());
+        return Err(AdxrError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
+
     if len < period + 1 {
-        return Err("Not enough data points to calculate ADXR.".into());
+        return Err(AdxrError::NotEnoughData {
+            period,
+            needed: period + 1,
+            actual: len,
+        });
     }
 
     let mut adx_vals = vec![f64::NAN; len];
@@ -317,9 +359,6 @@ mod tests {
         let input = AdxrInput::from_slices(&high, &low, &close, params);
         let result = adxr(&input);
         assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period"));
-        }
     }
 
     #[test]

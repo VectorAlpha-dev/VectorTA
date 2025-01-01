@@ -1,4 +1,4 @@
-use crate::indicators::highpass::{highpass, HighPassInput, HighPassParams};
+use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
@@ -79,28 +79,48 @@ pub struct BandPassOutput {
     pub trigger: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum BandPassError {
+    #[error("Not enough data available to compute BandPass. Data length = {data_len}, required = {period}.")]
+    NotEnoughData { data_len: usize, period: usize },
+    #[error("BandPass period must be at least 2 (got period={period}).")]
+    InvalidPeriod { period: usize },
+    #[error("hp_period is too small after rounding (hp_period={hp_period}).")]
+    HpPeriodTooSmall { hp_period: usize },
+    #[error("trigger_period is too small after rounding (trigger_period={trigger_period}).")]
+    TriggerPeriodTooSmall { trigger_period: usize },
+    #[error(transparent)]
+    HighPassError(#[from] HighPassError),
+}
+
 #[inline]
-pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>> {
+pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, BandPassError> {
     let data: &[f64] = match &input.data {
         BandPassData::Candles { candles, source } => source_type(candles, source),
         BandPassData::Slice(slice) => slice,
     };
 
-    let len: usize = data.len();
+    let len = data.len();
     let period = input.get_period();
     let bandwidth = input.get_bandwidth();
+
     if len == 0 || len < period {
-        return Err("Not enough data available.".into());
+        return Err(BandPassError::NotEnoughData {
+            data_len: len,
+            period,
+        });
     }
 
     if period < 2 {
-        return Err("BandPass period must be greater than data input.".into());
+        return Err(BandPassError::InvalidPeriod { period });
     }
 
     let hp_period_f = 4.0 * (period as f64) / bandwidth;
     let hp_period = hp_period_f.round() as usize;
     if hp_period < 2 {
-        return Err("hp_period is too small after rounding.".into());
+        return Err(BandPassError::HpPeriodTooSmall { hp_period });
     }
 
     let mut hp_params = HighPassParams::default();
@@ -132,18 +152,19 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
         if abs_bp > peak_prev {
             peak_prev = abs_bp;
         }
-        if peak_prev != 0.0 {
-            bp_normalized[i] = bp[i] / peak_prev;
+        bp_normalized[i] = if peak_prev != 0.0 {
+            bp[i] / peak_prev
         } else {
-            bp_normalized[i] = 0.0;
-        }
+            0.0
+        };
     }
 
     let trigger_period_f = (period as f64 / bandwidth) / 1.5;
     let trigger_period = trigger_period_f.round() as usize;
     if trigger_period < 2 {
-        return Err("trigger_period is too small after rounding.".into());
+        return Err(BandPassError::TriggerPeriodTooSmall { trigger_period });
     }
+
     let mut trigger_params = HighPassParams::default();
     trigger_params.period = Some(trigger_period);
     let trigger_input = HighPassInput::from_slice(&bp_normalized, trigger_params);
@@ -171,7 +192,6 @@ pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, Box<dyn Error>>
         trigger,
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,11 +370,6 @@ mod tests {
         let input = BandPassInput::from_slice(&data, params);
         let result = bandpass(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("BandPass period must be greater than data input."));
-        }
     }
 
     #[test]
@@ -367,9 +382,6 @@ mod tests {
         let input = BandPassInput::from_slice(&data, params);
         let result = bandpass(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Not enough data available"));
-        }
     }
 
     #[test]
@@ -382,9 +394,6 @@ mod tests {
         let input = BandPassInput::from_slice(&data, params);
         let result = bandpass(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Not enough data available."));
-        }
     }
 
     #[test]

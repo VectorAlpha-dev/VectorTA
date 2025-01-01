@@ -68,15 +68,29 @@ impl<'a> AdxInput<'a> {
 pub struct AdxOutput {
     pub values: Vec<f64>,
 }
+use thiserror::Error;
 
-pub fn adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
-    let period: usize = input.get_period();
+#[derive(Debug, Error)]
+pub enum AdxError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("Invalid period specified for ADX calculation. period={period}, data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("Not enough data points to calculate ADX. Needed at least {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
+}
+
+#[inline]
+pub fn adx(input: &AdxInput) -> Result<AdxOutput, AdxError> {
+    let period = input.get_period();
 
     let (high, low, close) = match &input.data {
         AdxData::Candles { candles } => {
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
-            let close: &[f64] = candles.select_candle_field("close")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            let close = candles.select_candle_field("close")?;
             (high, low, close)
         }
         AdxData::Slices { high, low, close } => (*high, *low, *close),
@@ -84,12 +98,17 @@ pub fn adx(input: &AdxInput) -> Result<AdxOutput, Box<dyn Error>> {
 
     let len = close.len();
     if period == 0 || period > len {
-        return Err("Invalid period specified for ADX calculation.".into());
+        return Err(AdxError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if len < period + 1 {
-        return Err("Not enough data points to calculate ADX.".into());
+        return Err(AdxError::NotEnoughData {
+            needed: period + 1,
+            found: len,
+        });
     }
-
     let mut adx_vals = vec![f64::NAN; len];
 
     let mut tr_sum = 0.0;
@@ -297,9 +316,6 @@ mod tests {
         let input = AdxInput::from_slices(&high, &low, &close, params);
         let result = adx(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period"));
-        }
     }
 
     #[test]

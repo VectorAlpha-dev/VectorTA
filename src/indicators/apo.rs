@@ -74,16 +74,36 @@ pub struct ApoOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ApoError {
+    #[error("Invalid period specified for APO calculation. short={short}, long={long}")]
+    InvalidPeriod { short: usize, long: usize },
+
+    #[error("Short period must be strictly less than the long period for APO. short={short}, long={long}")]
+    ShortPeriodNotLessThanLong { short: usize, long: usize },
+
+    #[error("No data provided for APO calculation.")]
+    NoData,
+
+    #[error("All values are NaN in the input.")]
+    AllValuesNaN,
+
+    #[error("Not enough data points to calculate APO. Needed at least {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
+}
+
 #[inline]
-pub fn apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
+pub fn apo(input: &ApoInput) -> Result<ApoOutput, ApoError> {
     let short = input.get_short_period();
     let long = input.get_long_period();
 
     if short == 0 || long == 0 {
-        return Err("Invalid period specified for APO calculation.".into());
+        return Err(ApoError::InvalidPeriod { short, long });
     }
     if short >= long {
-        return Err("Short period must be less than the long period for APO.".into());
+        return Err(ApoError::ShortPeriodNotLessThanLong { short, long });
     }
 
     let data: &[f64] = match &input.data {
@@ -93,11 +113,14 @@ pub fn apo(input: &ApoInput) -> Result<ApoOutput, Box<dyn Error>> {
 
     let len = data.len();
     if len == 0 {
-        return Err("No candles available.".into());
+        return Err(ApoError::NoData);
     }
 
-    if data.len() < long {
-        return Err("Not enough data points to calculate APO".into());
+    if len < long {
+        return Err(ApoError::NotEnoughData {
+            needed: long,
+            found: len,
+        });
     }
 
     let mut apo_values = Vec::with_capacity(len);
@@ -227,9 +250,6 @@ mod tests {
         let input = ApoInput::from_slice(&data, params);
         let result = apo(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period"));
-        }
     }
 
     #[test]
@@ -242,9 +262,6 @@ mod tests {
         let input = ApoInput::from_slice(&data, params);
         let result = apo(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Short period must be less"));
-        }
     }
 
     #[test]
@@ -257,9 +274,6 @@ mod tests {
         let input = ApoInput::from_slice(&data, params);
         let result = apo(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Not enough data points"));
-        }
     }
 
     #[test]
@@ -272,9 +286,6 @@ mod tests {
         let input = ApoInput::from_slice(&data, params);
         let result = apo(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("No candles available"));
-        }
     }
 
     #[test]

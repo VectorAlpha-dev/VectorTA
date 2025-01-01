@@ -49,17 +49,41 @@ pub struct AvgPriceOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AvgPriceError {
+    #[error("No candles available.")]
+    NoCandles,
+
+    #[error("Input slices have zero length.")]
+    ZeroLength,
+
+    #[error(
+        "Inconsistent slice lengths. open_len={open_len}, high_len={high_len}, low_len={low_len}, close_len={close_len}"
+    )]
+    InconsistentSlices {
+        open_len: usize,
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+    },
+
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+}
+
 #[inline]
-pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<dyn Error>> {
+pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, AvgPriceError> {
     let (open, high, low, close) = match &input.data {
         AvgPriceData::Candles { candles } => {
             if candles.close.is_empty() {
-                return Err("No candles available.".into());
+                return Err(AvgPriceError::NoCandles);
             }
-            let open: &[f64] = candles.select_candle_field("open")?;
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
-            let close: &[f64] = candles.select_candle_field("close")?;
+            let open = candles.select_candle_field("open")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            let close = candles.select_candle_field("close")?;
             (open, high, low, close)
         }
         AvgPriceData::Slices {
@@ -69,17 +93,23 @@ pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, Box<dyn Error>>
             close,
         } => {
             if open.is_empty() {
-                return Err("Input slices have zero length.".into());
+                return Err(AvgPriceError::ZeroLength);
             }
             if open.len() != high.len() || high.len() != low.len() || low.len() != close.len() {
-                return Err("Inconsistent slice lengths.".into());
+                return Err(AvgPriceError::InconsistentSlices {
+                    open_len: open.len(),
+                    high_len: high.len(),
+                    low_len: low.len(),
+                    close_len: close.len(),
+                });
             }
             (*open, *high, *low, *close)
         }
     };
-    let len: usize = close.len();
+
+    let len = close.len();
     if len == 0 {
-        return Err("No candles available.".into());
+        return Err(AvgPriceError::NoCandles);
     }
 
     let mut values = Vec::with_capacity(len);

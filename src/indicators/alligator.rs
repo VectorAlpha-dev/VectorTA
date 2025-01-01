@@ -96,20 +96,87 @@ pub struct AlligatorOutput {
     pub lips: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AlligatorError {
+    #[error("No data provided for Alligator indicator.")]
+    NoData,
+
+    #[error("All values are NaN in the input data.")]
+    AllValuesNaN,
+
+    #[error("Invalid jaw period specified: period={period}, data_len={data_len}")]
+    InvalidJawPeriod { period: usize, data_len: usize },
+
+    #[error("Invalid offset specified for jaw: {offset}")]
+    InvalidJawOffset { offset: usize },
+
+    #[error("Invalid teeth period specified: period={period}, data_len={data_len}")]
+    InvalidTeethPeriod { period: usize, data_len: usize },
+
+    #[error("Invalid offset specified for teeth: {offset}")]
+    InvalidTeethOffset { offset: usize },
+
+    #[error("Invalid lips period specified: period={period}, data_len={data_len}")]
+    InvalidLipsPeriod { period: usize, data_len: usize },
+
+    #[error("Invalid offset specified for lips: {offset}")]
+    InvalidLipsOffset { offset: usize },
+}
+
 #[inline]
-pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, Box<dyn Error>> {
+pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, AlligatorError> {
     let data: &[f64] = match &input.data {
         AlligatorData::Candles { candles, source } => source_type(candles, source),
         AlligatorData::Slice(slice) => slice,
     };
-    let len: usize = data.len();
+    let len = data.len();
+    if len == 0 {
+        return Err(AlligatorError::NoData);
+    }
 
     let jaw_period = input.get_jaw_period();
     let jaw_offset = input.get_jaw_offset();
+    if jaw_period == 0 || jaw_period > len {
+        return Err(AlligatorError::InvalidJawPeriod {
+            period: jaw_period,
+            data_len: len,
+        });
+    }
+    if jaw_offset > len {
+        return Err(AlligatorError::InvalidJawOffset {
+            offset: jaw_offset as usize,
+        });
+    }
+
     let teeth_period = input.get_teeth_period();
     let teeth_offset = input.get_teeth_offset();
+    if teeth_period == 0 || teeth_period > len {
+        return Err(AlligatorError::InvalidTeethPeriod {
+            period: teeth_period,
+            data_len: len,
+        });
+    }
+    if teeth_offset > len {
+        return Err(AlligatorError::InvalidTeethOffset {
+            offset: teeth_offset as usize,
+        });
+    }
+
     let lips_period = input.get_lips_period();
     let lips_offset = input.get_lips_offset();
+    if lips_period == 0 || lips_period > len {
+        return Err(AlligatorError::InvalidLipsPeriod {
+            period: lips_period,
+            data_len: len,
+        });
+    }
+    if lips_offset > len {
+        return Err(AlligatorError::InvalidLipsOffset {
+            offset: lips_offset as usize,
+        });
+    }
 
     let mut jaw = vec![f64::NAN; len];
     let mut teeth = vec![f64::NAN; len];

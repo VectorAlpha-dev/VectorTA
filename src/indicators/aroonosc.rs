@@ -58,41 +58,65 @@ pub struct AroonOscOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AroonOscError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("Invalid length specified for Aroon Osc calculation. length={length}")]
+    InvalidLength { length: usize },
+
+    #[error("No candles available.")]
+    NoCandles,
+
+    #[error("One or both of the slices for AroonOsc are empty.")]
+    EmptySlices,
+
+    #[error("Mismatch in high/low slice length. high_len={high_len}, low_len={low_len}")]
+    SlicesLengthMismatch { high_len: usize, low_len: usize },
+
+    #[error("Not enough data points for Aroon Osc: required={required}, found={found}")]
+    NotEnoughData { required: usize, found: usize },
+}
+
 #[inline]
-pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, Box<dyn Error>> {
+pub fn aroon_osc(input: &AroonOscInput) -> Result<AroonOscOutput, AroonOscError> {
     let length = input.get_length();
     if length == 0 {
-        return Err("Invalid length specified for Aroon Osc calculation.".into());
+        return Err(AroonOscError::InvalidLength { length });
     }
 
     let (high, low) = match &input.data {
         AroonOscData::Candles { candles } => {
             if candles.close.is_empty() {
-                return Err("No candles available.".into());
+                return Err(AroonOscError::NoCandles);
             }
-            (
-                candles.select_candle_field("high")?,
-                candles.select_candle_field("low")?,
-            )
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            (high, low)
         }
         AroonOscData::SlicesHL { high, low } => {
             if high.is_empty() || low.is_empty() {
-                return Err("One or both of the slices for AroonOsc are empty.".into());
+                return Err(AroonOscError::EmptySlices);
             }
             if high.len() != low.len() {
-                return Err("Mismatch in high/low slice length.".into());
+                return Err(AroonOscError::SlicesLengthMismatch {
+                    high_len: high.len(),
+                    low_len: low.len(),
+                });
             }
             (*high, *low)
         }
     };
+
     let len = low.len();
-    if high.len() < length {
-        return Err(format!(
-            "Not enough data points ({} total) for Aroon Osc length {}.",
-            high.len(),
-            length
-        )
-        .into());
+    if len < length {
+        return Err(AroonOscError::NotEnoughData {
+            required: length,
+            found: len,
+        });
     }
 
     let mut values = vec![f64::NAN; len];

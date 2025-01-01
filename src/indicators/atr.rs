@@ -69,23 +69,51 @@ pub struct AtrOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AtrError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("Invalid length for ATR calculation (length={length}).")]
+    InvalidLength { length: usize },
+
+    #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
+    InconsistentSliceLengths {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+    },
+
+    #[error("No candles available for ATR calculation.")]
+    NoCandlesAvailable,
+
+    #[error("Not enough data to calculate ATR: length={length}, data length={data_len}")]
+    NotEnoughData { length: usize, data_len: usize },
+}
+
 #[inline]
-pub fn atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
+pub fn atr(input: &AtrInput) -> Result<AtrOutput, AtrError> {
     let length = input.get_length();
     if length == 0 {
-        return Err("Invalid length for ATR calculation.".into());
+        return Err(AtrError::InvalidLength { length });
     }
 
     let (high, low, close) = match &input.data {
         AtrData::Candles { candles } => {
-            let high: &[f64] = candles.select_candle_field("high")?;
-            let low: &[f64] = candles.select_candle_field("low")?;
-            let close: &[f64] = candles.select_candle_field("close")?;
+            let high = candles.select_candle_field("high")?;
+            let low = candles.select_candle_field("low")?;
+            let close = candles.select_candle_field("close")?;
             (high, low, close)
         }
         AtrData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
-                return Err("Inconsistent slice lengths for ATR calculation.".into());
+                return Err(AtrError::InconsistentSliceLengths {
+                    high_len: high.len(),
+                    low_len: low.len(),
+                    close_len: close.len(),
+                });
             }
             (*high, *low, *close)
         }
@@ -93,10 +121,13 @@ pub fn atr(input: &AtrInput) -> Result<AtrOutput, Box<dyn Error>> {
 
     let len = close.len();
     if len == 0 {
-        return Err("No candles available.".into());
+        return Err(AtrError::NoCandlesAvailable);
     }
     if length > len {
-        return Err("Not enough data to calculate ATR.".into());
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: len,
+        });
     }
 
     let mut atr_values = vec![f64::NAN; len];

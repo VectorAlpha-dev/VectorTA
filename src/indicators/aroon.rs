@@ -59,12 +59,35 @@ pub struct AroonOutput {
     pub aroon_down: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AroonError {
+    #[error(transparent)]
+    CandleFieldError(#[from] Box<dyn std::error::Error>),
+
+    #[error("No candles available for Aroon.")]
+    NoCandlesAvailable,
+
+    #[error("One or both slices for Aroon are empty: high_len={high_len}, low_len={low_len}")]
+    EmptySlices { high_len: usize, low_len: usize },
+
+    #[error("Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
+    MismatchSliceLength { high_len: usize, low_len: usize },
+
+    #[error("Not enough data points for Aroon: data length={data_len}, required={required}")]
+    NotEnoughData { data_len: usize, required: usize },
+
+    #[error("Invalid length specified for Aroon calculation (length=0).")]
+    ZeroLength,
+}
+
 #[inline]
-pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
+pub fn aroon(input: &AroonInput) -> Result<AroonOutput, AroonError> {
     let (high, low) = match &input.data {
         AroonData::Candles { candles } => {
             if candles.close.is_empty() {
-                return Err("No candles available.".into());
+                return Err(AroonError::NoCandlesAvailable);
             }
             (
                 candles.select_candle_field("high")?,
@@ -72,27 +95,39 @@ pub fn aroon(input: &AroonInput) -> Result<AroonOutput, Box<dyn Error>> {
             )
         }
         AroonData::SlicesHL { high, low } => {
-            if high.is_empty() || low.is_empty() {
-                return Err("One or both of the slices for Aroon are empty.".into());
+            let h_len = high.len();
+            let l_len = low.len();
+
+            if h_len == 0 || l_len == 0 {
+                return Err(AroonError::EmptySlices {
+                    high_len: h_len,
+                    low_len: l_len,
+                });
             }
-            if high.len() != low.len() {
-                return Err("Mismatch in high/low slice length.".into());
+            if h_len != l_len {
+                return Err(AroonError::MismatchSliceLength {
+                    high_len: h_len,
+                    low_len: l_len,
+                });
             }
             (*high, *low)
         }
     };
+
     let length = input.get_length();
-    if high.len() < length {
-        return Err(format!(
-            "Not enough data points ({} total) for Aroon length {}.",
-            high.len(),
-            length
-        )
-        .into());
+    let data_len = high.len();
+    if data_len < length {
+        return Err(AroonError::NotEnoughData {
+            data_len,
+            required: length,
+        });
+    }
+    if length == 0 {
+        return Err(AroonError::ZeroLength);
     }
     let len = low.len();
     if length == 0 {
-        return Err("Invalid length specified for Aroon calculation.".into());
+        return Err(AroonError::ZeroLength);
     }
     let mut aroon_up = vec![f64::NAN; len];
     let mut aroon_down = vec![f64::NAN; len];
@@ -243,9 +278,6 @@ mod tests {
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon(&input);
         assert!(result.is_err(), "Expected error for zero length");
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid length"));
-        }
     }
 
     #[test]

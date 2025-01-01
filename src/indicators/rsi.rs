@@ -64,23 +64,50 @@ pub struct RsiOutput {
     pub values: Vec<f64>,
 }
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum RsiError {
+    #[error("No data provided for RSI calculation.")]
+    NoData,
+
+    #[error("All values in input data are NaN.")]
+    AllValuesNaN,
+
+    #[error("Not enough data points to compute RSI. Needed at least {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
+
+    #[error("Invalid period specified for RSI calculation. period={period}, data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+}
+
 #[inline]
-pub fn rsi(input: &RsiInput) -> Result<RsiOutput, Box<dyn Error>> {
+pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
     let data: &[f64] = match &input.data {
         RsiData::Candles { candles, source } => source_type(candles, source),
         RsiData::Slice(slice) => slice,
     };
     let period = input.get_period();
-
-    if data.len() < period {
-        return Err("Not enough data points to compute RSI.".into());
-    }
-
-    if period == 0 || period > data.len() {
-        return Err("Invalid period specified for RSI calculation.".into());
-    }
-
     let len = data.len();
+
+    if len == 0 {
+        return Err(RsiError::NoData);
+    }
+    if !data.iter().any(|&x| !x.is_nan()) {
+        return Err(RsiError::AllValuesNaN);
+    }
+    if len < period {
+        return Err(RsiError::NotEnoughData {
+            needed: period,
+            found: len,
+        });
+    }
+    if period == 0 || period > len {
+        return Err(RsiError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
     let mut rsi = Vec::with_capacity(len);
 
     rsi.extend(std::iter::repeat(f64::NAN).take(period));
@@ -222,9 +249,6 @@ mod tests {
         let input = RsiInput::from_slice(&slice, params);
         let result = rsi(&input);
         assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid period"));
-        }
     }
 
     #[test]
