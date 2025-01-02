@@ -69,12 +69,12 @@ use thiserror::Error;
 pub enum SmaError {
     #[error("Empty data provided for SMA.")]
     EmptyData,
-    #[error("All values are NaN.")]
-    AllValuesNaN,
     #[error("Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("All values are NaN.")]
+    AllValuesNaN,
 }
 
 #[inline]

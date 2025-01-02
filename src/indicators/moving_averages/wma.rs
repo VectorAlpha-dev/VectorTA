@@ -70,10 +70,14 @@ use thiserror::Error;
 pub enum WmaError {
     #[error("Data slice is empty, cannot compute WMA.")]
     EmptyData,
-    #[error("Period {period} is greater than data length {data_len}.")]
+    #[error("Period {period} is greater than data length {data_len} for WMA.")]
     PeriodExceedsDataLen { period: usize, data_len: usize },
     #[error("Invalid period for WMA calculation, must be >= 2. period = {period}")]
     InvalidPeriod { period: usize },
+    #[error("All values in input data are NaN during WMA calculation.")]
+    AllValuesNaN,
+    #[error("Insufficient data for WMA calculation: needed {needed} found {found}.")]
+    NotEnoughData { needed: usize, found: usize },
 }
 
 #[inline]
@@ -87,6 +91,11 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
         return Err(WmaError::EmptyData);
     }
 
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(WmaError::AllValuesNaN),
+    };
+
     let len = data.len();
     let period = input.get_period();
 
@@ -96,9 +105,15 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
             data_len: len,
         });
     }
-
     if period < 2 {
         return Err(WmaError::InvalidPeriod { period });
+    }
+
+    if (len - first_valid_idx) < period {
+        return Err(WmaError::NotEnoughData {
+            needed: period,
+            found: len - first_valid_idx,
+        });
     }
 
     let mut values = vec![f64::NAN; len];
@@ -110,23 +125,36 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
     let mut weighted_sum = 0.0;
     let mut plain_sum = 0.0;
 
-    for (i, &val) in data.iter().take(lookback).enumerate() {
+    for i in 0..lookback {
+        let val = data[first_valid_idx + i];
         weighted_sum += (i as f64 + 1.0) * val;
         plain_sum += val;
     }
 
-    for i in lookback..len {
+    let first_wma_idx = first_valid_idx + lookback;
+    let val = data[first_wma_idx];
+    weighted_sum += (period as f64) * val;
+    plain_sum += val;
+
+    values[first_wma_idx] = weighted_sum / divider;
+
+    weighted_sum -= plain_sum;
+    plain_sum -= data[first_valid_idx];
+
+    for i in (first_wma_idx + 1)..len {
         let val = data[i];
         weighted_sum += (period as f64) * val;
         plain_sum += val;
+
         values[i] = weighted_sum / divider;
+
         weighted_sum -= plain_sum;
         let old_val = data[i - lookback];
         plain_sum -= old_val;
     }
+
     Ok(WmaOutput { values })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

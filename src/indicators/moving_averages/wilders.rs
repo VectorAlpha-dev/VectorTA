@@ -71,11 +71,14 @@ pub enum WildersError {
     #[error("No data provided for Wilder's Moving Average.")]
     NoData,
 
-    #[error("All values are NaN.")]
+    #[error("All values are NaN during Wilder's Moving Average calculation.")]
     AllValuesNaN,
 
     #[error("Invalid period specified for Wilder's Moving Average. Period: {period}, data length: {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("Insufficient data provided for Wilder's Moving Average calculation. Needed: {needed}, found: {found}")]
+    NotEnoughData { needed: usize, found: usize },
 }
 
 #[inline]
@@ -84,32 +87,45 @@ pub fn wilders(input: &WildersInput) -> Result<WildersOutput, WildersError> {
         WildersData::Candles { candles, source } => source_type(candles, source),
         WildersData::Slice(slice) => slice,
     };
-    let n = data.len();
+
+    let len = data.len();
     let period = input.get_period();
 
-    if n == 0 {
+    if len == 0 {
         return Err(WildersError::NoData);
     }
-    if period == 0 || period > n {
+    if period == 0 || period > len {
         return Err(WildersError::InvalidPeriod {
             period,
-            data_len: n,
+            data_len: len,
         });
     }
 
-    let mut out_values = vec![f64::NAN; n];
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(WildersError::AllValuesNaN),
+    };
+
+    if (len - first_valid_idx) < period {
+        return Err(WildersError::NotEnoughData {
+            needed: period,
+            found: len - first_valid_idx,
+        });
+    }
+
+    let mut out_values = vec![f64::NAN; len];
 
     let mut sum = 0.0;
     for i in 0..period {
-        sum += data[i];
+        sum += data[first_valid_idx + i];
     }
 
-    let mut val = sum / period as f64;
-    out_values[period - 1] = val;
-
+    let wma_start_idx = first_valid_idx + period - 1;
+    let mut val = sum / (period as f64);
+    out_values[wma_start_idx] = val;
     let alpha = 1.0 / period as f64;
 
-    for i in period..n {
+    for i in (wma_start_idx + 1)..len {
         val = (data[i] - val) * alpha + val;
         out_values[i] = val;
     }

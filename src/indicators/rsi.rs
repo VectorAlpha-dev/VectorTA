@@ -71,7 +71,7 @@ pub enum RsiError {
     #[error("No data provided for RSI calculation.")]
     NoData,
 
-    #[error("All values in input data are NaN.")]
+    #[error("All values in input data are NaN for RSI calculation.")]
     AllValuesNaN,
 
     #[error("Not enough data points to compute RSI. Needed at least {needed}, found {found}")]
@@ -89,12 +89,13 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
     };
     let period = input.get_period();
     let len = data.len();
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(RsiError::AllValuesNaN),
+    };
 
     if len == 0 {
         return Err(RsiError::NoData);
-    }
-    if !data.iter().any(|&x| !x.is_nan()) {
-        return Err(RsiError::AllValuesNaN);
     }
     if len < period {
         return Err(RsiError::NotEnoughData {
@@ -108,9 +109,7 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
             data_len: len,
         });
     }
-    let mut rsi = Vec::with_capacity(len);
-
-    rsi.extend(std::iter::repeat(f64::NAN).take(period));
+    let mut rsi_values = vec![f64::NAN; len];
 
     let inv_period = 1.0 / period as f64;
     let beta = 1.0 - inv_period;
@@ -118,7 +117,7 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
     let mut avg_gain = 0.0;
     let mut avg_loss = 0.0;
 
-    for i in 1..=period {
+    for i in (first_valid_idx + 1)..=period {
         let delta = data[i] - data[i - 1];
         if delta > 0.0 {
             avg_gain += delta;
@@ -135,9 +134,9 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
     } else {
         100.0 * avg_gain / (avg_gain + avg_loss)
     };
-    rsi.push(initial_rsi);
+    rsi_values[first_valid_idx + period] = initial_rsi;
 
-    for i in (period + 1)..len {
+    for i in (first_valid_idx + period + 1)..len {
         let delta = data[i] - data[i - 1];
         let gain = if delta > 0.0 { delta } else { 0.0 };
         let loss = if delta < 0.0 { -delta } else { 0.0 };
@@ -151,10 +150,10 @@ pub fn rsi(input: &RsiInput) -> Result<RsiOutput, RsiError> {
             100.0 * avg_gain / (avg_gain + avg_loss)
         };
 
-        rsi.push(current_rsi);
+        rsi_values[i] = current_rsi;
     }
 
-    Ok(RsiOutput { values: rsi })
+    Ok(RsiOutput { values: rsi_values })
 }
 
 #[cfg(test)]

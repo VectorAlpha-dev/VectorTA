@@ -70,9 +70,9 @@ use thiserror::Error;
 pub enum ZlemaError {
     #[error("Empty data provided for ZLEMA.")]
     EmptyData,
-    #[error("All values are NaN.")]
+    #[error("All values are NaN during ZLEMA calculation.")]
     AllValuesNaN,
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("ZLEMA Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 }
 
@@ -104,12 +104,12 @@ pub fn zlema(input: &ZlemaInput) -> Result<ZlemaOutput, ZlemaError> {
     let lag = (period - 1) / 2;
     let alpha = 2.0 / (period as f64 + 1.0);
 
-    let mut zlema_values = Vec::with_capacity(len);
+    let mut zlema_values = vec![f64::NAN; len];
 
-    let mut last_ema = data[0];
-    zlema_values.push(last_ema);
+    let mut last_ema = data[first_valid_idx.unwrap()];
+    zlema_values[first_valid_idx.unwrap()] = last_ema;
 
-    for i in 1..len {
+    for i in (first_valid_idx.unwrap() + 1)..len {
         let val = if i < lag {
             data[i]
         } else {
@@ -117,7 +117,7 @@ pub fn zlema(input: &ZlemaInput) -> Result<ZlemaOutput, ZlemaError> {
         };
 
         last_ema = alpha * val + (1.0 - alpha) * last_ema;
-        zlema_values.push(last_ema);
+        zlema_values[i] = last_ema;
     }
 
     Ok(ZlemaOutput {
@@ -221,11 +221,11 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 
         let first_input =
-            ZlemaInput::from_candles(&candles, "close", ZlemaParams { period: Some(14) });
+            ZlemaInput::from_candles(&candles, "close", ZlemaParams { period: Some(21) });
         let first_result = zlema(&first_input).expect("Failed ZLEMA on first input");
 
         let second_input =
-            ZlemaInput::from_slice(&first_result.values, ZlemaParams { period: Some(7) });
+            ZlemaInput::from_slice(&first_result.values, ZlemaParams { period: Some(14) });
         let second_result = zlema(&second_input).expect("Failed ZLEMA on second input");
         assert_eq!(second_result.values.len(), first_result.values.len());
         for (idx, &val) in second_result.values.iter().enumerate().skip(240) {
