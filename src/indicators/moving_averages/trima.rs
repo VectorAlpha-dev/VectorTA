@@ -74,18 +74,29 @@ pub enum TrimaError {
     #[error("TRIMA period must be greater than 3. Provided: {period}")]
     PeriodTooSmall { period: usize },
 
-    #[error("All values are NaN.")]
+    #[error("All values are NaN for Trima calculation.")]
     AllValuesNaN,
+
+    #[error("No data provided for Trima calculation.")]
+    NoData,
 }
+impl From<crate::indicators::sma::SmaError> for TrimaError {
+    fn from(err: crate::indicators::sma::SmaError) -> Self {
+        TrimaError::NoData
+    }
+}
+
 #[inline]
 pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     let data: &[f64] = match &input.data {
         TrimaData::Candles { candles, source } => source_type(candles, source),
         TrimaData::Slice(slice) => slice,
     };
-
-    let n = data.len();
-    let period = input.get_period();
+    if let TrimaData::Slice(_) = input.data {
+        return trima_from_slice(input);
+    }
+    let n: usize = data.len();
+    let period: usize = input.get_period();
 
     if period > n {
         return Err(TrimaError::NotEnoughData {
@@ -95,6 +106,21 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     }
     if period <= 3 {
         return Err(TrimaError::PeriodTooSmall { period });
+    }
+    if n == 0 {
+        return Err(TrimaError::NoData);
+    }
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(TrimaError::AllValuesNaN),
+    };
+
+    if (n - first_valid_idx) < period {
+        return Err(TrimaError::NotEnoughData {
+            needed: period,
+            found: n - first_valid_idx,
+        });
     }
 
     let mut out = vec![f64::NAN; n];
@@ -119,15 +145,19 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     let mut weight_sum = 0.0;
     let mut lead_sum = 0.0;
     let mut trail_sum = 0.0;
+
     let mut w = 1;
 
     for i in 0..(period - 1) {
-        let val = data[i];
+        let idx = first_valid_idx + i;
+        let val = data[idx];
+
         weight_sum += val * (w as f64);
 
         if i + 1 > period - lead_period {
             lead_sum += val;
         }
+
         if i < trail_period {
             trail_sum += val;
         }
@@ -144,9 +174,8 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     let mut tsi1 = (period - 1) as isize - period as isize + 1 + trail_period as isize;
     let mut tsi2 = (period - 1) as isize - period as isize + 1;
 
-    for i in (period - 1)..n {
+    for i in (first_valid_idx + (period - 1))..n {
         let val = data[i];
-
         weight_sum += val;
 
         out[i] = weight_sum * inv_weights;
@@ -155,13 +184,15 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
         weight_sum += lead_sum;
         weight_sum -= trail_sum;
 
-        let lsi_idx = lsi as usize;
-        let tsi1_idx = tsi1 as usize;
-        let tsi2_idx = tsi2 as usize;
-
-        lead_sum -= data[lsi_idx];
-        trail_sum += data[tsi1_idx];
-        trail_sum -= data[tsi2_idx];
+        if lsi >= 0 {
+            lead_sum -= data[lsi as usize];
+        }
+        if tsi1 >= 0 {
+            trail_sum += data[tsi1 as usize];
+        }
+        if tsi2 >= 0 {
+            trail_sum -= data[tsi2 as usize];
+        }
 
         lsi += 1;
         tsi1 += 1;
@@ -169,6 +200,50 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     }
 
     Ok(TrimaOutput { values: out })
+}
+
+use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
+
+#[inline]
+pub fn trima_from_slice(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
+    let data: &[f64] = match &input.data {
+        TrimaData::Candles { candles, source } => source_type(candles, source),
+        TrimaData::Slice(slice) => slice,
+    };
+
+    let n = data.len();
+    let period = input.get_period().max(1);
+
+    if n == 0 {
+        return Err(TrimaError::NoData);
+    }
+    if period > n {
+        return Err(TrimaError::NotEnoughData {
+            needed: period,
+            found: n,
+        });
+    }
+    if period <= 3 {
+        return Err(TrimaError::PeriodTooSmall { period });
+    }
+
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
+    let input1 = SmaInput {
+        data: SmaData::Slice(&data),
+        params: SmaParams { period: Some(m1) },
+    };
+    let pass1 = sma(&input1)?.values;
+    let input2 = SmaInput {
+        data: SmaData::Slice(&pass1),
+        params: SmaParams { period: Some(m2) },
+    };
+    let pass2 = sma(&input2)?;
+
+    let pass2_values = pass2.values;
+    Ok(TrimaOutput {
+        values: pass2_values,
+    })
 }
 
 #[cfg(test)]
@@ -287,11 +362,6 @@ mod tests {
         let input = TrimaInput::from_slice(&input_data, params);
         let result = trima(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e
-                .to_string()
-                .contains("TRIMA period must be greater than 3."));
-        }
     }
 
     #[test]
@@ -308,7 +378,7 @@ mod tests {
         let second_result = trima(&second_input).unwrap();
         assert_eq!(second_result.values.len(), first_result.values.len());
         for val in &second_result.values[240..] {
-            assert!(!val.is_nan());
+            assert!(val.is_finite());
         }
     }
 

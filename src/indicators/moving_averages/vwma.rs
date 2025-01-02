@@ -93,8 +93,12 @@ pub enum VwmaError {
     VolumeFieldError(#[from] Box<dyn std::error::Error>),
     #[error("Invalid period for VWMA calculation: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Price and volume mismatch: price length = {price_len}, volume length = {volume_len}")]
+    #[error("Price and volume mismatch for VWMA: price length = {price_len}, volume length = {volume_len}")]
     PriceVolumeMismatch { price_len: usize, volume_len: usize },
+    #[error("All values are NaN for the VWMA calculation.")]
+    AllValuesNaN,
+    #[error("Not enough data for VWMA calculation: needed {needed}, found {found}")]
+    NotEnoughData { needed: usize, found: usize },
 }
 
 #[inline]
@@ -115,31 +119,50 @@ pub fn vwma(input: &VwmaInput) -> Result<VwmaOutput, VwmaError> {
             data_len: len,
         });
     }
-
-    if len != volume.len() {
+    if volume.len() != len {
         return Err(VwmaError::PriceVolumeMismatch {
             price_len: len,
             volume_len: volume.len(),
         });
     }
 
+    let first_valid_idx = match price
+        .iter()
+        .zip(volume.iter())
+        .position(|(&p, &v)| !p.is_nan() && !v.is_nan())
+    {
+        Some(idx) => idx,
+        None => return Err(VwmaError::AllValuesNaN),
+    };
+
+    if (len - first_valid_idx) < period {
+        return Err(VwmaError::NotEnoughData {
+            needed: period,
+            found: len - first_valid_idx,
+        });
+    }
+
     let mut vwma_values = vec![f64::NAN; len];
+
+    let first_vwma_idx = first_valid_idx + period - 1;
 
     let mut sum = 0.0;
     let mut vsum = 0.0;
-
     for i in 0..period {
-        sum += price[i] * volume[i];
-        vsum += volume[i];
+        let idx = first_valid_idx + i;
+        sum += price[idx] * volume[idx];
+        vsum += volume[idx];
     }
-    vwma_values[period - 1] = sum / vsum;
 
-    for i in period..len {
+    vwma_values[first_vwma_idx] = sum / vsum;
+
+    for i in (first_vwma_idx + 1)..len {
         sum += price[i] * volume[i];
-        sum -= price[i - period] * volume[i - period];
-
         vsum += volume[i];
-        vsum -= volume[i - period];
+
+        let old_idx = i - period;
+        sum -= price[old_idx] * volume[old_idx];
+        vsum -= volume[old_idx];
 
         vwma_values[i] = sum / vsum;
     }

@@ -260,8 +260,8 @@ fn benchmark_indicators(c: &mut Criterion) {
         b.iter(|| mama(black_box(&input)).expect("Failed to calculate MAMA"))
     });
 
-    // T3
-    group.bench_function(BenchmarkId::new("T3", 0), |b| {
+    // TILSON
+    group.bench_function(BenchmarkId::new("TILSON", 0), |b| {
         let input = TilsonInput::with_default_candles(&candles);
         b.iter(|| tilson(black_box(&input)).expect("Failed to calculate T3"))
     });

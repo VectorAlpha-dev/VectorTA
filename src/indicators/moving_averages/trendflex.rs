@@ -84,6 +84,8 @@ pub enum TrendFlexError {
 
 #[inline]
 pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexError> {
+    use std::f64::consts::PI;
+
     let data: &[f64] = match &input.data {
         TrendFlexData::Candles { candles, source } => source_type(candles, source),
         TrendFlexData::Slice(slice) => slice,
@@ -92,7 +94,6 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexErr
     if data.is_empty() {
         return Err(TrendFlexError::NoDataProvided);
     }
-
     let len = data.len();
     let trendflex_period = input.get_period();
 
@@ -101,7 +102,6 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexErr
             period: trendflex_period,
         });
     }
-
     if trendflex_period > len {
         return Err(TrendFlexError::TrendFlexPeriodExceedsData {
             period: trendflex_period,
@@ -117,52 +117,130 @@ pub fn trendflex(input: &TrendFlexInput) -> Result<TrendFlexOutput, TrendFlexErr
         });
     }
 
-    let mut ssf = vec![0.0; len];
-    ssf[0] = data[0];
-    if len > 1 {
-        ssf[1] = data[1];
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(TrendFlexError::AllValuesNaN),
+    };
+
+    if first_valid_idx == 0 {
+        let mut ssf: Vec<f64> = vec![0.0; len];
+        ssf[0] = data[0];
+        if len > 1 {
+            ssf[1] = data[1];
+        }
+
+        let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
+        let a_sq = a * a;
+        let b = 2.0 * a * (1.414_f64 * PI / (ss_period as f64)).cos();
+        let c = (1.0 + a_sq - b) * 0.5;
+
+        for i in 2..len {
+            let prev_1 = ssf[i - 1];
+            let prev_2 = ssf[i - 2];
+            let d_i = data[i];
+            let d_im1 = data[i - 1];
+            ssf[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
+        }
+
+        let mut tf_values: Vec<f64> = vec![f64::NAN; len];
+        let mut ms_prev = 0.0;
+
+        let tp_f = trendflex_period as f64;
+        let inv_tp = 1.0 / tp_f;
+
+        let mut rolling_sum = 0.0;
+        for &value in &ssf[..trendflex_period] {
+            rolling_sum += value;
+        }
+
+        for i in trendflex_period..len {
+            let my_sum = (tp_f * ssf[i] - rolling_sum) * inv_tp;
+
+            let ms_current = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
+            ms_prev = ms_current;
+
+            tf_values[i] = if ms_current != 0.0 {
+                my_sum / ms_current.sqrt()
+            } else {
+                0.0
+            };
+
+            rolling_sum += ssf[i] - ssf[i - trendflex_period];
+        }
+
+        return Ok(TrendFlexOutput { values: tf_values });
+    } else {
+        let m = len - first_valid_idx;
+        if m < trendflex_period {
+            return Ok(TrendFlexOutput {
+                values: vec![f64::NAN; len],
+            });
+        }
+        if m < ss_period {
+            return Err(TrendFlexError::SmootherPeriodExceedsData {
+                ss_period,
+                data_len: m,
+            });
+        }
+
+        let mut tmp_data = vec![0.0; m];
+        for i in 0..m {
+            tmp_data[i] = data[first_valid_idx + i];
+        }
+
+        let mut tmp_ssf = vec![0.0; m];
+        tmp_ssf[0] = tmp_data[0];
+        if m > 1 {
+            tmp_ssf[1] = tmp_data[1];
+        }
+
+        let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
+        let a_sq = a * a;
+        let b = 2.0 * a * (1.414_f64 * PI / (ss_period as f64)).cos();
+        let c = (1.0 + a_sq - b) * 0.5;
+
+        for i in 2..m {
+            let prev_1 = tmp_ssf[i - 1];
+            let prev_2 = tmp_ssf[i - 2];
+            let d_i = tmp_data[i];
+            let d_im1 = tmp_data[i - 1];
+            tmp_ssf[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
+        }
+
+        let mut tmp_tf = vec![f64::NAN; m];
+        let mut ms_prev = 0.0;
+
+        let tp_f = trendflex_period as f64;
+        let inv_tp = 1.0 / tp_f;
+
+        let mut rolling_sum = 0.0;
+        for &value in &tmp_ssf[..trendflex_period] {
+            rolling_sum += value;
+        }
+
+        for i in trendflex_period..m {
+            let my_sum = (tp_f * tmp_ssf[i] - rolling_sum) * inv_tp;
+            let ms_current = 0.04 * (my_sum * my_sum) + 0.96 * ms_prev;
+            ms_prev = ms_current;
+
+            tmp_tf[i] = if ms_current != 0.0 {
+                my_sum / ms_current.sqrt()
+            } else {
+                0.0
+            };
+
+            rolling_sum += tmp_ssf[i] - tmp_ssf[i - trendflex_period];
+        }
+
+        let mut final_values = vec![f64::NAN; len];
+        for i in 0..m {
+            final_values[first_valid_idx + i] = tmp_tf[i];
+        }
+
+        return Ok(TrendFlexOutput {
+            values: final_values,
+        });
     }
-
-    let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
-    let a_sq = a * a;
-    let b = 2.0 * a * (1.414_f64 * PI / (ss_period as f64)).cos();
-    let c = (1.0 + a_sq - b) * 0.5;
-
-    for i in 2..len {
-        let prev_1 = ssf[i - 1];
-        let prev_2 = ssf[i - 2];
-        let d_i = data[i];
-        let d_im1 = data[i - 1];
-        ssf[i] = c * (d_i + d_im1) + b * prev_1 - a_sq * prev_2;
-    }
-
-    let mut tf_values: Vec<f64> = vec![f64::NAN; len];
-    let mut ms_prev = 0.0;
-
-    let tp_f = trendflex_period as f64;
-    let inv_tp = 1.0 / tp_f;
-
-    let mut rolling_sum = 0.0;
-    for &value in &ssf[..trendflex_period] {
-        rolling_sum += value;
-    }
-
-    for i in trendflex_period..len {
-        let my_sum = (tp_f * ssf[i] - rolling_sum) * inv_tp;
-
-        let ms_current = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
-        ms_prev = ms_current;
-
-        tf_values[i] = if ms_current != 0.0 {
-            my_sum / ms_current.sqrt()
-        } else {
-            0.0
-        };
-
-        rolling_sum += ssf[i] - ssf[i - trendflex_period];
-    }
-
-    Ok(TrendFlexOutput { values: tf_values })
 }
 
 #[cfg(test)]
