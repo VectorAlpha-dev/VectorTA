@@ -115,7 +115,7 @@ fn pascal_weights(period: usize) -> Result<Vec<f64>, PwmaError> {
     let mut row = Vec::with_capacity(period);
 
     for r in 0..=n {
-        let c = combination(n, r) as f64;
+        let c = combination_f64(n, r);
         row.push(c);
     }
 
@@ -130,24 +130,20 @@ fn pascal_weights(period: usize) -> Result<Vec<f64>, PwmaError> {
 
     Ok(row)
 }
-
 #[inline]
-fn combination(n: usize, r: usize) -> u64 {
+fn combination_f64(n: usize, r: usize) -> f64 {
     let r = r.min(n - r);
     if r == 0 {
-        return 1;
+        return 1.0;
     }
 
-    let mut numerator: u64 = 1;
-    let mut denominator: u64 = 1;
-
+    let mut result = 1.0;
     for i in 0..r {
-        numerator *= (n - i) as u64;
-        denominator *= (i + 1) as u64;
+        result *= (n - i) as f64;
+        result /= (i + 1) as f64;
     }
-    numerator / denominator
+    result
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

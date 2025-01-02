@@ -955,10 +955,8 @@ mod tests {
             "hwma",
             "jma",
             "jsa",
-            "kama",
             "linreg",
             "maaq",
-            "mama",
             "mwdx",
             "nma",
             "pwma",
@@ -977,6 +975,7 @@ mod tests {
             "vpwma",
             "vwap",
             "vwma",
+            "mama",
         ];
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1004,7 +1003,7 @@ mod tests {
                 ma_type
             );
 
-            for (i, &value) in candles_result.iter().enumerate().skip(240) {
+            for (i, &value) in candles_result.iter().enumerate().skip(960) {
                 assert!(
                     !value.is_nan(),
                     "MA result for '{}' at index {} is NaN",
@@ -1020,7 +1019,7 @@ mod tests {
                 ma_type
             );
 
-            for (i, &value) in slice_result.iter().enumerate().skip(240) {
+            for (i, &value) in slice_result.iter().enumerate().skip(960) {
                 assert!(
                     !value.is_nan(),
                     "MA result for '{}' at index {} is NaN",

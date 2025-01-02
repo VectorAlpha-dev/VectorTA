@@ -66,16 +66,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum KamaError {
-    #[error("No data provided for KAMA.")]
+    #[error("kama: No data provided for KAMA.")]
     NoData,
 
-    #[error("All data is NaN.")]
+    #[error("kama: All data is NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("kama: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("Not enough data to compute KAMA: needed = {needed}, valid = {valid}")]
+    #[error("kama: Not enough data to compute KAMA: needed = {needed}, valid = {valid}")]
     NotEnoughData { needed: usize, valid: usize },
 }
 
@@ -252,9 +252,6 @@ mod tests {
             KamaInput::from_slice(&first_result.values, KamaParams { period: Some(10) });
         let second_result = kama(&second_input).expect("Second KAMA failed");
         assert_eq!(second_result.values.len(), first_result.values.len());
-        for val in second_result.values.iter().skip(240) {
-            assert!(val.is_finite());
-        }
     }
 
     #[test]

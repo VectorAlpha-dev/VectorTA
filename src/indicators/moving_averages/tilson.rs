@@ -74,7 +74,6 @@ impl<'a> TilsonInput<'a> {
     }
 }
 
-use std::f32::consts::E;
 use std::f64;
 use thiserror::Error;
 

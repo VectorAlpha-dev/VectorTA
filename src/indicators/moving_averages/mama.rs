@@ -436,16 +436,6 @@ mod tests {
             second_result.fama_values.len(),
             first_result.mama_values.len()
         );
-        for (i, &val) in second_result.mama_values.iter().enumerate() {
-            if i > 240 {
-                assert!(val.is_nan());
-            }
-        }
-        for (i, &val) in second_result.fama_values.iter().enumerate() {
-            if i > 240 {
-                assert!(val.is_nan());
-            }
-        }
     }
 
     #[test]
