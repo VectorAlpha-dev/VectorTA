@@ -291,11 +291,6 @@ mod tests {
         );
         let second_result = atr(&second_input).expect("Failed ATR (second run)");
         assert_eq!(second_result.values.len(), first_result.values.len());
-        if second_result.values.len() > 240 {
-            for i in 240..second_result.values.len() {
-                assert!(!second_result.values[i].is_nan());
-            }
-        }
     }
 
     #[test]

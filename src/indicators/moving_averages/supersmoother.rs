@@ -73,11 +73,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SuperSmootherError {
-    #[error("All input data for Super Smoother are NaN.")]
+    #[error("Swma: All input data for Super Smoother are NaN.")]
     AllValuesNaN,
-    #[error("Invalid period for Super Smoother: period = {period}, data length = {data_len}. Period must be >= 1 and no greater than the data length.")]
+    #[error("Smwa: Invalid period for Super Smoother: period = {period}, data length = {data_len}. Period must be >= 1 and no greater than the data length.")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Empty data provided for Super Smoother.")]
+    #[error("Swma: Empty data provided for Super Smoother.")]
     EmptyData,
 }
 

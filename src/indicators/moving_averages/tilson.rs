@@ -74,18 +74,19 @@ impl<'a> TilsonInput<'a> {
     }
 }
 
+use std::f32::consts::E;
 use std::f64;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TilsonError {
-    #[error("No data available: data length = 0")]
+    #[error("No data available: data length = 0 for Tilson calculation.")]
     EmptyData,
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("Invalid period: period = {period}, data length = {data_len} for Tilson calculation.")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Invalid volume factor: {v_factor}")]
+    #[error("Invalid volume factor: {v_factor} for Tilson calculation.")]
     InvalidVolumeFactor { v_factor: f64 },
-    #[error("All values are NaN.")]
+    #[error("All values are NaN during Tilson calculation..")]
     AllValuesNaN,
 }
 
@@ -94,6 +95,11 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, TilsonError> {
     let data: &[f64] = match &input.data {
         TilsonData::Candles { candles, source } => source_type(candles, source),
         TilsonData::Slice(slice) => slice,
+    };
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(TilsonError::AllValuesNaN),
     };
 
     let length = data.len();
@@ -116,78 +122,30 @@ pub fn tilson(input: &TilsonInput) -> Result<TilsonOutput, TilsonError> {
         });
     }
 
-    // 1) Find first valid (non-NaN) index
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(TilsonError::AllValuesNaN),
-    };
-
-    // 2) If first_valid_idx == 0, run your original T3 code verbatim
-    if first_valid_idx == 0 {
-        return tilson_original(data, opt_in_time_period, opt_in_v_factor);
-    } else {
-        // 3) Shift approach if there are leading NaNs
-        let m = length - first_valid_idx;
-        // Enough data to do the T3? We need `lookback_total = 6 * (p - 1)`
-        let lookback_total = 6 * (opt_in_time_period - 1);
-        if m <= lookback_total {
-            // Not enough bars to compute even 1 T3 value => all NaNs
-            return Ok(TilsonOutput {
-                values: vec![f64::NAN; length],
-            });
-        }
-
-        // Copy valid data into tmp_data[0..m]
-        let mut tmp_data = vec![0.0; m];
-        for i in 0..m {
-            tmp_data[i] = data[first_valid_idx + i];
-        }
-
-        // Run the same T3 logic on tmp_data from 0..m
-        // => get a tmp_out of length m, with the T3 from index lookback_total..m-1
-        let tmp_result =
-            tilson_original_slice_only(&tmp_data, opt_in_time_period, opt_in_v_factor)?;
-
-        // 4) Map those results back to final output
-        let mut final_values = vec![f64::NAN; length];
-        // Because tmp_result might be all NaN up to lookback_total,
-        // we just copy the entire tmp_result to the tail of final_values
-        for i in 0..m {
-            final_values[first_valid_idx + i] = tmp_result[i];
-        }
-
-        Ok(TilsonOutput {
-            values: final_values,
-        })
-    }
-}
-
-/// This is your *original* T3 logic, unchanged, assuming data starts at index 0 and has no NaNs.
-/// It returns a `TilsonOutput` with the same length as `data`, with `NaN` in `[0..lookback_total)`.
-#[inline]
-fn tilson_original(
-    data: &[f64],
-    opt_in_time_period: usize,
-    opt_in_v_factor: f64,
-) -> Result<TilsonOutput, TilsonError> {
-    let length = data.len();
     let lookback_total = 6 * (opt_in_time_period - 1);
-
-    // Pre-fill output with NaN
     let mut out_values = vec![f64::NAN; length];
+
     if lookback_total >= length {
-        return Ok(TilsonOutput { values: out_values });
+        return Err(TilsonError::InvalidPeriod {
+            period: opt_in_time_period,
+            data_len: length,
+        });
     }
 
-    let start_idx = lookback_total;
+    let start_idx = first_valid_idx + lookback_total;
     let end_idx = length - 1;
 
     let k = 2.0 / (opt_in_time_period as f64 + 1.0);
     let one_minus_k = 1.0 - k;
 
-    let mut today = 0_usize;
+    let temp = opt_in_v_factor * opt_in_v_factor;
+    let c1 = -(temp * opt_in_v_factor);
+    let c2 = 3.0 * (temp - c1);
+    let c3 = -6.0 * temp - 3.0 * (opt_in_v_factor - c1);
+    let c4 = 1.0 + 3.0 * opt_in_v_factor - c1 + 3.0 * temp;
 
-    let mut temp_real: f64;
+    let mut today = 0_usize;
+    let mut temp_real;
     let mut e1;
     let mut e2;
     let mut e3;
@@ -195,39 +153,33 @@ fn tilson_original(
     let mut e5;
     let mut e6;
 
-    // ---- EXACT T3 LOGIC from your code ----
-
-    // 1) e1 init
     temp_real = 0.0;
     for i in 0..opt_in_time_period {
-        temp_real += data[today + i];
+        temp_real += data[first_valid_idx + today + i];
     }
     e1 = temp_real / (opt_in_time_period as f64);
     today += opt_in_time_period;
 
-    // 2) e2 init
     temp_real = e1;
     for _ in 1..opt_in_time_period {
-        e1 = k * data[today] + one_minus_k * e1;
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         temp_real += e1;
         today += 1;
     }
     e2 = temp_real / (opt_in_time_period as f64);
 
-    // 3) e3 init
     temp_real = e2;
     for _ in 1..opt_in_time_period {
-        e1 = k * data[today] + one_minus_k * e1;
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         temp_real += e2;
         today += 1;
     }
     e3 = temp_real / (opt_in_time_period as f64);
 
-    // 4) e4 init
     temp_real = e3;
     for _ in 1..opt_in_time_period {
-        e1 = k * data[today] + one_minus_k * e1;
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         e3 = k * e2 + one_minus_k * e3;
         temp_real += e3;
@@ -235,10 +187,9 @@ fn tilson_original(
     }
     e4 = temp_real / (opt_in_time_period as f64);
 
-    // 5) e5 init
     temp_real = e4;
     for _ in 1..opt_in_time_period {
-        e1 = k * data[today] + one_minus_k * e1;
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         e3 = k * e2 + one_minus_k * e3;
         e4 = k * e3 + one_minus_k * e4;
@@ -247,10 +198,9 @@ fn tilson_original(
     }
     e5 = temp_real / (opt_in_time_period as f64);
 
-    // 6) e6 init
     temp_real = e5;
     for _ in 1..opt_in_time_period {
-        e1 = k * data[today] + one_minus_k * e1;
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         e3 = k * e2 + one_minus_k * e3;
         e4 = k * e3 + one_minus_k * e4;
@@ -260,9 +210,8 @@ fn tilson_original(
     }
     e6 = temp_real / (opt_in_time_period as f64);
 
-    // 7) Warmup loop until we reach start_idx
-    while today <= start_idx {
-        e1 = k * data[today] + one_minus_k * e1;
+    while (first_valid_idx + today) <= start_idx {
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         e3 = k * e2 + one_minus_k * e3;
         e4 = k * e3 + one_minus_k * e4;
@@ -270,22 +219,14 @@ fn tilson_original(
         e6 = k * e5 + one_minus_k * e6;
         today += 1;
     }
-
-    // 8) T3 combination constants
-    let temp = opt_in_v_factor * opt_in_v_factor;
-    let c1 = -(temp * opt_in_v_factor);
-    let c2 = 3.0 * (temp - c1);
-    let c3 = -6.0 * temp - 3.0 * (opt_in_v_factor - c1);
-    let c4 = 1.0 + 3.0 * opt_in_v_factor - c1 + 3.0 * temp;
 
     if start_idx < length {
         out_values[start_idx] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
     }
 
-    // 9) Main loop
     let mut out_idx = start_idx + 1;
-    while today <= end_idx {
-        e1 = k * data[today] + one_minus_k * e1;
+    while (first_valid_idx + today) <= end_idx {
+        e1 = k * data[first_valid_idx + today] + one_minus_k * e1;
         e2 = k * e1 + one_minus_k * e2;
         e3 = k * e2 + one_minus_k * e3;
         e4 = k * e3 + one_minus_k * e4;
@@ -294,149 +235,11 @@ fn tilson_original(
 
         out_values[out_idx] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
 
-        out_idx += 1;
         today += 1;
+        out_idx += 1;
     }
 
     Ok(TilsonOutput { values: out_values })
-}
-
-/// Same as `tilson_original`, but for a slice we already shifted to index 0.
-/// This is needed if we do the "shift approach".
-#[inline]
-fn tilson_original_slice_only(
-    slice_data: &[f64],
-    opt_in_time_period: usize,
-    opt_in_v_factor: f64,
-) -> Result<Vec<f64>, TilsonError> {
-    // We'll replicate the `tilson_original` logic exactly, but the length = slice_data.len()
-    let length = slice_data.len();
-    let lookback_total = 6 * (opt_in_time_period - 1);
-
-    // Output is same length, with NaNs up to lookback_total
-    let mut out_values = vec![f64::NAN; length];
-    if lookback_total >= length {
-        return Ok(out_values);
-    }
-
-    // ... then do the same code, but all indexing starts at 0
-    // (We won't repeat all of it here verbatim for brevity, but you'd do exactly the same steps.)
-    // I'll inline a shortened version:
-
-    let k = 2.0 / (opt_in_time_period as f64 + 1.0);
-    let one_minus_k = 1.0 - k;
-    let mut today = 0_usize;
-
-    let mut temp_real = 0.0;
-    let mut e1;
-    let mut e2;
-    let mut e3;
-    let mut e4;
-    let mut e5;
-    let mut e6;
-
-    // e1 init
-    for i in 0..opt_in_time_period {
-        temp_real += slice_data[today + i];
-    }
-    e1 = temp_real / (opt_in_time_period as f64);
-    today += opt_in_time_period;
-
-    // e2 init
-    temp_real = e1;
-    for _ in 1..opt_in_time_period {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        temp_real += e1;
-        today += 1;
-    }
-    e2 = temp_real / (opt_in_time_period as f64);
-
-    // e3 init
-    temp_real = e2;
-    for _ in 1..opt_in_time_period {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        temp_real += e2;
-        today += 1;
-    }
-    e3 = temp_real / (opt_in_time_period as f64);
-
-    // e4 init
-    temp_real = e3;
-    for _ in 1..opt_in_time_period {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        e3 = k * e2 + one_minus_k * e3;
-        temp_real += e3;
-        today += 1;
-    }
-    e4 = temp_real / (opt_in_time_period as f64);
-
-    // e5 init
-    temp_real = e4;
-    for _ in 1..opt_in_time_period {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        e3 = k * e2 + one_minus_k * e3;
-        e4 = k * e3 + one_minus_k * e4;
-        temp_real += e4;
-        today += 1;
-    }
-    e5 = temp_real / (opt_in_time_period as f64);
-
-    // e6 init
-    temp_real = e5;
-    for _ in 1..opt_in_time_period {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        e3 = k * e2 + one_minus_k * e3;
-        e4 = k * e3 + one_minus_k * e4;
-        e5 = k * e4 + one_minus_k * e5;
-        temp_real += e5;
-        today += 1;
-    }
-    e6 = temp_real / (opt_in_time_period as f64);
-
-    // Warmup to lookback_total
-    while today <= lookback_total {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        e3 = k * e2 + one_minus_k * e3;
-        e4 = k * e3 + one_minus_k * e4;
-        e5 = k * e4 + one_minus_k * e5;
-        e6 = k * e5 + one_minus_k * e6;
-        today += 1;
-    }
-
-    // T3 combination
-    let temp = opt_in_v_factor * opt_in_v_factor;
-    let c1 = -(temp * opt_in_v_factor);
-    let c2 = 3.0 * (temp - c1);
-    let c3 = -6.0 * temp - 3.0 * (opt_in_v_factor - c1);
-    let c4 = 1.0 + 3.0 * opt_in_v_factor - c1 + 3.0 * temp;
-
-    // place first T3
-    if lookback_total < length {
-        out_values[lookback_total] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
-    }
-
-    let mut out_idx = lookback_total + 1;
-    let end_idx = length - 1;
-    while today <= end_idx {
-        e1 = k * slice_data[today] + one_minus_k * e1;
-        e2 = k * e1 + one_minus_k * e2;
-        e3 = k * e2 + one_minus_k * e3;
-        e4 = k * e3 + one_minus_k * e4;
-        e5 = k * e4 + one_minus_k * e5;
-        e6 = k * e5 + one_minus_k * e6;
-
-        out_values[out_idx] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
-
-        out_idx += 1;
-        today += 1;
-    }
-
-    Ok(out_values)
 }
 
 #[cfg(test)]

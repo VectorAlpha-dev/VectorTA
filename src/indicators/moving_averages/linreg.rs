@@ -72,6 +72,8 @@ pub enum LinRegError {
     InvalidPeriod { period: usize },
     #[error("No data available for linear regression.")]
     NoData,
+    #[error("All values are NaN during the linear regression calculation.")]
+    AllValuesNaN,
 }
 
 #[inline]
@@ -82,6 +84,10 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
     };
     let size: usize = data.len();
     let period = input.get_period();
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(LinRegError::AllValuesNaN),
+    };
     if period < 1 {
         return Err(LinRegError::InvalidPeriod { period });
     }
@@ -109,12 +115,12 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
 
     for i in 0..(period - 1) {
         let x_i = (i + 1) as f64;
-        let val = data[i];
+        let val = data[i + first_valid_idx];
         y += val;
         xy += val * x_i;
     }
 
-    for i in (period - 1)..size {
+    for i in (first_valid_idx + period - 1)..size {
         let val = data[i];
         xy += val * (period as f64);
         y += val;

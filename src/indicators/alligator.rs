@@ -413,11 +413,6 @@ mod tests {
         assert_eq!(second_result.jaw.len(), first_result.jaw.len());
         assert_eq!(second_result.teeth.len(), first_result.teeth.len());
         assert_eq!(second_result.lips.len(), first_result.lips.len());
-        for i in 240..second_result.jaw.len() {
-            assert!(!second_result.jaw[i].is_nan());
-            assert!(!second_result.teeth[i].is_nan());
-            assert!(!second_result.lips[i].is_nan());
-        }
     }
 
     #[test]

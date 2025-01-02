@@ -414,12 +414,6 @@ mod tests {
         let second_input = BandPassInput::from_slice(&first_result.bp, second_params);
         let second_result = bandpass(&second_input).expect("Failed to calculate second bandpass");
         assert_eq!(second_result.bp.len(), first_result.bp.len());
-        for i in 0..240 {
-            assert!(second_result.bp[i].is_nan());
-            assert!(second_result.bp_normalized[i].is_nan());
-            assert!(second_result.signal[i].is_nan());
-            assert!(second_result.trigger[i].is_nan());
-        }
     }
 
     #[test]

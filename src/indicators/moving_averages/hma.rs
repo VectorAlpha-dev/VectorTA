@@ -68,19 +68,19 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HmaError {
-    #[error("No data provided.")]
+    #[error("hma: No data provided.")]
     NoData,
 
-    #[error("All values are NaN.")]
+    #[error("hma: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("hma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("Cannot calculate half of period: period = {period}")]
+    #[error("hma: Cannot calculate half of period: period = {period}")]
     ZeroHalf { period: usize },
 
-    #[error("Cannot calculate sqrt of period: period = {period}")]
+    #[error("hma: Cannot calculate sqrt of period: period = {period}")]
     ZeroSqrtPeriod { period: usize },
 }
 
@@ -95,6 +95,15 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     if len == 0 {
         return Err(HmaError::NoData);
     }
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => {
+            return Ok(HmaOutput {
+                values: vec![f64::NAN; len],
+            });
+        }
+    };
 
     let period = input.get_period();
     if period == 0 || period > len {
@@ -114,6 +123,11 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     let sqrtp = (period as f64).sqrt().floor() as usize;
     if sqrtp == 0 {
         return Err(HmaError::ZeroSqrtPeriod { period });
+    }
+
+    let m = len - first_valid_idx;
+    if period > m {
+        return Ok(HmaOutput { values });
     }
 
     let sum_w_half = (half * (half + 1)) >> 1;
@@ -139,8 +153,9 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     let mut period_sum_half = 0.0;
     let mut in_idx = 0;
     let mut i_half = 1;
+
     while in_idx < lookback_half {
-        let val = data[in_idx];
+        let val = data[first_valid_idx + in_idx];
         period_sub_half += val;
         period_sum_half += val * (i_half as f64);
         in_idx += 1;
@@ -151,66 +166,67 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     let mut period_sum_full = 0.0;
     let mut in_idx_full = 0;
     let mut i_full = 1;
+
     while in_idx_full < lookback_full {
-        let val = data[in_idx_full];
+        let val = data[first_valid_idx + in_idx_full];
         period_sub_full += val;
         period_sum_full += val * (i_full as f64);
         in_idx_full += 1;
         i_full += 1;
     }
 
-    if in_idx < len {
-        let val = data[in_idx];
+    if in_idx < m {
+        let val = data[first_valid_idx + in_idx];
         in_idx += 1;
         period_sub_half += val;
         period_sum_half += val * half_f;
 
-        wma_half[lookback_half] = period_sum_half / denom_half;
+        wma_half[first_valid_idx + lookback_half] = period_sum_half / denom_half;
         period_sum_half -= period_sub_half;
 
         let mut trailing_idx_half = 1;
-        let mut trailing_value_half = data[0];
+        let mut trailing_value_half = data[first_valid_idx];
 
-        if in_idx_full < len {
-            let valf = data[in_idx_full];
+        if in_idx_full < m {
+            let valf = data[first_valid_idx + in_idx_full];
             in_idx_full += 1;
             period_sub_full += valf;
             period_sum_full += valf * period_f;
 
-            wma_full[lookback_full] = period_sum_full / denom_full;
+            wma_full[first_valid_idx + lookback_full] = period_sum_full / denom_full;
             period_sum_full -= period_sub_full;
 
             let mut trailing_idx_full = 1;
-            let mut trailing_value_full = data[0];
+            let mut trailing_value_full = data[first_valid_idx];
 
-            while in_idx < len || in_idx_full < len {
-                if in_idx < len {
-                    let new_val = data[in_idx];
+            while in_idx < m || in_idx_full < m {
+                if in_idx < m {
+                    let new_val = data[first_valid_idx + in_idx];
                     in_idx += 1;
 
                     period_sub_half += new_val;
                     period_sub_half -= trailing_value_half;
                     period_sum_half += new_val * half_f;
 
-                    trailing_value_half = data[trailing_idx_half];
+                    trailing_value_half = data[first_valid_idx + trailing_idx_half];
                     trailing_idx_half += 1;
 
-                    wma_half[in_idx - 1] = period_sum_half / denom_half;
+                    wma_half[first_valid_idx + (in_idx - 1)] = period_sum_half / denom_half;
                     period_sum_half -= period_sub_half;
                 }
 
-                if in_idx_full < len {
-                    let new_valf = data[in_idx_full];
+                if in_idx_full < m {
+                    let new_valf = data[first_valid_idx + in_idx_full];
                     in_idx_full += 1;
 
                     period_sub_full += new_valf;
                     period_sub_full -= trailing_value_full;
                     period_sum_full += new_valf * period_f;
 
-                    trailing_value_full = data[trailing_idx_full];
+                    trailing_value_full = data[first_valid_idx + trailing_idx_full];
                     trailing_idx_full += 1;
 
-                    wma_full[in_idx_full - 1] = period_sum_full / denom_full;
+                    wma_full[first_valid_idx + (in_idx_full - 1)] = period_sum_full / denom_full;
                     period_sum_full -= period_sub_full;
                 }
             }
@@ -235,7 +251,7 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
         let mut i_s = 1;
 
         while in_idx_sqrt < lookback_sqrt {
-            let val = diff[in_idx_sqrt];
+            let val = diff[first_valid_idx + in_idx_sqrt];
             if val.is_finite() {
                 period_sub_sqrt += val;
                 period_sum_sqrt += val * (i_s as f64);
@@ -244,25 +260,25 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
             i_s += 1;
         }
 
-        if in_idx_sqrt < len {
-            let val = diff[in_idx_sqrt];
+        if in_idx_sqrt < m {
+            let val = diff[first_valid_idx + in_idx_sqrt];
             in_idx_sqrt += 1;
             if val.is_finite() {
                 period_sub_sqrt += val;
                 period_sum_sqrt += val * sqrtp_f;
             }
             let mut trailing_idx_sqrt = 1;
-            let mut trailing_value_sqrt = diff[0];
+            let mut trailing_value_sqrt = diff[first_valid_idx];
 
-            wma_sqrt[lookback_sqrt] = if trailing_value_sqrt.is_finite() {
+            wma_sqrt[first_valid_idx + lookback_sqrt] = if trailing_value_sqrt.is_finite() {
                 period_sum_sqrt / denom_sqrt
             } else {
                 f64::NAN
             };
             period_sum_sqrt -= period_sub_sqrt;
 
-            while in_idx_sqrt < len {
-                let new_val = diff[in_idx_sqrt];
+            while in_idx_sqrt < m {
+                let new_val = diff[first_valid_idx + in_idx_sqrt];
                 in_idx_sqrt += 1;
 
                 if new_val.is_finite() {
@@ -275,15 +291,14 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
                     period_sum_sqrt += new_val * sqrtp_f;
                 }
 
-                trailing_value_sqrt = diff[trailing_idx_sqrt];
+                trailing_value_sqrt = diff[first_valid_idx + trailing_idx_sqrt];
                 trailing_idx_sqrt += 1;
 
-                wma_sqrt[in_idx_sqrt - 1] = if period_sub_sqrt != 0.0 {
+                wma_sqrt[first_valid_idx + (in_idx_sqrt - 1)] = if period_sub_sqrt != 0.0 {
                     period_sum_sqrt / denom_sqrt
                 } else {
                     f64::NAN
                 };
-
                 period_sum_sqrt -= period_sub_sqrt;
             }
         }

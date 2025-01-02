@@ -68,12 +68,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TemaError {
-    #[error("All values in input data are NaN for TEMA calculation.")]
+    #[error("Tema: All values in input data are NaN for TEMA calculation.")]
     AllValuesNaN,
-    #[error("Period cannot be zero or negative for TEMA. period = {period}")]
+    #[error("Tema: Period cannot be zero or negative for TEMA. period = {period}")]
     InvalidPeriod { period: usize },
     #[error(
-        "Not enough data points to calculate TEMA. period = {period}, data length = {data_len}"
+        "Tema: Not enough data points to calculate TEMA. period = {period}, data length = {data_len}"
     )]
     NotEnoughDataPoints { period: usize, data_len: usize },
 }

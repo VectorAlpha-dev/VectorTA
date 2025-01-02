@@ -68,7 +68,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SwmaError {
-    #[error("All values are NaN.")]
+    #[error("Swma: All input values are NaN.")]
     AllValuesNaN,
 
     #[error("SWMA period must be >= 1. Provided: {period}")]
