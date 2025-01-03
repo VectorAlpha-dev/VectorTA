@@ -1,5 +1,24 @@
+/// # Reflex
+///
+/// An indicator (attributed to John Ehlers) designed to detect turning points in a time
+/// series by comparing a 2-pole filtered version of the data to a projected slope over
+/// a specified window (`period`). It then adjusts its output (`Reflex`) based on the
+/// difference between predicted and past values, normalized by a rolling measure of
+/// variance.
+///
+/// ## Parameters
+/// - **period**: The window size used for measuring and predicting the slope (must be ≥ 2).
+///
+/// ## Errors
+/// - **NoData**: reflex: No data provided (empty slice).
+/// - **InvalidPeriod**: reflex: `period` < 2.
+/// - **NotEnoughData**: reflex: The available data is shorter than `period`.
+/// - **AllValuesNaN**: reflex: All input data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(ReflexOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(ReflexError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -69,16 +88,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ReflexError {
-    #[error("No data available for Reflex.")]
+    #[error("reflex: No data available for Reflex.")]
     NoData,
 
-    #[error("Reflex period must be >=2. Provided period was {period}")]
+    #[error("reflex: Reflex period must be >=2. Provided period was {period}")]
     InvalidPeriod { period: usize },
 
-    #[error("Not enough data: needed {needed}, found {found}")]
+    #[error("reflex: Not enough data: needed {needed}, found {found}")]
     NotEnoughData { needed: usize, found: usize },
 
-    #[error("All values are NaN.")]
+    #[error("reflex: All values are NaN.")]
     AllValuesNaN,
 }
 

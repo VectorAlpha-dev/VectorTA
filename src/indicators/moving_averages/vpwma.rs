@@ -1,5 +1,37 @@
+/// # Variable Power Weighted Moving Average (VPWMA)
+///
+/// The Variable Power Weighted Moving Average (VPWMA) adjusts the weights of each
+/// price data point in its calculation based on their respective volumes. This
+/// means that periods with higher trading volumes have a greater influence on
+/// the moving average. By raising the weight to a specified power (`power`),
+/// one can control how aggressively recent, high-volume data points dominate
+/// the resulting average.
+///
+/// ## Parameters
+/// - **period**: Number of data points in each calculation window (defaults to 14).
+/// - **power**: Exponent applied to the volume-based weight function. Higher
+///   values give more impact to recent, higher-volume data (defaults to 0.382).
+///
+/// ## Errors
+/// - If `period < 2`, an error is returned (`"VPWMA period must be >= 2."`).
+/// - If `power` is `NaN`, an error is returned (`"VPWMA power cannot be NaN."`).
+/// - If the data length is less than `period + 1`, an error is returned indicating
+///   insufficient data.
+///
+/// ## Returns
+/// - A `Vec<f64>` matching the input length, with leading elements unchanged
+///   from the original data slice (or candles), and subsequent elements replaced
+///   by the VPWMA.
+///
+/// # Example
+/// ```
+/// // Assuming `candles` is a valid Candles structure with volume data
+/// let params = VpwmaParams { period: Some(14), power: Some(0.382) };
+/// let input = VpwmaInput::from_candles(&candles, "close", params);
+/// let result = vpwma(&input).unwrap();
+/// println!("VPWMA output: {:?}", result.values);
+/// ```
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum VpwmaData<'a> {
@@ -80,7 +112,7 @@ use thiserror::Error;
 pub enum VpwmaError {
     #[error("Input data is empty, cannot compute VPWMA.")]
     EmptyData,
-    #[error("Not enough data: length {data_len} < period+1={period_plus_1}")]
+    #[error("vpwma: Not enough data: length {data_len} < period+1={period_plus_1}")]
     NotEnoughData {
         data_len: usize,
         period_plus_1: usize,

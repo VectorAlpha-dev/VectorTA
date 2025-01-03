@@ -1,5 +1,25 @@
+/// # Zero Lag Exponential Moving Average (ZLEMA)
+///
+/// ZLEMA is an enhanced EMA variant that aims to reduce the lag inherent in
+/// traditional EMAs. It does this by adjusting the input data through a
+/// de-lagging step, effectively “removing” half the typical EMA delay. This
+/// approach can yield a more reactive indicator while still providing the
+/// smoothing benefits of an EMA.
+///
+/// ## Parameters
+/// - **period**: The lookback length for computing ZLEMA (defaults to 14). Must
+///   be ≥ 1 and no greater than the data length.
+///
+/// ## Errors
+/// - **EmptyData**: zlema: No data provided.
+/// - **AllValuesNaN**: zlema: All input values are `NaN`.
+/// - **InvalidPeriod**: zlema: `period` is 0 or exceeds data length.
+///
+/// ## Returns
+/// - **`Ok(ZlemaOutput)`** on success, containing a `Vec<f64>` with length
+///   matching the input.
+/// - **`Err(ZlemaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum ZlemaData<'a> {

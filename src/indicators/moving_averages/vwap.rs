@@ -1,3 +1,30 @@
+/// # Volume Weighted Average Price (VWAP)
+///
+/// VWAP computes the average price of a security weighted by traded volume.
+/// By default, this implementation anchors calculations to a daily (1d) bucket,
+/// but you can customize the anchor (e.g., `1m`, `4h`, `2d`, or `1M`) for
+/// aggregation periods in minutes, hours, days, or months. Internally, VWAP
+/// groups data points by the chosen bucket size, tracks cumulative volume
+/// (`volume_sum`) and cumulative volume*price (`vol_price_sum`), and produces
+/// a cumulative average for each group.
+///
+/// ## Parameters
+/// - **anchor**: Defines the grouping period (e.g., `1m`, `4h`, `1d`, `1M`).
+///   Defaults to `"1d"`.
+///
+/// ## Errors
+/// - **MismatchTimestampsPricesVolumes**: vwap: Mismatch in length of timestamps, prices, or volumes.
+/// - **NoData**: vwap: No data available for VWAP calculation.
+/// - **MismatchPricesVolumes**: vwap: Mismatch in length of prices and volumes.
+/// - **ParseAnchorError**: vwap: Error parsing the anchor string.
+/// - **UnsupportedAnchorUnit**: vwap: The specified anchor unit is not supported.
+/// - **MonthConversionError**: vwap: Error converting timestamp to month-based anchor.
+///
+/// ## Returns
+/// - **`Ok(VwapOutput)`** on success, containing a `Vec<f64>` of length matching
+///   the input, where each value represents the cumulative VWAP within that
+///   anchor bucket.
+/// - **`Err(VwapError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use chrono::{Datelike, NaiveDateTime, Utc};
 use std::error::Error;
@@ -76,21 +103,21 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VwapError {
-    #[error("Mismatch in length of timestamps ({timestamps}), prices ({prices}), or volumes ({volumes}).")]
+    #[error("vwap: Mismatch in length of timestamps ({timestamps}), prices ({prices}), or volumes ({volumes}).")]
     MismatchTimestampsPricesVolumes {
         timestamps: usize,
         prices: usize,
         volumes: usize,
     },
-    #[error("No data for VWAP calculation.")]
+    #[error("vwap: No data for VWAP calculation.")]
     NoData,
-    #[error("Mismatch in length of prices ({prices}) and volumes ({volumes}).")]
+    #[error("vwap: Mismatch in length of prices ({prices}) and volumes ({volumes}).")]
     MismatchPricesVolumes { prices: usize, volumes: usize },
-    #[error("Error parsing anchor: {msg}")]
+    #[error("vwap: Error parsing anchor: {msg}")]
     ParseAnchorError { msg: String },
-    #[error("Unsupported anchor unit '{unit_char}'.")]
+    #[error("vwap: Unsupported anchor unit '{unit_char}'.")]
     UnsupportedAnchorUnit { unit_char: char },
-    #[error("Error converting timestamp {ts_ms} to month-based anchor.")]
+    #[error("vwap: Error converting timestamp {ts_ms} to month-based anchor.")]
     MonthConversionError { ts_ms: i64 },
 }
 

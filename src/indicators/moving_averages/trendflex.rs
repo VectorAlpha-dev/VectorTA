@@ -1,5 +1,26 @@
+/// # Trend Flex Filter
+///
+/// The Trend Flex Filter is designed to highlight momentum shifts by applying a
+/// Super Smoother (using half of `period`) and then measuring the volatility
+/// around this smoothed value. It adapts to changing market conditions by
+/// amplifying or dampening its reaction based on the prevailing volatility level,
+/// providing a balanced view of both trend persistence and sudden market moves.
+///
+/// ## Parameters
+/// - **period**: The primary lookback period (defaults to 20). Must be ≥ 1 and ≤ data length.
+///   Internally, the super smoother uses `(period / 2).round()` as its own period.
+///
+/// ## Errors
+/// - **NoDataProvided**: trendflex: No data was provided.
+/// - **AllValuesNaN**: trendflex: All data values are `NaN`.
+/// - **ZeroTrendFlexPeriod**: trendflex: `period` is zero.
+/// - **TrendFlexPeriodExceedsData**: trendflex: `period` is greater than the data length.
+/// - **SmootherPeriodExceedsData**: trendflex: Derived super smoother period exceeds data length.
+///
+/// ## Returns
+/// - **`Ok(TrendFlexOutput)`** on success, containing a `Vec<f64>` with the same length as the input.
+/// - **`Err(TrendFlexError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
 pub enum TrendFlexData<'a> {

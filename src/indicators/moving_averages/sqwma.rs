@@ -1,5 +1,23 @@
+/// # Square Weighted Moving Average (SQWMA)
+///
+/// A specialized moving average that applies squared weights to recent data
+/// points. The most recent value receives `(period)^2` weight, and each
+/// preceding value’s weight decreases quadratically. This approach enhances
+/// sensitivity to current price changes while still smoothing out older noise.
+///
+/// ## Parameters
+/// - **period**: Number of data points used for weighting (must be ≥ 2).
+///
+/// ## Errors
+/// - **EmptyData**: sqwma: No input data provided.
+/// - **AllValuesNaN**: sqwma: All data values are `NaN`.
+/// - **InvalidPeriod**: sqwma: `period` is less than 2.
+/// - **NotEnoughData**: sqwma: `period + 1` exceeds the available data length.
+///
+/// ## Returns
+/// - **`Ok(SqwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(SqwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum SqwmaData<'a> {
@@ -67,16 +85,18 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SqwmaError {
-    #[error("Empty data for SQWMA calculation.")]
+    #[error("sqma: Empty data for SQWMA calculation.")]
     EmptyData,
 
-    #[error("All values are NaN.")]
+    #[error("sqma: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("SQWMA period must be >= 2. Provided: {period}")]
+    #[error("sqma: SQWMA period must be >= 2. Provided: {period}")]
     InvalidPeriod { period: usize },
 
-    #[error("Not enough data for SQWMA calculation: required at least {required}, found {found}")]
+    #[error(
+        "sqma: Not enough data for SQWMA calculation: required at least {required}, found {found}"
+    )]
     NotEnoughData { required: usize, found: usize },
 }
 

@@ -1,5 +1,24 @@
+/// # Smoothed Moving Average (SMMA)
+///
+/// The Smoothed Moving Average (SMMA) applies a simple recursive formula to
+/// produce a smoother trend. The first SMMA value is initialized as an average
+/// of the first `period` points, and subsequent values are computed by removing
+/// a fraction of the old average and adding a fraction of the new data point.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). (defaults to 7)
+///
+/// ## Errors
+/// - **AllValuesNaN**: smma: All values in input data are `NaN`.
+/// - **InvalidPeriod**: smma: `period` is zero or exceeds the data length.
+/// - **NotEnoughValidData**: smma: Not enough valid data points for the requested `period`.
+/// - **NaNFound**: smma: A `NaN` was encountered after the first valid index.
+///
+/// ## Returns
+/// - **`Ok(SmmaOutput)`** on success, containing a `Vec<f64>` of length matching
+///   the input. Values prior to `first_valid_idx + period - 1` remain `NaN`.
+/// - **`Err(SmmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum SmmaData<'a> {
@@ -68,13 +87,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SmmaError {
-    #[error("All values in input data are NaN.")]
+    #[error("smma: All values in input data are NaN.")]
     AllValuesNaN,
-    #[error("Invalid period specified for SMMA calculation: period = {period}, data length = {data_len}")]
+    #[error("smma: Invalid period specified for SMMA calculation: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Not enough valid data points to compute SMMA: needed = {needed}, valid = {valid}")]
+    #[error(
+        "smma: Not enough valid data points to compute SMMA: needed = {needed}, valid = {valid}"
+    )]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("NaN found in data after the first valid index (index = {first_valid_idx}).")]
+    #[error("smma: NaN found in data after the first valid index (index = {first_valid_idx}).")]
     NaNFound { first_valid_idx: usize },
 }
 

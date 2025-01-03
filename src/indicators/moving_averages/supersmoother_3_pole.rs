@@ -1,5 +1,21 @@
+/// # 3-Pole SuperSmoother
+///
+/// A three-pole smoothing filter (attributed to John Ehlers) that applies exponential
+/// decay at a specific cutoff frequency determined by the `period`. This helps reduce
+/// higher-frequency noise in the data while preserving longer-term trends.
+///
+/// ## Parameters
+/// - **period**: The smoothing period (must be ≥ 1).
+///
+/// ## Errors
+/// - **EmptyData**: supersmoother_3_pole: No data provided.
+/// - **InvalidPeriod**: supersmoother_3_pole: `period` < 1.
+/// - **AllValuesNaN**: supersmoother_3_pole: All data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(SuperSmoother3PoleOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(SuperSmoother3PoleError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -77,7 +93,7 @@ pub enum SuperSmoother3PoleError {
     EmptyData,
     #[error("Period must be >= 1 for 3-pole SuperSmoother: period = {period}")]
     InvalidPeriod { period: usize },
-    #[error("All values are NaN.")]
+    #[error("3-pole SuperSmoother: All values are NaN.")]
     AllValuesNaN,
 }
 

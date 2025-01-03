@@ -1,5 +1,22 @@
+/// # Wilder’s Moving Average (Wilders)
+///
+/// A moving average introduced by J. Welles Wilder, commonly used in indicators such as
+/// the Average Directional Index (ADX). It places a heavier emphasis on new data than a
+/// simple moving average, but less so than an exponential moving average.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points).
+///
+/// ## Errors
+/// - **NoData**: wilders: No data provided.
+/// - **AllValuesNaN**: wilders: All input data values are `NaN`.
+/// - **InvalidPeriod**: wilders: `period` is zero or exceeds the data length.
+/// - **NotEnoughData**: wilders: Not enough valid data points for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(WildersOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(WildersError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum WildersData<'a> {
@@ -68,16 +85,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum WildersError {
-    #[error("No data provided for Wilder's Moving Average.")]
+    #[error("wilders: No data provided for Wilder's Moving Average.")]
     NoData,
 
-    #[error("All values are NaN during Wilder's Moving Average calculation.")]
+    #[error("wilders: All values are NaN during Wilder's Moving Average calculation.")]
     AllValuesNaN,
 
-    #[error("Invalid period specified for Wilder's Moving Average. Period: {period}, data length: {data_len}")]
+    #[error("wilders: Invalid period specified for Wilder's Moving Average. Period: {period}, data length: {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("Insufficient data provided for Wilder's Moving Average calculation. Needed: {needed}, found: {found}")]
+    #[error("wilders: Insufficient data provided for Wilder's Moving Average calculation. Needed: {needed}, found: {found}")]
     NotEnoughData { needed: usize, found: usize },
 }
 

@@ -1,5 +1,21 @@
+/// # Square Root Weighted Moving Average (SRWMA)
+///
+/// A moving average variant that assigns weights proportional to the square root
+/// of the distance from the current bar. This approach provides a moderate
+/// emphasis on more recent data while still accounting for older points, thereby
+/// reducing noise without excessively lagging.
+///
+/// ## Parameters
+/// - **period**: The look-back window size used for weighting (defaults to 14).
+///
+/// ## Errors
+/// - **EmptyData**: srwma: The input data slice is empty.
+/// - **InvalidPeriod**: srwma: The specified `period` is zero.
+///
+/// ## Returns
+/// - **`Ok(SrwmaOutput)`** on success, containing a `Vec<f64>` that matches the input length.
+/// - **`Err(SrwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum SrwmaData<'a> {
@@ -68,9 +84,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SrwmaError {
-    #[error("Data slice is empty for SRWMA calculation.")]
+    #[error("srwma: Data slice is empty for SRWMA calculation.")]
     EmptyData,
-    #[error("Invalid period for SRWMA calculation. period = {period}")]
+    #[error("srwma: Invalid period for SRWMA calculation. period = {period}")]
     InvalidPeriod { period: usize },
 }
 

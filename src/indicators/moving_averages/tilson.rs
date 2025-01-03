@@ -1,5 +1,28 @@
+/// # Tilson T3 Moving Average (T3)
+///
+/// A specialized moving average that applies multiple iterations of an
+/// exponential smoothing algorithm, enhanced by a volume factor (`v_factor`)
+/// parameter. This factor controls the overall responsiveness, allowing you to
+/// tune between smoother (lower `v_factor`) or more reactive (higher `v_factor`)
+/// outputs. Commonly referred to simply as “T3”, it’s favored for its balance
+/// of smoothness and minimal lag.
+///
+/// ## Parameters
+/// - **period**: The look-back period for smoothing (defaults to 5).
+/// - **volume_factor**: Controls the “depth” of the T3 smoothing. Typically in the
+///   range [0.0, 1.0], where higher values yield more aggressive smoothing (defaults to 0.0).
+///
+/// ## Errors
+/// - **EmptyData**: tilson: The input slice is empty.
+/// - **InvalidPeriod**: tilson: `period` is zero or exceeds the available data length.
+/// - **InvalidVolumeFactor**: tilson: The `volume_factor` is invalid (`NaN` or infinite).
+/// - **AllValuesNaN**: tilson: All input data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(TilsonOutput)`** on success, containing a `Vec<f64>` matching the input length,
+///   with `NaN` values where insufficient data exists for the calculation.
+/// - **`Err(TilsonError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum TilsonData<'a> {
@@ -79,13 +102,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TilsonError {
-    #[error("No data available: data length = 0 for Tilson calculation.")]
+    #[error("tilson: No data available: data length = 0 for Tilson calculation.")]
     EmptyData,
-    #[error("Invalid period: period = {period}, data length = {data_len} for Tilson calculation.")]
+    #[error("tilson: Invalid period: period = {period}, data length = {data_len} for Tilson calculation.")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Invalid volume factor: {v_factor} for Tilson calculation.")]
+    #[error("tilson: Invalid volume factor: {v_factor} for Tilson calculation.")]
     InvalidVolumeFactor { v_factor: f64 },
-    #[error("All values are NaN during Tilson calculation..")]
+    #[error("tilson: All values are NaN during Tilson calculation..")]
     AllValuesNaN,
 }
 

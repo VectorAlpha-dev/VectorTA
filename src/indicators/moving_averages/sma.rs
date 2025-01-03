@@ -1,5 +1,24 @@
+/// # Simple Moving Average (SMA)
+///
+/// The most basic form of moving average, which sums the last `period` data points
+/// and divides by `period`. SMA is easy to interpret and widely used for smoothing
+/// data and identifying trends.
+///
+/// ## Parameters
+/// - **period**: The window size (number of data points). Defaults to 9.
+///
+/// ## Errors
+/// - **EmptyData**: sma: Input data slice is empty.
+/// - **InvalidPeriod**: sma: `period` is zero or exceeds the data length.
+/// - **NotEnoughValidData**: sma: Fewer than `period` valid (non-`NaN`) data points remain
+///   after the first valid index.
+/// - **AllValuesNaN**: sma: All input data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(SmaOutput)`** on success, containing a `Vec<f64>` matching the input length,
+///   with leading `NaN`s until the moving average window is filled.
+/// - **`Err(SmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum SmaData<'a> {
@@ -67,13 +86,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SmaError {
-    #[error("Empty data provided for SMA.")]
+    #[error("sma: Empty data provided for SMA.")]
     EmptyData,
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("sma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("sma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("All values are NaN.")]
+    #[error("sma: All values are NaN.")]
     AllValuesNaN,
 }
 

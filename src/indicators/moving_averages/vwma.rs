@@ -1,5 +1,26 @@
+/// # Volume Weighted Moving Average (VWMA)
+///
+/// A moving average that weights each price by its corresponding volume within a
+/// rolling window. This method provides a more accurate reflection of price trends
+/// by emphasizing data points with higher trading activity. Users can specify the
+/// data via candle fields (`Candles` and `source`) or provide both a candle set
+/// and a separate prices slice.
+///
+/// ## Parameters
+/// - **period**: Number of bars (candles) used in each volume-weighted calculation
+///   (defaults to 20). Must be ≥ 1 and ≤ data length.
+///
+/// ## Errors
+/// - **VolumeFieldError**: vwma: Error retrieving the volume field from candle data.
+/// - **InvalidPeriod**: vwma: The specified `period` is 0 or exceeds the length of the data.
+/// - **PriceVolumeMismatch**: vwma: The number of price points does not match the number of volume points.
+/// - **AllValuesNaN**: vwma: All price-volume pairs contain `NaN`.
+/// - **NotEnoughData**: vwma: Insufficient valid data remaining after the first non-`NaN` price-volume pair is found.
+///
+/// ## Returns
+/// - **`Ok(VwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(VwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum VwmaData<'a> {
@@ -91,13 +112,15 @@ use thiserror::Error;
 pub enum VwmaError {
     #[error(transparent)]
     VolumeFieldError(#[from] Box<dyn std::error::Error>),
-    #[error("Invalid period for VWMA calculation: period = {period}, data length = {data_len}")]
+    #[error(
+        "vwma: Invalid period for VWMA calculation: period = {period}, data length = {data_len}"
+    )]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Price and volume mismatch for VWMA: price length = {price_len}, volume length = {volume_len}")]
+    #[error("vwma: Price and volume mismatch for VWMA: price length = {price_len}, volume length = {volume_len}")]
     PriceVolumeMismatch { price_len: usize, volume_len: usize },
-    #[error("All values are NaN for the VWMA calculation.")]
+    #[error("vwma: All values are NaN for the VWMA calculation.")]
     AllValuesNaN,
-    #[error("Not enough data for VWMA calculation: needed {needed}, found {found}")]
+    #[error("vwma: Not enough data for VWMA calculation: needed {needed}, found {found}")]
     NotEnoughData { needed: usize, found: usize },
 }
 

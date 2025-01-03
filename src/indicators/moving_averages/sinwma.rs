@@ -1,5 +1,24 @@
+/// # Sine Weighted Moving Average (SINWMA)
+///
+/// A specialized weighted moving average that applies sine coefficients to
+/// the most recent data points. The sine values decrease from `sin(π/(period+1))`
+/// at the earliest point up to `sin(π * period / (period+1))` at the most recent
+/// point in the window, emphasizing nearer data. This approach can offer a smooth
+/// yet responsive curve.
+///
+/// ## Parameters
+/// - **period**: Number of data points to include in each weighted sum (defaults to 14).
+///
+/// ## Errors
+/// - **EmptyData**: sinwma: The input data slice is empty.
+/// - **InvalidPeriod**: sinwma: `period` is zero or greater than the data length.
+/// - **ZeroSumSines**: sinwma: Sum of the sine coefficients is zero or extremely close to zero,
+///   preventing a valid weighted average.
+///
+/// ## Returns
+/// - **`Ok(SinWmaOutput)`** on success, containing a `Vec<f64>` that mirrors the input length.
+/// - **`Err(SinWmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -78,12 +97,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SinWmaError {
-    #[error("Data slice is empty for SINWMA calculation.")]
+    #[error("sinwma: Data slice is empty for SINWMA calculation.")]
     EmptyData,
-    #[error("Invalid period for SINWMA calculation. period = {period}, data length = {data_len}")]
+    #[error("sinwma: Invalid period for SINWMA calculation. period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error(
-        "Sum of sines is zero or too close to zero, cannot compute SINWMA. sum_sines = {sum_sines}"
+        "sinwma: Sum of sines is zero or too close to zero, cannot compute SINWMA. sum_sines = {sum_sines}"
     )]
     ZeroSumSines { sum_sines: f64 },
 }

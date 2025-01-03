@@ -1,5 +1,23 @@
+/// # Triangular Moving Average (TRIMA)
+///
+/// A moving average computed by averaging an underlying Simple Moving Average (SMA) over
+/// the specified `period`, resulting in a smoother output than a single SMA.
+/// For instance, a TRIMA with a period of 14 first computes a 14-period SMA, then
+/// applies additional averaging steps to produce a triangular shape of weights.
+///
+/// ## Parameters
+/// - **period**: Window size (must be > 3).
+///
+/// ## Errors
+/// - **NotEnoughData**: trima: Not enough data points for the requested `period`.
+/// - **PeriodTooSmall**: trima: `period` ≤ 3.
+/// - **AllValuesNaN**: trima: All data values are `NaN`.
+/// - **NoData**: trima: No data provided.
+///
+/// ## Returns
+/// - **`Ok(TrimaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(TrimaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum TrimaData<'a> {

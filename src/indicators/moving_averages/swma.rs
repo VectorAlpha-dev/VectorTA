@@ -1,5 +1,23 @@
+/// # Symmetric Weighted Moving Average (SWMA)
+///
+/// A moving average that applies triangular (symmetric) weighting across its
+/// window. This places more emphasis on the center of the period than on its
+/// extremes, offering a balance between smoothing and responsiveness. If the
+/// input data is empty, this implementation returns an empty `Vec<f64>` without
+/// error.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). Defaults to 5.
+///
+/// ## Errors
+/// - **AllValuesNaN**: swma: All input data values are `NaN`.
+/// - **InvalidPeriod**: swma: `period` is zero.
+/// - **PeriodExceedsLength**: swma: `period` is larger than the input data length.
+///
+/// ## Returns
+/// - **`Ok(SwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(SwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum SwmaData<'a> {

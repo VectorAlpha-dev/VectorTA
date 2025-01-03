@@ -1,5 +1,23 @@
+/// # Weighted Moving Average (WMA)
+///
+/// A moving average where each data point within the window is assigned a weight proportional
+/// to its position in the window. The most recent data points carry more weight than older ones,
+/// allowing the WMA to react more quickly to new information compared to a simple moving average.
+///
+/// ## Parameters
+/// - **period**: Window size (must be ≥ 2).
+///
+/// ## Errors
+/// - **EmptyData**: wma: Data slice is empty.
+/// - **PeriodExceedsDataLen**: wma: `period` is greater than the data length.
+/// - **InvalidPeriod**: wma: `period` < 2.
+/// - **AllValuesNaN**: wma: All input data values are `NaN`.
+/// - **NotEnoughData**: wma: Not enough valid data points for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(WmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(WmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum WmaData<'a> {

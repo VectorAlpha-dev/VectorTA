@@ -1,5 +1,22 @@
+/// # Triple Exponential Moving Average (TEMA)
+///
+/// A variant of Exponential Moving Average (EMA) computed three times to further
+/// reduce lag and smooth out noise. TEMA is calculated using three consecutive EMAs:  
+/// `TEMA = 3*EMA1 - 3*EMA2 + EMA3`,  
+/// where each `EMA` is computed over the specified `period`.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). Must be ≥ 1.
+///
+/// ## Errors
+/// - **AllValuesNaN**: tema: All input data values are `NaN`.
+/// - **InvalidPeriod**: tema: `period` < 1.
+/// - **NotEnoughDataPoints**: tema: The data length is insufficient for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(TemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(TemaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum TemaData<'a> {
