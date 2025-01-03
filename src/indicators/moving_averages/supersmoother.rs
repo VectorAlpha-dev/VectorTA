@@ -1,3 +1,25 @@
+/// # Super Smoother Filter
+///
+/// A double-pole smoothing filter that aims to reduce higher-frequency noise
+/// while preserving significant trend information. By incorporating two poles in
+/// its design, the Super Smoother can offer less lag compared to simpler
+/// smoothing filters, providing a balance between responsiveness and noise
+/// reduction.
+///
+/// ## Parameters
+/// - **period**: The primary lookback length (defaults to 14). Must be ≥ 1 and
+///   ≤ the data length.
+///
+/// ## Errors
+/// - **EmptyData**: supersmoother: No input data was provided.
+/// - **InvalidPeriod**: supersmoother: The `period` is either 0 or greater than
+///   the length of the input data.
+/// - **AllValuesNaN**: supersmoother: All data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(SuperSmootherOutput)`** on success, containing a `Vec<f64>` with
+///   smoothed values of the same length as the input.
+/// - **`Err(SuperSmootherError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use std::f64::consts::PI;
 

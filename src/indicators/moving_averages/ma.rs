@@ -1,3 +1,28 @@
+/// # Moving Average Dispatcher
+///
+/// A single entry-point function that dispatches the call to various moving average
+/// implementations, based on a string identifier (`ma_type`). Supported identifiers
+/// include `"sma"`, `"ema"`, `"wma"`, etc., and each corresponds to a specific
+/// underlying moving average algorithm. This allows you to switch between different
+/// moving average types at runtime with a uniform interface.
+///
+/// ## Parameters
+/// - **ma_type**: A lowercase string identifier specifying which moving average
+///   function to call (e.g., `"sma"`, `"ema"`, `"alma"`, `"kama"`, etc.).
+/// - **data**: An enum that can contain either candle data + source or a raw slice of `f64`.
+/// - **period**: The window length for the chosen moving average. Its interpretation
+///   depends on the specific MA type (e.g., a look-back period).
+///
+/// ## Errors
+/// - **`Box<dyn Error>`**: Propagates any errors returned by the specific moving average
+///   function. This may include invalid periods, missing or mismatched data fields,
+///   insufficient data length, etc. If `ma_type` does not match a known identifier,
+///   an error will also be returned.
+///
+/// ## Returns
+/// - **`Ok(Vec<f64>)`** on success, containing the computed moving average values
+///   of length matching the input data.
+/// - **`Err(Box<dyn Error>)`** otherwise.
 use crate::indicators::alma::{alma, AlmaData, AlmaInput, AlmaParams};
 use crate::indicators::cwma::{cwma, CwmaData, CwmaInput, CwmaParams};
 use crate::indicators::dema::{dema, DemaData, DemaInput, DemaParams};
