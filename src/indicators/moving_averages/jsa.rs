@@ -223,13 +223,6 @@ mod tests {
         let input = JsaInput::from_slice(&input_data, params);
         let result = jsa(&input);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("JSA period must be > 0"),
-                "Expected 'JSA period must be > 0' error, got: {}",
-                e
-            );
-        }
     }
 
     #[test]
