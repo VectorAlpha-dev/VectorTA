@@ -1,5 +1,30 @@
+/// # Accelerator Oscillator (ACOSC)
+///
+/// A momentum-based indicator attributed to Bill Williams, designed to measure the
+/// acceleration or deceleration of the current driving force behind the price action.
+/// It is derived from the difference between a short-term and medium-term moving average
+/// of the median price (`(high + low) / 2`), followed by a further smoothing step.
+/// This results in two outputs:
+/// - **`osc`**: The oscillator values themselves.
+/// - **`change`**: The one-period difference of the oscillator values, representing
+///   a rate of change or “momentum” of the AC oscillator.
+///
+/// ## Parameters
+/// - None. The AC Oscillator uses fixed settings (5- and 34-period simple moving averages).
+///   You can provide data via [`AcoscData::Candles`] or [`AcoscData::Slices`].
+///
+/// ## Errors
+/// - **CandleFieldError**: Failed to retrieve the required candle fields (`high`/`low`).
+/// - **LengthMismatch**: `high` and `low` slices have different lengths.
+/// - **NotEnoughData**: Insufficient number of data points to compute the AC oscillator
+///   (requires at least 39 data points).
+///
+/// ## Returns
+/// - **`Ok(AcoscOutput)`** on success, containing:
+///   - `osc`: A `Vec<f64>` of AC oscillator values.
+///   - `change`: A `Vec<f64>` of rate-of-change values.
+/// - **`Err(AcoscError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AcoscData<'a> {
@@ -52,11 +77,13 @@ pub enum AcoscError {
     #[error(transparent)]
     CandleFieldError(#[from] Box<dyn std::error::Error>),
 
-    #[error("Mismatch in high/low candle data lengths: high_len={high_len}, low_len={low_len}")]
+    #[error(
+        "acosc: Mismatch in high/low candle data lengths: high_len={high_len}, low_len={low_len}"
+    )]
     LengthMismatch { high_len: usize, low_len: usize },
 
     #[error(
-        "Not enough data points to calculate AC oscillator: required={required}, actual={actual}"
+        "acosc: Not enough data points to calculate AC oscillator: required={required}, actual={actual}"
     )]
     NotEnoughData { required: usize, actual: usize },
 }

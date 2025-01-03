@@ -1,6 +1,40 @@
+/// # Band-Pass Filter
+///
+/// A frequency-based filter (inspired by John Ehlers’ work) that removes both high-frequency
+/// and low-frequency components from a time series, isolating a band of interest. This
+/// implementation first applies a configurable [HighPass filter] to remove low-frequency
+/// noise, then applies a second-stage filter with user-selected `bandwidth` around a
+/// central period (`period`).
+///
+/// Internally, it computes:
+/// 1. **hp**: A high-pass version of the input using `hp_period = 4 * (period / bandwidth)`.
+/// 2. **bp**: A band-pass transform over `hp`, adjusting for phase and bandwidth.
+/// 3. **bp_normalized**: A normalized form of `bp` used to detect peaks.
+/// 4. **trigger**: A high-pass of `bp_normalized` (with `trigger_period = (period / bandwidth) / 1.5`).
+/// 5. **signal**: A simple -1/1 directional signal comparing `bp_normalized` to `trigger`.
+///
+/// ## Parameters
+/// - **period**: The central lookback period around which the band-pass is centered (must be ≥ 2).
+/// - **bandwidth**: A fraction in [0.0, 1.0] controlling the passband’s width (defaults to `0.3`).
+///
+/// ## Errors
+/// - **NotEnoughData**: bandpass: Data length is smaller than `period`.
+/// - **InvalidPeriod**: bandpass: `period` < 2.
+/// - **HpPeriodTooSmall**: bandpass: Computed high-pass period < 2 after rounding.
+/// - **TriggerPeriodTooSmall**: bandpass: Computed trigger period < 2 after rounding.
+/// - **HighPassError**: bandpass: Errors originating from the underlying high-pass filter (e.g., invalid parameters).
+///
+/// ## Returns
+/// - **`Ok(BandPassOutput)`** on success, containing:
+///   - `bp`: The band-pass filtered values.
+///   - `bp_normalized`: The band-pass output normalized by its running peak.
+///   - `signal`: A simple directional signal derived from comparing `bp_normalized` and `trigger`.
+///   - `trigger`: A high-pass filtered output of `bp_normalized` used as a signal trigger.
+/// - **`Err(BandPassError)`** otherwise.
+///
+/// [HighPass filter]: crate::indicators::highpass
 use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -87,9 +121,11 @@ pub enum BandPassError {
     NotEnoughData { data_len: usize, period: usize },
     #[error("BandPass period must be at least 2 (got period={period}).")]
     InvalidPeriod { period: usize },
-    #[error("hp_period is too small after rounding (hp_period={hp_period}).")]
+    #[error("bandpass: hp_period is too small after rounding (hp_period={hp_period}).")]
     HpPeriodTooSmall { hp_period: usize },
-    #[error("trigger_period is too small after rounding (trigger_period={trigger_period}).")]
+    #[error(
+        "bandpass: trigger_period is too small after rounding (trigger_period={trigger_period})."
+    )]
     TriggerPeriodTooSmall { trigger_period: usize },
     #[error(transparent)]
     HighPassError(#[from] HighPassError),

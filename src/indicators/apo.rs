@@ -1,5 +1,32 @@
+/// # Absolute Price Oscillator (APO)
+///
+/// The Absolute Price Oscillator calculates the difference between two
+/// exponential moving averages (EMAs) of different lengths (`short_period`
+/// and `long_period`), effectively measuring momentum and identifying potential
+/// trend shifts. A positive APO indicates the shorter EMA is above the longer
+/// EMA, suggesting bullish momentum, while a negative APO suggests bearish
+/// momentum.
+///
+/// ## Parameters
+/// - **short_period**: The shorter EMA window size, which must be strictly
+///   less than `long_period`. (defaults to 10)
+/// - **long_period**: The longer EMA window size. (defaults to 20)
+///
+/// ## Errors
+/// - **InvalidPeriod**: apo: At least one of the periods is zero.
+/// - **ShortPeriodNotLessThanLong**: apo: The `short_period` is not strictly
+///   less than `long_period`.
+/// - **NoData**: apo: No data provided.
+/// - **AllValuesNaN**: apo: All input data values are `NaN`.
+/// - **NotEnoughData**: apo: There are not enough data points to compute the
+///   longer EMA.
+///
+/// ## Returns
+/// - **`Ok(ApoOutput)`** on success, containing a `Vec<f64>` of length matching
+///   the input. The first value starts immediately using the initial prices,
+///   without a warm-up period.
+/// - **`Err(ApoError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum ApoData<'a> {
@@ -87,7 +114,7 @@ pub enum ApoError {
     #[error("No data provided for APO calculation.")]
     NoData,
 
-    #[error("All values are NaN in the input.")]
+    #[error("APO: All values are NaN in the input.")]
     AllValuesNaN,
 
     #[error("Not enough data points to calculate APO. Needed at least {needed}, found {found}")]

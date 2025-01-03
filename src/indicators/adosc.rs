@@ -1,5 +1,34 @@
+/// # Chaikin Accumulation/Distribution Oscillator (ADOSC)
+///
+/// A momentum indicator developed by Marc Chaikin, based on the Accumulation/Distribution
+/// Line (ADL). It subtracts a longer-term EMA of the ADL from a shorter-term EMA to
+/// identify subtle shifts in market buying/selling pressure.
+///
+/// ## Parameters
+/// - **short_period**: The shorter EMA period (defaults to 3).
+/// - **long_period**: The longer EMA period (defaults to 10).
+///
+/// ## Errors
+/// - **InvalidPeriod**: adosc: At least one of the periods (`short` or `long`) is zero.
+/// - **ShortPeriodGreaterThanLong**: adosc: `short_period` ≥ `long_period`.
+/// - **NoCandlesAvailable**: adosc: No candle data available.
+/// - **NotEnoughData**: adosc: Not enough data points to compute the longer EMA.
+/// - **EmptySlices**: adosc: At least one of the slices (high, low, close, volume) is empty.
+///
+/// ## Returns
+/// - **`Ok(AdoscOutput)`** on success, with a `Vec<f64>` matching the length of the input data,
+///   containing the ADOSC values.
+/// - **`Err(AdoscError)`** otherwise.
+///
+/// # Example
+/// ```
+/// // Suppose we have a `candles` struct with high, low, close, volume data
+/// let params = AdoscParams { short_period: Some(3), long_period: Some(10) };
+/// let input = AdoscInput::from_candles(&candles, params);
+/// let output = adosc(&input).expect("ADOSC calculation failed");
+/// println!("ADOSC values: {:?}", output.values);
+/// ```
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AdoscData<'a> {

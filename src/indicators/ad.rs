@@ -1,5 +1,25 @@
+/// # Chaikin Accumulation/Distribution (AD)
+///
+/// A volume-based indicator that measures the cumulative flow of money into or out
+/// of a security. For each bar (candle), it computes a “Money Flow Multiplier” (MFM),
+/// derived from the position of the close relative to the high-low range, and then
+/// multiplies this by the volume to determine “Money Flow Volume” (MFV). The AD
+/// line is the cumulative sum of these MFVs over time.
+///
+/// ## Parameters
+/// - This function does not have adjustable parameters beyond the required input data.
+///
+/// ## Errors
+/// - **CandleFieldError**: ad: Failure retrieving one of the candle fields needed
+///   (high, low, close, or volume).
+/// - **DataLengthMismatch**: ad: The provided high, low, close, and volume slices
+///   must all be of equal length.
+/// - **NotEnoughData**: ad: The data length is zero; cannot compute AD values.
+///
+/// ## Returns
+/// - **`Ok(AdOutput)`** on success, containing a `Vec<f64>` with the cumulative AD line.
+/// - **`Err(AdError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AdData<'a> {
@@ -68,14 +88,14 @@ use thiserror::Error;
 pub enum AdError {
     #[error(transparent)]
     CandleFieldError(#[from] Box<dyn std::error::Error>),
-    #[error("Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
+    #[error("ad: Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
     DataLengthMismatch {
         high_len: usize,
         low_len: usize,
         close_len: usize,
         volume_len: usize,
     },
-    #[error("Not enough data points to calculate AD. Length={len}")]
+    #[error("ad: Not enough data points to calculate AD. Length={len}")]
     NotEnoughData { len: usize },
 }
 

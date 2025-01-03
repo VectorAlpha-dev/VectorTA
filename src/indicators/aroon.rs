@@ -1,5 +1,28 @@
+/// # Aroon
+///
+/// A trend-following indicator designed by Tushar Chande that measures the strength and
+/// potential direction of a market trend based on the recent highs and lows over a specified
+/// `length`. It provides two outputs:
+/// - **`aroon_up`**: How close the most recent highest high is to the current bar (as a percentage).
+/// - **`aroon_down`**: How close the most recent lowest low is to the current bar (as a percentage).
+///
+/// ## Parameters
+/// - **length**: The lookback period used to determine the highest high and lowest low
+///   (defaults to 14).
+///
+/// ## Errors
+/// - **NoCandlesAvailable**: aroon: No candle data was found.
+/// - **EmptySlices**: aroon: One or both of the `high`/`low` slices are empty.
+/// - **MismatchSliceLength**: aroon: `high` and `low` slices differ in length.
+/// - **NotEnoughData**: aroon: The data length is smaller than the specified `length`.
+/// - **ZeroLength**: aroon: `length` is zero (invalid).
+///
+/// ## Returns
+/// - **`Ok(AroonOutput)`** on success, containing:
+///   - `aroon_up`: A `Vec<f64>` representing the Aroon Up values.
+///   - `aroon_down`: A `Vec<f64>` representing the Aroon Down values.
+/// - **`Err(AroonError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AroonData<'a> {
@@ -72,10 +95,12 @@ pub enum AroonError {
     #[error("One or both slices for Aroon are empty: high_len={high_len}, low_len={low_len}")]
     EmptySlices { high_len: usize, low_len: usize },
 
-    #[error("Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
+    #[error("Aroon: Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
     MismatchSliceLength { high_len: usize, low_len: usize },
 
-    #[error("Not enough data points for Aroon: data length={data_len}, required={required}")]
+    #[error(
+        "Aroon: Not enough data points for Aroon: data length={data_len}, required={required}"
+    )]
     NotEnoughData { data_len: usize, required: usize },
 
     #[error("Invalid length specified for Aroon calculation (length=0).")]

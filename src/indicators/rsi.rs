@@ -1,5 +1,24 @@
+/// # Relative Strength Index (RSI)
+///
+/// RSI is a momentum oscillator that measures the speed and magnitude of recent
+/// price changes. It oscillates between 0 and 100, providing signals about
+/// potential overbought or oversold conditions. A typical RSI period is 14 bars.
+///
+/// ## Parameters
+/// - **period**: The number of bars used to calculate average gains/losses (defaults to 14).
+///
+/// ## Errors
+/// - **NoData**: rsi: The input slice is empty.
+/// - **AllValuesNaN**: rsi: All input data points are `NaN`.
+/// - **NotEnoughData**: rsi: The data length is smaller than the specified `period`.
+/// - **InvalidPeriod**: rsi: `period` is 0 or exceeds the data length.
+///
+/// ## Returns
+/// - **`Ok(RsiOutput)`** on success, containing a `Vec<f64>` of length matching
+///   the input data. The first `period` bars remain `NaN` until the RSI
+///   “warms up.”
+/// - **`Err(RsiError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum RsiData<'a> {

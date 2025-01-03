@@ -1,5 +1,36 @@
+/// # Awesome Oscillator (AO)
+///
+/// A technical analysis indicator developed by Bill Williams, designed to measure
+/// market momentum by comparing recent price changes against a longer baseline.
+/// It uses the difference between two Simple Moving Averages (SMAs) of the
+/// median price (`hl2`)—one short and one long—to highlight shifts in market force.
+///
+/// ## Parameters
+/// - **short_period**: The number of bars used for the short SMA (defaults to 5).
+/// - **long_period**: The number of bars used for the long SMA (defaults to 34).
+///
+/// ## Errors
+/// - **InvalidPeriods**: ao: One or both periods are zero (`short=0` or `long=0`).
+/// - **ShortPeriodNotLess**: ao: `short_period` ≥ `long_period`.
+/// - **NoData**: ao: The input slice is empty.
+/// - **NotEnoughData**: ao: The input slice is smaller than the `long_period`.
+/// - **AllValuesNaN**: ao: All values in the data are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(AoOutput)`** on success, containing a `Vec<f64>` whose length matches
+///   the input data. Leading values (before the `long_period` is reached) remain
+///   `NaN`, while subsequent bars hold the AO values.
+/// - **`Err(AoError)`** otherwise.
+///
+/// # Example
+/// ```
+/// // Suppose `candles` is a Candles structure with high, low, and close data
+/// let params = AoParams { short_period: Some(5), long_period: Some(34) };
+/// let input = AoInput::from_candles(&candles, "hl2", params);
+/// let output = ao(&input).unwrap();
+/// println!("Awesome Oscillator values: {:?}", output.values);
+/// ```
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AoData<'a> {
@@ -66,14 +97,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AoError {
-    #[error("Invalid periods for AO calculation: short={short}, long={long}. Both must be greater than 0.")]
+    #[error("AO: Invalid periods for AO calculation: short={short}, long={long}. Both must be greater than 0.")]
     InvalidPeriods { short: usize, long: usize },
-    #[error("Short period must be strictly less than long period: short={short}, long={long}")]
+    #[error("AO: Short period must be strictly less than long period: short={short}, long={long}")]
     ShortPeriodNotLess { short: usize, long: usize },
-    #[error("No data provided (HL2 slice is empty).")]
+    #[error("AO: No data provided (HL2 slice is empty).")]
     NoData,
     #[error(
-        "Not enough data to compute AO: requested long period = {long}, data length = {data_len}"
+        "AO: Not enough data to compute AO: requested long period = {long}, data length = {data_len}"
     )]
     NotEnoughData { long: usize, data_len: usize },
     #[error("All values in the data are NaN.")]

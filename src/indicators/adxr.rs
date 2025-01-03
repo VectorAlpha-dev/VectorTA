@@ -1,5 +1,25 @@
+/// # Average Directional Index Rating (ADXR)
+///
+/// A smoothed variant of the Average Directional Index (ADX), computed as the average
+/// of the current ADX value and a previous ADX value separated by `period` bars.
+/// By including both recent and past ADX readings, ADXR provides an alternate
+/// perspective on trend strength and consistency.
+///
+/// ## Parameters
+/// - **period**: The ADX lookback period (commonly set to 14).
+///
+/// ## Errors
+/// - **CandleFieldError**: adxr: Failed to retrieve the required candle fields (`high`, `low`, or `close`).
+/// - **HlcLengthMismatch**: adxr: The provided `high`, `low`, and `close` slices have different lengths.
+/// - **AllValuesNaN**: adxr: All `high`, `low`, and `close` values are `NaN`.
+/// - **InvalidPeriod**: adxr: `period` is zero or exceeds the length of the provided data.
+/// - **NotEnoughData**: adxr: There is insufficient data to compute ADXR for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(AdxrOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+///   The final values are the computed ADXR values for each data point.
+/// - **`Err(AdxrError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AdxrData<'a> {
@@ -77,7 +97,7 @@ pub enum AdxrError {
     CandleFieldError(#[from] Box<dyn std::error::Error>),
 
     #[error(
-        "High/low/close data length mismatch: high={high_len}, low={low_len}, close={close_len}"
+        "ADXR: High/low/close data length mismatch: high={high_len}, low={low_len}, close={close_len}"
     )]
     HlcLengthMismatch {
         high_len: usize,
@@ -85,7 +105,7 @@ pub enum AdxrError {
         close_len: usize,
     },
 
-    #[error("All high, low, and close values are NaN.")]
+    #[error("ADXR: All high, low, and close values are NaN.")]
     AllValuesNaN,
 
     #[error(

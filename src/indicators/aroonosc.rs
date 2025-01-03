@@ -1,5 +1,26 @@
+/// # Aroon Oscillator
+///
+/// The Aroon Oscillator measures the relative time since the most recent highest
+/// high and lowest low within a specified `length`. It oscillates between -100
+/// and +100, providing insights into the strength and direction of a price trend.
+/// Higher positive values indicate a stronger uptrend, while negative values
+/// signify a more dominant downtrend.
+///
+/// ## Parameters
+/// - **length**: The number of recent bars to look back when identifying the highest
+///   high and lowest low (defaults to 14).
+///
+/// ## Errors
+/// - **InvalidLength**: aroon_osc: The specified `length` is zero.
+/// - **NoCandles**: aroon_osc: No candle data available.
+/// - **EmptySlices**: aroon_osc: One or both high/low slices are empty.
+/// - **SlicesLengthMismatch**: aroon_osc: High/low slices have different lengths.
+/// - **NotEnoughData**: aroon_osc: Not enough data points to compute the Aroon Oscillator.
+///
+/// ## Returns
+/// - **`Ok(AroonOscOutput)`** on success, containing a `Vec<f64>` of the oscillator values.
+/// - **`Err(AroonOscError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AroonOscData<'a> {
@@ -65,19 +86,19 @@ pub enum AroonOscError {
     #[error(transparent)]
     CandleFieldError(#[from] Box<dyn std::error::Error>),
 
-    #[error("Invalid length specified for Aroon Osc calculation. length={length}")]
+    #[error("aroonosc: Invalid length specified for Aroon Osc calculation. length={length}")]
     InvalidLength { length: usize },
 
-    #[error("No candles available.")]
+    #[error("aroonosc: No candles available.")]
     NoCandles,
 
-    #[error("One or both of the slices for AroonOsc are empty.")]
+    #[error("aroonosc: One or both of the slices for AroonOsc are empty.")]
     EmptySlices,
 
-    #[error("Mismatch in high/low slice length. high_len={high_len}, low_len={low_len}")]
+    #[error("aroonosc: Mismatch in high/low slice length. high_len={high_len}, low_len={low_len}")]
     SlicesLengthMismatch { high_len: usize, low_len: usize },
 
-    #[error("Not enough data points for Aroon Osc: required={required}, found={found}")]
+    #[error("aroonosc: Not enough data points for Aroon Osc: required={required}, found={found}")]
     NotEnoughData { required: usize, found: usize },
 }
 

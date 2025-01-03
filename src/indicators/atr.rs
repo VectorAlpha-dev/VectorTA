@@ -1,5 +1,24 @@
+/// # Average True Range (ATR)
+///
+/// A volatility indicator invented by J. Welles Wilder. It measures the average
+/// distance between the intraday high/low range and the previous closing price,
+/// capturing how much the market moves (both upward and downward fluctuations).
+///
+/// ## Parameters
+/// - **length**: The number of periods used to compute the smoothed true range
+///   (defaults to 14).
+///
+/// ## Errors
+/// - **InvalidLength**: atr: The specified `length` is zero.
+/// - **InconsistentSliceLengths**: atr: Provided slices (high, low, close) have differing
+///   lengths.
+/// - **NoCandlesAvailable**: atr: The provided candle data is empty.
+/// - **NotEnoughData**: atr: The data length is smaller than the required `length`.
+///
+/// ## Returns
+/// - **`Ok(AtrOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(AtrError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AtrData<'a> {

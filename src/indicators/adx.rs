@@ -1,5 +1,25 @@
+/// # Average Directional Index (ADX)
+///
+/// The Average Directional Index (ADX) is a technical indicator that measures
+/// the strength of a prevailing trend by comparing consecutive bars’ highs
+/// and lows. It uses smoothed values of the directional movement (positive
+/// and negative) to arrive at a single value that signals the intensity of
+/// price movement.
+///
+/// ## Parameters
+/// - **period**: The smoothing period over which ADX is calculated. (defaults to 14)
+///
+/// ## Errors
+/// - **CandleFieldError**: adx: An error occurred while selecting fields from the `Candles`.
+/// - **InvalidPeriod**: adx: The specified `period` is zero or exceeds the data length.
+/// - **NotEnoughData**: adx: There are not enough data points to compute ADX. Requires at least
+///   `period + 1` bars.
+///
+/// ## Returns
+/// - **`Ok(AdxOutput)`** on success, containing a `Vec<f64>` of length matching the input data.
+///   Values before the ADX is fully formed remain `NaN`.
+/// - **`Err(AdxError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AdxData<'a> {

@@ -1,5 +1,34 @@
+/// # Alligator Indicator
+///
+/// Bill Williams’ Alligator is a trend-following indicator composed of three
+/// smoothed moving averages with different periods and forward offsets, often
+/// referred to as the “jaw”, “teeth”, and “lips.” Each line is shifted in time
+/// to represent the “Alligator’s jaws, teeth, and lips,” indicating the
+/// convergence or divergence of trends.
+///
+/// ## Parameters
+/// - **jaw_period** (default = 13): The smoothing period for the Alligator’s “jaw.”
+/// - **jaw_offset** (default = 8): The forward shift for the jaw values.
+/// - **teeth_period** (default = 8): The smoothing period for the Alligator’s “teeth.”
+/// - **teeth_offset** (default = 5): The forward shift for the teeth values.
+/// - **lips_period** (default = 5): The smoothing period for the Alligator’s “lips.”
+/// - **lips_offset** (default = 3): The forward shift for the lips values.
+///
+/// ## Errors
+/// - **NoData**: alligator: The input slice is empty.
+/// - **AllValuesNaN**: alligator: The provided data is all `NaN`.
+/// - **InvalidJawPeriod**: alligator: `jaw_period` is zero or exceeds data length.
+/// - **InvalidJawOffset**: alligator: `jaw_offset` is larger than the data length.
+/// - **InvalidTeethPeriod**: alligator: `teeth_period` is zero or exceeds data length.
+/// - **InvalidTeethOffset**: alligator: `teeth_offset` is larger than the data length.
+/// - **InvalidLipsPeriod**: alligator: `lips_period` is zero or exceeds data length.
+/// - **InvalidLipsOffset**: alligator: `lips_offset` is larger than the data length.
+///
+/// ## Returns
+/// - **`Ok(AlligatorOutput)`** on success, containing three `Vec<f64>` for
+///   the jaw, teeth, and lips, each shifted according to their respective offsets.
+/// - **`Err(AlligatorError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AlligatorData<'a> {
@@ -100,28 +129,28 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AlligatorError {
-    #[error("No data provided for Alligator indicator.")]
+    #[error("Alligator: No data provided for Alligator indicator.")]
     NoData,
 
-    #[error("All values are NaN in the input data.")]
+    #[error("Alligator: All values are NaN in the input data.")]
     AllValuesNaN,
 
-    #[error("Invalid jaw period specified: period={period}, data_len={data_len}")]
+    #[error("Alligator: Invalid jaw period specified: period={period}, data_len={data_len}")]
     InvalidJawPeriod { period: usize, data_len: usize },
 
-    #[error("Invalid offset specified for jaw: {offset}")]
+    #[error("Alligator: Invalid offset specified for jaw: {offset}")]
     InvalidJawOffset { offset: usize },
 
-    #[error("Invalid teeth period specified: period={period}, data_len={data_len}")]
+    #[error("Alligator: Invalid teeth period specified: period={period}, data_len={data_len}")]
     InvalidTeethPeriod { period: usize, data_len: usize },
 
-    #[error("Invalid offset specified for teeth: {offset}")]
+    #[error("Alligator: Invalid offset specified for teeth: {offset}")]
     InvalidTeethOffset { offset: usize },
 
-    #[error("Invalid lips period specified: period={period}, data_len={data_len}")]
+    #[error("Alligator: Invalid lips period specified: period={period}, data_len={data_len}")]
     InvalidLipsPeriod { period: usize, data_len: usize },
 
-    #[error("Invalid offset specified for lips: {offset}")]
+    #[error("Alligator: Invalid offset specified for lips: {offset}")]
     InvalidLipsOffset { offset: usize },
 }
 

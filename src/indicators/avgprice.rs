@@ -1,5 +1,29 @@
+/// # Average Price
+///
+/// Computes the average price from the `open`, `high`, `low`, and `close` fields
+/// of candle data (or from slice references). This provides a simple measure of
+/// the typical price over a given interval.
+///
+/// ## Parameters
+/// - **Candles**: If using the `Candles` source, the function extracts the
+///   `open`, `high`, `low`, and `close` fields.
+/// - **Slices**: If providing raw slice references, these slices must have the
+///   same length and represent the same time span.
+///
+/// ## Errors
+/// - **NoCandles**: avgprice: Occurs when the `Candles` structure has zero-length
+///   arrays for the `open`, `high`, `low`, or `close` fields.
+/// - **ZeroLength**: avgprice: Occurs when input slices are of zero length.
+/// - **InconsistentSlices**: avgprice: Occurs when the provided `open`, `high`,
+///   `low`, and `close` slices are not all of the same length.
+/// - **CandleFieldError**: avgprice: An error occurred while retrieving fields
+///   from the `Candles`.
+///
+/// ## Returns
+/// - **`Ok(AvgPriceOutput)`** on success, containing a `Vec<f64>` of length
+///   matching the input. Each entry is `(open + high + low + close) / 4`.
+/// - **`Err(AvgPriceError)`** otherwise.
 use crate::utilities::data_loader::Candles;
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum AvgPriceData<'a> {
@@ -53,14 +77,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AvgPriceError {
-    #[error("No candles available.")]
+    #[error("avgprice: No candles available.")]
     NoCandles,
 
-    #[error("Input slices have zero length.")]
+    #[error("avgprice: Input slices have zero length.")]
     ZeroLength,
 
     #[error(
-        "Inconsistent slice lengths. open_len={open_len}, high_len={high_len}, low_len={low_len}, close_len={close_len}"
+        "avgprice: Inconsistent slice lengths. open_len={open_len}, high_len={high_len}, low_len={low_len}, close_len={close_len}"
     )]
     InconsistentSlices {
         open_len: usize,
