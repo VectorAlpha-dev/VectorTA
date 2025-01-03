@@ -19,6 +19,9 @@ use my_project::indicators::{
     atr::{atr, AtrInput},
     avgprice::{avgprice, AvgPriceInput},
     bandpass::{bandpass, BandPassInput},
+    bollinger_bands::{bollinger_bands, BollingerBandsInput},
+    bop::{bop, BopInput},
+    cci::{cci, CciInput},
     cwma::{cwma, CwmaInput},
     dema::{dema, DemaInput},
     edcf::{edcf, EdcfInput},
@@ -41,6 +44,7 @@ use my_project::indicators::{
     nma::{nma, NmaInput},
     pwma::{pwma, PwmaInput},
     reflex::{reflex, ReflexInput},
+    roc::{roc, RocInput},
     rsi::{rsi, RsiInput},
     sinwma::{sinwma, SinWmaInput},
     sma::{sma, SmaInput},
@@ -71,6 +75,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // BOP
+    group.bench_function(BenchmarkId::new("BOP", 0), |b| {
+        let input = BopInput::with_default_candles(&candles);
+        b.iter(|| bop(black_box(&input)).expect("Failed to calculate BOP"))
+    });
+
+    // CCI
+    group.bench_function(BenchmarkId::new("CCI", 0), |b| {
+        let input = CciInput::with_default_candles(&candles);
+        b.iter(|| cci(black_box(&input)).expect("Failed to calculate CCI"))
+    });
+
+    // Bollinger Bands
+    group.bench_function(BenchmarkId::new("BOLLINGER_BANDS", 0), |b| {
+        let input = BollingerBandsInput::with_default_candles(&candles);
+        b.iter(|| bollinger_bands(black_box(&input)).expect("Failed to calculate BOLLINGER_BANDS"))
+    });
+
+    // ROC
+    group.bench_function(BenchmarkId::new("ROC", 0), |b| {
+        let input = RocInput::with_default_candles(&candles);
+        b.iter(|| roc(black_box(&input)).expect("Failed to calculate ROC"))
+    });
 
     // EPMA
     group.bench_function(BenchmarkId::new("EPMA", 0), |b| {
