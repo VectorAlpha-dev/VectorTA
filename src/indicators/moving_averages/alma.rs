@@ -1,3 +1,26 @@
+/// # Arnaud Legoux Moving Average (ALMA)
+///
+/// A smooth yet responsive moving average that uses Gaussian weighting. Its parameters
+/// (`period`, `offset`, `sigma`) control the window size, the weighting center, and
+/// the Gaussian smoothness. ALMA can also be re-applied to its own output, allowing
+/// iterative smoothing on previously computed results.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points).
+/// - **offset**: Shift in [0.0, 1.0] for the Gaussian center (defaults to 0.85).
+/// - **sigma**: Controls the Gaussian curve’s width (defaults to 6.0).
+///
+/// ## Errors
+/// - **AllValuesNaN**: alma: All input data values are `NaN`.
+/// - **InvalidPeriod**: alma: `period` is zero or exceeds the data length.
+/// - **NotEnoughValidData**: alma: Not enough valid data points for the requested `period`.
+/// - **InvalidSigma**: alma: `sigma` ≤ 0.0.
+/// - **InvalidOffset**: alma: `offset` is `NaN` or infinite.
+///
+/// ## Returns
+/// - **`Ok(AlmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(AlmaError)`** otherwise.
+///
 use crate::utilities::data_loader::{source_type, Candles};
 
 #[derive(Debug, Clone)]
@@ -85,19 +108,19 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AlmaError {
-    #[error("All values are NaN.")]
+    #[error("alma: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("alma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("alma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("Invalid sigma: {sigma}")]
+    #[error("alma: Invalid sigma: {sigma}")]
     InvalidSigma { sigma: f64 },
 
-    #[error("Invalid offset: {offset}")]
+    #[error("alma: Invalid offset: {offset}")]
     InvalidOffset { offset: f64 },
 }
 
