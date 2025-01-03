@@ -1,5 +1,25 @@
+/// # Holt-Winters Moving Average (HWMA)
+///
+/// A triple-smoothed technique that uses three parameters (`na`, `nb`, `nc`) to produce
+/// an adaptive moving average. Each parameter adjusts a specific component of smoothing:
+/// the level (`na`), the trend (`nb`), and the acceleration (`nc`). This allows for
+/// nuanced adjustment of the smoothing process, reacting to different rates of change
+/// in the data.
+///
+/// ## Parameters
+/// - **na**: Smoothing parameter for the level component (must be in (0,1)).
+/// - **nb**: Smoothing parameter for the trend component (must be in (0,1)).
+/// - **nc**: Smoothing parameter for the acceleration component (must be in (0,1)).
+///
+/// ## Errors
+/// - **EmptyData**: hwma: The provided data array is empty.
+/// - **AllValuesNaN**: hwma: All input data values are `NaN`.
+/// - **InvalidParams**: hwma: One or more of `(na, nb, nc)` are out of the range (0,1).
+///
+/// ## Returns
+/// - **`Ok(HwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(HwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum HwmaData<'a> {
@@ -86,11 +106,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HwmaError {
-    #[error("HWMA calculation received empty data array.")]
+    #[error("hwma: calculation received empty data array.")]
     EmptyData,
-    #[error("All values in input data are NaN.")]
+    #[error("hwma: All values in input data are NaN.")]
     AllValuesNaN,
-    #[error("Parameters (na, nb, nc) must be in (0,1). Received: na={na}, nb={nb}, nc={nc}")]
+    #[error("hwma: Parameters (na, nb, nc) must be in (0,1). Received: na={na}, nb={nb}, nc={nc}")]
     InvalidParams { na: f64, nb: f64, nc: f64 },
 }
 

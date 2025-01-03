@@ -1,5 +1,20 @@
+/// # Cubic Weighted Moving Average (CWMA)
+///
+/// A moving average that applies a polynomial (cubic) weighting to candle data.
+/// It places more emphasis on recent data points, highlighting short-term price movements.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points).
+///
+/// ## Errors
+/// - **AllValuesNaN**: cwma: All input data values are `NaN`.
+/// - **InvalidPeriod**: cwma: `period` is zero or exceeds the data length.
+/// - **NotEnoughValidData**: cwma: Not enough valid data points for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(CwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(CwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum CwmaData<'a> {
@@ -68,11 +83,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CwmaError {
-    #[error("All values in input data are NaN.")]
+    #[error("cwma: All values in input data are NaN.")]
     AllValuesNaN,
-    #[error("Invalid period specified for CWMA calculation: period = {period}, data length = {data_len}")]
+    #[error("cwma: Invalid period specified for CWMA calculation: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}")]
+    #[error(
+        "cwma: Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}"
+    )]
     NotEnoughValidData { needed: usize, valid: usize },
 }
 

@@ -1,5 +1,21 @@
+/// # Exponential Moving Average (EMA)
+///
+/// A moving average that applies an exponential weighting, giving more significance to
+/// recent data points. The EMA is calculated using the multiplier `α = 2 / (period + 1)`,
+/// which continuously adjusts the average based on new incoming values.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points).
+///
+/// ## Errors
+/// - **AllValuesNaN**: ema: All input data values are `NaN`.
+/// - **InvalidPeriod**: ema: `period` is zero or exceeds the data length.
+/// - **NotEnoughValidData**: ema: Not enough valid data points for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(EmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(EmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum EmaData<'a> {
@@ -68,11 +84,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum EmaError {
-    #[error("All input data are NaN.")]
+    #[error("ema: All input data are NaN.")]
     AllValuesNaN,
-    #[error("Invalid period for EMA: period = {period}, data length = {data_len}")]
+    #[error("ema: Invalid period for EMA: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Not enough valid data to compute EMA: needed = {needed}, valid = {valid}")]
+    #[error("ema: Not enough valid data to compute EMA: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 }
 

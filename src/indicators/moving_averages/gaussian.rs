@@ -1,5 +1,23 @@
+/// # Gaussian Filter
+///
+/// A parametric smoothing technique that approximates a Gaussian response using
+/// a cascade of discrete poles. Its parameters (`period`, `poles`) control the
+/// filter's length and the number of cascaded stages that shape the overall
+/// filter response.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). (defaults to 14)
+/// - **poles**: The number of poles (1..4) to use for the filter. (defaults to 4)
+///
+/// ## Errors
+/// - **NoData**: gaussian: No data provided to Gaussian filter.
+/// - **InvalidPoles**: gaussian: `poles` is out of range (expected 1..4).
+/// - **PeriodLongerThanData**: gaussian: The `period` is longer than the data length.
+///
+/// ## Returns
+/// - **`Ok(GaussianOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(GaussianError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum GaussianData<'a> {
@@ -79,9 +97,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GaussianError {
-    #[error("No data provided to Gaussian filter.")]
+    #[error("gaussian: No data provided to Gaussian filter.")]
     NoData,
-    #[error("Invalid number of poles: expected 1..4, got {poles}")]
+    #[error("gaussian: Invalid number of poles: expected 1..4, got {poles}")]
     InvalidPoles { poles: usize },
     #[error(
         "Gaussian filter period is longer than the data. period={period}, data_len={data_len}"

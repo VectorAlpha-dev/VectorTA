@@ -1,3 +1,26 @@
+/// # Ehlers Distance Coefficient Filter (EDCF)
+///
+/// A filter proposed by John Ehlers that leverages squared distance measures
+/// between successive data points. By comparing the current value against its
+/// preceding `period` samples, this filter computes a weighted average where
+/// each weight is proportional to the cumulative squared distance. The result
+/// is a smoothed output that can emphasize or de-emphasize points based on
+/// recent volatility. EDCF can be re-applied to its own output, allowing
+/// iterative smoothing on previously computed results.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). (defaults to 15)
+///
+/// ## Errors
+/// - **NoData**: edcf: No data provided to EDCF filter.
+/// - **AllValuesNaN**: edcf: All input data values are `NaN`.
+/// - **InvalidPeriod**: edcf: `period` is zero.
+/// - **NotEnoughValidData**: edcf: Not enough valid data points for the requested `period`.
+/// - **NaNFound**: edcf: A `NaN` was encountered after the first valid index.
+///
+/// ## Returns
+/// - **`Ok(EdcfOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(EdcfError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
@@ -69,19 +92,19 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum EdcfError {
-    #[error("No data provided to EDCF filter.")]
+    #[error("edcf: No data provided to EDCF filter.")]
     NoData,
 
-    #[error("All values are NaN.")]
+    #[error("edcf: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period: period = {period}. Period must be > 0.")]
+    #[error("edcf: Invalid period: period = {period}. Period must be > 0.")]
     InvalidPeriod { period: usize },
 
-    #[error("Not enough valid data points to compute EDCF. Need at least {needed} valid points after index {idx}.")]
+    #[error("edcf: Not enough valid data points to compute EDCF. Need at least {needed} valid points after index {idx}.")]
     NotEnoughValidData { needed: usize, idx: usize },
 
-    #[error("NaN found in data after the first valid index.")]
+    #[error("edcf: NaN found in data after the first valid index.")]
     NaNFound,
 }
 

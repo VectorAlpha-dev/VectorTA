@@ -1,5 +1,26 @@
+/// # Hull Moving Average (HMA)
+///
+/// The Hull Moving Average (HMA) is a moving average technique that aims to
+/// minimize lag while providing smooth output. It combines Weighted Moving
+/// Averages of different lengths—namely `period/2` and `period`—to form an
+/// intermediate difference. A final Weighted Moving Average is then applied
+/// using the integer part of `sqrt(period)`, yielding a responsive trend
+/// indication with reduced lag.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). (defaults to 5)
+///
+/// ## Errors
+/// - **NoData**: hma: No data provided.
+/// - **AllValuesNaN**: hma: All input data values are `NaN`.
+/// - **InvalidPeriod**: hma: `period` is zero or exceeds the data length.
+/// - **ZeroHalf**: hma: Cannot calculate half of period.
+/// - **ZeroSqrtPeriod**: hma: Cannot calculate sqrt of period.
+///
+/// ## Returns
+/// - **`Ok(HmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(HmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum HmaData<'a> {

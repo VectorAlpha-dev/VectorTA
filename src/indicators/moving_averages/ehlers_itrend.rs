@@ -1,3 +1,23 @@
+/// # Ehlers Instantaneous Trend (EIT)
+///
+/// A digital signal processing-based approach proposed by John Ehlers for
+/// detecting cyclical market changes and creating an “instantaneous trend”
+/// line. By leveraging MESA-based spectral analysis, it smooths price data
+/// with minimal lag and dynamically adapts to changes in the dominant
+/// cycle length.
+///
+/// ## Parameters
+/// - **warmup_bars**: Number of initial bars used to initialize the filter state (defaults to 12).
+/// - **max_dc_period**: The maximum cycle period used by the MESA algorithm (defaults to 50).
+///
+/// ## Errors
+/// - **EmptyInputData**: ehlers_itrend: The provided input slice is empty.
+/// - **AllValuesNaN**: ehlers_itrend: All values in the input are `NaN`.
+/// - **NotEnoughDataForWarmup**: ehlers_itrend: Data length is less than the specified `warmup_bars`.
+///
+/// ## Returns
+/// - **`Ok(EhlersITrendOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(EhlersITrendError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 use std::f64::consts::PI;
@@ -78,11 +98,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum EhlersITrendError {
-    #[error("Input data is empty.")]
+    #[error("ehler's itrend: Input data is empty.")]
     EmptyInputData,
-    #[error("All values in input data are NaN.")]
+    #[error("ehler's itrend: All values in input data are NaN.")]
     AllValuesNaN,
-    #[error("Not enough data for warmup. warmup_bars={warmup_bars} but data length={length}")]
+    #[error("ehler's itrend: Not enough data for warmup. warmup_bars={warmup_bars} but data length={length}")]
     NotEnoughDataForWarmup { warmup_bars: usize, length: usize },
 }
 

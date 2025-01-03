@@ -1,3 +1,22 @@
+/// # Double Exponential Moving Average (DEMA)
+///
+/// A moving average technique that seeks to reduce lag by combining two
+/// exponential moving averages (EMA). First, an EMA is calculated on the input
+/// data. Then, a second EMA is computed on the first EMA. Finally, the DEMA is
+/// determined by subtracting the second EMA from twice the first EMA.
+///
+/// ## Parameters
+/// - **period**: Lookback period for the EMA calculations (must be ≥ 1).
+///
+/// ## Errors
+/// - **AllValuesNaN**: DEMA: All input data values are `NaN`.
+/// - **InvalidPeriod**: DEMA: `period` is less than 1.
+/// - **NotEnoughData**: DEMA: Not enough data points (needs `2 * (period - 1)`).
+///
+/// ## Returns
+/// - **`Ok(DemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(DemaError)`** otherwise.
+///
 use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
@@ -69,13 +88,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DemaError {
-    #[error("All values are NaN.")]
+    #[error("dema: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period: period = {period} (must be >= 1).")]
+    #[error("dema: Invalid period: period = {period} (must be >= 1).")]
     InvalidPeriod { period: usize },
 
-    #[error("Not enough data to calculate DEMA for the specified period: needed = {needed}, valid = {valid}.")]
+    #[error("dema: Not enough data to calculate DEMA for the specified period: needed = {needed}, valid = {valid}.")]
     NotEnoughData { needed: usize, valid: usize },
 }
 

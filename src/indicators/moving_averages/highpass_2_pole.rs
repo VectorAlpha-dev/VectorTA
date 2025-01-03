@@ -1,5 +1,21 @@
+/// # 2-Pole High-Pass Filter
+///
+/// A 2-pole high-pass filter using a user-specified cutoff frequency (`k`). This filter
+/// removes or attenuates lower-frequency components from the input data.
+///
+/// ## Parameters
+/// - **period**: Window size (must be ≥ 2).
+/// - **k**: Cutoff frequency (commonly in [0.0, 1.0]) controlling the filter’s
+///          attenuation of low-frequency components (defaults to 0.707).
+///
+/// ## Errors
+/// - **InvalidPeriod**: highpass_2_pole: `period` < 2 or data is empty.
+/// - **InvalidK**: highpass_2_pole: `k` ≤ 0.0 or `k` is `NaN`.
+///
+/// ## Returns
+/// - **`Ok(HighPass2Output)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(HighPass2Error)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -79,9 +95,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HighPass2Error {
-    #[error("Invalid period (<2) or no data for 2-pole high-pass: period = {period}, data length = {data_len}")]
+    #[error("high pass 2 pole : Invalid period (<2) or no data for 2-pole high-pass: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Invalid k (cutoff) for 2-pole high-pass: k = {k}")]
+    #[error("high pass 2 pole : Invalid k (cutoff) for 2-pole high-pass: k = {k}")]
     InvalidK { k: f64 },
 }
 

@@ -1,5 +1,27 @@
+/// # End Point Moving Average (EPMA)
+///
+/// A moving average technique that projects a polynomial-based weighting scheme
+/// from the data’s end point. It utilizes both a `period` to define how many
+/// data points are considered, and an `offset` to shift the weights along the
+/// data series. This approach can help emphasize more recent data values or
+/// redistribute focus based on the chosen parameters.
+///
+/// ## Parameters
+/// - **period**: Number of data points to include in the calculation (defaults to 11).
+///   Must be ≥ 2.
+/// - **offset**: Shift applied to the weighting (defaults to 4). Increasing the offset
+///   moves the weighting window further back in the series, potentially reducing
+///   immediate responsiveness.
+///
+/// ## Errors
+/// - **EmptyDataSlice**: epma: No input data was provided.
+/// - **InvalidPeriod**: epma: `period` < 2, making the calculation invalid.
+/// - **StartIndexOutOfRange**: epma: The combined `period + offset + 1` exceeds the data length.
+///
+/// ## Returns
+/// - **`Ok(EpmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(EpmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum EpmaData<'a> {

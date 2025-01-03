@@ -1,5 +1,25 @@
+/// # Pascal Weighted Moving Average (PWMA)
+///
+/// A weighted moving average that leverages the coefficients of Pascal’s triangle
+/// to form its weighting scheme. For a given `period`, PWMA computes the row of
+/// Pascal’s triangle of length `period`, normalizes these coefficients, and then
+/// applies them to the data slice. This tends to place more emphasis on recent
+/// data points while still accounting for older observations.
+///
+/// ## Parameters
+/// - **period**: The window size (number of data points) to be weighted
+///   according to Pascal’s triangle (defaults to 5).
+///
+/// ## Errors
+/// - **AllValuesNaN**: pwma: All input data values are `NaN`.
+/// - **InvalidPeriod**: pwma: Specified `period` is zero or exceeds data length.
+/// - **PascalWeightsSumZero**: pwma: The computed Pascal weights sum to zero (unexpected).
+///
+/// ## Returns
+/// - **`Ok(PwmaOutput)`** on success, containing a `Vec<f64>` of length matching
+///   the input, where the first `period - 1` entries remain `NaN`.
+/// - **`Err(PwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum PwmaData<'a> {
@@ -68,11 +88,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PwmaError {
-    #[error("All values are NaN.")]
+    #[error("pwma: All values are NaN.")]
     AllValuesNaN,
-    #[error("Invalid period specified for PWMA calculation: period = {period}, data length = {data_len}")]
+    #[error("pwma: Invalid period specified for PWMA calculation: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("Pascal weights sum to zero for period = {period}")]
+    #[error("pwma: Pascal weights sum to zero for period = {period}")]
     PascalWeightsSumZero { period: usize },
 }
 

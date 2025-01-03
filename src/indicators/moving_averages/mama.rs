@@ -1,6 +1,28 @@
+/// # MESA Adaptive Moving Average (MAMA)
+///
+/// The MESA Adaptive Moving Average (MAMA) adapts its smoothing factor based on
+/// the phase and amplitude of the underlying data, potentially offering lower
+/// lag and quicker response than fixed-coefficient moving averages. It
+/// automatically adjusts between faster and slower smoothing limits to follow
+/// market conditions.
+///
+/// ## Parameters
+/// - **fast_limit**: Upper bound for the adaptive smoothing factor (`alpha`). A
+///   higher `fast_limit` allows MAMA to respond more quickly. (defaults to 0.5)
+/// - **slow_limit**: Lower bound for `alpha`. A higher `slow_limit` makes MAMA
+///   respond more conservatively. (defaults to 0.05)
+///
+/// ## Errors
+/// - **NotEnoughData**: mama: Fewer than 10 data points provided.
+/// - **InvalidFastLimit**: mama: The specified `fast_limit` is invalid (≤ 0.0, `NaN`, or infinite).
+/// - **InvalidSlowLimit**: mama: The specified `slow_limit` is invalid (≤ 0.0, `NaN`, or infinite).
+///
+/// ## Returns
+/// - **`Ok(MamaOutput)`** on success, containing two `Vec<f64>`:  
+///   **`mama_values`** and **`fama_values`**, each of length matching the input.
+/// - **`Err(MamaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::math_functions::atan64;
-use std::error::Error;
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -92,13 +114,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MamaError {
-    #[error("Not enough data: needed at least {needed}, found {found}")]
+    #[error("mama: Not enough data: needed at least {needed}, found {found}")]
     NotEnoughData { needed: usize, found: usize },
 
-    #[error("Invalid fast limit: {fast_limit}")]
+    #[error("mama: Invalid fast limit: {fast_limit}")]
     InvalidFastLimit { fast_limit: f64 },
 
-    #[error("Invalid slow limit: {slow_limit}")]
+    #[error("mama: Invalid slow limit: {slow_limit}")]
     InvalidSlowLimit { slow_limit: f64 },
 }
 

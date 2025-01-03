@@ -1,5 +1,23 @@
+/// # Midway Weighted Exponential (MWDX)
+///
+/// A custom exponential smoothing approach that uses a user-defined `factor` to
+/// determine the weighting applied to the most recent data points. When the
+/// `factor` is larger, the indicator responds more aggressively to new data.
+/// Conversely, a smaller `factor` yields a smoother, more lagging curve.
+///
+/// ## Parameters
+/// - **factor**: Controls the balance between new data and historical data.
+///   Must be strictly greater than 0.
+///
+/// ## Errors
+/// - **EmptyData**: mwdx: No input data was provided.
+/// - **InvalidFactor**: mwdx: `factor` is ≤ 0.0, `NaN`, or infinite.
+/// - **InvalidDenominator**: mwdx: The chosen `factor` leads to a zero or negative denominator.
+///
+/// ## Returns
+/// - **`Ok(MwdxOutput)`** on success, containing a `Vec<f64>` with length matching the input.
+/// - **`Err(MwdxError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum MwdxData<'a> {

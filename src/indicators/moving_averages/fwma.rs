@@ -1,3 +1,25 @@
+/// # Fibonacci Weighted Moving Average (FWMA)
+///
+/// A weighted moving average that applies Fibonacci coefficients to each data
+/// point within the specified `period`. Fibonacci numbers grow in a way that
+/// places slightly greater emphasis on more recent data points, while still
+/// smoothing out short-term noise. The sum of the weights (Fibonacci coefficients)
+/// is normalized to 1.0, ensuring the resulting average remains correctly scaled.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points).
+///
+/// ## Errors
+/// - **NoData**: fwma: No data provided (empty slice).
+/// - **InvalidPeriod**: fwma: `period` is zero or exceeds the data length.
+/// - **AllValuesNaN**: fwma: All input data values are `NaN`.
+/// - **NotEnoughValidData**: fwma: Not enough valid data points for the requested `period`.
+/// - **NaNFound**: fwma: A `NaN` value was found after the first valid data index.
+/// - **ZeroFibonacciSum**: fwma: The sum of Fibonacci weights was zero, preventing normalization.
+///
+/// ## Returns
+/// - **`Ok(FwmaOutput)`** on success, containing a `Vec<f64>` matching the input length.
+/// - **`Err(FwmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use std::error::Error;
 
@@ -67,22 +89,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FwmaError {
-    #[error("No data provided.")]
+    #[error("fwma: No data provided.")]
     NoData,
 
-    #[error("Invalid period: period = {period}, data length = {data_len}")]
+    #[error("fwma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("All values are NaN.")]
+    #[error("fwma: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("fwma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("NaN found after the first valid index.")]
+    #[error("fwma: NaN found after the first valid index.")]
     NaNFound,
 
-    #[error("Fibonacci sum is zero. Cannot normalize weights.")]
+    #[error("fwma: Fibonacci sum is zero. Cannot normalize weights.")]
     ZeroFibonacciSum,
 }
 

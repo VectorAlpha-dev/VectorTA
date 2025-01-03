@@ -1,6 +1,23 @@
+/// # High-Pass Filter (HP)
+///
+/// A digital filter that attenuates low-frequency components of the input data,
+/// allowing higher-frequency fluctuations to pass through. This helps to remove
+/// or reduce slow-moving trends or bias.
+///
+/// ## Parameters
+/// - **period**: The size of the window (number of data points). Defaults to 48.
+///
+/// ## Errors
+/// - **AllValuesNaN**: highpass: All input data values are `NaN`.
+/// - **InvalidPeriod**: highpass: `period` is zero, or exceeds the data length, or the data length
+///   is insufficient for filter calculations.
+/// - **InvalidAlpha**: highpass: The cosine value (`cos_val`) is too close to zero, preventing
+///   a valid computation of the alpha parameter.
+///
+/// ## Returns
+/// - **`Ok(HighPassOutput)`** on success, containing a `Vec<f64>` matching the input length.
+/// - **`Err(HighPassError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
-use std::f64::consts::PI;
 
 #[derive(Debug, Clone)]
 pub enum HighPassData<'a> {
@@ -69,13 +86,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HighPassError {
-    #[error("All values are NaN.")]
+    #[error("highpass: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("Invalid period or insufficient data for highpass calculation: period = {period}, data length = {data_len}.")]
+    #[error("highpass: Invalid period or insufficient data for highpass calculation: period = {period}, data length = {data_len}.")]
     InvalidPeriod { period: usize, data_len: usize },
 
-    #[error("Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}")]
+    #[error(
+        "highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}"
+    )]
     InvalidAlpha { cos_val: f64 },
 }
 

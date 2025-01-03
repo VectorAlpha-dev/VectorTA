@@ -1,5 +1,25 @@
+/// # Moving Average Adaptive Q (MAAQ)
+///
+/// A dynamic moving average that adjusts its smoothing coefficient based on the ratio
+/// of short-term noise to long-term signal. By tracking the absolute price changes over
+/// a user-defined period (`period`) and comparing them to a cumulative difference, MAAQ
+/// adapts quickly in volatile markets (`fast_period`) and remains steady during quieter
+/// times (`slow_period`).
+///
+/// ## Parameters
+/// - **period**: Main window size (number of data points).
+/// - **fast_period**: Window size for the fast smoothing coefficient.
+/// - **slow_period**: Window size for the slow smoothing coefficient.
+///
+/// ## Errors
+/// - **AllValuesNaN**: maaq: All values are `NaN`.
+/// - **NotEnoughData**: maaq: Not enough data for the requested `period`.
+/// - **ZeroPeriods**: maaq: `period`, `fast_period`, or `slow_period` is zero.
+///
+/// ## Returns
+/// - **`Ok(MaaqOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(MaaqError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum MaaqData<'a> {
@@ -86,11 +106,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MaaqError {
-    #[error("All values are NaN.")]
+    #[error("maaq: All values are NaN.")]
     AllValuesNaN,
-    #[error("Not enough data: needed = {needed}, got = {got}")]
+    #[error("maaq: Not enough data: needed = {needed}, got = {got}")]
     NotEnoughData { needed: usize, got: usize },
-    #[error("MAAQ periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}")]
+    #[error("maaq: periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}")]
     ZeroPeriods {
         period: usize,
         fast_p: usize,

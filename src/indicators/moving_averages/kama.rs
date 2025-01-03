@@ -1,5 +1,24 @@
+/// # Kaufman Adaptive Moving Average (KAMA)
+///
+/// KAMA is an adaptive moving average that dynamically adjusts its smoothing factor
+/// based on price noise or volatility. When price movements are relatively stable,
+/// KAMA becomes smoother, filtering out minor fluctuations. Conversely, in more
+/// volatile or trending periods, KAMA becomes more reactive, aiming to catch the
+/// prevailing trend sooner.
+///
+/// ## Parameters
+/// - **period**: Core lookback length for the KAMA calculation (defaults to 30).
+///
+/// ## Errors
+/// - **NoData**: kama: No input data was provided.
+/// - **AllValuesNaN**: kama: All input data is `NaN`.
+/// - **InvalidPeriod**: kama: `period` is zero or exceeds the data length.
+/// - **NotEnoughData**: kama: Not enough data to calculate KAMA for the requested `period`.
+///
+/// ## Returns
+/// - **`Ok(KamaOutput)`** on success, containing a `Vec<f64>` with length matching the input.
+/// - **`Err(KamaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum KamaData<'a> {

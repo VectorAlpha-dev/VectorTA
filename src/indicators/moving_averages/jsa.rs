@@ -1,5 +1,22 @@
+/// # (JSA)
+///
+/// JSA provides a simple smoothing approach by averaging a data point with its
+/// value at a specified `period` steps in the past. This can help reduce noise
+/// while maintaining a degree of responsiveness in the time series.
+///
+/// ## Parameters
+/// - **period**: Defines the look-back length for smoothing. (defaults to 30)
+///
+/// ## Errors
+/// - **NoDataProvided**: jsa: No data provided for JSA calculation.
+/// - **AllValuesNaN**: jsa: All input data values are `NaN`.
+/// - **InvalidPeriod**: jsa: `period` must be greater than 0.
+///
+/// ## Returns
+/// - **`Ok(JsaOutput)`** on success, containing a `Vec<f64>` of length matching the input.  
+///   Positions before `period` will be `NaN`.
+/// - **`Err(JsaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum JsaData<'a> {
@@ -68,13 +85,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum JsaError {
-    #[error("No data provided for JSA calculation.")]
+    #[error("jsa: No data provided for JSA calculation.")]
     NoDataProvided,
 
-    #[error("All values are NaN.")]
+    #[error("jsa: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("JSA period must be > 0: period = {period}")]
+    #[error("jsa: period must be > 0: period = {period}")]
     InvalidPeriod { period: usize },
 }
 
@@ -89,11 +106,6 @@ pub fn jsa(input: &JsaInput) -> Result<JsaOutput, JsaError> {
     if len == 0 {
         return Err(JsaError::NoDataProvided);
     }
-
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(JsaError::AllValuesNaN),
-    };
 
     let period = input.get_period();
     if period == 0 {

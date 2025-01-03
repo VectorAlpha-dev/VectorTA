@@ -1,5 +1,22 @@
+/// # Linear Regression (LINREG)
+///
+/// A statistical method that fits a straight line to recent price data. This implementation
+/// forecasts a future value (the next bar) based on the slope and intercept of the fitted
+/// linear trend line over a given period. It can help identify general price direction
+/// and predict near-term continuation or reversal.
+///
+/// ## Parameters
+/// - **period**: Look-back window size for calculating the slope and intercept (defaults to 14).
+///
+/// ## Errors
+/// - **InvalidPeriod**: linreg: `period` is less than 1.
+/// - **NoData**: linreg: Input data slice is empty.
+/// - **AllValuesNaN**: linreg: All input data values are `NaN`.
+///
+/// ## Returns
+/// - **`Ok(LinRegOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(LinRegError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum LinRegData<'a> {
@@ -68,11 +85,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LinRegError {
-    #[error("Invalid period for linear regression: period={period}. Period must be >= 1.")]
+    #[error("linear regression: Invalid period for linear regression: period={period}. Period must be >= 1.")]
     InvalidPeriod { period: usize },
-    #[error("No data available for linear regression.")]
+    #[error("linear regression: No data available for linear regression.")]
     NoData,
-    #[error("All values are NaN during the linear regression calculation.")]
+    #[error("linear regression: All values are NaN during the linear regression calculation.")]
     AllValuesNaN,
 }
 

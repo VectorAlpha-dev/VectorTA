@@ -1,5 +1,22 @@
+/// # Normalized Moving Average (NMA)
+///
+/// A technique that computes an adaptive moving average by transforming the input
+/// values into log space and weighting differences between consecutive values.
+/// The weighting ratio depends on a series of square-root increments. This design
+/// aims to normalize large price changes without oversmoothing small fluctuations.
+///
+/// ## Parameters
+/// - **period**: The look-back window size (in bars). Defaults to 40.
+///
+/// ## Errors
+/// - **AllValuesNaN**: nma: All input data values are `NaN`.
+/// - **PeriodCannotBeZero**: nma: `period` cannot be zero.
+/// - **NotEnoughData**: nma: Data length is less than `period + 1`, making the NMA calculation impossible.
+///
+/// ## Returns
+/// - **`Ok(NmaOutput)`** on success, containing a `Vec<f64>` with the same length as the input.
+/// - **`Err(NmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum NmaData<'a> {
@@ -68,11 +85,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum NmaError {
-    #[error("All values are NaN.")]
+    #[error("nma: All values are NaN.")]
     AllValuesNaN,
-    #[error("NMA period cannot be zero.")]
+    #[error("nma: period cannot be zero.")]
     PeriodCannotBeZero,
-    #[error("Not enough data: len = {len}, period = {period} (need at least period + 1).")]
+    #[error("nma: Not enough data: len = {len}, period = {period} (need at least period + 1).")]
     NotEnoughData { len: usize, period: usize },
 }
 

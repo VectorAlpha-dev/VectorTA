@@ -1,5 +1,26 @@
+/// # Jurik Moving Average (JMA)
+///
+/// A minimal-lag smoothing methodology developed by Mark Jurik. JMA adapts quickly
+/// to market moves while reducing the noise that can come from sudden fluctuations
+/// in the data. It features an adjustable `phase` parameter to shift the curve
+/// forward or backward in time, and a `power` parameter to control the smoothing
+/// aggressiveness.
+///
+/// ## Parameters
+/// - **period**: Window size (number of data points). Defaults to 7.
+/// - **phase**: Phase shift in the range [-100.0, 100.0], controlling how JMA is displaced.
+///   Defaults to 50.0.
+/// - **power**: The exponent applied to the smoothing ratio (`alpha`). Larger values
+///   increase smoothing. Defaults to 2.
+///
+/// ## Errors
+/// - **EmptyData**: jma: The input slice is empty.
+/// - **InvalidPeriod**: jma: `period` is zero or invalid.
+///
+/// ## Returns
+/// - **`Ok(JmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+/// - **`Err(JmaError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub enum JmaData<'a> {
