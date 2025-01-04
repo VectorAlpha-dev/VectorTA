@@ -17,6 +17,7 @@ pub mod cci;
 pub mod deviation;
 pub mod moving_averages;
 pub mod roc;
+pub mod rocp;
 pub mod rsi;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, fwma, gaussian, highpass, highpass_2_pole,
