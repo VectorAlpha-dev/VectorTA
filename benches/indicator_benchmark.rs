@@ -20,6 +20,7 @@ use my_project::indicators::{
     avgprice::{avgprice, AvgPriceInput},
     bandpass::{bandpass, BandPassInput},
     bollinger_bands::{bollinger_bands, BollingerBandsInput},
+    bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput},
     bop::{bop, BopInput},
     cci::{cci, CciInput},
     cwma::{cwma, CwmaInput},
@@ -45,6 +46,7 @@ use my_project::indicators::{
     pwma::{pwma, PwmaInput},
     reflex::{reflex, ReflexInput},
     roc::{roc, RocInput},
+    rocp::{rocp, RocpInput},
     rsi::{rsi, RsiInput},
     sinwma::{sinwma, SinWmaInput},
     sma::{sma, SmaInput},
@@ -75,6 +77,21 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Bollinger Bands Width
+    group.bench_function(BenchmarkId::new("BOLLINGER_BANDS_WIDTH", 0), |b| {
+        let input = BollingerBandsWidthInput::with_default_candles(&candles);
+        b.iter(|| {
+            bollinger_bands_width(black_box(&input))
+                .expect("Failed to calculate BOLLINGER_BANDS_WIDTH")
+        })
+    });
+
+    // ROCP
+    group.bench_function(BenchmarkId::new("ROCP", 0), |b| {
+        let input = RocpInput::with_default_candles(&candles);
+        b.iter(|| rocp(black_box(&input)).expect("Failed to calculate ROCP"))
+    });
 
     // BOP
     group.bench_function(BenchmarkId::new("BOP", 0), |b| {

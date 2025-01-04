@@ -12,6 +12,7 @@ pub mod atr;
 pub mod avgprice;
 pub mod bandpass;
 pub mod bollinger_bands;
+pub mod bollinger_bands_width;
 pub mod bop;
 pub mod cci;
 pub mod deviation;

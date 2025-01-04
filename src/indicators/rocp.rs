@@ -1,12 +1,12 @@
 /// # Rate of Change Percentage (ROCP)
 ///
-/// The Rate of Change Percentage (ROCP) calculates the relative change in value between
-/// the current price and the price `period` bars ago:
+/// The Rate of Change Percentage (ROCP) calculates the relative change in value
+/// between the current price and the price `period` bars ago, without the
+/// extra `* 100` factor used by ROC:
 ///
 /// \[ ROCP[i] = (price[i] - price[i - period]) / price[i - period] \]
 ///
-/// ROCP is often interpreted as a normalized momentum measure centered around zero.
-/// Positive values indicate increasing price, negative values indicate a decrease.
+/// This indicator is centered around 0 and can be positive or negative.
 ///
 /// ## Parameters
 /// - **period**: The lookback window (number of data points). Defaults to 9.
@@ -20,7 +20,7 @@
 ///
 /// ## Returns
 /// - **`Ok(RocpOutput)`** on success, containing a `Vec<f64>` matching the input length,
-///   with leading `NaN`s until the first valid ROCP value.
+///   with leading `NaN`s until the moving window is filled.
 /// - **`Err(RocpError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use thiserror::Error;
@@ -100,7 +100,7 @@ pub enum RocpError {
     AllValuesNaN,
 }
 
-pub fn rate_of_change_percentage(input: &RocpInput) -> Result<RocpOutput, RocpError> {
+pub fn rocp(input: &RocpInput) -> Result<RocpOutput, RocpError> {
     let data: &[f64] = match &input.data {
         RocpData::Candles { candles, source } => source_type(candles, source),
         RocpData::Slice(slice) => slice,
@@ -134,13 +134,8 @@ pub fn rate_of_change_percentage(input: &RocpInput) -> Result<RocpOutput, RocpEr
 
     let start_idx = first_valid_idx + period;
     for i in start_idx..data.len() {
-        let current = data[i];
         let past = data[i - period];
-        if past == 0.0 || past.is_nan() {
-            rocp_values[i] = 0.0;
-        } else {
-            rocp_values[i] = (current - past) / past;
-        }
+        rocp_values[i] = (data[i] - past) / past;
     }
 
     Ok(RocpOutput {
@@ -160,20 +155,18 @@ mod tests {
 
         let default_params = RocpParams { period: None };
         let input_default = RocpInput::from_candles(&candles, "close", default_params);
-        let output_default =
-            rate_of_change_percentage(&input_default).expect("Failed ROCP with default params");
+        let output_default = rocp(&input_default).expect("Failed ROCP with default params");
         assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_period_14 = RocpParams { period: Some(14) };
         let input_period_14 = RocpInput::from_candles(&candles, "hl2", params_period_14);
-        let output_period_14 = rate_of_change_percentage(&input_period_14)
-            .expect("Failed ROCP with period=14, source=hl2");
+        let output_period_14 =
+            rocp(&input_period_14).expect("Failed ROCP with period=14, source=hl2");
         assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = RocpParams { period: Some(20) };
         let input_custom = RocpInput::from_candles(&candles, "hlc3", params_custom);
-        let output_custom =
-            rate_of_change_percentage(&input_custom).expect("Failed ROCP fully custom");
+        let output_custom = rocp(&input_custom).expect("Failed ROCP fully custom");
         assert_eq!(output_custom.values.len(), candles.close.len());
     }
 
@@ -187,7 +180,7 @@ mod tests {
 
         let params = RocpParams { period: Some(10) };
         let input = RocpInput::from_candles(&candles, "close", params);
-        let rocp_result = rate_of_change_percentage(&input).expect("Failed to calculate ROCP");
+        let rocp_result = rocp(&input).expect("Failed to calculate ROCP");
 
         assert_eq!(
             rocp_result.values.len(),
@@ -229,8 +222,7 @@ mod tests {
         }
 
         let default_input = RocpInput::with_default_candles(&candles);
-        let default_rocp_result =
-            rate_of_change_percentage(&default_input).expect("Failed to compute ROCP defaults");
+        let default_rocp_result = rocp(&default_input).expect("Failed to compute ROCP defaults");
         assert_eq!(
             default_rocp_result.values.len(),
             close_prices.len(),
@@ -268,7 +260,7 @@ mod tests {
         let params = RocpParams { period: Some(0) };
         let input = RocpInput::from_slice(&input_data, params);
 
-        let result = rate_of_change_percentage(&input);
+        let result = rocp(&input);
         assert!(result.is_err(), "Expected error for zero period");
         if let Err(e) = result {
             assert!(
@@ -285,7 +277,7 @@ mod tests {
         let params = RocpParams { period: Some(10) };
         let input = RocpInput::from_slice(&input_data, params);
 
-        let result = rate_of_change_percentage(&input);
+        let result = rocp(&input);
         assert!(result.is_err(), "Expected error for period > data.len()");
     }
 
@@ -295,7 +287,7 @@ mod tests {
         let params = RocpParams { period: Some(9) };
         let input = RocpInput::from_slice(&input_data, params);
 
-        let result = rate_of_change_percentage(&input);
+        let result = rocp(&input);
         assert!(
             result.is_err(),
             "Expected error for data smaller than period"
@@ -309,8 +301,7 @@ mod tests {
 
         let first_params = RocpParams { period: Some(14) };
         let first_input = RocpInput::from_candles(&candles, "close", first_params);
-        let first_result =
-            rate_of_change_percentage(&first_input).expect("Failed first ROCP calculation");
+        let first_result = rocp(&first_input).expect("Failed first ROCP calculation");
         assert_eq!(
             first_result.values.len(),
             candles.close.len(),
@@ -319,8 +310,7 @@ mod tests {
 
         let second_params = RocpParams { period: Some(14) };
         let second_input = RocpInput::from_slice(&first_result.values, second_params);
-        let second_result =
-            rate_of_change_percentage(&second_input).expect("Failed second ROCP calculation");
+        let second_result = rocp(&second_input).expect("Failed second ROCP calculation");
         assert_eq!(
             second_result.values.len(),
             first_result.values.len(),
@@ -347,7 +337,7 @@ mod tests {
             period: Some(period),
         };
         let input = RocpInput::from_candles(&candles, "close", params);
-        let rocp_result = rate_of_change_percentage(&input).expect("Failed to calculate ROCP");
+        let rocp_result = rocp(&input).expect("Failed to calculate ROCP");
 
         assert_eq!(
             rocp_result.values.len(),

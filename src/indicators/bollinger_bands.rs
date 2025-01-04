@@ -203,11 +203,9 @@ pub fn bollinger_bands(
     let mut lower_band = vec![f64::NAN; data.len()];
 
     for i in (first_valid_idx + period - 1)..data.len() {
-        if !middle[i].is_nan() && !dev_values[i].is_nan() {
-            middle_band[i] = middle[i];
-            upper_band[i] = middle[i] + devup * dev_values[i];
-            lower_band[i] = middle[i] - devdn * dev_values[i];
-        }
+        middle_band[i] = middle[i];
+        upper_band[i] = middle[i] + devup * dev_values[i];
+        lower_band[i] = middle[i] - devdn * dev_values[i];
     }
 
     Ok(BollingerBandsOutput {
