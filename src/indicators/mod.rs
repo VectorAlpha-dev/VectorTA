@@ -15,7 +15,12 @@ pub mod bollinger_bands;
 pub mod bollinger_bands_width;
 pub mod bop;
 pub mod cci;
+pub mod cfo;
+pub mod cg;
+pub mod coppock;
 pub mod deviation;
+pub mod rocr;
+
 pub mod moving_averages;
 pub mod roc;
 pub mod rocp;

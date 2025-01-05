@@ -23,6 +23,7 @@ use my_project::indicators::{
     bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput},
     bop::{bop, BopInput},
     cci::{cci, CciInput},
+    coppock::{coppock, CoppockInput},
     cwma::{cwma, CwmaInput},
     dema::{dema, DemaInput},
     edcf::{edcf, EdcfInput},
@@ -66,6 +67,9 @@ use my_project::indicators::{
     wilders::{wilders, WildersInput},
     wma::{wma, WmaInput},
     zlema::{zlema, ZlemaInput},
+    cfo::{cfo, CfoInput},
+    rocr::{rocr, RocrInput},
+    cg::{cg, CgInput},
 };
 use std::time::Duration;
 
@@ -77,6 +81,29 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Center of Gravity
+    group.bench_function(BenchmarkId::new("CG", 0), |b| {
+        let input = CgInput::with_default_candles(&candles);
+        b.iter(|| cg(black_box(&input)).expect("Failed to calculate CG"))
+    });
+
+    // Rate of Change Ratio
+    group.bench_function(BenchmarkId::new("ROCR", 0), |b| {
+        let input = RocrInput::with_default_candles(&candles);
+        b.iter(|| rocr(black_box(&input)).expect("Failed to calculate ROCR"))
+    });
+    // Chnade Forecast Oscillator
+    group.bench_function(BenchmarkId::new("CFO", 0), |b| {
+        let input = CfoInput::with_default_candles(&candles);
+        b.iter(|| cfo(black_box(&input)).expect("Failed to calculate CFO"))
+    });
+
+    // Coppock Curve
+    group.bench_function(BenchmarkId::new("COPPOCK", 0), |b| {
+        let input = CoppockInput::with_default_candles(&candles);
+        b.iter(|| coppock(black_box(&input)).expect("Failed to calculate COPPOCK"))
+    });
 
     // Bollinger Bands Width
     group.bench_function(BenchmarkId::new("BOLLINGER_BANDS_WIDTH", 0), |b| {
