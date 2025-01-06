@@ -3,7 +3,6 @@
 /// The Center of Gravity (CG) indicator attempts to measure the "center" of prices
 /// over a given window, sometimes used for smoothing or cycle analysis.  
 ///
-/// Formula (based on your Python snippet):
 ///
 /// ```ignore
 /// for i in range(len(source)):

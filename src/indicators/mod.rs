@@ -17,14 +17,18 @@ pub mod bop;
 pub mod cci;
 pub mod cfo;
 pub mod cg;
+pub mod chande;
+pub mod chop;
+pub mod cksp;
+pub mod cmo;
 pub mod coppock;
 pub mod deviation;
-pub mod rocr;
-
 pub mod moving_averages;
 pub mod roc;
 pub mod rocp;
+pub mod rocr;
 pub mod rsi;
+pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, fwma, gaussian, highpass, highpass_2_pole,
     hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma,

@@ -70,6 +70,10 @@ use my_project::indicators::{
     cfo::{cfo, CfoInput},
     rocr::{rocr, RocrInput},
     cg::{cg, CgInput},
+    cmo::{cmo, CmoInput},
+    cksp::{cksp, CkspInput},
+    chop::{chop, ChopInput},
+    chande::{chande, ChandeInput},
 };
 use std::time::Duration;
 
@@ -81,6 +85,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // CHANDE
+    group.bench_function(BenchmarkId::new("CHANDE", 0), |b| {
+        let input = ChandeInput::with_default_candles(&candles);
+        b.iter(|| chande(black_box(&input)).expect("Failed to calculate CHANDE"))
+    });
+    
+    // CHOP
+    group.bench_function(BenchmarkId::new("CHOP", 0), |b| {
+        let input = ChopInput::with_default_candles(&candles);
+        b.iter(|| chop(black_box(&input)).expect("Failed to calculate CHOP"))
+    });
+
+    // Chande Kroll Stop
+    group.bench_function(BenchmarkId::new("CKSP", 0), |b| {
+        let input = CkspInput::with_default_candles(&candles);
+        b.iter(|| cksp(black_box(&input)).expect("Failed to calculate CKSP"))
+    });
+
+    // Chande Momentum Oscillator
+    group.bench_function(BenchmarkId::new("CMO", 0), |b| {
+        let input = CmoInput::with_default_candles(&candles);
+        b.iter(|| cmo(black_box(&input)).expect("Failed to calculate CMO"))
+    });
 
     // Center of Gravity
     group.bench_function(BenchmarkId::new("CG", 0), |b| {
