@@ -110,6 +110,8 @@ pub enum ChandeError {
     InvalidDirection,
     #[error("chande: ATR error: {0}")]
     AtrError(#[from] AtrError),
+    #[error("chande: Empty data.")]
+    AllValuesNaN,
 }
 
 #[derive(Debug, Error)]
@@ -152,93 +154,26 @@ impl<'a> AtrInput<'a> {
 }
 
 #[inline]
-pub fn atr(input: &AtrInput) -> Result<AtrOutput, AtrError> {
-    let length = input.get_length();
-    if length == 0 {
-        return Err(AtrError::InvalidLength { length });
-    }
-
-    let (high, low, close) = match &input.data {
-        AtrData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| AtrError::NoCandlesAvailable)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| AtrError::NoCandlesAvailable)?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|_| AtrError::NoCandlesAvailable)?;
-            (high, low, close)
-        }
-    };
-
-    let len = close.len();
-    if len == 0 {
-        return Err(AtrError::NoCandlesAvailable);
-    }
-    if length > len {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: len,
-        });
-    }
-
-    let alpha = 1.0 / length as f64;
-    let mut atr_values = vec![f64::NAN; len];
-
-    let mut sum_tr = 0.0;
-    let mut rma = f64::NAN;
-
-    for i in 0..len {
-        let tr = if i == 0 {
-            high[0] - low[0]
-        } else {
-            let hl = high[i] - low[i];
-            let hc = (high[i] - close[i - 1]).abs();
-            let lc = (low[i] - close[i - 1]).abs();
-            hl.max(hc).max(lc)
-        };
-
-        if i < length {
-            sum_tr += tr;
-            if i == length - 1 {
-                rma = sum_tr / length as f64;
-                atr_values[i] = rma;
-            }
-        } else {
-            rma += alpha * (tr - rma);
-            atr_values[i] = rma;
-        }
-    }
-
-    Ok(AtrOutput { values: atr_values })
-}
-
-#[inline]
 pub fn chande(input: &ChandeInput) -> Result<ChandeOutput, ChandeError> {
-    let candles = match &input.data {
-        ChandeData::Candles(c) => c,
-    };
-
-    let period = input.get_period();
-    let mult = input.get_mult();
-    let direction = input.get_direction().to_lowercase();
-
-    if direction != "long" && direction != "short" {
-        return Err(ChandeError::InvalidDirection);
-    }
-
+    let ChandeData::Candles(candles) = &input.data;
     let high = candles
         .select_candle_field("high")
         .map_err(|_| ChandeError::EmptyData)?;
     let low = candles
         .select_candle_field("low")
         .map_err(|_| ChandeError::EmptyData)?;
+    let close = candles
+        .select_candle_field("close")
+        .map_err(|_| ChandeError::EmptyData)?;
     let len = high.len();
-
     if len == 0 {
         return Err(ChandeError::EmptyData);
+    }
+    let period = input.get_period();
+    let mult = input.get_mult();
+    let dir = input.get_direction().to_lowercase();
+    if dir != "long" && dir != "short" {
+        return Err(ChandeError::InvalidDirection);
     }
     if period == 0 || period > len {
         return Err(ChandeError::InvalidPeriod {
@@ -252,40 +187,59 @@ pub fn chande(input: &ChandeInput) -> Result<ChandeOutput, ChandeError> {
             available: len,
         });
     }
-
-    let atr_input = AtrInput::new(candles, period);
-    let atr_result = atr(&atr_input)?;
-    let atr_values = &atr_result.values;
-
-    let mut chande_vals = vec![f64::NAN; len];
-
-    if direction == "long" {
-        for i in (period - 1)..len {
-            let start_idx = i + 1 - period;
-            let mut max_h = f64::MIN;
-            for j in start_idx..=i {
-                if high[j] > max_h {
-                    max_h = high[j];
-                }
+    let first_valid = match close.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(ChandeError::AllValuesNaN),
+    };
+    let mut vals = vec![f64::NAN; len];
+    let mut atr = vec![f64::NAN; len];
+    let alpha = 1.0 / period as f64;
+    let mut sum_tr = 0.0;
+    let mut rma = f64::NAN;
+    for i in first_valid..len {
+        let tr = if i == first_valid {
+            high[i] - low[i]
+        } else {
+            let hl = high[i] - low[i];
+            let hc = (high[i] - close[i - 1]).abs();
+            let lc = (low[i] - close[i - 1]).abs();
+            hl.max(hc).max(lc)
+        };
+        if i < first_valid + period {
+            sum_tr += tr;
+            if i == first_valid + period - 1 {
+                rma = sum_tr / period as f64;
+                atr[i] = rma;
             }
-            chande_vals[i] = max_h - atr_values[i] * mult;
+        } else {
+            rma += alpha * (tr - rma);
+            atr[i] = rma;
         }
-    } else {
-        for i in (period - 1)..len {
-            let start_idx = i + 1 - period;
-            let mut min_l = f64::MAX;
-            for j in start_idx..=i {
-                if low[j] < min_l {
-                    min_l = low[j];
+        if i >= first_valid + period - 1 {
+            let a = atr[i];
+            if !a.is_nan() {
+                let start = i + 1 - period;
+                if dir == "long" {
+                    let mut m = f64::MIN;
+                    for j in start..=i {
+                        if high[j] > m {
+                            m = high[j];
+                        }
+                    }
+                    vals[i] = m - a * mult;
+                } else {
+                    let mut m = f64::MAX;
+                    for j in start..=i {
+                        if low[j] < m {
+                            m = low[j];
+                        }
+                    }
+                    vals[i] = m + a * mult;
                 }
             }
-            chande_vals[i] = min_l + atr_values[i] * mult;
         }
     }
-
-    Ok(ChandeOutput {
-        values: chande_vals,
-    })
+    Ok(ChandeOutput { values: vals })
 }
 
 #[cfg(test)]

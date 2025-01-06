@@ -111,11 +111,9 @@ pub fn cmo(input: &CmoInput) -> Result<CmoOutput, CmoError> {
     }
 
     let period = input.get_period();
-    if period == 0 || period > data.len() {
-        return Err(CmoError::InvalidPeriod {
-            period,
-            data_len: data.len(),
-        });
+    let data_len = data.len();
+    if period == 0 || period > data_len {
+        return Err(CmoError::InvalidPeriod { period, data_len });
     }
 
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
@@ -123,72 +121,70 @@ pub fn cmo(input: &CmoInput) -> Result<CmoOutput, CmoError> {
         None => return Err(CmoError::AllValuesNaN),
     };
 
-    if (data.len() - first_valid_idx) < period {
+    if (data_len - first_valid_idx) < period {
         return Err(CmoError::NotEnoughValidData {
             needed: period,
-            valid: data.len() - first_valid_idx,
+            valid: data_len - first_valid_idx,
         });
     }
 
-    let mut cmo_values = vec![f64::NAN; data.len()];
-
+    let mut cmo_values = vec![f64::NAN; data_len];
     let mut avg_gain = 0.0;
     let mut avg_loss = 0.0;
     let mut prev_price = data[first_valid_idx];
-    let init_start = first_valid_idx + 1;
+
+    let start_loop = first_valid_idx + 1;
     let init_end = first_valid_idx + period;
 
-    for i in init_start..=init_end {
+    let period_f = period as f64;
+    let period_m1 = (period - 1) as f64;
+    let inv_period = 1.0 / period_f;
+
+    for i in start_loop..data_len {
         let curr = data[i];
         let diff = curr - prev_price;
         prev_price = curr;
 
-        if diff > 0.0 {
-            avg_gain += diff;
+        let abs_diff = diff.abs();
+        let gain = 0.5 * (diff + abs_diff);
+        let loss = 0.5 * (abs_diff - diff);
+
+        if i <= init_end {
+            avg_gain += gain;
+            avg_loss += loss;
+
+            if i == init_end {
+                avg_gain *= inv_period;
+                avg_loss *= inv_period;
+
+                let sum_gl = avg_gain + avg_loss;
+                cmo_values[i] = if sum_gl != 0.0 {
+                    100.0 * ((avg_gain - avg_loss) / sum_gl)
+                } else {
+                    0.0
+                };
+            }
         } else {
-            avg_loss -= diff;
-        }
-    }
+            avg_gain *= period_m1;
+            avg_loss *= period_m1;
 
-    avg_gain /= period as f64;
-    avg_loss /= period as f64;
+            avg_gain += gain;
+            avg_loss += loss;
 
-    let first_output_idx = init_end;
-    let sum_gl = avg_gain + avg_loss;
-    if sum_gl != 0.0 {
-        cmo_values[first_output_idx] = 100.0 * ((avg_gain - avg_loss) / sum_gl);
-    } else {
-        cmo_values[first_output_idx] = 0.0;
-    }
+            avg_gain *= inv_period;
+            avg_loss *= inv_period;
 
-    for i in (first_output_idx + 1)..data.len() {
-        let curr = data[i];
-        let diff = curr - prev_price;
-        prev_price = curr;
-
-        avg_gain *= (period as f64 - 1.0);
-        avg_loss *= (period as f64 - 1.0);
-
-        if diff > 0.0 {
-            avg_gain += diff;
-        } else {
-            avg_loss -= diff;
-        }
-
-        avg_gain /= period as f64;
-        avg_loss /= period as f64;
-
-        let sum_gl = avg_gain + avg_loss;
-        if sum_gl != 0.0 {
-            cmo_values[i] = 100.0 * ((avg_gain - avg_loss) / sum_gl);
-        } else {
-            cmo_values[i] = 0.0;
+            let sum_gl = avg_gain + avg_loss;
+            cmo_values[i] = if sum_gl != 0.0 {
+                100.0 * ((avg_gain - avg_loss) / sum_gl)
+            } else {
+                0.0
+            };
         }
     }
 
     Ok(CmoOutput { values: cmo_values })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

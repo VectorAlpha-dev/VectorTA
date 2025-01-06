@@ -120,16 +120,16 @@ pub enum CkspError {
 pub fn cksp(input: &CkspInput) -> Result<CkspOutput, CkspError> {
     let (high, low, close) = match &input.data {
         CkspData::Candles { candles } => {
-            let high = candles
+            let h = candles
                 .select_candle_field("high")
                 .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            let low = candles
+            let l = candles
                 .select_candle_field("low")
                 .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            let close = candles
+            let c = candles
                 .select_candle_field("close")
                 .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            (high, low, close)
+            (h, l, c)
         }
         CkspData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
@@ -138,134 +138,136 @@ pub fn cksp(input: &CkspInput) -> Result<CkspOutput, CkspError> {
             (*high, *low, *close)
         }
     };
-
     let p = input.get_p();
     let x = input.get_x();
     let q = input.get_q();
-
-    let len = close.len();
-    if len == 0 {
+    let size = close.len();
+    if size == 0 {
         return Err(CkspError::NoData);
     }
-
-    if p > len || q > len {
+    if p > size || q > size {
         return Err(CkspError::NotEnoughData {
             p,
             q,
-            data_len: len,
+            data_len: size,
         });
     }
-
-    let mut atr_values = vec![f64::NAN; len];
-    let alpha = 1.0 / (p as f64);
+    let first_valid_idx = match close.iter().position(|&v| !v.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(CkspError::NoData),
+    };
+    let mut long_values = vec![f64::NAN; size];
+    let mut short_values = vec![f64::NAN; size];
+    let mut atr = vec![0.0; size];
     let mut sum_tr = 0.0;
-    let mut rma = f64::NAN;
-
-    for i in 0..len {
-        let tr = if i == 0 {
-            high[0] - low[0]
+    let mut rma = 0.0;
+    let alpha = 1.0 / (p as f64);
+    let mut dq_h = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut dq_ls0 = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut dq_l = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut dq_ss0 = std::collections::VecDeque::<(usize, f64)>::new();
+    for i in 0..size {
+        if i < first_valid_idx {
+            continue;
+        }
+        let tr = if i == first_valid_idx {
+            high[i] - low[i]
         } else {
             let hl = high[i] - low[i];
             let hc = (high[i] - close[i - 1]).abs();
             let lc = (low[i] - close[i - 1]).abs();
             hl.max(hc).max(lc)
         };
-        if i < p {
+        if i - first_valid_idx < p {
             sum_tr += tr;
-            if i == p - 1 {
+            if i - first_valid_idx == p - 1 {
                 rma = sum_tr / p as f64;
-                atr_values[i] = rma;
+                atr[i] = rma;
             }
         } else {
             rma += alpha * (tr - rma);
-            atr_values[i] = rma;
+            atr[i] = rma;
         }
-    }
-
-    fn rolling_max(src: &[f64], window: usize) -> Vec<f64> {
-        let mut output = vec![f64::NAN; src.len()];
-        let mut deque = std::collections::VecDeque::<(usize, f64)>::new();
-
-        for i in 0..src.len() {
-            let val = src[i];
-            while let Some((_, v)) = deque.back() {
-                if *v <= val {
-                    deque.pop_back();
-                } else {
-                    break;
-                }
-            }
-            deque.push_back((i, val));
-            let start = i.saturating_sub(window - 1);
-            while let Some(&(idx, _)) = deque.front() {
-                if idx < start {
-                    deque.pop_front();
-                } else {
-                    break;
-                }
-            }
-            if i >= window - 1 {
-                if let Some(&(_, v)) = deque.front() {
-                    output[i] = v;
-                }
+        while let Some((_, v)) = dq_h.back() {
+            if *v <= high[i] {
+                dq_h.pop_back();
+            } else {
+                break;
             }
         }
-        output
-    }
-
-    fn rolling_min(src: &[f64], window: usize) -> Vec<f64> {
-        let mut output = vec![f64::NAN; src.len()];
-        let mut deque = std::collections::VecDeque::<(usize, f64)>::new();
-
-        for i in 0..src.len() {
-            let val = src[i];
-            while let Some((_, v)) = deque.back() {
-                if *v >= val {
-                    deque.pop_back();
-                } else {
-                    break;
-                }
+        dq_h.push_back((i, high[i]));
+        let start_h = i.saturating_sub(q - 1);
+        while let Some(&(idx, _)) = dq_h.front() {
+            if idx < start_h {
+                dq_h.pop_front();
+            } else {
+                break;
             }
-            deque.push_back((i, val));
-            let start = i.saturating_sub(window - 1);
-            while let Some(&(idx, _)) = deque.front() {
-                if idx < start {
-                    deque.pop_front();
-                } else {
-                    break;
-                }
+        }
+        while let Some((_, v)) = dq_l.back() {
+            if *v >= low[i] {
+                dq_l.pop_back();
+            } else {
+                break;
             }
-            if i >= window - 1 {
-                if let Some(&(_, v)) = deque.front() {
-                    output[i] = v;
+        }
+        dq_l.push_back((i, low[i]));
+        let start_l = i.saturating_sub(q - 1);
+        while let Some(&(idx, _)) = dq_l.front() {
+            if idx < start_l {
+                dq_l.pop_front();
+            } else {
+                break;
+            }
+        }
+        if atr[i] != 0.0 && i >= first_valid_idx + p - 1 {
+            if let (Some(&(_, mh)), Some(&(_, ml))) = (dq_h.front(), dq_l.front()) {
+                let ls0_val = mh - x * atr[i];
+                let ss0_val = ml + x * atr[i];
+                while let Some((_, val)) = dq_ls0.back() {
+                    if *val <= ls0_val {
+                        dq_ls0.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                dq_ls0.push_back((i, ls0_val));
+                let start_ls0 = i.saturating_sub(q - 1);
+                while let Some(&(idx, _)) = dq_ls0.front() {
+                    if idx < start_ls0 {
+                        dq_ls0.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&(_, mx)) = dq_ls0.front() {
+                    long_values[i] = mx;
+                }
+                while let Some((_, val)) = dq_ss0.back() {
+                    if *val >= ss0_val {
+                        dq_ss0.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                dq_ss0.push_back((i, ss0_val));
+                let start_ss0 = i.saturating_sub(q - 1);
+                while let Some(&(idx, _)) = dq_ss0.front() {
+                    if idx < start_ss0 {
+                        dq_ss0.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&(_, mn)) = dq_ss0.front() {
+                    short_values[i] = mn;
                 }
             }
         }
-        output
     }
-
-    let max_high_q = rolling_max(high, q);
-    let min_low_q = rolling_min(low, q);
-
-    let mut ls0 = vec![f64::NAN; len];
-    for i in 0..len {
-        if !max_high_q[i].is_nan() && !atr_values[i].is_nan() {
-            ls0[i] = max_high_q[i] - x * atr_values[i];
-        }
-    }
-    let ls0_rolling = rolling_max(&ls0, q);
-
-    let mut ss0 = vec![f64::NAN; len];
-    for i in 0..len {
-        if !min_low_q[i].is_nan() && !atr_values[i].is_nan() {
-            ss0[i] = min_low_q[i] + x * atr_values[i];
-        }
-    }
-    let ss0_rolling = rolling_min(&ss0, q);
-
     Ok(CkspOutput {
-        long_values: ls0_rolling,
-        short_values: ss0_rolling,
+        long_values,
+        short_values,
     })
 }
 

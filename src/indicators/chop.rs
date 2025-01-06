@@ -134,6 +134,8 @@ pub enum ChopError {
     #[error("chop: Underlying function failed: {0}")]
     UnderlyingFunctionFailed(String),
 }
+use std::collections::VecDeque;
+
 #[inline]
 pub fn chop(input: &ChopInput) -> Result<ChopOutput, ChopError> {
     let (high, low, close) = match &input.data {
@@ -157,6 +159,13 @@ pub fn chop(input: &ChopInput) -> Result<ChopOutput, ChopError> {
             data_len: len,
         });
     }
+    let drift = input.get_drift();
+    if drift == 0 {
+        return Err(ChopError::UnderlyingFunctionFailed(
+            "Invalid drift=0 for ATR".to_string(),
+        ));
+    }
+    let scalar = input.get_scalar();
 
     let first_valid_idx = match (0..len).find(|&i| {
         let (h, l, c) = (high[i], low[i], close[i]);
@@ -165,7 +174,6 @@ pub fn chop(input: &ChopInput) -> Result<ChopOutput, ChopError> {
         Some(idx) => idx,
         None => return Err(ChopError::AllValuesNaN),
     };
-
     if (len - first_valid_idx) < period {
         return Err(ChopError::NotEnoughValidData {
             needed: period,
@@ -173,40 +181,114 @@ pub fn chop(input: &ChopInput) -> Result<ChopOutput, ChopError> {
         });
     }
 
-    let drift = input.get_drift();
-    let scalar = input.get_scalar();
-
-    let atr_input = AtrInput::from_slices(
-        high,
-        low,
-        close,
-        AtrParams {
-            length: Some(drift),
-        },
-    );
-    let atr_output =
-        atr(&atr_input).map_err(|e| ChopError::UnderlyingFunctionFailed(e.to_string()))?;
-    let atr_values = atr_output.values;
-
-    let atr_sum = sum_rolling(&atr_values, period)
-        .map_err(|e| ChopError::UnderlyingFunctionFailed(e.to_string()))?;
-    let hh = max_rolling(high, period)
-        .map_err(|e| ChopError::UnderlyingFunctionFailed(e.to_string()))?;
-    let ll =
-        min_rolling(low, period).map_err(|e| ChopError::UnderlyingFunctionFailed(e.to_string()))?;
-
     let mut chop_values = vec![f64::NAN; len];
-    let log_period = (period as f64).log10();
-    let start_idx = first_valid_idx + period - 1;
 
-    for i in start_idx..len {
-        let sum_val = atr_sum[i];
-        let hi_val = hh[i];
-        let lo_val = ll[i];
-        if !(sum_val.is_nan() || hi_val.is_nan() || lo_val.is_nan()) {
-            let rng = hi_val - lo_val;
-            if rng > 0.0 && sum_val > 0.0 {
-                chop_values[i] = (scalar * (sum_val.log10() - rng.log10())) / log_period;
+    let alpha = 1.0 / (drift as f64);
+    let mut sum_tr = 0.0;
+    let mut rma_atr = f64::NAN;
+
+    let mut atr_ring = vec![0.0; period];
+    let mut ring_idx = 0;
+    let mut rolling_sum_atr = 0.0;
+
+    let mut dq_high: VecDeque<usize> = VecDeque::with_capacity(period);
+    let mut dq_low: VecDeque<usize> = VecDeque::with_capacity(period);
+
+    let mut prev_close = close[first_valid_idx];
+
+    for i in first_valid_idx..len {
+        let tr = if i == first_valid_idx {
+            let hl = high[i] - low[i];
+            sum_tr = hl;
+            hl
+        } else {
+            let hl = high[i] - low[i];
+            let hc = (high[i] - prev_close).abs();
+            let lc = (low[i] - prev_close).abs();
+            hl.max(hc).max(lc)
+        };
+
+        if (i - first_valid_idx) < drift {
+            if i != first_valid_idx {
+                sum_tr += tr;
+            }
+            if (i - first_valid_idx) == (drift - 1) {
+                rma_atr = sum_tr / drift as f64;
+            }
+        } else {
+            rma_atr += alpha * (tr - rma_atr);
+        }
+        prev_close = close[i];
+
+        let current_atr = if (i - first_valid_idx) < drift {
+            if (i - first_valid_idx) == drift - 1 {
+                rma_atr
+            } else {
+                f64::NAN
+            }
+        } else {
+            rma_atr
+        };
+
+        let oldest = atr_ring[ring_idx];
+        rolling_sum_atr -= oldest;
+
+        let new_val = if current_atr.is_nan() {
+            0.0
+        } else {
+            current_atr
+        };
+        atr_ring[ring_idx] = new_val;
+        rolling_sum_atr += new_val;
+
+        ring_idx = (ring_idx + 1) % period;
+
+        let win_start = i.saturating_sub(period - 1);
+        while let Some(&front_idx) = dq_high.front() {
+            if front_idx < win_start {
+                dq_high.pop_front();
+            } else {
+                break;
+            }
+        }
+        let h_val = high[i];
+        while let Some(&back_idx) = dq_high.back() {
+            if high[back_idx] <= h_val {
+                dq_high.pop_back();
+            } else {
+                break;
+            }
+        }
+        dq_high.push_back(i);
+
+        while let Some(&front_idx) = dq_low.front() {
+            if front_idx < win_start {
+                dq_low.pop_front();
+            } else {
+                break;
+            }
+        }
+        let l_val = low[i];
+        while let Some(&back_idx) = dq_low.back() {
+            if low[back_idx] >= l_val {
+                dq_low.pop_back();
+            } else {
+                break;
+            }
+        }
+        dq_low.push_back(i);
+
+        let bars_since_valid = i - first_valid_idx;
+        if bars_since_valid >= (period - 1) {
+            let hh_idx = *dq_high.front().unwrap();
+            let ll_idx = *dq_low.front().unwrap();
+            let range = high[hh_idx] - low[ll_idx];
+
+            if range > 0.0 && rolling_sum_atr > 0.0 {
+                let logp = (period as f64).log10();
+                chop_values[i] = (scalar * (rolling_sum_atr.log10() - range.log10())) / logp;
+            } else {
+                chop_values[i] = f64::NAN;
             }
         }
     }
