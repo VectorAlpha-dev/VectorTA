@@ -23,8 +23,18 @@ use my_project::indicators::{
     bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput},
     bop::{bop, BopInput},
     cci::{cci, CciInput},
+    cfo::{cfo, CfoInput},
+    cg::{cg, CgInput},
+    chande::{chande, ChandeInput},
+    chop::{chop, ChopInput},
+    cksp::{cksp, CkspInput},
+    cmo::{cmo, CmoInput},
     coppock::{coppock, CoppockInput},
+    correl_hl::{correl_hl, CorrelHlInput},
+    correlation_cycle::{correlation_cycle, CorrelationCycleInput},
+    cvi::{cvi, CviInput},
     cwma::{cwma, CwmaInput},
+    damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput},
     dema::{dema, DemaInput},
     edcf::{edcf, EdcfInput},
     ehlers_itrend::{ehlers_itrend, EhlersITrendInput},
@@ -48,6 +58,7 @@ use my_project::indicators::{
     reflex::{reflex, ReflexInput},
     roc::{roc, RocInput},
     rocp::{rocp, RocpInput},
+    rocr::{rocr, RocrInput},
     rsi::{rsi, RsiInput},
     sinwma::{sinwma, SinWmaInput},
     sma::{sma, SmaInput},
@@ -67,13 +78,6 @@ use my_project::indicators::{
     wilders::{wilders, WildersInput},
     wma::{wma, WmaInput},
     zlema::{zlema, ZlemaInput},
-    cfo::{cfo, CfoInput},
-    rocr::{rocr, RocrInput},
-    cg::{cg, CgInput},
-    cmo::{cmo, CmoInput},
-    cksp::{cksp, CkspInput},
-    chop::{chop, ChopInput},
-    chande::{chande, ChandeInput},
 };
 use std::time::Duration;
 
@@ -86,12 +90,40 @@ fn benchmark_indicators(c: &mut Criterion) {
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
 
+    // CORRELATION_CYCLE
+    group.bench_function(BenchmarkId::new("CORRELATION_CYCLE", 0), |b| {
+        let input = CorrelationCycleInput::with_default_candles(&candles);
+        b.iter(|| {
+            correlation_cycle(black_box(&input)).expect("Failed to calculate CORRELATION_CYCLE")
+        })
+    });
+
+    // CORREL_HL
+    group.bench_function(BenchmarkId::new("CORREL_HL", 0), |b| {
+        let input = CorrelHlInput::with_default_candles(&candles);
+        b.iter(|| correl_hl(black_box(&input)).expect("Failed to calculate CORREL_HL"))
+    });
+
+    // DAMIANI VOLATMETER
+    group.bench_function(BenchmarkId::new("DAMIANI_VOLATMETER", 0), |b| {
+        let input = DamianiVolatmeterInput::with_default_candles(&candles);
+        b.iter(|| {
+            damiani_volatmeter(black_box(&input)).expect("Failed to calculate DAMIANI_VOLATMETER")
+        })
+    });
+
+    //CVI
+    group.bench_function(BenchmarkId::new("CVI", 0), |b| {
+        let input = CviInput::with_default_candles(&candles);
+        b.iter(|| cvi(black_box(&input)).expect("Failed to calculate CVI"))
+    });
+
     // CHANDE
     group.bench_function(BenchmarkId::new("CHANDE", 0), |b| {
         let input = ChandeInput::with_default_candles(&candles);
         b.iter(|| chande(black_box(&input)).expect("Failed to calculate CHANDE"))
     });
-    
+
     // CHOP
     group.bench_function(BenchmarkId::new("CHOP", 0), |b| {
         let input = ChopInput::with_default_candles(&candles);
