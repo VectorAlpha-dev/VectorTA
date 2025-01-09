@@ -41,7 +41,12 @@ use my_project::indicators::{
     devstop::{devstop, DevStopInput},
     di::{di, DiInput},
     dm::{dm, DmInput},
+    donchian::{donchian, DonchianInput},
+    dpo::{dpo, DpoInput},
+    dti::{dti, DtiInput},
+    dx::{dx, DxInput},
     edcf::{edcf, EdcfInput},
+    efi::{efi, EfiInput},
     ehlers_itrend::{ehlers_itrend, EhlersITrendInput},
     ema::{ema, EmaInput},
     epma::{epma, EpmaInput},
@@ -94,6 +99,36 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // EFI
+    group.bench_function(BenchmarkId::new("EFI", 0), |b| {
+        let input = EfiInput::with_default_candles(&candles);
+        b.iter(|| efi(black_box(&input)).expect("Failed to calculate EFI"))
+    });
+
+    // DX
+    group.bench_function(BenchmarkId::new("DX", 0), |b| {
+        let input = DxInput::with_default_candles(&candles);
+        b.iter(|| dx(black_box(&input)).expect("Failed to calculate DX"))
+    });
+
+    // DTI
+    group.bench_function(BenchmarkId::new("DTI", 0), |b| {
+        let input = DtiInput::with_default_candles(&candles);
+        b.iter(|| dti(black_box(&input)).expect("Failed to calculate DTI"))
+    });
+
+    // Detrended Price Oscillator
+    group.bench_function(BenchmarkId::new("DPO", 0), |b| {
+        let input = DpoInput::with_default_candles(&candles);
+        b.iter(|| dpo(black_box(&input)).expect("Failed to calculate DPO"))
+    });
+
+    // Donchian Channel
+    group.bench_function(BenchmarkId::new("DONCHIAN", 0), |b| {
+        let input = DonchianInput::with_default_candles(&candles);
+        b.iter(|| donchian(black_box(&input)).expect("Failed to calculate DONCHIAN"))
+    });
 
     // Directional Index
     group.bench_function(BenchmarkId::new("DI", 0), |b| {
