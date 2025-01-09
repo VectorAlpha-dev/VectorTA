@@ -113,27 +113,45 @@ fn standard_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f64>, B
         return Err("Period must be >= 2 for standard deviation.".into());
     }
 
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values are NaN.".into()),
+    };
+
+    if data.len() - first_valid_idx < period {
+        return Err(format!(
+            "Not enough valid data: need {}, but only {} valid from index {}.",
+            period,
+            data.len() - first_valid_idx,
+            first_valid_idx
+        )
+        .into());
+    }
+
     let mut result = vec![f64::NAN; data.len()];
+
     let mut sum = 0.0;
     let mut sumsq = 0.0;
 
-    for i in 0..(period - 1) {
-        sum += data[i];
-        sumsq += data[i] * data[i];
+    for &val in &data[first_valid_idx..(first_valid_idx + period)] {
+        sum += val;
+        sumsq += val * val;
     }
 
-    for i in (period - 1)..data.len() {
-        sum += data[i];
-        sumsq += data[i] * data[i];
+    let mut idx = first_valid_idx + period - 1;
+    let mean = sum / (period as f64);
+    let var = (sumsq / (period as f64)) - mean * mean;
+    result[idx] = var.sqrt();
+
+    for i in (idx + 1)..data.len() {
+        let val_in = data[i];
+        let val_out = data[i - period];
+        sum += val_in - val_out;
+        sumsq += val_in * val_in - val_out * val_out;
 
         let mean = sum / (period as f64);
-        let mean_sq = sumsq / (period as f64);
-        let var = mean_sq - (mean * mean);
+        let var = (sumsq / (period as f64)) - mean * mean;
         result[i] = var.sqrt();
-
-        let oldest_index = i + 1 - period;
-        sum -= data[oldest_index];
-        sumsq -= data[oldest_index] * data[oldest_index];
     }
 
     Ok(result)
@@ -144,12 +162,31 @@ fn mean_absolute_deviation_rolling(
     data: &[f64],
     period: usize,
 ) -> Result<Vec<f64>, Box<dyn Error>> {
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values are NaN.".into()),
+    };
+
+    if data.len() - first_valid_idx < period {
+        return Err(format!(
+            "Not enough valid data: need {}, but only {} valid from index {}.",
+            period,
+            data.len() - first_valid_idx,
+            first_valid_idx
+        )
+        .into());
+    }
+
     let mut result = vec![f64::NAN; data.len()];
 
-    for i in (period - 1)..data.len() {
-        let start_idx = i + 1 - period;
-        let window = &data[start_idx..=i];
+    let start_window_end = first_valid_idx + period - 1;
+    for i in start_window_end..data.len() {
+        let window_start = i + 1 - period;
+        if window_start < first_valid_idx {
+            continue;
+        }
 
+        let window = &data[window_start..=i];
         let mean = window.iter().sum::<f64>() / (period as f64);
         let abs_sum = window.iter().fold(0.0, |acc, &x| acc + (x - mean).abs());
         result[i] = abs_sum / (period as f64);
@@ -162,12 +199,31 @@ fn median_absolute_deviation_rolling(
     data: &[f64],
     period: usize,
 ) -> Result<Vec<f64>, Box<dyn Error>> {
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err("All values are NaN.".into()),
+    };
+
+    if data.len() - first_valid_idx < period {
+        return Err(format!(
+            "Not enough valid data: need {}, but only {} valid from index {}.",
+            period,
+            data.len() - first_valid_idx,
+            first_valid_idx
+        )
+        .into());
+    }
+
     let mut result = vec![f64::NAN; data.len()];
 
-    for i in (period - 1)..data.len() {
-        let start_idx = i + 1 - period;
-        let window = &data[start_idx..=i];
+    let start_window_end = first_valid_idx + period - 1;
+    for i in start_window_end..data.len() {
+        let window_start = i + 1 - period;
+        if window_start < first_valid_idx {
+            continue;
+        }
 
+        let window = &data[window_start..=i];
         let median = find_median(window);
         let mut abs_devs: Vec<f64> = window.iter().map(|&x| (x - median).abs()).collect();
         result[i] = find_median(&abs_devs);

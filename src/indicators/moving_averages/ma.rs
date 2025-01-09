@@ -291,14 +291,12 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                     data: HighPass2Data::Candles { candles, source },
                     params: HighPass2Params {
                         period: Some(period),
-                        k: Some(0.5),
                     },
                 },
                 MaData::Slice(slice) => HighPass2Input {
                     data: HighPass2Data::Slice(slice),
                     params: HighPass2Params {
                         period: Some(period),
-                        k: Some(0.5),
                     },
                 },
             };

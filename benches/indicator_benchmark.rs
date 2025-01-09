@@ -35,7 +35,12 @@ use my_project::indicators::{
     cvi::{cvi, CviInput},
     cwma::{cwma, CwmaInput},
     damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput},
+    dec_osc::{dec_osc, DecOscInput},
+    decycler::{decycler, DecyclerInput},
     dema::{dema, DemaInput},
+    devstop::{devstop, DevStopInput},
+    di::{di, DiInput},
+    dm::{dm, DmInput},
     edcf::{edcf, EdcfInput},
     ehlers_itrend::{ehlers_itrend, EhlersITrendInput},
     ema::{ema, EmaInput},
@@ -89,6 +94,35 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Directional Index
+    group.bench_function(BenchmarkId::new("DI", 0), |b| {
+        let input = DiInput::with_default_candles(&candles);
+        b.iter(|| di(black_box(&input)).expect("Failed to calculate DI"))
+    });
+
+    // Directional Movement
+    group.bench_function(BenchmarkId::new("DM", 0), |b| {
+        let input = DmInput::with_default_candles(&candles);
+        b.iter(|| dm(black_box(&input)).expect("Failed to calculate DM"))
+    });
+
+    // DEVIATION STOP
+    group.bench_function(BenchmarkId::new("DEVIATION STOP", 0), |b| {
+        let input = DevStopInput::with_default_candles(&candles);
+        b.iter(|| devstop(black_box(&input)).expect("Failed to calculate DEVIATION STOP"))
+    });
+
+    // DECYCLER
+    group.bench_function(BenchmarkId::new("DECYCLER", 0), |b| {
+        let input = DecyclerInput::with_default_candles(&candles);
+        b.iter(|| decycler(black_box(&input)).expect("Failed to calculate DECYCLER"))
+    });
+    // DECYCLER OSCILLATOR
+    group.bench_function(BenchmarkId::new("DECYCLER OSCILLATOR", 0), |b| {
+        let input = DecOscInput::with_default_candles(&candles);
+        b.iter(|| dec_osc(black_box(&input)).expect("Failed to calculate DECYCLER"))
+    });
 
     // CORRELATION_CYCLE
     group.bench_function(BenchmarkId::new("CORRELATION_CYCLE", 0), |b| {

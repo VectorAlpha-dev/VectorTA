@@ -35,14 +35,12 @@ pub struct HighPass2Output {
 #[derive(Debug, Clone)]
 pub struct HighPass2Params {
     pub period: Option<usize>,
-    pub k: Option<f64>,
 }
 
 impl Default for HighPass2Params {
     fn default() -> Self {
         Self {
             period: Some(48),
-            k: Some(0.707),
         }
     }
 }
@@ -83,12 +81,6 @@ impl<'a> HighPass2Input<'a> {
             .period
             .unwrap_or_else(|| HighPass2Params::default().period.unwrap())
     }
-
-    pub fn get_k(&self) -> f64 {
-        self.params
-            .k
-            .unwrap_or_else(|| HighPass2Params::default().k.unwrap())
-    }
 }
 
 use thiserror::Error;
@@ -97,8 +89,6 @@ use thiserror::Error;
 pub enum HighPass2Error {
     #[error("high pass 2 pole : Invalid period (<2) or no data for 2-pole high-pass: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("high pass 2 pole : Invalid k (cutoff) for 2-pole high-pass: k = {k}")]
-    InvalidK { k: f64 },
 }
 
 #[inline]
@@ -109,7 +99,6 @@ pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPa
     };
     let len: usize = data.len();
     let period: usize = input.get_period();
-    let k: f64 = input.get_k();
 
     if period < 2 || len == 0 {
         return Err(HighPass2Error::InvalidPeriod {
@@ -117,11 +106,8 @@ pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPa
             data_len: len,
         });
     }
-    if k <= 0.0 || k.is_nan() {
-        return Err(HighPass2Error::InvalidK { k });
-    }
 
-    let angle = 2.0 * PI * k / (period as f64);
+    let angle = 2.0 * PI * 0.707 / (period as f64);
     let sin_val = angle.sin();
     let cos_val = angle.cos();
     let alpha = 1.0 + ((sin_val - 1.0) / cos_val);
@@ -165,7 +151,6 @@ mod tests {
             .expect("Failed to extract close prices");
         let params = HighPass2Params {
             period: Some(48),
-            k: Some(0.707),
         };
         let input = HighPass2Input::from_candles(&candles, "close", params);
         let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
@@ -190,7 +175,6 @@ mod tests {
     fn test_high_pass_2_pole_params_with_default_params() {
         let params = HighPass2Params::default();
         assert_eq!(params.period, Some(48));
-        assert_eq!(params.k, Some(0.707));
     }
 
     #[test]
@@ -209,7 +193,6 @@ mod tests {
         let data = [10.0, 20.0, 30.0];
         let params = HighPass2Params {
             period: Some(1),
-            k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input);
@@ -221,7 +204,6 @@ mod tests {
         let data: [f64; 0] = [];
         let params = HighPass2Params {
             period: Some(48),
-            k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input);
@@ -233,7 +215,6 @@ mod tests {
         let data = [42.0];
         let params = HighPass2Params {
             period: Some(2),
-            k: Some(0.707),
         };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input).expect("Should handle single data with period=2");
@@ -247,14 +228,12 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let first_params = HighPass2Params {
             period: Some(48),
-            k: Some(0.707),
         };
         let first_input = HighPass2Input::from_candles(&candles, "close", first_params);
         let first_result = highpass_2_pole(&first_input).expect("Failed first pass");
         assert_eq!(first_result.values.len(), candles.close.len());
         let second_params = HighPass2Params {
             period: Some(32),
-            k: Some(0.9),
         };
         let second_input = HighPass2Input::from_slice(&first_result.values, second_params);
         let second_result = highpass_2_pole(&second_input).expect("Failed second pass");
@@ -270,7 +249,6 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let params = HighPass2Params {
             period: Some(48),
-            k: Some(0.707),
         };
         let input = HighPass2Input::from_candles(&candles, "close", params);
         let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
