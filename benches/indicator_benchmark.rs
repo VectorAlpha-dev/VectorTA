@@ -49,7 +49,12 @@ use my_project::indicators::{
     efi::{efi, EfiInput},
     ehlers_itrend::{ehlers_itrend, EhlersITrendInput},
     ema::{ema, EmaInput},
+    emd::{emd, EmdInput},
+    emv::{emv, EmvInput},
     epma::{epma, EpmaInput},
+    er::{er, ErInput},
+    eri::{eri, EriInput},
+    fisher::{fisher, FisherInput},
     fwma::{fwma, FwmaInput},
     gaussian::{gaussian, GaussianInput},
     highpass::{highpass, HighPassInput},
@@ -99,6 +104,36 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // FISHER
+    group.bench_function(BenchmarkId::new("FISHER", 0), |b| {
+        let input = FisherInput::with_default_candles(&candles);
+        b.iter(|| fisher(black_box(&input)).expect("Failed to calculate Fisher Transform"))
+    });
+
+    // ERI
+    group.bench_function(BenchmarkId::new("ERI", 0), |b| {
+        let input = EriInput::with_default_candles(&candles);
+        b.iter(|| eri(black_box(&input)).expect("Failed to calculate ERI"))
+    });
+
+    // ER
+    group.bench_function(BenchmarkId::new("ER", 0), |b| {
+        let input = ErInput::with_default_candles(&candles);
+        b.iter(|| er(black_box(&input)).expect("Failed to calculate ER"))
+    });
+
+    // EMV
+    group.bench_function(BenchmarkId::new("EMV", 0), |b| {
+        let input = EmvInput::with_default_candles(&candles);
+        b.iter(|| emv(black_box(&input)).expect("Failed to calculate EMV"))
+    });
+
+    // EMD
+    group.bench_function(BenchmarkId::new("EMD", 0), |b| {
+        let input = EmdInput::with_default_candles(&candles);
+        b.iter(|| emd(black_box(&input)).expect("Failed to calculate EMD"))
+    });
 
     // EFI
     group.bench_function(BenchmarkId::new("EFI", 0), |b| {
