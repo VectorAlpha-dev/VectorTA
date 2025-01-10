@@ -55,11 +55,16 @@ use my_project::indicators::{
     er::{er, ErInput},
     eri::{eri, EriInput},
     fisher::{fisher, FisherInput},
+    fosc::{fosc, FoscInput},
+    frama::{frama, FramaInput},
     fwma::{fwma, FwmaInput},
+    gatorosc::{gatorosc, GatorOscInput},
     gaussian::{gaussian, GaussianInput},
+    heikin_ashi_candles::{heikin_ashi_candles, HeikinAshiInput},
     highpass::{highpass, HighPassInput},
     highpass_2_pole::{highpass_2_pole, HighPass2Input},
     hma::{hma, HmaInput},
+    ht_dcperiod::{ht_dcperiod, HtDcPeriodInput},
     hwma::{hwma, HwmaInput},
     jma::{jma, JmaInput},
     jsa::{jsa, JsaInput},
@@ -104,6 +109,36 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // HT_DCPeriod
+    group.bench_function(BenchmarkId::new("HT_DCPeriod", 0), |b| {
+        let input = HtDcPeriodInput::with_default_candles(&candles);
+        b.iter(|| ht_dcperiod(black_box(&input)).expect("Failed to calculate HT_DCPeriod"))
+    });
+
+    // Heikin Ashi Candles
+    group.bench_function(BenchmarkId::new("HEIKIN_ASHI", 0), |b| {
+        let input = HeikinAshiInput::with_default_candles(&candles);
+        b.iter(|| heikin_ashi_candles(black_box(&input)).expect("Failed to calculate Heikin Ashi"))
+    });
+
+    // FRAMA
+    group.bench_function(BenchmarkId::new("FRAMA", 0), |b| {
+        let input = FramaInput::with_default_candles(&candles);
+        b.iter(|| frama(black_box(&input)).expect("Failed to calculate FRAMA"))
+    });
+
+    // FOSC
+    group.bench_function(BenchmarkId::new("FOSC", 0), |b| {
+        let input = FoscInput::with_default_candles(&candles);
+        b.iter(|| fosc(black_box(&input)).expect("Failed to calculate FOSC"))
+    });
+
+    // Gator Oscillator
+    group.bench_function(BenchmarkId::new("GATOROSC", 0), |b| {
+        let input = GatorOscInput::with_default_candles(&candles);
+        b.iter(|| gatorosc(black_box(&input)).expect("Failed to calculate GATOROSC"))
+    });
 
     // FISHER
     group.bench_function(BenchmarkId::new("FISHER", 0), |b| {

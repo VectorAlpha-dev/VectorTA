@@ -5,6 +5,7 @@ pub mod edcf;
 pub mod ehlers_itrend;
 pub mod ema;
 pub mod epma;
+pub mod frama;
 pub mod fwma;
 pub mod gaussian;
 pub mod highpass;

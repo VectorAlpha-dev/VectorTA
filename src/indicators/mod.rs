@@ -42,6 +42,10 @@ pub mod emv;
 pub mod er;
 pub mod eri;
 pub mod fisher;
+pub mod fosc;
+pub mod gatorosc;
+pub mod heikin_ashi_candles;
+pub mod ht_dcperiod;
 pub mod moving_averages;
 pub mod roc;
 pub mod rocp;
@@ -49,8 +53,8 @@ pub mod rocr;
 pub mod rsi;
 pub mod utility_functions;
 pub use moving_averages::{
-    alma, cwma, dema, edcf, ehlers_itrend, ema, epma, fwma, gaussian, highpass, highpass_2_pole,
-    hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma,
-    sqwma, srwma, supersmoother, supersmoother_3_pole, swma, tema, tilson, trendflex, trima, vpwma,
-    vwap, vwma, wilders, wma, zlema,
+    alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
+    highpass_2_pole, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex,
+    sinwma, sma, smma, sqwma, srwma, supersmoother, supersmoother_3_pole, swma, tema, tilson,
+    trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
 };
