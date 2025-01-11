@@ -66,9 +66,14 @@ use my_project::indicators::{
     hma::{hma, HmaInput},
     ht_dcperiod::{ht_dcperiod, HtDcPeriodInput},
     hwma::{hwma, HwmaInput},
+    ift_rsi::{ift_rsi, IftRsiInput},
     jma::{jma, JmaInput},
     jsa::{jsa, JsaInput},
     kama::{kama, KamaInput},
+    kaufmanstop::{kaufmanstop, KaufmanstopInput},
+    kdj::{kdj, KdjInput},
+    keltner::{keltner, KeltnerInput},
+    kst::{kst, KstInput},
     linreg::{linreg, LinRegInput},
     maaq::{maaq, MaaqInput},
     mama::{mama, MamaInput},
@@ -109,6 +114,36 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // keltern Channel
+    group.bench_function(BenchmarkId::new("KELTNER", 0), |b| {
+        let input = KeltnerInput::with_default_candles(&candles);
+        b.iter(|| keltner(black_box(&input)).expect("Failed to calculate KELTNER"))
+    });
+
+    // kaufman Stop
+    group.bench_function(BenchmarkId::new("KaufmanStop", 0), |b| {
+        let input = KaufmanstopInput::with_default_candles(&candles);
+        b.iter(|| kaufmanstop(black_box(&input)).expect("Failed to calculate Kaufman Stop"))
+    });
+
+    // kst
+    group.bench_function(BenchmarkId::new("KST", 0), |b| {
+        let input = KstInput::with_default_candles(&candles);
+        b.iter(|| kst(black_box(&input)).expect("Failed to calculate KST"))
+    });
+
+    // KDJ
+    group.bench_function(BenchmarkId::new("KDJ", 0), |b| {
+        let input = KdjInput::with_default_candles(&candles);
+        b.iter(|| kdj(black_box(&input)).expect("Failed to calculate KDJ"))
+    });
+
+    // IFT RSI
+    group.bench_function(BenchmarkId::new("IFT_RSI", 0), |b| {
+        let input = IftRsiInput::with_default_candles(&candles);
+        b.iter(|| ift_rsi(black_box(&input)).expect("Failed to calculate IFT_RSI"))
+    });
 
     // HT_DCPeriod
     group.bench_function(BenchmarkId::new("HT_DCPeriod", 0), |b| {
