@@ -74,7 +74,12 @@ use my_project::indicators::{
     kdj::{kdj, KdjInput},
     keltner::{keltner, KeltnerInput},
     kst::{kst, KstInput},
+    kvo::{kvo, KvoInput},
+    linearreg_angle::{linearreg_angle, Linearreg_angleInput},
+    linearreg_intercept::{linearreg_intercept, LinearRegInterceptInput},
+    linearreg_slope::{linearreg_slope, LinearRegSlopeInput},
     linreg::{linreg, LinRegInput},
+    lrsi::{lrsi, LrsiInput},
     maaq::{maaq, MaaqInput},
     mama::{mama, MamaInput},
     mwdx::{mwdx, MwdxInput},
@@ -114,6 +119,38 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Linear Regression Slope
+    group.bench_function(BenchmarkId::new("LINEARREG_SLOPE", 0), |b| {
+        let input = LinearRegSlopeInput::with_default_candles(&candles);
+        b.iter(|| linearreg_slope(black_box(&input)).expect("Failed to calculate LINEARREG_SLOPE"))
+    });
+
+    // Linear regression intercept
+    group.bench_function(BenchmarkId::new("LINEARREG_INTERCEPT", 0), |b| {
+        let input = LinearRegInterceptInput::with_default_candles(&candles);
+        b.iter(|| {
+            linearreg_intercept(black_box(&input)).expect("Failed to calculate LINEARREG_INTERCEPT")
+        })
+    });
+
+    // LRSI
+    group.bench_function(BenchmarkId::new("LRSI", 0), |b| {
+        let input = LrsiInput::with_default_candles(&candles);
+        b.iter(|| lrsi(black_box(&input)).expect("Failed to calculate LRSI"))
+    });
+
+    // KVO
+    group.bench_function(BenchmarkId::new("KVO", 0), |b| {
+        let input = KvoInput::with_default_candles(&candles);
+        b.iter(|| kvo(black_box(&input)).expect("Failed to calculate KVO"))
+    });
+
+    // Linear Regression Angle
+    group.bench_function(BenchmarkId::new("LINEARREG_ANGLE", 0), |b| {
+        let input = Linearreg_angleInput::with_default_candles(&candles);
+        b.iter(|| linearreg_angle(black_box(&input)).expect("Failed to calculate LINEARREG_ANGLE"))
+    });
 
     // keltern Channel
     group.bench_function(BenchmarkId::new("KELTNER", 0), |b| {

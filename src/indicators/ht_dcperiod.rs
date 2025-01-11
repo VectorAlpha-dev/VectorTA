@@ -283,4 +283,34 @@ mod tests {
         let res = ht_dcperiod(&input);
         assert!(res.is_err());
     }
+
+    #[test]
+    #[ignore]
+    fn test_ht_dcperiod_compare_python_talib() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let input = HtDcPeriodInput::from_candles(&candles, "close", HtDcPeriodParams);
+        let output = ht_dcperiod(&input).expect("Failed to calculate HT_DCPERIOD");
+        let len = output.values.len();
+        let last_five = &output.values[len - 5..];
+        let expected = [
+            22.053215131184984,
+            21.443032406123155,
+            20.827144455403214,
+            20.29555647396436,
+            19.900406223996097,
+        ];
+        for (i, &val) in last_five.iter().enumerate() {
+            let exp = expected[i];
+            if !val.is_nan() {
+                assert!(
+                    (val - exp).abs() < 1e-1,
+                    "HT_DCPERIOD mismatch at index {}: expected {}, got {}",
+                    i,
+                    exp,
+                    val
+                );
+            }
+        }
+    }
 }
