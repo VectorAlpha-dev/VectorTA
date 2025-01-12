@@ -81,7 +81,12 @@ use my_project::indicators::{
     linreg::{linreg, LinRegInput},
     lrsi::{lrsi, LrsiInput},
     maaq::{maaq, MaaqInput},
+    mab::{mab, MabInput},
+    macd::{macd, MacdInput},
     mama::{mama, MamaInput},
+    marketefi::{marketfi, MarketFiInput},
+    mass::{mass, MassInput},
+    mean_ad::{mean_ad, MeanAdInput},
     mwdx::{mwdx, MwdxInput},
     nma::{nma, NmaInput},
     pwma::{pwma, PwmaInput},
@@ -119,6 +124,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // MEAN AD
+    group.bench_function(BenchmarkId::new("MEAN_AD", 0), |b| {
+        let input = MeanAdInput::with_default_candles(&candles);
+        b.iter(|| mean_ad(black_box(&input)).expect("Failed to calculate MEAN_AD"))
+    });
+
+    // MASS
+    group.bench_function(BenchmarkId::new("MASS", 0), |b| {
+        let input = MassInput::with_default_candles(&candles);
+        b.iter(|| mass(black_box(&input)).expect("Failed to calculate MASS"))
+    });
+
+    // MAB
+    group.bench_function(BenchmarkId::new("MAB", 0), |b| {
+        let input = MabInput::with_default_candles(&candles);
+        b.iter(|| mab(black_box(&input)).expect("Failed to calculate MAB"))
+    });
+
+    // MACD
+    group.bench_function(BenchmarkId::new("MACD", 0), |b| {
+        let input = MacdInput::with_default_candles(&candles);
+        b.iter(|| macd(black_box(&input)).expect("Failed to calculate MACD"))
+    });
 
     // Linear Regression Slope
     group.bench_function(BenchmarkId::new("LINEARREG_SLOPE", 0), |b| {

@@ -318,7 +318,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
         let close_prices = &candles.close;
 
-        let period = 9;
+        let period = 140;
         let params = SmaParams {
             period: Some(period),
         };
