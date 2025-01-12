@@ -18,14 +18,14 @@
 /// - **ZeroOrNaNVolume**: marketfi: Volume is zero or NaN at a valid index.
 ///
 /// ## Returns
-/// - **`Ok(MarketFiOutput)`** on success, containing a `Vec<f64>` matching the input length,
+/// - **`Ok(MarketefiOutput)`** on success, containing a `Vec<f64>` matching the input length,
 ///   with leading `NaN`s until the first valid index.
-/// - **`Err(MarketFiError)`** otherwise.
+/// - **`Err(MarketefiError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
-pub enum MarketFiData<'a> {
+pub enum MarketefiData<'a> {
     Candles {
         candles: &'a Candles,
         source_high: &'a str,
@@ -40,30 +40,30 @@ pub enum MarketFiData<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct MarketFiParams;
+pub struct MarketefiParams;
 
-impl Default for MarketFiParams {
+impl Default for MarketefiParams {
     fn default() -> Self {
         Self
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct MarketFiInput<'a> {
-    pub data: MarketFiData<'a>,
-    pub params: MarketFiParams,
+pub struct MarketefiInput<'a> {
+    pub data: MarketefiData<'a>,
+    pub params: MarketefiParams,
 }
 
-impl<'a> MarketFiInput<'a> {
+impl<'a> MarketefiInput<'a> {
     pub fn from_candles(
         candles: &'a Candles,
         source_high: &'a str,
         source_low: &'a str,
         source_volume: &'a str,
-        params: MarketFiParams,
+        params: MarketefiParams,
     ) -> Self {
         Self {
-            data: MarketFiData::Candles {
+            data: MarketefiData::Candles {
                 candles,
                 source_high,
                 source_low,
@@ -77,22 +77,34 @@ impl<'a> MarketFiInput<'a> {
         high: &'a [f64],
         low: &'a [f64],
         volume: &'a [f64],
-        params: MarketFiParams,
+        params: MarketefiParams,
     ) -> Self {
         Self {
-            data: MarketFiData::Slices { high, low, volume },
+            data: MarketefiData::Slices { high, low, volume },
             params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self {
+            data: MarketefiData::Candles {
+                candles,
+                source_high: "high",
+                source_low: "low",
+                source_volume: "volume",
+            },
+            params: MarketefiParams::default(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct MarketFiOutput {
+pub struct MarketefiOutput {
     pub values: Vec<f64>,
 }
 
 #[derive(Debug, Error)]
-pub enum MarketFiError {
+pub enum MarketefiError {
     #[error("marketfi: Empty data provided.")]
     EmptyData,
     #[error("marketfi: Mismatched data length among high, low, and volume.")]
@@ -106,9 +118,9 @@ pub enum MarketFiError {
 }
 
 #[inline]
-pub fn marketfi(input: &MarketFiInput) -> Result<MarketFiOutput, MarketFiError> {
+pub fn marketfi(input: &MarketefiInput) -> Result<MarketefiOutput, MarketefiError> {
     let (high, low, volume) = match &input.data {
-        MarketFiData::Candles {
+        MarketefiData::Candles {
             candles,
             source_high,
             source_low,
@@ -118,15 +130,15 @@ pub fn marketfi(input: &MarketFiInput) -> Result<MarketFiOutput, MarketFiError> 
             source_type(candles, source_low),
             source_type(candles, source_volume),
         ),
-        MarketFiData::Slices { high, low, volume } => (*high, *low, *volume),
+        MarketefiData::Slices { high, low, volume } => (*high, *low, *volume),
     };
 
     if high.is_empty() || low.is_empty() || volume.is_empty() {
-        return Err(MarketFiError::EmptyData);
+        return Err(MarketefiError::EmptyData);
     }
 
     if high.len() != low.len() || low.len() != volume.len() {
-        return Err(MarketFiError::MismatchedDataLength);
+        return Err(MarketefiError::MismatchedDataLength);
     }
 
     let mut output_values = vec![f64::NAN; high.len()];
@@ -137,7 +149,7 @@ pub fn marketfi(input: &MarketFiInput) -> Result<MarketFiOutput, MarketFiError> 
         !(h.is_nan() || l.is_nan() || v.is_nan())
     }) {
         Some(idx) => idx,
-        None => return Err(MarketFiError::AllValuesNaN),
+        None => return Err(MarketefiError::AllValuesNaN),
     };
 
     let mut valid_count = 0;
@@ -158,17 +170,17 @@ pub fn marketfi(input: &MarketFiInput) -> Result<MarketFiOutput, MarketFiError> 
     }
 
     if valid_count == 0 {
-        return Err(MarketFiError::NotEnoughValidData);
+        return Err(MarketefiError::NotEnoughValidData);
     }
 
     if output_values[first_valid_idx..]
         .iter()
         .all(|&val| val.is_nan())
     {
-        return Err(MarketFiError::ZeroOrNaNVolume);
+        return Err(MarketefiError::ZeroOrNaNVolume);
     }
 
-    Ok(MarketFiOutput {
+    Ok(MarketefiOutput {
         values: output_values,
     })
 }
@@ -184,8 +196,8 @@ mod tests {
         let low: [f64; 0] = [];
         let volume: [f64; 0] = [];
 
-        let params = MarketFiParams;
-        let input = MarketFiInput::from_slices(&high, &low, &volume, params);
+        let params = MarketefiParams;
+        let input = MarketefiInput::from_slices(&high, &low, &volume, params);
         let result = marketfi(&input);
         assert!(result.is_err());
         if let Err(e) = result {
@@ -203,8 +215,8 @@ mod tests {
         let low = [f64::NAN, f64::NAN];
         let volume = [f64::NAN, f64::NAN];
 
-        let params = MarketFiParams;
-        let input = MarketFiInput::from_slices(&high, &low, &volume, params);
+        let params = MarketefiParams;
+        let input = MarketefiInput::from_slices(&high, &low, &volume, params);
         let result = marketfi(&input);
         assert!(result.is_err());
         if let Err(e) = result {
@@ -222,8 +234,8 @@ mod tests {
         let low = [1.0, 2.0];
         let volume = [10.0, 10.0, 10.0];
 
-        let params = MarketFiParams;
-        let input = MarketFiInput::from_slices(&high, &low, &volume, params);
+        let params = MarketefiParams;
+        let input = MarketefiInput::from_slices(&high, &low, &volume, params);
         let result = marketfi(&input);
         assert!(result.is_err());
         if let Err(e) = result {
@@ -241,8 +253,8 @@ mod tests {
         let low = [1.0, 2.0, 3.0];
         let volume = [10.0, 0.0, 10.0];
 
-        let params = MarketFiParams;
-        let input = MarketFiInput::from_slices(&high, &low, &volume, params);
+        let params = MarketefiParams;
+        let input = MarketefiInput::from_slices(&high, &low, &volume, params);
         let result = marketfi(&input).expect("Failed to calculate MarketFI");
         assert_eq!(result.values.len(), 3);
         assert!(result.values[1].is_nan());
@@ -254,8 +266,8 @@ mod tests {
         let low = [f64::NAN, 1.0];
         let volume = [f64::NAN, 0.0];
 
-        let params = MarketFiParams;
-        let input = MarketFiInput::from_slices(&high, &low, &volume, params);
+        let params = MarketefiParams;
+        let input = MarketefiInput::from_slices(&high, &low, &volume, params);
         let result = marketfi(&input);
         assert!(result.is_err());
         if let Err(e) = result {
@@ -273,12 +285,12 @@ mod tests {
     fn test_marketfi_accuracy_with_csv_data() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = MarketFiInput::from_candles(
+        let input = MarketefiInput::from_candles(
             &candles,
             "high",
             "low",
             "volume",
-            MarketFiParams::default(),
+            MarketefiParams::default(),
         );
 
         let result = marketfi(&input).expect("Failed to calculate MarketFI");

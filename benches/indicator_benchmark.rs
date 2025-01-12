@@ -84,7 +84,7 @@ use my_project::indicators::{
     mab::{mab, MabInput},
     macd::{macd, MacdInput},
     mama::{mama, MamaInput},
-    marketefi::{marketfi, MarketFiInput},
+    marketefi::{marketfi, MarketefiInput},
     mass::{mass, MassInput},
     mean_ad::{mean_ad, MeanAdInput},
     mwdx::{mwdx, MwdxInput},
@@ -124,6 +124,12 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Market EFI
+    group.bench_function(BenchmarkId::new("MARKETEFI", 0), |b| {
+        let input = MarketefiInput::with_default_candles(&candles);
+        b.iter(|| marketfi(black_box(&input)).expect("Failed to calculate MARKETEFI"))
+    });
 
     // MEAN AD
     group.bench_function(BenchmarkId::new("MEAN_AD", 0), |b| {
