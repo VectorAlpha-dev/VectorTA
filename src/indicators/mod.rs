@@ -56,6 +56,7 @@ pub mod kaufmanstop;
 pub mod kdj;
 pub mod keltner;
 pub mod kst;
+pub mod kurtosis;
 pub mod kvo;
 pub mod linearreg_angle;
 pub mod linearreg_intercept;

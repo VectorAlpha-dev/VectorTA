@@ -74,6 +74,7 @@ use my_project::indicators::{
     kdj::{kdj, KdjInput},
     keltner::{keltner, KeltnerInput},
     kst::{kst, KstInput},
+    kurtosis::{kurtosis, KurtosisInput},
     kvo::{kvo, KvoInput},
     linearreg_angle::{linearreg_angle, Linearreg_angleInput},
     linearreg_intercept::{linearreg_intercept, LinearRegInterceptInput},
@@ -124,6 +125,12 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Kurtosis
+    group.bench_function(BenchmarkId::new("KURTOSIS", 0), |b| {
+        let input = KurtosisInput::with_default_candles(&candles);
+        b.iter(|| kurtosis(black_box(&input)).expect("Failed to calculate KURTOSIS"))
+    });
 
     // Market EFI
     group.bench_function(BenchmarkId::new("MARKETEFI", 0), |b| {
