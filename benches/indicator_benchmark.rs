@@ -88,6 +88,10 @@ use my_project::indicators::{
     marketefi::{marketfi, MarketefiInput},
     mass::{mass, MassInput},
     mean_ad::{mean_ad, MeanAdInput},
+    medium_ad::{medium_ad, MediumAdInput},
+    medprice::{medprice, MedpriceInput},
+    mfi::{mfi, MfiInput},
+    midpoint::{midpoint, MidpointInput},
     mwdx::{mwdx, MwdxInput},
     nma::{nma, NmaInput},
     pwma::{pwma, PwmaInput},
@@ -125,6 +129,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // MIDPOINT
+    group.bench_function(BenchmarkId::new("MIDPOINT", 0), |b| {
+        let input = MidpointInput::with_default_candles(&candles);
+        b.iter(|| midpoint(black_box(&input)).expect("Failed to calculate MIDPOINT"))
+    });
+
+    // MFI
+    group.bench_function(BenchmarkId::new("MFI", 0), |b| {
+        let input = MfiInput::with_default_candles(&candles);
+        b.iter(|| mfi(black_box(&input)).expect("Failed to calculate MFI"))
+    });
+
+    // Medprice
+    group.bench_function(BenchmarkId::new("MEDPRICE", 0), |b| {
+        let input = MedpriceInput::with_default_candles(&candles);
+        b.iter(|| medprice(black_box(&input)).expect("Failed to calculate MEDPRICE"))
+    });
+
+    // Medium AD
+    group.bench_function(BenchmarkId::new("MEDIUM_AD", 0), |b| {
+        let input = MediumAdInput::with_default_candles(&candles);
+        b.iter(|| medium_ad(black_box(&input)).expect("Failed to calculate MEDIUM_AD"))
+    });
 
     // Kurtosis
     group.bench_function(BenchmarkId::new("KURTOSIS", 0), |b| {
