@@ -92,6 +92,10 @@ use my_project::indicators::{
     medprice::{medprice, MedpriceInput},
     mfi::{mfi, MfiInput},
     midpoint::{midpoint, MidpointInput},
+    midprice::{midprice, MidpriceInput},
+    minmax::{minmax, MinmaxInput},
+    mom::{mom, MomInput},
+    msw::{msw, MswInput},
     mwdx::{mwdx, MwdxInput},
     nma::{nma, NmaInput},
     pwma::{pwma, PwmaInput},
@@ -129,6 +133,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // MIDPRICE
+    group.bench_function(BenchmarkId::new("MIDPRICE", 0), |b| {
+        let input = MidpriceInput::with_default_candles(&candles);
+        b.iter(|| midprice(black_box(&input)).expect("Failed to calculate MIDPRICE"))
+    });
+
+    // MINMAX
+    group.bench_function(BenchmarkId::new("MINMAX", 0), |b| {
+        let input = MinmaxInput::with_default_candles(&candles);
+        b.iter(|| minmax(black_box(&input)).expect("Failed to calculate MINMAX"))
+    });
+
+    // MOM
+    group.bench_function(BenchmarkId::new("MOM", 0), |b| {
+        let input = MomInput::with_default_candles(&candles);
+        b.iter(|| mom(black_box(&input)).expect("Failed to calculate MOM"))
+    });
+
+    // MSW
+    group.bench_function(BenchmarkId::new("MSW", 0), |b| {
+        let input = MswInput::with_default_candles(&candles);
+        b.iter(|| msw(black_box(&input)).expect("Failed to calculate MSW"))
+    });
 
     // MIDPOINT
     group.bench_function(BenchmarkId::new("MIDPOINT", 0), |b| {
