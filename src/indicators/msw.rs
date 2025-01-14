@@ -20,7 +20,7 @@
 ///   the Mesa Sine Wave window is filled.
 /// - **`Err(MswError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
-use crate::utilities::math_functions::{atan64, fast_sin_f64};
+use crate::utilities::math_functions::{atan64, fast_cos_f64, fast_sin_f64};
 use std::f64::consts::PI;
 use thiserror::Error;
 #[allow(clippy::approx_constant)]
@@ -268,7 +268,6 @@ mod tests {
             "MSW lead length mismatch"
         );
 
-        // Hypothetical "last 5" reference values for both sine and lead
         let expected_last_five_sine = [
             -0.49733966449848194,
             -0.8909425976991894,
@@ -316,14 +315,12 @@ mod tests {
             );
         }
 
-        // Verify the correct number of leading NaNs based on the period
         let period: usize = 5;
         for i in 0..(period - 1) {
             assert!(msw_result.sine[i].is_nan());
             assert!(msw_result.lead[i].is_nan());
         }
 
-        // Test default parameters with candles
         let default_input = MswInput::with_default_candles(&candles);
         let default_msw_result = msw(&default_input).expect("Failed to calculate MSW defaults");
         assert_eq!(
