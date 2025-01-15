@@ -97,7 +97,9 @@ use my_project::indicators::{
     mom::{mom, MomInput},
     msw::{msw, MswInput},
     mwdx::{mwdx, MwdxInput},
+    natr::{natr, NatrInput},
     nma::{nma, NmaInput},
+    pivot::{pivot, PivotInput},
     pwma::{pwma, PwmaInput},
     reflex::{reflex, ReflexInput},
     roc::{roc, RocInput},
@@ -133,6 +135,18 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // NATR
+    group.bench_function(BenchmarkId::new("NATR", 0), |b| {
+        let input = NatrInput::with_default_candles(&candles);
+        b.iter(|| natr(black_box(&input)).expect("Failed to calculate NATR"))
+    });
+
+    // PIVOT
+    group.bench_function(BenchmarkId::new("PIVOT", 0), |b| {
+        let input = PivotInput::with_default_candles(&candles);
+        b.iter(|| pivot(black_box(&input)).expect("Failed to calculate PIVOT"))
+    });
 
     // MIDPRICE
     group.bench_function(BenchmarkId::new("MIDPRICE", 0), |b| {
