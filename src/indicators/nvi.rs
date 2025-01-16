@@ -125,7 +125,7 @@ pub fn nvi(input: &NviInput) -> Result<NviOutput, NviError> {
 
     let mut output = vec![f64::NAN; close.len()];
     let mut nvi_val = 1000.0;
-    output[0] = volume[0] + nvi_val;
+    output[0] = nvi_val;
 
     for i in (1)..close.len() {
         if volume[i] < volume[i - 1] {
