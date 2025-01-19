@@ -101,6 +101,8 @@ use my_project::indicators::{
     nma::{nma, NmaInput},
     pivot::{pivot, PivotInput},
     pma::{pma, PmaInput},
+    ppo::{ppo, PpoInput},
+    pvi::{pvi, PviInput},
     pwma::{pwma, PwmaInput},
     qstick::{qstick, QstickInput},
     reflex::{reflex, ReflexInput},
@@ -137,6 +139,18 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // PVI
+    group.bench_function(BenchmarkId::new("PVI", 0), |b| {
+        let input = PviInput::with_default_candles(&candles);
+        b.iter(|| pvi(black_box(&input)).expect("Failed to calculate PVI"))
+    });
+
+    // PPO
+    group.bench_function(BenchmarkId::new("PPO", 0), |b| {
+        let input = PpoInput::with_default_candles(&candles);
+        b.iter(|| ppo(black_box(&input)).expect("Failed to calculate PPO"))
+    });
 
     // Qstick
     group.bench_function(BenchmarkId::new("QSTICK", 0), |b| {

@@ -84,11 +84,13 @@ pub mod pfe;
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
+pub mod pvi;
 pub mod qstick;
 pub mod roc;
 pub mod rocp;
 pub mod rocr;
 pub mod rsi;
+pub mod rsmk;
 pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
