@@ -100,7 +100,9 @@ use my_project::indicators::{
     natr::{natr, NatrInput},
     nma::{nma, NmaInput},
     pivot::{pivot, PivotInput},
+    pma::{pma, PmaInput},
     pwma::{pwma, PwmaInput},
+    qstick::{qstick, QstickInput},
     reflex::{reflex, ReflexInput},
     roc::{roc, RocInput},
     rocp::{rocp, RocpInput},
@@ -135,6 +137,18 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Qstick
+    group.bench_function(BenchmarkId::new("QSTICK", 0), |b| {
+        let input = QstickInput::with_default_candles(&candles);
+        b.iter(|| qstick(black_box(&input)).expect("Failed to calculate QSTICK"))
+    });
+
+    // PMA
+    group.bench_function(BenchmarkId::new("PMA", 0), |b| {
+        let input = PmaInput::with_default_candles(&candles);
+        b.iter(|| pma(black_box(&input)).expect("Failed to calculate PMA"))
+    });
 
     // NATR
     group.bench_function(BenchmarkId::new("NATR", 0), |b| {
