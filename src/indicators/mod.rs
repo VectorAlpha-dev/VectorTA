@@ -83,6 +83,7 @@ pub mod pattern_recognition;
 pub mod pfe;
 pub mod pivot;
 pub mod pma;
+pub mod ppo;
 pub mod qstick;
 pub mod roc;
 pub mod rocp;
