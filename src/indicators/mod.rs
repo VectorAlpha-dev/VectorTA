@@ -91,6 +91,7 @@ pub mod rocp;
 pub mod rocr;
 pub mod rsi;
 pub mod rsmk;
+pub mod rsx;
 pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,

@@ -144,6 +144,7 @@ fn candle_range(open: f64, close: f64) -> f64 {
     real_body(open, close)
 }
 
+#[inline]
 pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
     const BODY_LONG_PERIOD: usize = 10;
 
@@ -218,6 +219,218 @@ pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
         let new_idx = i - 2;
         body_long_period_total += candle_range(open[new_idx], close[new_idx])
             - candle_range(open[old_idx], close[old_idx]);
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdl3blackcrows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const SHADOW_VERY_SHORT_PERIOD: usize = 10;
+
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let lookback_total = 3 + SHADOW_VERY_SHORT_PERIOD;
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+
+    fn candle_color(o: f64, c: f64) -> i8 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    fn lower_shadow(o: f64, c: f64, l: f64) -> f64 {
+        if c < o {
+            c - l
+        } else {
+            o - l
+        }
+    }
+
+    let mut sum2 = 0.0;
+    let mut sum1 = 0.0;
+    let mut sum0 = 0.0;
+    for i in 0..SHADOW_VERY_SHORT_PERIOD {
+        sum2 += lower_shadow(open[i], close[i], low[i]);
+        sum1 += lower_shadow(open[i + 1], close[i + 1], low[i + 1]);
+        sum0 += lower_shadow(open[i + 2], close[i + 2], low[i + 2]);
+    }
+
+    for i in lookback_total..size {
+        let avg2 = sum2 / (SHADOW_VERY_SHORT_PERIOD as f64);
+        let avg1 = sum1 / (SHADOW_VERY_SHORT_PERIOD as f64);
+        let avg0 = sum0 / (SHADOW_VERY_SHORT_PERIOD as f64);
+
+        if candle_color(open[i - 3], close[i - 3]) == 1
+            && candle_color(open[i - 2], close[i - 2]) == -1
+            && lower_shadow(open[i - 2], close[i - 2], low[i - 2]) < avg2
+            && candle_color(open[i - 1], close[i - 1]) == -1
+            && lower_shadow(open[i - 1], close[i - 1], low[i - 1]) < avg1
+            && candle_color(open[i], close[i]) == -1
+            && lower_shadow(open[i], close[i], low[i]) < avg0
+            && open[i - 1] < open[i - 2]
+            && open[i - 1] > close[i - 2]
+            && open[i] < open[i - 1]
+            && open[i] > close[i - 1]
+            && high[i - 3] > close[i - 2]
+            && close[i - 2] > close[i - 1]
+            && close[i - 1] > close[i]
+        {
+            out[i] = -100;
+        } else {
+            out[i] = 0;
+        }
+
+        let old_idx2 = i - lookback_total;
+        let new_idx2 = i - 2;
+        sum2 += lower_shadow(open[new_idx2], close[new_idx2], low[new_idx2])
+            - lower_shadow(open[old_idx2], close[old_idx2], low[old_idx2]);
+
+        let old_idx1 = i - lookback_total + 1;
+        let new_idx1 = i - 1;
+        sum1 += lower_shadow(open[new_idx1], close[new_idx1], low[new_idx1])
+            - lower_shadow(open[old_idx1], close[old_idx1], low[old_idx1]);
+
+        let old_idx0 = i - lookback_total + 2;
+        let new_idx0 = i;
+        sum0 += lower_shadow(open[new_idx0], close[new_idx0], low[new_idx0])
+            - lower_shadow(open[old_idx0], close[old_idx0], low[old_idx0]);
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdl3inside(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const BODY_LONG_PERIOD: usize = 10;
+    const BODY_SHORT_PERIOD: usize = 10;
+
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let lookback_total = 2 + BODY_LONG_PERIOD.max(BODY_SHORT_PERIOD);
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    fn candle_color(o: f64, c: f64) -> i8 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    fn candle_range(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn real_body(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn max2(a: f64, b: f64) -> f64 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn min2(a: f64, b: f64) -> f64 {
+        if a < b {
+            a
+        } else {
+            b
+        }
+    }
+
+    let mut out = vec![0i8; size];
+
+    let mut body_long_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+
+    for i in 0..BODY_LONG_PERIOD {
+        body_long_period_total += candle_range(open[i], close[i]);
+    }
+    for i in 0..BODY_SHORT_PERIOD {
+        body_short_period_total += candle_range(open[i], close[i]);
+    }
+
+    for i in lookback_total..size {
+        let avg_body_long = body_long_period_total / BODY_LONG_PERIOD as f64;
+        let avg_body_short = body_short_period_total / BODY_SHORT_PERIOD as f64;
+
+        if real_body(open[i - 2], close[i - 2]) > avg_body_long
+            && real_body(open[i - 1], close[i - 1]) <= avg_body_short
+            && max2(close[i - 1], open[i - 1]) < max2(close[i - 2], open[i - 2])
+            && min2(close[i - 1], open[i - 1]) > min2(close[i - 2], open[i - 2])
+            && ((candle_color(open[i - 2], close[i - 2]) == 1
+                && candle_color(open[i], close[i]) == -1
+                && close[i] < open[i - 2])
+                || (candle_color(open[i - 2], close[i - 2]) == -1
+                    && candle_color(open[i], close[i]) == 1
+                    && close[i] > open[i - 2]))
+        {
+            out[i] = -candle_color(open[i - 2], close[i - 2]) * 100;
+        } else {
+            out[i] = 0;
+        }
+
+        let old_idx_long = i - lookback_total;
+        body_long_period_total += candle_range(open[i - 2], close[i - 2])
+            - candle_range(open[old_idx_long], close[old_idx_long]);
+
+        let old_idx_short = i - lookback_total + 1;
+        body_short_period_total += candle_range(open[i - 1], close[i - 1])
+            - candle_range(open[old_idx_short], close[old_idx_short]);
     }
 
     Ok(PatternOutput { values: out })
