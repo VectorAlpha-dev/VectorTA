@@ -435,3 +435,113 @@ pub fn cdl3inside(input: &PatternInput) -> Result<PatternOutput, PatternError> {
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdl3linestrike(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const NEAR_PERIOD: usize = 10;
+
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let lookback_total = 3 + NEAR_PERIOD;
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    fn candle_color(o: f64, c: f64) -> i8 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    fn candle_range(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn max2(a: f64, b: f64) -> f64 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn min2(a: f64, b: f64) -> f64 {
+        if a < b {
+            a
+        } else {
+            b
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut sum3 = 0.0;
+    let mut sum2 = 0.0;
+
+    for i in 0..NEAR_PERIOD {
+        sum3 += candle_range(open[i], close[i]);
+        sum2 += candle_range(open[i + 1], close[i + 1]);
+    }
+
+    for i in lookback_total..size {
+        let avg3 = sum3 / (NEAR_PERIOD as f64);
+        let avg2 = sum2 / (NEAR_PERIOD as f64);
+
+        if candle_color(open[i - 3], close[i - 3]) == candle_color(open[i - 2], close[i - 2])
+            && candle_color(open[i - 2], close[i - 2]) == candle_color(open[i - 1], close[i - 1])
+            && candle_color(open[i], close[i]) == -candle_color(open[i - 1], close[i - 1])
+            && open[i - 2] >= min2(open[i - 3], close[i - 3]) - avg3
+            && open[i - 2] <= max2(open[i - 3], close[i - 3]) + avg3
+            && open[i - 1] >= min2(open[i - 2], close[i - 2]) - avg2
+            && open[i - 1] <= max2(open[i - 2], close[i - 2]) + avg2
+            && ((candle_color(open[i - 1], close[i - 1]) == 1
+                && close[i - 1] > close[i - 2]
+                && close[i - 2] > close[i - 3]
+                && open[i] > close[i - 1]
+                && close[i] < open[i - 3])
+                || (candle_color(open[i - 1], close[i - 1]) == -1
+                    && close[i - 1] < close[i - 2]
+                    && close[i - 2] < close[i - 3]
+                    && open[i] < close[i - 1]
+                    && close[i] > open[i - 3]))
+        {
+            out[i] = candle_color(open[i - 1], close[i - 1]) * 100;
+        } else {
+            out[i] = 0;
+        }
+
+        let old_idx3 = i - lookback_total;
+        let new_idx3 = i - 3;
+        sum3 += candle_range(open[new_idx3], close[new_idx3])
+            - candle_range(open[old_idx3], close[old_idx3]);
+
+        let old_idx2 = i - lookback_total + 1;
+        let new_idx2 = i - 2;
+        sum2 += candle_range(open[new_idx2], close[new_idx2])
+            - candle_range(open[old_idx2], close[old_idx2]);
+    }
+
+    Ok(PatternOutput { values: out })
+}

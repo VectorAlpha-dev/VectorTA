@@ -92,6 +92,10 @@ pub mod rocr;
 pub mod rsi;
 pub mod rsmk;
 pub mod rsx;
+pub mod rvi;
+pub mod safezonestop;
+pub mod sar;
+pub mod squeeze_momentum;
 pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,

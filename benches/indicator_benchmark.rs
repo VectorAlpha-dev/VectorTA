@@ -110,9 +110,13 @@ use my_project::indicators::{
     rocp::{rocp, RocpInput},
     rocr::{rocr, RocrInput},
     rsi::{rsi, RsiInput},
+    rvi::{rvi, RviInput},
+    safezonestop::{safezonestop, SafeZoneStopInput},
+    sar::{sar, SarInput},
     sinwma::{sinwma, SinWmaInput},
     sma::{sma, SmaInput},
     smma::{smma, SmmaInput},
+    squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput},
     sqwma::{sqwma, SqwmaInput},
     srwma::{srwma, SrwmaInput},
     supersmoother::{supersmoother, SuperSmootherInput},
@@ -139,6 +143,32 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Squeeze Momentum
+    group.bench_function(BenchmarkId::new("SQUEEZE_MOMENTUM", 0), |b| {
+        let input = SqueezeMomentumInput::with_default_candles(&candles);
+        b.iter(|| {
+            squeeze_momentum(black_box(&input)).expect("Failed to calculate Squeeze Momentum")
+        })
+    });
+
+    // RVI
+    group.bench_function(BenchmarkId::new("RVI", 0), |b| {
+        let input = RviInput::with_default_candles(&candles);
+        b.iter(|| rvi(black_box(&input)).expect("Failed to calculate RVI"))
+    });
+
+    // Sar
+    group.bench_function(BenchmarkId::new("SAR", 0), |b| {
+        let input = SarInput::with_default_candles(&candles).expect("Failed to create SarInput");
+        b.iter(|| sar(black_box(&input)).expect("Failed to calculate SAR"))
+    });
+
+    // SafeZoneStop
+    group.bench_function(BenchmarkId::new("SAFEZONESTOP", 0), |b| {
+        let input = SafeZoneStopInput::with_default_candles_long(&candles);
+        b.iter(|| safezonestop(black_box(&input)).expect("Failed to calculate SafeZoneStop"))
+    });
 
     // PVI
     group.bench_function(BenchmarkId::new("PVI", 0), |b| {
