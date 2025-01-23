@@ -118,6 +118,7 @@ use my_project::indicators::{
     smma::{smma, SmmaInput},
     squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput},
     sqwma::{sqwma, SqwmaInput},
+    srsi::{srsi, SrsiInput},
     srwma::{srwma, SrwmaInput},
     supersmoother::{supersmoother, SuperSmootherInput},
     supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput},
@@ -143,6 +144,12 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // SRSI
+    group.bench_function(BenchmarkId::new("SRSI", 0), |b| {
+        let input = SrsiInput::with_default_candles(&candles);
+        b.iter(|| srsi(black_box(&input)).expect("Failed to calculate SRSI"))
+    });
 
     // Squeeze Momentum
     group.bench_function(BenchmarkId::new("SQUEEZE_MOMENTUM", 0), |b| {

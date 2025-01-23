@@ -97,6 +97,7 @@ pub mod safezonestop;
 pub mod sar;
 pub mod squeeze_momentum;
 pub mod srsi;
+pub mod stc;
 pub mod stoch;
 pub mod utility_functions;
 pub use moving_averages::{
