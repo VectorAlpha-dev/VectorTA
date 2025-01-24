@@ -777,3 +777,307 @@ pub fn cdl3starsinsouth(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdl3whitesoldiers(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const SHADOW_VERY_SHORT_PERIOD: usize = 10;
+    const NEAR_PERIOD: usize = 10;
+    const FAR_PERIOD: usize = 10;
+    const BODY_SHORT_PERIOD: usize = 10;
+
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    fn candle_color(o: f64, c: f64) -> i8 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    fn candle_range(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn real_body(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn upper_shadow(o: f64, c: f64, h: f64) -> f64 {
+        if c < o {
+            h - o
+        } else {
+            h - c
+        }
+    }
+
+    fn max2(a: f64, b: f64) -> f64 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    let size = open.len();
+    let lookback_total = 2 + SHADOW_VERY_SHORT_PERIOD
+        .max(NEAR_PERIOD)
+        .max(FAR_PERIOD)
+        .max(BODY_SHORT_PERIOD);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_very_short_sum = [0.0; 3];
+    let mut near_sum = [0.0; 3];
+    let mut far_sum = [0.0; 3];
+    let mut body_short_sum = 0.0;
+
+    for i in 0..SHADOW_VERY_SHORT_PERIOD {
+        shadow_very_short_sum[2] += upper_shadow(open[i], close[i], high[i]);
+        if i + 1 < size {
+            shadow_very_short_sum[1] += upper_shadow(open[i + 1], close[i + 1], high[i + 1]);
+        }
+        if i + 2 < size {
+            shadow_very_short_sum[0] += upper_shadow(open[i + 2], close[i + 2], high[i + 2]);
+        }
+    }
+    for i in 0..NEAR_PERIOD {
+        if i + 2 < size {
+            near_sum[2] += candle_range(open[i + 2], close[i + 2]);
+        }
+        if i + 1 < size {
+            near_sum[1] += candle_range(open[i + 1], close[i + 1]);
+        }
+    }
+    for i in 0..FAR_PERIOD {
+        if i + 2 < size {
+            far_sum[2] += candle_range(open[i + 2], close[i + 2]);
+        }
+        if i + 1 < size {
+            far_sum[1] += candle_range(open[i + 1], close[i + 1]);
+        }
+    }
+    for i in 0..BODY_SHORT_PERIOD {
+        body_short_sum += candle_range(open[i], close[i]);
+    }
+
+    for i in lookback_total..size {
+        let avg_sv_2 = shadow_very_short_sum[2] / (SHADOW_VERY_SHORT_PERIOD as f64);
+        let avg_sv_1 = shadow_very_short_sum[1] / (SHADOW_VERY_SHORT_PERIOD as f64);
+        let avg_sv_0 = shadow_very_short_sum[0] / (SHADOW_VERY_SHORT_PERIOD as f64);
+        let avg_near_2 = near_sum[2] / (NEAR_PERIOD as f64);
+        let avg_near_1 = near_sum[1] / (NEAR_PERIOD as f64);
+        let avg_far_2 = far_sum[2] / (FAR_PERIOD as f64);
+        let avg_far_1 = far_sum[1] / (FAR_PERIOD as f64);
+        let avg_body_short = body_short_sum / (BODY_SHORT_PERIOD as f64);
+
+        if candle_color(open[i - 2], close[i - 2]) == 1
+            && upper_shadow(open[i - 2], close[i - 2], high[i - 2]) < avg_sv_2
+            && candle_color(open[i - 1], close[i - 1]) == 1
+            && upper_shadow(open[i - 1], close[i - 1], high[i - 1]) < avg_sv_1
+            && candle_color(open[i], close[i]) == 1
+            && upper_shadow(open[i], close[i], high[i]) < avg_sv_0
+            && close[i] > close[i - 1]
+            && close[i - 1] > close[i - 2]
+            && open[i - 1] > open[i - 2]
+            && open[i - 1] <= close[i - 2] + avg_near_2
+            && open[i] > open[i - 1]
+            && open[i] <= close[i - 1] + avg_near_1
+            && real_body(open[i - 1], close[i - 1])
+                > real_body(open[i - 2], close[i - 2]) - avg_far_2
+            && real_body(open[i], close[i]) > real_body(open[i - 1], close[i - 1]) - avg_far_1
+            && real_body(open[i], close[i]) > avg_body_short
+        {
+            out[i] = 100;
+        } else {
+            out[i] = 0;
+        }
+
+        let old_idx = i - lookback_total;
+        shadow_very_short_sum[2] += upper_shadow(open[i - 2], close[i - 2], high[i - 2])
+            - upper_shadow(
+                open[old_idx.saturating_sub(2)],
+                close[old_idx.saturating_sub(2)],
+                high[old_idx.saturating_sub(2)],
+            );
+        shadow_very_short_sum[1] += upper_shadow(open[i - 1], close[i - 1], high[i - 1])
+            - upper_shadow(
+                open[old_idx.saturating_sub(1)],
+                close[old_idx.saturating_sub(1)],
+                high[old_idx.saturating_sub(1)],
+            );
+        shadow_very_short_sum[0] += upper_shadow(open[i], close[i], high[i])
+            - upper_shadow(open[old_idx], close[old_idx], high[old_idx]);
+
+        far_sum[2] += candle_range(open[i - 2], close[i - 2])
+            - candle_range(
+                open[old_idx.saturating_sub(2)],
+                close[old_idx.saturating_sub(2)],
+            );
+        far_sum[1] += candle_range(open[i - 1], close[i - 1])
+            - candle_range(
+                open[old_idx.saturating_sub(1)],
+                close[old_idx.saturating_sub(1)],
+            );
+
+        near_sum[2] += candle_range(open[i - 2], close[i - 2])
+            - candle_range(
+                open[old_idx.saturating_sub(2)],
+                close[old_idx.saturating_sub(2)],
+            );
+        near_sum[1] += candle_range(open[i - 1], close[i - 1])
+            - candle_range(
+                open[old_idx.saturating_sub(1)],
+                close[old_idx.saturating_sub(1)],
+            );
+
+        body_short_sum +=
+            candle_range(open[i], close[i]) - candle_range(open[old_idx], close[old_idx]);
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlabandonedbaby(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const BODY_LONG_PERIOD: usize = 10;
+    const BODY_DOJI_PERIOD: usize = 10;
+    const BODY_SHORT_PERIOD: usize = 10;
+
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let penetration = input.params.penetration;
+
+    fn candle_color(o: f64, c: f64) -> i8 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    fn real_body(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn candle_range(o: f64, c: f64) -> f64 {
+        (c - o).abs()
+    }
+
+    fn candle_gap_up(idx1: usize, idx2: usize, low: &[f64], high: &[f64]) -> bool {
+        low[idx1] > high[idx2]
+    }
+
+    fn candle_gap_down(idx1: usize, idx2: usize, low: &[f64], high: &[f64]) -> bool {
+        high[idx1] < low[idx2]
+    }
+
+    let size = open.len();
+    let lookback_total = 2 + BODY_LONG_PERIOD
+        .max(BODY_DOJI_PERIOD)
+        .max(BODY_SHORT_PERIOD);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_sum = 0.0;
+    let mut body_doji_sum = 0.0;
+    let mut body_short_sum = 0.0;
+
+    for i in 0..BODY_LONG_PERIOD {
+        body_long_sum += candle_range(open[i], close[i]);
+    }
+    for i in 0..BODY_DOJI_PERIOD {
+        body_doji_sum += candle_range(open[i], close[i]);
+    }
+    for i in 0..BODY_SHORT_PERIOD {
+        body_short_sum += candle_range(open[i], close[i]);
+    }
+
+    for i in lookback_total..size {
+        let avg_body_long = body_long_sum / BODY_LONG_PERIOD as f64;
+        let avg_body_doji = body_doji_sum / BODY_DOJI_PERIOD as f64;
+        let avg_body_short = body_short_sum / BODY_SHORT_PERIOD as f64;
+
+        if real_body(open[i - 2], close[i - 2]) > avg_body_long
+            && real_body(open[i - 1], close[i - 1]) <= avg_body_doji
+            && real_body(open[i], close[i]) > avg_body_short
+            && ((candle_color(open[i - 2], close[i - 2]) == 1
+                && candle_color(open[i], close[i]) == -1
+                && close[i] < close[i - 2] - real_body(open[i - 2], close[i - 2]) * penetration
+                && candle_gap_up(i - 1, i - 2, &low, &high)
+                && candle_gap_down(i, i - 1, &low, &high))
+                || (candle_color(open[i - 2], close[i - 2]) == -1
+                    && candle_color(open[i], close[i]) == 1
+                    && close[i]
+                        > close[i - 2] + real_body(open[i - 2], close[i - 2]) * penetration
+                    && candle_gap_down(i - 1, i - 2, &low, &high)
+                    && candle_gap_up(i, i - 1, &low, &high)))
+        {
+            out[i] = candle_color(open[i], close[i]) * 100;
+        } else {
+            out[i] = 0;
+        }
+
+        let old_idx = i - lookback_total;
+        body_long_sum += candle_range(open[i - 2], close[i - 2])
+            - candle_range(
+                open[old_idx.saturating_sub(2)],
+                close[old_idx.saturating_sub(2)],
+            );
+        body_doji_sum += candle_range(open[i - 1], close[i - 1])
+            - candle_range(
+                open[old_idx.saturating_sub(1)],
+                close[old_idx.saturating_sub(1)],
+            );
+        body_short_sum +=
+            candle_range(open[i], close[i]) - candle_range(open[old_idx], close[old_idx]);
+    }
+
+    Ok(PatternOutput { values: out })
+}
