@@ -20,6 +20,7 @@ use crate::indicators::utility_functions::{max_rolling, min_rolling};
 /// - **NotEnoughValidData**: stc: Fewer than needed valid data points remain after the first valid index.
 /// - **MinRollingError** / **MaxRollingError**: Errors returned by rolling min/max calculations.
 /// - **MaError**: Errors returned by the generic `ma` function.
+/// - **EmaError**: Errors returned by the `ema` function.
 ///
 /// ## Returns
 /// - **`Ok(StcOutput)`** on success, containing a `Vec<f64>` matching the input length,
@@ -144,8 +145,10 @@ pub enum StcError {
     AllValuesNaN,
     #[error("stc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("stc: rolling error: {0}")]
-    RollingError(#[from] crate::indicators::utility_functions::RollingError),
+    #[error("stc: min_rolling error: {0}")]
+    MinRollingError(#[from] crate::indicators::utility_functions::RollingError),
+    #[error("stc: max_rolling error: {0}")]
+    MaxRollingError(crate::indicators::utility_functions::RollingError),
     #[error("stc: MA error: {0}")]
     MaError(#[from] Box<dyn Error>),
     #[error("stc: EMA error: {0}")]
@@ -184,6 +187,7 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
 
     let fast_ma_type = input.get_fast_ma_type();
     let slow_ma_type = input.get_slow_ma_type();
+
     let fast_ma = ma(
         fast_ma_type,
         MaData::Slice(&data[first_valid_idx..]),
@@ -208,6 +212,8 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
         let range = macd_max[i] - macd_min[i];
         if range.abs() > f64::EPSILON && !range.is_nan() {
             stok[i] = (macd[i] - macd_min[i]) / range * 100.0;
+        } else if !macd[i].is_nan() {
+            stok[i] = 50.0;
         }
     }
 
@@ -217,7 +223,16 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
             period: Some(d_period),
         },
     );
-    let d_ema_output = ema(&d_ema_input)?;
+    let d_ema_output = match ema(&d_ema_input) {
+        Ok(o) => o,
+        Err(EmaError::AllValuesNaN) => {
+            let mut nan_output = vec![f64::NAN; macd.len()];
+            return Ok(StcOutput {
+                values: fill_final_array(data.len(), first_valid_idx, &nan_output),
+            });
+        }
+        Err(e) => return Err(StcError::EmaError(e)),
+    };
     let d_vals = d_ema_output.values;
 
     let d_min = min_rolling(&d_vals, k_period)?;
@@ -227,6 +242,8 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
         let range = d_max[i] - d_min[i];
         if range.abs() > f64::EPSILON && !range.is_nan() {
             kd[i] = (d_vals[i] - d_min[i]) / range * 100.0;
+        } else if !d_vals[i].is_nan() {
+            kd[i] = 50.0;
         }
     }
 
@@ -236,15 +253,28 @@ pub fn stc(input: &StcInput) -> Result<StcOutput, StcError> {
             period: Some(d_period),
         },
     );
-    let kd_ema_output = ema(&kd_ema_input)?;
+    let kd_ema_output = match ema(&kd_ema_input) {
+        Ok(o) => o,
+        Err(EmaError::AllValuesNaN) => {
+            let mut nan_output = vec![f64::NAN; macd.len()];
+            return Ok(StcOutput {
+                values: fill_final_array(data.len(), first_valid_idx, &nan_output),
+            });
+        }
+        Err(e) => return Err(StcError::EmaError(e)),
+    };
     let final_stc = kd_ema_output.values;
 
-    let mut stc_values = vec![f64::NAN; data.len()];
-    for (i, &val) in final_stc.iter().enumerate() {
-        stc_values[first_valid_idx + i] = val;
-    }
-
+    let stc_values = fill_final_array(data.len(), first_valid_idx, &final_stc);
     Ok(StcOutput { values: stc_values })
+}
+
+fn fill_final_array(total_len: usize, offset: usize, partial: &[f64]) -> Vec<f64> {
+    let mut out = vec![f64::NAN; total_len];
+    for (i, &val) in partial.iter().enumerate() {
+        out[offset + i] = val;
+    }
+    out
 }
 
 #[cfg(test)]

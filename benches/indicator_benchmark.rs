@@ -120,6 +120,9 @@ use my_project::indicators::{
     sqwma::{sqwma, SqwmaInput},
     srsi::{srsi, SrsiInput},
     srwma::{srwma, SrwmaInput},
+    stc::{stc, StcInput},
+    stddev::{stddev, StdDevInput},
+    stochf::{stochf, StochfInput},
     supersmoother::{supersmoother, SuperSmootherInput},
     supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput},
     swma::{swma, SwmaInput},
@@ -144,6 +147,24 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // Stochf
+    group.bench_function(BenchmarkId::new("STOCHF", 0), |b| {
+        let input = StochfInput::with_default_candles(&candles);
+        b.iter(|| stochf(black_box(&input)).expect("Failed to calculate STOCHF"))
+    });
+
+    // STC
+    group.bench_function(BenchmarkId::new("STC", 0), |b| {
+        let input = StcInput::with_default_candles(&candles);
+        b.iter(|| stc(black_box(&input)).expect("Failed to calculate STC"))
+    });
+
+    // STDDEV
+    group.bench_function(BenchmarkId::new("STDDEV", 0), |b| {
+        let input = StdDevInput::with_default_candles(&candles);
+        b.iter(|| stddev(black_box(&input)).expect("Failed to calculate STDDEV"))
+    });
 
     // SRSI
     group.bench_function(BenchmarkId::new("SRSI", 0), |b| {

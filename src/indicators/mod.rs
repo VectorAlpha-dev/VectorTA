@@ -98,7 +98,10 @@ pub mod sar;
 pub mod squeeze_momentum;
 pub mod srsi;
 pub mod stc;
+pub mod stddev;
 pub mod stoch;
+pub mod stochf;
+pub mod supertrend;
 pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
