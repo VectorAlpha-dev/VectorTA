@@ -107,7 +107,11 @@ pub mod tsf;
 pub mod tsi;
 pub mod ttm_trend;
 pub mod ui;
+pub mod ultosc;
 pub mod utility_functions;
+pub mod var;
+pub mod vi;
+pub mod vidya;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
     highpass_2_pole, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex,
