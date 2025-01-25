@@ -102,6 +102,11 @@ pub mod stddev;
 pub mod stoch;
 pub mod stochf;
 pub mod supertrend;
+pub mod trix;
+pub mod tsf;
+pub mod tsi;
+pub mod ttm_trend;
+pub mod ui;
 pub mod utility_functions;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,

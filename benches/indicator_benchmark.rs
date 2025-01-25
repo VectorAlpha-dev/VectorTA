@@ -130,6 +130,10 @@ use my_project::indicators::{
     tilson::{tilson, TilsonInput},
     trendflex::{trendflex, TrendFlexInput},
     trima::{trima, TrimaInput},
+    trix::{trix, TrixInput},
+    tsi::{tsi, TsiInput},
+    ttm_trend::{ttm_trend, TtmTrendInput},
+    ui::{ui, UiInput},
     vpwma::{vpwma, VpwmaInput},
     vwap::{vwap, VwapInput},
     vwma::{vwma, VwmaInput},
@@ -147,6 +151,30 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // TRIX
+    group.bench_function(BenchmarkId::new("TRIX", 0), |b| {
+        let input = TrixInput::with_default_candles(&candles);
+        b.iter(|| trix(black_box(&input)).expect("Failed to calculate TRIX"))
+    });
+
+    // TSI
+    group.bench_function(BenchmarkId::new("TSI", 0), |b| {
+        let input = TsiInput::with_default_candles(&candles);
+        b.iter(|| tsi(black_box(&input)).expect("Failed to calculate TSI"))
+    });
+
+    // TTM Trend
+    group.bench_function(BenchmarkId::new("TTM_TREND", 0), |b| {
+        let input = TtmTrendInput::with_default_candles(&candles);
+        b.iter(|| ttm_trend(black_box(&input)).expect("Failed to calculate TTM Trend"))
+    });
+
+    //UI
+    group.bench_function(BenchmarkId::new("UI", 0), |b| {
+        let input = UiInput::with_default_candles(&candles);
+        b.iter(|| ui(black_box(&input)).expect("Failed to calculate UI"))
+    });
 
     // Stochf
     group.bench_function(BenchmarkId::new("STOCHF", 0), |b| {

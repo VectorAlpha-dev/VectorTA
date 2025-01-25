@@ -1081,3 +1081,221 @@ pub fn cdlabandonedbaby(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdladvanceblock(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let shadow_short_period = 10;
+    let shadow_long_period = 10;
+    let near_period = 5;
+    let far_period = 5;
+    let body_long_period = 10;
+    let lookback_total = 2 + shadow_short_period
+        .max(shadow_long_period)
+        .max(near_period)
+        .max(far_period)
+        .max(body_long_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+
+    let mut shadow_short_period_total = [0.0; 3];
+    let mut shadow_long_period_total = [0.0; 2];
+    let mut near_period_total = [0.0; 3];
+    let mut far_period_total = [0.0; 3];
+    let mut body_long_period_total = 0.0;
+
+    #[inline(always)]
+    fn upper_shadow(o: f64, h: f64, c: f64) -> f64 {
+        if c >= o {
+            h - c
+        } else {
+            h - o
+        }
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let start_idx = lookback_total;
+    let mut shadow_short_trailing_idx = start_idx.saturating_sub(shadow_short_period);
+    let mut shadow_long_trailing_idx = start_idx.saturating_sub(shadow_long_period);
+    let mut near_trailing_idx = start_idx.saturating_sub(near_period);
+    let mut far_trailing_idx = start_idx.saturating_sub(far_period);
+    let mut body_long_trailing_idx = start_idx.saturating_sub(body_long_period);
+
+    let mut i = shadow_short_trailing_idx;
+    while i < start_idx {
+        shadow_short_period_total[2] += upper_shadow(
+            open[i.saturating_sub(2)],
+            high[i.saturating_sub(2)],
+            close[i.saturating_sub(2)],
+        );
+        shadow_short_period_total[1] += upper_shadow(
+            open[i.saturating_sub(1)],
+            high[i.saturating_sub(1)],
+            close[i.saturating_sub(1)],
+        );
+        shadow_short_period_total[0] += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < start_idx {
+        shadow_long_period_total[1] += upper_shadow(
+            open[i.saturating_sub(1)],
+            high[i.saturating_sub(1)],
+            close[i.saturating_sub(1)],
+        );
+        shadow_long_period_total[0] += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = near_trailing_idx;
+    while i < start_idx {
+        near_period_total[2] += real_body(open[i.saturating_sub(2)], close[i.saturating_sub(2)]);
+        near_period_total[1] += real_body(open[i.saturating_sub(1)], close[i.saturating_sub(1)]);
+        i += 1;
+    }
+    i = far_trailing_idx;
+    while i < start_idx {
+        far_period_total[2] += real_body(open[i.saturating_sub(2)], close[i.saturating_sub(2)]);
+        far_period_total[1] += real_body(open[i.saturating_sub(1)], close[i.saturating_sub(1)]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < start_idx {
+        body_long_period_total += real_body(open[i.saturating_sub(2)], close[i.saturating_sub(2)]);
+        i += 1;
+    }
+
+    let mut idx = start_idx;
+    while idx < size {
+        let c1_color = candle_color(open[idx - 2], close[idx - 2]);
+        let c2_color = candle_color(open[idx - 1], close[idx - 1]);
+        let c3_color = candle_color(open[idx], close[idx]);
+
+        if c1_color == 1
+            && c2_color == 1
+            && c3_color == 1
+            && close[idx] > close[idx - 1]
+            && close[idx - 1] > close[idx - 2]
+            && open[idx - 1] > open[idx - 2]
+            && open[idx - 1] <= close[idx - 2] + candle_average(near_period_total[2], near_period)
+            && open[idx] > open[idx - 1]
+            && open[idx] <= close[idx - 1] + candle_average(near_period_total[1], near_period)
+            && real_body(open[idx - 2], close[idx - 2])
+                > candle_average(body_long_period_total, body_long_period)
+            && upper_shadow(open[idx - 2], high[idx - 2], close[idx - 2])
+                < candle_average(shadow_short_period_total[2], shadow_short_period)
+            && ((real_body(open[idx - 1], close[idx - 1])
+                < real_body(open[idx - 2], close[idx - 2])
+                    - candle_average(far_period_total[2], far_period)
+                && real_body(open[idx], close[idx])
+                    < real_body(open[idx - 1], close[idx - 1])
+                        + candle_average(near_period_total[1], near_period))
+                || (real_body(open[idx], close[idx])
+                    < real_body(open[idx - 1], close[idx - 1])
+                        - candle_average(far_period_total[1], far_period))
+                || (real_body(open[idx], close[idx]) < real_body(open[idx - 1], close[idx - 1])
+                    && real_body(open[idx - 1], close[idx - 1])
+                        < real_body(open[idx - 2], close[idx - 2])
+                    && (upper_shadow(open[idx], high[idx], close[idx])
+                        > candle_average(shadow_short_period_total[0], shadow_short_period)
+                        || upper_shadow(open[idx - 1], high[idx - 1], close[idx - 1])
+                            > candle_average(shadow_short_period_total[1], shadow_short_period)))
+                || (real_body(open[idx], close[idx]) < real_body(open[idx - 1], close[idx - 1])
+                    && upper_shadow(open[idx], high[idx], close[idx])
+                        > candle_average(shadow_long_period_total[0], shadow_long_period)))
+        {
+            out[idx] = -100;
+        }
+
+        for tot_idx in (0..=2).rev() {
+            if tot_idx < 3 {
+                shadow_short_period_total[tot_idx] += upper_shadow(
+                    open[idx.saturating_sub(tot_idx)],
+                    high[idx.saturating_sub(tot_idx)],
+                    close[idx.saturating_sub(tot_idx)],
+                ) - upper_shadow(
+                    open[shadow_short_trailing_idx.saturating_sub(tot_idx)],
+                    high[shadow_short_trailing_idx.saturating_sub(tot_idx)],
+                    close[shadow_short_trailing_idx.saturating_sub(tot_idx)],
+                );
+            }
+        }
+
+        for tot_idx in (0..=1).rev() {
+            shadow_long_period_total[tot_idx] += upper_shadow(
+                open[idx.saturating_sub(tot_idx)],
+                high[idx.saturating_sub(tot_idx)],
+                close[idx.saturating_sub(tot_idx)],
+            ) - upper_shadow(
+                open[shadow_long_trailing_idx.saturating_sub(tot_idx)],
+                high[shadow_long_trailing_idx.saturating_sub(tot_idx)],
+                close[shadow_long_trailing_idx.saturating_sub(tot_idx)],
+            );
+        }
+
+        for tot_idx in (1..=2).rev() {
+            far_period_total[tot_idx] += real_body(
+                open[idx.saturating_sub(tot_idx)],
+                close[idx.saturating_sub(tot_idx)],
+            ) - real_body(
+                open[far_trailing_idx.saturating_sub(tot_idx)],
+                close[far_trailing_idx.saturating_sub(tot_idx)],
+            );
+            near_period_total[tot_idx] += real_body(
+                open[idx.saturating_sub(tot_idx)],
+                close[idx.saturating_sub(tot_idx)],
+            ) - real_body(
+                open[near_trailing_idx.saturating_sub(tot_idx)],
+                close[near_trailing_idx.saturating_sub(tot_idx)],
+            );
+        }
+
+        body_long_period_total += real_body(open[idx - 2], close[idx - 2])
+            - real_body(
+                open[body_long_trailing_idx.saturating_sub(2)],
+                close[body_long_trailing_idx.saturating_sub(2)],
+            );
+
+        idx += 1;
+        shadow_short_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        near_trailing_idx += 1;
+        far_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
