@@ -121,44 +121,49 @@ pub fn var(input: &VarInput) -> Result<VarOutput, VarError> {
     }
 
     let period = input.get_period();
-    if period == 0 || period > data.len() {
-        return Err(VarError::InvalidPeriod {
-            period,
-            data_len: data.len(),
-        });
+    let data_len = data.len();
+    if period == 0 || period > data_len {
+        return Err(VarError::InvalidPeriod { period, data_len });
     }
 
-    let nbdev = input.get_nbdev();
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
         None => return Err(VarError::AllValuesNaN),
     };
 
-    if (data.len() - first_valid_idx) < period {
+    if (data_len - first_valid_idx) < period {
         return Err(VarError::NotEnoughValidData {
             needed: period,
-            valid: data.len() - first_valid_idx,
+            valid: data_len - first_valid_idx,
         });
     }
 
-    let mut var_values = vec![f64::NAN; data.len()];
+    let nbdev_sq = input.get_nbdev().powi(2);
+    let period_f = period as f64;
+    let inv_period = 1.0 / period_f;
+
+    let mut var_values = vec![f64::NAN; data_len];
     let mut sum = 0.0;
     let mut sum_sq = 0.0;
-    for &value in data[first_valid_idx..(first_valid_idx + period)].iter() {
+
+    for &value in &data[first_valid_idx..(first_valid_idx + period)] {
         sum += value;
         sum_sq += value * value;
     }
 
-    let period_f = period as f64;
-    var_values[first_valid_idx + period - 1] =
-        (sum_sq / period_f - (sum / period_f) * (sum / period_f)) * nbdev * nbdev;
+    let mean = sum * inv_period;
+    let mean_sq = sum_sq * inv_period;
+    var_values[first_valid_idx + period - 1] = (mean_sq - mean * mean) * nbdev_sq;
 
-    for i in (first_valid_idx + period)..data.len() {
+    for i in (first_valid_idx + period)..data_len {
         let old_val = data[i - period];
         let new_val = data[i];
         sum += new_val - old_val;
         sum_sq += new_val * new_val - old_val * old_val;
-        var_values[i] = (sum_sq / period_f - (sum / period_f) * (sum / period_f)) * nbdev * nbdev;
+
+        let mean = sum * inv_period;
+        let mean_sq = sum_sq * inv_period;
+        var_values[i] = (mean_sq - mean * mean) * nbdev_sq;
     }
 
     Ok(VarOutput { values: var_values })
@@ -218,9 +223,6 @@ mod tests {
 
     #[test]
     fn test_var_accuracy() {
-        // These values are for demonstration; in practice, use real data comparisons.
-        // The user-provided reference values might come from a known dataset:
-        // "350987.4081501961, 348493.9183540344, 302611.06121110916, 106092.2499871254, 121941.35202789307"
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
 

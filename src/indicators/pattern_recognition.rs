@@ -1550,3 +1550,319 @@ pub fn cdlbreakaway(input: &PatternInput) -> Result<PatternOutput, PatternError>
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdlclosingmarubozu(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let body_long_period = 10;
+    let shadow_very_short_period = 10;
+    let lookback_total = body_long_period.max(shadow_very_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+
+    #[inline(always)]
+    fn lower_shadow(o: f64, l: f64, c: f64) -> f64 {
+        if c >= o {
+            o - l
+        } else {
+            c - l
+        }
+    }
+
+    #[inline(always)]
+    fn upper_shadow(o: f64, h: f64, c: f64) -> f64 {
+        if c >= o {
+            h - c
+        } else {
+            h - o
+        }
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_long_trailing_idx = start_idx.saturating_sub(body_long_period);
+    let mut shadow_very_short_trailing_idx = start_idx.saturating_sub(shadow_very_short_period);
+
+    let mut i = body_long_trailing_idx;
+    while i < start_idx {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = shadow_very_short_trailing_idx;
+    while i < start_idx {
+        let color = candle_color(open[i], close[i]);
+        shadow_very_short_period_total += if color == 1 {
+            upper_shadow(open[i], high[i], close[i])
+        } else {
+            lower_shadow(open[i], low[i], close[i])
+        };
+        i += 1;
+    }
+
+    while start_idx < size {
+        let color = candle_color(open[start_idx], close[start_idx]);
+        if real_body(open[start_idx], close[start_idx])
+            > candle_average(body_long_period_total, body_long_period)
+            && ((color == 1
+                && upper_shadow(open[start_idx], high[start_idx], close[start_idx])
+                    < candle_average(shadow_very_short_period_total, shadow_very_short_period))
+                || (color == -1
+                    && lower_shadow(open[start_idx], low[start_idx], close[start_idx])
+                        < candle_average(shadow_very_short_period_total, shadow_very_short_period)))
+        {
+            out[start_idx] = (color as i8) * 100;
+        }
+
+        body_long_period_total += real_body(open[start_idx], close[start_idx])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+
+        let trailing_color = candle_color(open[start_idx], close[start_idx]);
+        let new_shadow = if trailing_color == 1 {
+            upper_shadow(open[start_idx], high[start_idx], close[start_idx])
+        } else {
+            lower_shadow(open[start_idx], low[start_idx], close[start_idx])
+        };
+
+        let old_color = candle_color(
+            open[shadow_very_short_trailing_idx],
+            close[shadow_very_short_trailing_idx],
+        );
+        let old_shadow = if old_color == 1 {
+            upper_shadow(
+                open[shadow_very_short_trailing_idx],
+                high[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            )
+        } else {
+            lower_shadow(
+                open[shadow_very_short_trailing_idx],
+                low[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            )
+        };
+
+        shadow_very_short_period_total += new_shadow - old_shadow;
+
+        start_idx += 1;
+        body_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlconcealbabyswall(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let lookback_total = 3 + shadow_very_short_period;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_very_short_period_total = [0.0; 4];
+
+    #[inline(always)]
+    fn upper_shadow(o: f64, h: f64, c: f64) -> f64 {
+        if c >= o {
+            h - c
+        } else {
+            h - o
+        }
+    }
+
+    #[inline(always)]
+    fn lower_shadow(o: f64, l: f64, c: f64) -> f64 {
+        if c >= o {
+            o - l
+        } else {
+            c - l
+        }
+    }
+
+    #[inline(always)]
+    fn candle_color(o: f64, c: f64) -> i32 {
+        if c >= o {
+            1
+        } else {
+            -1
+        }
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(o1: f64, c1: f64, o2: f64, c2: f64) -> bool {
+        o1.max(c1) < o2.min(c2)
+    }
+
+    let mut start_idx = lookback_total;
+    let mut shadow_very_short_trailing_idx = start_idx.saturating_sub(shadow_very_short_period);
+
+    let mut i = shadow_very_short_trailing_idx;
+    while i < start_idx {
+        shadow_very_short_period_total[3] += upper_shadow(open[i - 3], high[i - 3], close[i - 3])
+            .max(lower_shadow(open[i - 3], low[i - 3], close[i - 3]));
+        shadow_very_short_period_total[2] += upper_shadow(open[i - 2], high[i - 2], close[i - 2])
+            .max(lower_shadow(open[i - 2], low[i - 2], close[i - 2]));
+        shadow_very_short_period_total[1] += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]));
+        i += 1;
+    }
+
+    while start_idx < size {
+        let c1 = candle_color(open[start_idx - 3], close[start_idx - 3]);
+        let c2 = candle_color(open[start_idx - 2], close[start_idx - 2]);
+        let c3 = candle_color(open[start_idx - 1], close[start_idx - 1]);
+        let c4 = candle_color(open[start_idx], close[start_idx]);
+
+        let upper1 = upper_shadow(
+            open[start_idx - 3],
+            high[start_idx - 3],
+            close[start_idx - 3],
+        );
+        let lower1 = lower_shadow(
+            open[start_idx - 3],
+            low[start_idx - 3],
+            close[start_idx - 3],
+        );
+        let upper2 = upper_shadow(
+            open[start_idx - 2],
+            high[start_idx - 2],
+            close[start_idx - 2],
+        );
+        let lower2 = lower_shadow(
+            open[start_idx - 2],
+            low[start_idx - 2],
+            close[start_idx - 2],
+        );
+        let upper3 = upper_shadow(
+            open[start_idx - 1],
+            high[start_idx - 1],
+            close[start_idx - 1],
+        );
+
+        if c1 == -1
+            && c2 == -1
+            && c3 == -1
+            && c4 == -1
+            && lower1 < candle_average(shadow_very_short_period_total[3], shadow_very_short_period)
+            && upper1 < candle_average(shadow_very_short_period_total[3], shadow_very_short_period)
+            && lower2 < candle_average(shadow_very_short_period_total[2], shadow_very_short_period)
+            && upper2 < candle_average(shadow_very_short_period_total[2], shadow_very_short_period)
+            && real_body_gap_down(
+                open[start_idx - 1],
+                close[start_idx - 1],
+                open[start_idx - 2],
+                close[start_idx - 2],
+            )
+            && upper3 > candle_average(shadow_very_short_period_total[1], shadow_very_short_period)
+            && high[start_idx - 1] > close[start_idx - 2]
+            && high[start_idx] > high[start_idx - 1]
+            && low[start_idx] < low[start_idx - 1]
+        {
+            out[start_idx] = 100;
+        }
+
+        for tot_idx in (1..=3).rev() {
+            let current_upper = upper_shadow(
+                open[start_idx - tot_idx],
+                high[start_idx - tot_idx],
+                close[start_idx - tot_idx],
+            );
+            let current_lower = lower_shadow(
+                open[start_idx - tot_idx],
+                low[start_idx - tot_idx],
+                close[start_idx - tot_idx],
+            );
+            let new_val = current_upper.max(current_lower);
+
+            let old_upper = upper_shadow(
+                open[shadow_very_short_trailing_idx - tot_idx],
+                high[shadow_very_short_trailing_idx - tot_idx],
+                close[shadow_very_short_trailing_idx - tot_idx],
+            );
+            let old_lower = lower_shadow(
+                open[shadow_very_short_trailing_idx - tot_idx],
+                low[shadow_very_short_trailing_idx - tot_idx],
+                close[shadow_very_short_trailing_idx - tot_idx],
+            );
+            let old_val = old_upper.max(old_lower);
+
+            shadow_very_short_period_total[tot_idx] += new_val - old_val;
+        }
+
+        start_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}

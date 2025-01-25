@@ -112,6 +112,7 @@ pub mod utility_functions;
 pub mod var;
 pub mod vi;
 pub mod vidya;
+pub mod vlma;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
     highpass_2_pole, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex,

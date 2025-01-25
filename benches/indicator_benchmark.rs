@@ -134,6 +134,11 @@ use my_project::indicators::{
     tsi::{tsi, TsiInput},
     ttm_trend::{ttm_trend, TtmTrendInput},
     ui::{ui, UiInput},
+    ultosc::{ultosc, UltOscInput},
+    var::{var, VarInput},
+    vi::{vi, ViInput},
+    vidya::{vidya, VidyaInput},
+    vlma::{vlma, VlmaInput},
     vpwma::{vpwma, VpwmaInput},
     vwap::{vwap, VwapInput},
     vwma::{vwma, VwmaInput},
@@ -151,6 +156,36 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // VIDYA
+    group.bench_function(BenchmarkId::new("VIDYA", 0), |b| {
+        let input = VidyaInput::with_default_candles(&candles);
+        b.iter(|| vidya(black_box(&input)).expect("Failed to calculate VIDYA"))
+    });
+
+    // ULTOSC
+    group.bench_function(BenchmarkId::new("ULTOSC", 0), |b| {
+        let input = UltOscInput::with_default_candles(&candles);
+        b.iter(|| ultosc(black_box(&input)).expect("Failed to calculate ULTOSC"))
+    });
+
+    // VLMA
+    group.bench_function(BenchmarkId::new("VLMA", 0), |b| {
+        let input = VlmaInput::with_default_candles(&candles);
+        b.iter(|| vlma(black_box(&input)).expect("Failed to calculate VLMA"))
+    });
+
+    // VI
+    group.bench_function(BenchmarkId::new("VI", 0), |b| {
+        let input = ViInput::with_default_candles(&candles);
+        b.iter(|| vi(black_box(&input)).expect("Failed to calculate VI"))
+    });
+
+    // VAR
+    group.bench_function(BenchmarkId::new("VAR", 0), |b| {
+        let input = VarInput::with_default_candles(&candles);
+        b.iter(|| var(black_box(&input)).expect("Failed to calculate VAR"))
+    });
 
     // TRIX
     group.bench_function(BenchmarkId::new("TRIX", 0), |b| {

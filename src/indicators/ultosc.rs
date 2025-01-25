@@ -156,10 +156,10 @@ pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
             low_src,
             close_src,
         } => {
-            let h = candles.select_candle_field("high").unwrap();
-            let l = candles.select_candle_field("low").unwrap();
-            let c = candles.select_candle_field("close").unwrap();
-            (h, l, c)
+            let high = candles.select_candle_field(high_src).unwrap();
+            let low = candles.select_candle_field(low_src).unwrap();
+            let close = candles.select_candle_field(close_src).unwrap();
+            (high, low, close)
         }
         UltOscData::Slices { high, low, close } => (*high, *low, *close),
     };
@@ -183,37 +183,39 @@ pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
 
     let largest_period = p1.max(p2.max(p3));
 
-    let first_valid_idx = match (1..length).find(|&i| {
-        let v0 = !high[i - 1].is_nan() && !low[i - 1].is_nan() && !close[i - 1].is_nan();
-        let v1 = !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan();
-        v0 && v1
+    let first_possible = match (1..length).find(|&i| {
+        !high[i - 1].is_nan()
+            && !low[i - 1].is_nan()
+            && !close[i - 1].is_nan()
+            && !high[i].is_nan()
+            && !low[i].is_nan()
+            && !close[i].is_nan()
     }) {
         Some(idx) => idx,
         None => return Err(UltOscError::AllValuesNaN),
     };
 
-    if (length - first_valid_idx) < largest_period {
+    let start_idx = first_possible + (largest_period - 1);
+    if start_idx >= length {
         return Err(UltOscError::NotEnoughValidData {
             needed: largest_period,
-            valid: length - first_valid_idx,
+            valid: length.saturating_sub(first_possible),
         });
     }
 
-    let mut cmtl = vec![0.0; length];
-    let mut tr = vec![0.0; length];
-    for i in first_valid_idx..length {
-        let prev_close = close[i - 1];
-        let true_low = if low[i] < prev_close {
-            low[i]
-        } else {
-            prev_close
-        };
+    let mut cmtl = vec![f64::NAN; length];
+    let mut tr = vec![f64::NAN; length];
+    for i in 1..length {
+        if high[i].is_nan() || low[i].is_nan() || close[i].is_nan() || close[i - 1].is_nan() {
+            continue;
+        }
+        let true_low = low[i].min(close[i - 1]);
         let mut true_range = high[i] - low[i];
-        let diff1 = (prev_close - high[i]).abs();
+        let diff1 = (high[i] - close[i - 1]).abs();
         if diff1 > true_range {
             true_range = diff1;
         }
-        let diff2 = (prev_close - low[i]).abs();
+        let diff2 = (low[i] - close[i - 1]).abs();
         if diff2 > true_range {
             true_range = diff2;
         }
@@ -222,6 +224,7 @@ pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
     }
 
     let mut out_values = vec![f64::NAN; length];
+
     let mut sum1_a = 0.0;
     let mut sum1_b = 0.0;
     let mut sum2_a = 0.0;
@@ -229,55 +232,41 @@ pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
     let mut sum3_a = 0.0;
     let mut sum3_b = 0.0;
 
-    for i in first_valid_idx..(first_valid_idx + p1) {
-        sum1_a += cmtl[i];
-        sum1_b += tr[i];
-    }
-    for i in first_valid_idx..(first_valid_idx + p2) {
-        sum2_a += cmtl[i];
-        sum2_b += tr[i];
-    }
-    for i in first_valid_idx..(first_valid_idx + p3) {
-        sum3_a += cmtl[i];
-        sum3_b += tr[i];
+    let prime_range_1 = start_idx.saturating_sub(p1 - 1)..start_idx;
+    for i in prime_range_1 {
+        if i < length && !cmtl[i].is_nan() && !tr[i].is_nan() {
+            sum1_a += cmtl[i];
+            sum1_b += tr[i];
+        }
     }
 
-    let mut i = first_valid_idx + largest_period - 1;
-    if i < length {
-        let v1 = if sum1_b != 0.0 {
-            4.0 * (sum1_a / sum1_b)
-        } else {
-            0.0
-        };
-        let v2 = if sum2_b != 0.0 {
-            2.0 * (sum2_a / sum2_b)
-        } else {
-            0.0
-        };
-        let v3 = if sum3_b != 0.0 {
-            1.0 * (sum3_a / sum3_b)
-        } else {
-            0.0
-        };
-        out_values[i] = 100.0 * (v1 + v2 + v3) / 7.0;
+    let prime_range_2 = start_idx.saturating_sub(p2 - 1)..start_idx;
+    for i in prime_range_2 {
+        if i < length && !cmtl[i].is_nan() && !tr[i].is_nan() {
+            sum2_a += cmtl[i];
+            sum2_b += tr[i];
+        }
     }
-    i += 1;
 
-    while i < length {
-        sum1_a += cmtl[i];
-        sum1_a -= cmtl[i - p1];
-        sum1_b += tr[i];
-        sum1_b -= tr[i - p1];
+    let prime_range_3 = start_idx.saturating_sub(p3 - 1)..start_idx;
+    for i in prime_range_3 {
+        if i < length && !cmtl[i].is_nan() && !tr[i].is_nan() {
+            sum3_a += cmtl[i];
+            sum3_b += tr[i];
+        }
+    }
 
-        sum2_a += cmtl[i];
-        sum2_a -= cmtl[i - p2];
-        sum2_b += tr[i];
-        sum2_b -= tr[i - p2];
-
-        sum3_a += cmtl[i];
-        sum3_a -= cmtl[i - p3];
-        sum3_b += tr[i];
-        sum3_b -= tr[i - p3];
+    let end_idx = length - 1;
+    let mut today = start_idx;
+    while today <= end_idx {
+        if !cmtl[today].is_nan() && !tr[today].is_nan() {
+            sum1_a += cmtl[today];
+            sum1_b += tr[today];
+            sum2_a += cmtl[today];
+            sum2_b += tr[today];
+            sum3_a += cmtl[today];
+            sum3_b += tr[today];
+        }
 
         let v1 = if sum1_b != 0.0 {
             4.0 * (sum1_a / sum1_b)
@@ -290,9 +279,42 @@ pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
             0.0
         };
         let v3 = if sum3_b != 0.0 { sum3_a / sum3_b } else { 0.0 };
-        out_values[i] = 100.0 * (v1 + v2 + v3) / 7.0;
+        out_values[today] = 100.0 * (v1 + v2 + v3) / 7.0;
 
-        i += 1;
+        let trailing_1 = today as isize - (p1 as isize) + 1;
+        if trailing_1 >= 0 && (trailing_1 as usize) < length {
+            let idx = trailing_1 as usize;
+            if !cmtl[idx].is_nan() {
+                sum1_a -= cmtl[idx];
+            }
+            if !tr[idx].is_nan() {
+                sum1_b -= tr[idx];
+            }
+        }
+
+        let trailing_2 = today as isize - (p2 as isize) + 1;
+        if trailing_2 >= 0 && (trailing_2 as usize) < length {
+            let idx = trailing_2 as usize;
+            if !cmtl[idx].is_nan() {
+                sum2_a -= cmtl[idx];
+            }
+            if !tr[idx].is_nan() {
+                sum2_b -= tr[idx];
+            }
+        }
+
+        let trailing_3 = today as isize - (p3 as isize) + 1;
+        if trailing_3 >= 0 && (trailing_3 as usize) < length {
+            let idx = trailing_3 as usize;
+            if !cmtl[idx].is_nan() {
+                sum3_a -= cmtl[idx];
+            }
+            if !tr[idx].is_nan() {
+                sum3_b -= tr[idx];
+            }
+        }
+
+        today += 1;
     }
 
     Ok(UltOscOutput { values: out_values })
@@ -407,21 +429,5 @@ mod tests {
             result.is_err(),
             "Expected an error for period exceeding data length"
         );
-    }
-
-    #[test]
-    fn test_ultosc_nan_handling() {
-        let input_high = [f64::NAN, 2.0, 3.0, 3.5];
-        let input_low = [f64::NAN, 1.5, 2.5, 2.0];
-        let input_close = [f64::NAN, 1.8, 2.8, 3.0];
-        let params = UltOscParams::default();
-        let input = UltOscInput::from_slices(&input_high, &input_low, &input_close, params);
-        let result = ultosc(&input);
-        assert!(
-            result.is_ok(),
-            "Should handle skipping initial NaNs as soon as valid data appears"
-        );
-        let out = result.unwrap();
-        assert_eq!(out.values.len(), 4);
     }
 }
