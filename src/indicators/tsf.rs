@@ -173,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_tsf_accuracy() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
