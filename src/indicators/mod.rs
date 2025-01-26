@@ -113,6 +113,16 @@ pub mod var;
 pub mod vi;
 pub mod vidya;
 pub mod vlma;
+pub mod vosc;
+pub mod voss;
+pub mod vpci;
+pub mod vpt;
+pub mod vwmacd;
+pub mod wad;
+pub mod wavetrend;
+pub mod wclprice;
+pub mod willr;
+pub mod zscore;
 pub use moving_averages::{
     alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass,
     highpass_2_pole, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex,

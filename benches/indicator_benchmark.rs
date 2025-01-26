@@ -139,12 +139,22 @@ use my_project::indicators::{
     vi::{vi, ViInput},
     vidya::{vidya, VidyaInput},
     vlma::{vlma, VlmaInput},
+    vosc::{vosc, VoscInput},
+    voss::{voss, VossInput},
+    vpci::{vpci, VpciInput},
+    vpt::{vpt, VptInput},
     vpwma::{vpwma, VpwmaInput},
     vwap::{vwap, VwapInput},
     vwma::{vwma, VwmaInput},
+    vwmacd::{vwmacd, VwmacdInput},
+    wad::{wad, WadInput},
+    wavetrend::{wavetrend, WavetrendInput},
+    wclprice::{wclprice, WclpriceInput},
     wilders::{wilders, WildersInput},
+    willr::{willr, WillrInput},
     wma::{wma, WmaInput},
     zlema::{zlema, ZlemaInput},
+    zscore::{zscore, ZscoreInput},
 };
 use std::time::Duration;
 
@@ -156,6 +166,66 @@ fn benchmark_indicators(c: &mut Criterion) {
     let mut group = c.benchmark_group("Indicator Benchmarks");
     group.measurement_time(Duration::new(8, 0));
     group.warm_up_time(Duration::new(4, 0));
+
+    // ZSCORE
+    group.bench_function(BenchmarkId::new("ZSCORE", 0), |b| {
+        let input = ZscoreInput::with_default_candles(&candles);
+        b.iter(|| zscore(black_box(&input)).expect("Failed to calculate ZSCORE"))
+    });
+
+    // WILLR
+    group.bench_function(BenchmarkId::new("WILLR", 0), |b| {
+        let input = WillrInput::with_default_candles(&candles);
+        b.iter(|| willr(black_box(&input)).expect("Failed to calculate WILLR"))
+    });
+
+    // WCLPRICE
+    group.bench_function(BenchmarkId::new("WCLPRICE", 0), |b| {
+        let input = WclpriceInput::with_default_candles(&candles);
+        b.iter(|| wclprice(black_box(&input)).expect("Failed to calculate WCLPRICE"))
+    });
+
+    // WAVE TREND
+    group.bench_function(BenchmarkId::new("WAVETREND", 0), |b| {
+        let input = WavetrendInput::with_default_candles(&candles);
+        b.iter(|| wavetrend(black_box(&input)).expect("Failed to calculate Wave Trend"))
+    });
+
+    //WAD
+    group.bench_function(BenchmarkId::new("WAD", 0), |b| {
+        let input = WadInput::with_default_candles(&candles);
+        b.iter(|| wad(black_box(&input)).expect("Failed to calculate WAD"))
+    });
+
+    // VWMACD
+    group.bench_function(BenchmarkId::new("VWMACD", 0), |b| {
+        let input = VwmacdInput::with_default_candles(&candles);
+        b.iter(|| vwmacd(black_box(&input)).expect("Failed to calculate VWMACD"))
+    });
+
+    // VPT
+    group.bench_function(BenchmarkId::new("VPT", 0), |b| {
+        let input = VptInput::with_default_candles(&candles);
+        b.iter(|| vpt(black_box(&input)).expect("Failed to calculate VPT"))
+    });
+
+    //VPCI
+    group.bench_function(BenchmarkId::new("VPCI", 0), |b| {
+        let input = VpciInput::with_default_candles(&candles);
+        b.iter(|| vpci(black_box(&input)).expect("Failed to calculate VPCI"))
+    });
+
+    // VOSS
+    group.bench_function(BenchmarkId::new("VOSS", 0), |b| {
+        let input = VossInput::with_default_candles(&candles);
+        b.iter(|| voss(black_box(&input)).expect("Failed to calculate VOSS"))
+    });
+
+    // VOSC
+    group.bench_function(BenchmarkId::new("VOSC", 0), |b| {
+        let input = VoscInput::with_default_candles(&candles);
+        b.iter(|| vosc(black_box(&input)).expect("Failed to calculate VOSC"))
+    });
 
     // VIDYA
     group.bench_function(BenchmarkId::new("VIDYA", 0), |b| {
