@@ -2365,3 +2365,57 @@ pub fn cdldragonflydoji(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdlengulfing(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    if size < 2 {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    for i in 1..size {
+        let c1 = candle_color(open[i - 1], close[i - 1]);
+        let c2 = candle_color(open[i], close[i]);
+        if (c2 == 1
+            && c1 == -1
+            && ((close[i] >= open[i - 1] && open[i] < close[i - 1])
+                || (close[i] > open[i - 1] && open[i] <= close[i - 1])))
+            || (c2 == -1
+                && c1 == 1
+                && ((open[i] >= close[i - 1] && close[i] < open[i - 1])
+                    || (open[i] > close[i - 1] && close[i] <= open[i - 1])))
+        {
+            if (open[i] - close[i - 1]).abs() > f64::EPSILON
+                && (close[i] - open[i - 1]).abs() > f64::EPSILON
+            {
+                out[i] = (c2 as i8) * 100;
+            } else {
+                out[i] = (c2 as i8) * 80;
+            }
+        }
+    }
+
+    Ok(PatternOutput { values: out })
+}
