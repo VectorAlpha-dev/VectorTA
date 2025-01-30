@@ -2419,3 +2419,128 @@ pub fn cdlengulfing(input: &PatternInput) -> Result<PatternOutput, PatternError>
 
     Ok(PatternOutput { values: out })
 }
+
+#[inline]
+pub fn cdleveningdojistar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = match &input.data {
+        PatternData::Candles { candles } => {
+            let open = candles
+                .select_candle_field("open")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
+            (open, high, low, close)
+        }
+    };
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_doji_period = 10;
+    let body_short_period = 10;
+    let penetration = if input.params.penetration == 0.0 {
+        0.3
+    } else {
+        input.params.penetration
+    };
+    let lookback_total = 2 + body_long_period
+        .max(body_doji_period)
+        .max(body_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type.clone(),
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_doji_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn gap_up(current_open: f64, current_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        current_open.min(current_close) > prev_open.max(prev_close)
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_long_trailing_idx = start_idx.saturating_sub(2 + body_long_period);
+    let mut body_doji_trailing_idx = start_idx.saturating_sub(1 + body_doji_period);
+    let mut body_short_trailing_idx = start_idx.saturating_sub(body_short_period);
+
+    let mut i = body_long_trailing_idx;
+    while i < start_idx - 2 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = body_doji_trailing_idx;
+    while i < start_idx - 1 {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = body_short_trailing_idx;
+    while i < start_idx {
+        body_short_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        if real_body(open[start_idx - 2], close[start_idx - 2])
+            > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[start_idx - 2], close[start_idx - 2]) == 1
+            && real_body(open[start_idx - 1], close[start_idx - 1])
+                <= candle_average(body_doji_period_total, body_doji_period)
+            && gap_up(
+                open[start_idx - 1],
+                close[start_idx - 1],
+                open[start_idx - 2],
+                close[start_idx - 2],
+            )
+            && real_body(open[start_idx], close[start_idx])
+                > candle_average(body_short_period_total, body_short_period)
+            && candle_color(open[start_idx], close[start_idx]) == -1
+            && close[start_idx]
+                < close[start_idx - 2]
+                    - real_body(open[start_idx - 2], close[start_idx - 2]) * penetration
+        {
+            out[start_idx] = -100;
+        }
+
+        body_long_period_total += real_body(open[start_idx - 2], close[start_idx - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+
+        body_doji_period_total += real_body(open[start_idx - 1], close[start_idx - 1])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+
+        body_short_period_total += real_body(open[start_idx], close[start_idx])
+            - real_body(
+                open[body_short_trailing_idx],
+                close[body_short_trailing_idx],
+            );
+
+        start_idx += 1;
+        body_long_trailing_idx += 1;
+        body_doji_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
