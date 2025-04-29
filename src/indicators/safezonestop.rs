@@ -107,7 +107,7 @@ impl<'a> SafeZoneStopInput<'a> {
         }
     }
 
-    pub fn with_default_candles_long(candles: &'a Candles) -> Self {
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
         Self {
             data: SafeZoneStopData::Candles {
                 candles,
@@ -322,7 +322,7 @@ mod tests {
     fn test_safezonestop_default_long() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = SafeZoneStopInput::with_default_candles_long(&candles);
+        let input = SafeZoneStopInput::with_default_candles(&candles);
         let output = safezonestop(&input).expect("Failed SafeZoneStop calculation");
         assert_eq!(output.values.len(), candles.close.len());
     }
