@@ -1,1091 +1,984 @@
-extern crate criterion;
-extern crate my_project;
+//! benches/indicator_benchmark.rs
+//! Run with:  cargo +nightly bench --bench indicator_benchmark
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use my_project::utilities::data_loader::read_candles_from_csv;
-
-use my_project::indicators::{
-    acosc::{acosc, AcoscInput},
-    ad::{ad, AdInput},
-    adosc::{adosc, AdoscInput},
-    adx::{adx, AdxInput},
-    adxr::{adxr, AdxrInput},
-    alligator::{alligator, AlligatorInput},
-    alma::{alma, AlmaInput},
-    ao::{ao, AoInput},
-    apo::{apo, ApoInput},
-    aroon::{aroon, AroonInput},
-    aroonosc::{aroon_osc, AroonOscInput},
-    atr::{atr, AtrInput},
-    avgprice::{avgprice, AvgPriceInput},
-    bandpass::{bandpass, BandPassInput},
-    bollinger_bands::{bollinger_bands, BollingerBandsInput},
-    bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput},
-    bop::{bop, BopInput},
-    cci::{cci, CciInput},
-    cfo::{cfo, CfoInput},
-    cg::{cg, CgInput},
-    chande::{chande, ChandeInput},
-    chop::{chop, ChopInput},
-    cksp::{cksp, CkspInput},
-    cmo::{cmo, CmoInput},
-    coppock::{coppock, CoppockInput},
-    correl_hl::{correl_hl, CorrelHlInput},
-    correlation_cycle::{correlation_cycle, CorrelationCycleInput},
-    cvi::{cvi, CviInput},
-    cwma::{cwma, CwmaInput},
-    damiani_volatmeter::{damiani_volatmeter, DamianiVolatmeterInput},
-    dec_osc::{dec_osc, DecOscInput},
-    decycler::{decycler, DecyclerInput},
-    dema::{dema, DemaInput},
-    devstop::{devstop, DevStopInput},
-    di::{di, DiInput},
-    dm::{dm, DmInput},
-    donchian::{donchian, DonchianInput},
-    dpo::{dpo, DpoInput},
-    dti::{dti, DtiInput},
-    dx::{dx, DxInput},
-    edcf::{edcf, EdcfInput},
-    efi::{efi, EfiInput},
-    ehlers_itrend::{ehlers_itrend, EhlersITrendInput},
-    ema::{ema, EmaInput},
-    emd::{emd, EmdInput},
-    emv::{emv, EmvInput},
-    epma::{epma, EpmaInput},
-    er::{er, ErInput},
-    eri::{eri, EriInput},
-    fisher::{fisher, FisherInput},
-    fosc::{fosc, FoscInput},
-    frama::{frama, FramaInput},
-    fwma::{fwma, FwmaInput},
-    gatorosc::{gatorosc, GatorOscInput},
-    gaussian::{gaussian, GaussianInput},
-    heikin_ashi_candles::{heikin_ashi_candles, HeikinAshiInput},
-    highpass::{highpass, HighPassInput},
-    highpass_2_pole::{highpass_2_pole, HighPass2Input},
-    hma::{hma, HmaInput},
-    ht_dcperiod::{ht_dcperiod, HtDcPeriodInput},
-    hwma::{hwma, HwmaInput},
-    ift_rsi::{ift_rsi, IftRsiInput},
-    jma::{jma, JmaInput},
-    jsa::{jsa, JsaInput},
-    kama::{kama, KamaInput},
-    kaufmanstop::{kaufmanstop, KaufmanstopInput},
-    kdj::{kdj, KdjInput},
-    keltner::{keltner, KeltnerInput},
-    kst::{kst, KstInput},
-    kurtosis::{kurtosis, KurtosisInput},
-    kvo::{kvo, KvoInput},
-    linearreg_angle::{linearreg_angle, Linearreg_angleInput},
-    linearreg_intercept::{linearreg_intercept, LinearRegInterceptInput},
-    linearreg_slope::{linearreg_slope, LinearRegSlopeInput},
-    linreg::{linreg, LinRegInput},
-    lrsi::{lrsi, LrsiInput},
-    maaq::{maaq, MaaqInput},
-    mab::{mab, MabInput},
-    macd::{macd, MacdInput},
-    mama::{mama, MamaInput},
-    marketefi::{marketfi, MarketefiInput},
-    mass::{mass, MassInput},
-    mean_ad::{mean_ad, MeanAdInput},
-    medium_ad::{medium_ad, MediumAdInput},
-    medprice::{medprice, MedpriceInput},
-    mfi::{mfi, MfiInput},
-    midpoint::{midpoint, MidpointInput},
-    midprice::{midprice, MidpriceInput},
-    minmax::{minmax, MinmaxInput},
-    mom::{mom, MomInput},
-    msw::{msw, MswInput},
-    mwdx::{mwdx, MwdxInput},
-    natr::{natr, NatrInput},
-    nma::{nma, NmaInput},
-    pivot::{pivot, PivotInput},
-    pma::{pma, PmaInput},
-    ppo::{ppo, PpoInput},
-    pvi::{pvi, PviInput},
-    pwma::{pwma, PwmaInput},
-    qstick::{qstick, QstickInput},
-    reflex::{reflex, ReflexInput},
-    roc::{roc, RocInput},
-    rocp::{rocp, RocpInput},
-    rocr::{rocr, RocrInput},
-    rsi::{rsi, RsiInput},
-    rvi::{rvi, RviInput},
-    safezonestop::{safezonestop, SafeZoneStopInput},
-    sar::{sar, SarInput},
-    sinwma::{sinwma, SinWmaInput},
-    sma::{sma, SmaInput},
-    smma::{smma, SmmaInput},
-    squeeze_momentum::{squeeze_momentum, SqueezeMomentumInput},
-    sqwma::{sqwma, SqwmaInput},
-    srsi::{srsi, SrsiInput},
-    srwma::{srwma, SrwmaInput},
-    stc::{stc, StcInput},
-    stddev::{stddev, StdDevInput},
-    stochf::{stochf, StochfInput},
-    supersmoother::{supersmoother, SuperSmootherInput},
-    supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput},
-    swma::{swma, SwmaInput},
-    tema::{tema, TemaInput},
-    tilson::{tilson, TilsonInput},
-    trendflex::{trendflex, TrendFlexInput},
-    trima::{trima, TrimaInput},
-    trix::{trix, TrixInput},
-    tsi::{tsi, TsiInput},
-    ttm_trend::{ttm_trend, TtmTrendInput},
-    ui::{ui, UiInput},
-    ultosc::{ultosc, UltOscInput},
-    var::{var, VarInput},
-    vi::{vi, ViInput},
-    vidya::{vidya, VidyaInput},
-    vlma::{vlma, VlmaInput},
-    vosc::{vosc, VoscInput},
-    voss::{voss, VossInput},
-    vpci::{vpci, VpciInput},
-    vpt::{vpt, VptInput},
-    vpwma::{vpwma, VpwmaInput},
-    vwap::{vwap, VwapInput},
-    vwma::{vwma, VwmaInput},
-    vwmacd::{vwmacd, VwmacdInput},
-    wad::{wad, WadInput},
-    wavetrend::{wavetrend, WavetrendInput},
-    wclprice::{wclprice, WclpriceInput},
-    wilders::{wilders, WildersInput},
-    willr::{willr, WillrInput},
-    wma::{wma, WmaInput},
-    zlema::{zlema, ZlemaInput},
-    zscore::{zscore, ZscoreInput},
+/* ------------------------------------------------- *
+ *  0.   Imports & helper defs                       *
+ * ------------------------------------------------- */
+ use std::time::{Instant, Duration};
+ use once_cell::sync::Lazy;
+ use criterion::{
+     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
+     Throughput,
+ };
+ use paste::paste;
+use anyhow::anyhow;
+use my_project::utilities::enums::Kernel;
+ 
+ // -------------- indicators we will benchmark -----------------
+ // Pull the functions into scope so that we can refer to them with a single
+ // identifier – no `::` inside the `paste!` macro.
+ use my_project::indicators::{
+    acosc::{acosc as acosc_raw, AcoscInput},
+    ad::{ad as ad_raw, AdInput},
+    adosc::{adosc as adosc_raw, AdoscInput},
+    adx::{adx as adx_raw, AdxInput},
+    adxr::{adxr as adxr_raw, AdxrInput},
+    alligator::{alligator as alligator_raw, AlligatorInput},
+    alma::{
+        alma_with_kernel,
+        alma_f32_with_kernel,
+        AlmaInput,
+        AlmaInputF32,
+    },
+    ao::{ao as ao_raw, AoInput},
+    apo::{apo as apo_raw, ApoInput},
+    aroon::{aroon as aroon_raw, AroonInput},
+    aroonosc::{aroon_osc as aroon_osc_raw, AroonOscInput},
+    atr::{atr as atr_raw, AtrInput},
+    avgprice::{avgprice as avgprice_raw, AvgPriceInput},
+    bandpass::{bandpass as bandpass_raw, BandPassInput},
+    bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
+    bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
+    bop::{bop as bop_raw, BopInput},
+    cci::{cci as cci_raw, CciInput},
+    cfo::{cfo as cfo_raw, CfoInput},
+    cg::{cg as cg_raw, CgInput},
+    chande::{chande as chande_raw, ChandeInput},
+    chop::{chop as chop_raw, ChopInput},
+    cksp::{cksp as cksp_raw, CkspInput},
+    cmo::{cmo as cmo_raw, CmoInput},
+    coppock::{coppock as coppock_raw, CoppockInput},
+    correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
+    correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
+    cvi::{cvi as cvi_raw, CviInput},
+    cwma::{cwma as cwma_raw, CwmaInput},
+    damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
+    dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
+    decycler::{decycler as decycler_raw, DecyclerInput},
+    dema::{dema as dema_raw, DemaInput},
+    devstop::{devstop as devstop_raw, DevStopInput},
+    di::{di as di_raw, DiInput},
+    dm::{dm as dm_raw, DmInput},
+    donchian::{donchian as donchian_raw, DonchianInput},
+    dpo::{dpo as dpo_raw, DpoInput},
+    dti::{dti as dti_raw, DtiInput},
+    dx::{dx as dx_raw, DxInput},
+    edcf::{edcf as edcf_raw, EdcfInput},
+    efi::{efi as efi_raw, EfiInput},
+    ehlers_itrend::{ehlers_itrend as ehlers_itrend_raw, EhlersITrendInput},
+    ema::{ema as ema_raw, EmaInput},
+    emd::{emd as emd_raw, EmdInput},
+    emv::{emv as emv_raw, EmvInput},
+    epma::{epma as epma_raw, EpmaInput},
+    er::{er as er_raw, ErInput},
+    eri::{eri as eri_raw, EriInput},
+    fisher::{fisher as fisher_raw, FisherInput},
+    fosc::{fosc as fosc_raw, FoscInput},
+    frama::{frama as frama_raw, FramaInput},
+    fwma::{fwma as fwma_raw, FwmaInput},
+    gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
+    gaussian::{gaussian as gaussian_raw, GaussianInput},
+    heikin_ashi_candles::{heikin_ashi_candles as heikin_ashi_candles_raw, HeikinAshiInput},
+    highpass::{highpass as highpass_raw, HighPassInput},
+    highpass_2_pole::{highpass_2_pole as highpass_2_pole_raw, HighPass2Input},
+    hma::{hma as hma_raw, HmaInput},
+    ht_dcperiod::{ht_dcperiod as ht_dcperiod_raw, HtDcPeriodInput},
+    hwma::{hwma as hwma_raw, HwmaInput},
+    ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
+    jma::{jma as jma_raw, JmaInput},
+    jsa::{jsa as jsa_raw, JsaInput},
+    kama::{kama as kama_raw, KamaInput},
+    kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
+    kdj::{kdj as kdj_raw, KdjInput},
+    keltner::{keltner as keltner_raw, KeltnerInput},
+    kst::{kst as kst_raw, KstInput},
+    kurtosis::{kurtosis as kurtosis_raw, KurtosisInput},
+    kvo::{kvo as kvo_raw, KvoInput},
+    linearreg_angle::{linearreg_angle as linearreg_angle_raw, Linearreg_angleInput},
+    linearreg_intercept::{linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput},
+    linearreg_slope::{linearreg_slope as linearreg_slope_raw, LinearRegSlopeInput},
+    linreg::{linreg as linreg_raw, LinRegInput},
+    lrsi::{lrsi as lrsi_raw, LrsiInput},
+    maaq::{maaq as maaq_raw, MaaqInput},
+    mab::{mab as mab_raw, MabInput},
+    macd::{macd as macd_raw, MacdInput},
+    mama::{mama as mama_raw, MamaInput},
+    marketefi::{marketfi as marketfi_raw, MarketefiInput},
+    mass::{mass as mass_raw, MassInput},
+    mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
+    medium_ad::{medium_ad as medium_ad_raw, MediumAdInput},
+    medprice::{medprice as medprice_raw, MedpriceInput},
+    mfi::{mfi as mfi_raw, MfiInput},
+    midpoint::{midpoint as midpoint_raw, MidpointInput},
+    midprice::{midprice as midprice_raw, MidpriceInput},
+    minmax::{minmax as minmax_raw, MinmaxInput},
+    mom::{mom as mom_raw, MomInput},
+    msw::{msw as msw_raw, MswInput},
+    mwdx::{mwdx as mwdx_raw, MwdxInput},
+    natr::{natr as natr_raw, NatrInput},
+    nma::{nma as nma_raw, NmaInput},
+    pivot::{pivot as pivot_raw, PivotInput},
+    pma::{pma as pma_raw, PmaInput},
+    ppo::{ppo as ppo_raw, PpoInput},
+    pvi::{pvi as pvi_raw, PviInput},
+    pwma::{pwma as pwma_raw, PwmaInput},
+    qstick::{qstick as qstick_raw, QstickInput},
+    reflex::{reflex as reflex_raw, ReflexInput},
+    roc::{roc as roc_raw, RocInput},
+    rocp::{rocp as rocp_raw, RocpInput},
+    rocr::{rocr as rocr_raw, RocrInput},
+    rsi::{rsi as rsi_raw, RsiInput},
+    rvi::{rvi as rvi_raw, RviInput},
+    safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
+    sar::{sar as sar_raw, SarInput},
+    sinwma::{sinwma as sinwma_raw, SinWmaInput},
+    sma::{sma as sma_raw, SmaInput},
+    smma::{smma as smma_raw, SmmaInput},
+    squeeze_momentum::{squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumInput},
+    sqwma::{sqwma as sqwma_raw, SqwmaInput},
+    srsi::{srsi as srsi_raw, SrsiInput},
+    srwma::{srwma as srwma_raw, SrwmaInput},
+    stc::{stc as stc_raw, StcInput},
+    stddev::{stddev as stddev_raw, StdDevInput},
+    stochf::{stochf as stochf_raw, StochfInput},
+    supersmoother::{supersmoother as supersmoother_raw, SuperSmootherInput},
+    supersmoother_3_pole::{supersmoother_3_pole as supersmoother_3_pole_raw, SuperSmoother3PoleInput},
+    swma::{swma as swma_raw, SwmaInput},
+    tema::{tema as tema_raw, TemaInput},
+    tilson::{tilson as tilson_raw, TilsonInput},
+    trendflex::{trendflex as trendflex_raw, TrendFlexInput},
+    trima::{trima as trima_raw, TrimaInput},
+    trix::{trix as trix_raw, TrixInput},
+    tsi::{tsi as tsi_raw, TsiInput},
+    ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
+    ui::{ui as ui_raw, UiInput},
+    ultosc::{ultosc as ultosc_raw, UltOscInput},
+    var::{var as var_raw, VarInput},
+    vi::{vi as vi_raw, ViInput},
+    vidya::{vidya as vidya_raw, VidyaInput},
+    vlma::{vlma as vlma_raw, VlmaInput},
+    vosc::{vosc as vosc_raw, VoscInput},
+    voss::{voss as voss_raw, VossInput},
+    vpci::{vpci as vpci_raw, VpciInput},
+    vpt::{vpt as vpt_raw, VptInput},
+    vpwma::{vpwma as vpwma_raw, VpwmaInput},
+    vwap::{vwap as vwap_raw, VwapInput},
+    vwma::{vwma as vwma_raw, VwmaInput},
+    vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
+    wad::{wad as wad_raw, WadInput},
+    wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
+    wclprice::{wclprice as wclprice_raw, WclpriceInput},
+    wilders::{wilders as wilders_raw, WildersInput},
+    willr::{willr as willr_raw, WillrInput},
+    wma::{wma as wma_raw, WmaInput},
+    zlema::{zlema as zlema_raw, ZlemaInput},
+    zscore::{zscore as zscore_raw, ZscoreInput},
 };
-use std::time::Duration;
 
-fn benchmark_indicators(c: &mut Criterion) {
-    let candles =
-        read_candles_from_csv("src/data/bitfinex btc-usd 100,000 candles ends 09-01-24.csv")
-            .expect("Failed to load candles");
-
-    let mut group = c.benchmark_group("Indicator Benchmarks");
-    group.measurement_time(Duration::new(8, 0));
-    group.warm_up_time(Duration::new(4, 0));
-
-    // ZSCORE
-    group.bench_function(BenchmarkId::new("ZSCORE", 0), |b| {
-        let input = ZscoreInput::with_default_candles(&candles);
-        b.iter(|| zscore(black_box(&input)).expect("Failed to calculate ZSCORE"))
-    });
-
-    // WILLR
-    group.bench_function(BenchmarkId::new("WILLR", 0), |b| {
-        let input = WillrInput::with_default_candles(&candles);
-        b.iter(|| willr(black_box(&input)).expect("Failed to calculate WILLR"))
-    });
-
-    // WCLPRICE
-    group.bench_function(BenchmarkId::new("WCLPRICE", 0), |b| {
-        let input = WclpriceInput::with_default_candles(&candles);
-        b.iter(|| wclprice(black_box(&input)).expect("Failed to calculate WCLPRICE"))
-    });
-
-    // WAVE TREND
-    group.bench_function(BenchmarkId::new("WAVETREND", 0), |b| {
-        let input = WavetrendInput::with_default_candles(&candles);
-        b.iter(|| wavetrend(black_box(&input)).expect("Failed to calculate Wave Trend"))
-    });
-
-    //WAD
-    group.bench_function(BenchmarkId::new("WAD", 0), |b| {
-        let input = WadInput::with_default_candles(&candles);
-        b.iter(|| wad(black_box(&input)).expect("Failed to calculate WAD"))
-    });
-
-    // VWMACD
-    group.bench_function(BenchmarkId::new("VWMACD", 0), |b| {
-        let input = VwmacdInput::with_default_candles(&candles);
-        b.iter(|| vwmacd(black_box(&input)).expect("Failed to calculate VWMACD"))
-    });
-
-    // VPT
-    group.bench_function(BenchmarkId::new("VPT", 0), |b| {
-        let input = VptInput::with_default_candles(&candles);
-        b.iter(|| vpt(black_box(&input)).expect("Failed to calculate VPT"))
-    });
-
-    //VPCI
-    group.bench_function(BenchmarkId::new("VPCI", 0), |b| {
-        let input = VpciInput::with_default_candles(&candles);
-        b.iter(|| vpci(black_box(&input)).expect("Failed to calculate VPCI"))
-    });
-
-    // VOSS
-    group.bench_function(BenchmarkId::new("VOSS", 0), |b| {
-        let input = VossInput::with_default_candles(&candles);
-        b.iter(|| voss(black_box(&input)).expect("Failed to calculate VOSS"))
-    });
-
-    // VOSC
-    group.bench_function(BenchmarkId::new("VOSC", 0), |b| {
-        let input = VoscInput::with_default_candles(&candles);
-        b.iter(|| vosc(black_box(&input)).expect("Failed to calculate VOSC"))
-    });
-
-    // VIDYA
-    group.bench_function(BenchmarkId::new("VIDYA", 0), |b| {
-        let input = VidyaInput::with_default_candles(&candles);
-        b.iter(|| vidya(black_box(&input)).expect("Failed to calculate VIDYA"))
-    });
-
-    // ULTOSC
-    group.bench_function(BenchmarkId::new("ULTOSC", 0), |b| {
-        let input = UltOscInput::with_default_candles(&candles);
-        b.iter(|| ultosc(black_box(&input)).expect("Failed to calculate ULTOSC"))
-    });
-
-    // VLMA
-    group.bench_function(BenchmarkId::new("VLMA", 0), |b| {
-        let input = VlmaInput::with_default_candles(&candles);
-        b.iter(|| vlma(black_box(&input)).expect("Failed to calculate VLMA"))
-    });
-
-    // VI
-    group.bench_function(BenchmarkId::new("VI", 0), |b| {
-        let input = ViInput::with_default_candles(&candles);
-        b.iter(|| vi(black_box(&input)).expect("Failed to calculate VI"))
-    });
-
-    // VAR
-    group.bench_function(BenchmarkId::new("VAR", 0), |b| {
-        let input = VarInput::with_default_candles(&candles);
-        b.iter(|| var(black_box(&input)).expect("Failed to calculate VAR"))
-    });
-
-    // TRIX
-    group.bench_function(BenchmarkId::new("TRIX", 0), |b| {
-        let input = TrixInput::with_default_candles(&candles);
-        b.iter(|| trix(black_box(&input)).expect("Failed to calculate TRIX"))
-    });
-
-    // TSI
-    group.bench_function(BenchmarkId::new("TSI", 0), |b| {
-        let input = TsiInput::with_default_candles(&candles);
-        b.iter(|| tsi(black_box(&input)).expect("Failed to calculate TSI"))
-    });
-
-    // TTM Trend
-    group.bench_function(BenchmarkId::new("TTM_TREND", 0), |b| {
-        let input = TtmTrendInput::with_default_candles(&candles);
-        b.iter(|| ttm_trend(black_box(&input)).expect("Failed to calculate TTM Trend"))
-    });
-
-    //UI
-    group.bench_function(BenchmarkId::new("UI", 0), |b| {
-        let input = UiInput::with_default_candles(&candles);
-        b.iter(|| ui(black_box(&input)).expect("Failed to calculate UI"))
-    });
-
-    // Stochf
-    group.bench_function(BenchmarkId::new("STOCHF", 0), |b| {
-        let input = StochfInput::with_default_candles(&candles);
-        b.iter(|| stochf(black_box(&input)).expect("Failed to calculate STOCHF"))
-    });
-
-    // STC
-    group.bench_function(BenchmarkId::new("STC", 0), |b| {
-        let input = StcInput::with_default_candles(&candles);
-        b.iter(|| stc(black_box(&input)).expect("Failed to calculate STC"))
-    });
-
-    // STDDEV
-    group.bench_function(BenchmarkId::new("STDDEV", 0), |b| {
-        let input = StdDevInput::with_default_candles(&candles);
-        b.iter(|| stddev(black_box(&input)).expect("Failed to calculate STDDEV"))
-    });
-
-    // SRSI
-    group.bench_function(BenchmarkId::new("SRSI", 0), |b| {
-        let input = SrsiInput::with_default_candles(&candles);
-        b.iter(|| srsi(black_box(&input)).expect("Failed to calculate SRSI"))
-    });
-
-    // Squeeze Momentum
-    group.bench_function(BenchmarkId::new("SQUEEZE_MOMENTUM", 0), |b| {
-        let input = SqueezeMomentumInput::with_default_candles(&candles);
-        b.iter(|| {
-            squeeze_momentum(black_box(&input)).expect("Failed to calculate Squeeze Momentum")
-        })
-    });
-
-    // RVI
-    group.bench_function(BenchmarkId::new("RVI", 0), |b| {
-        let input = RviInput::with_default_candles(&candles);
-        b.iter(|| rvi(black_box(&input)).expect("Failed to calculate RVI"))
-    });
-
-    // Sar
-    group.bench_function(BenchmarkId::new("SAR", 0), |b| {
-        let input = SarInput::with_default_candles(&candles).expect("Failed to create SarInput");
-        b.iter(|| sar(black_box(&input)).expect("Failed to calculate SAR"))
-    });
-
-    // SafeZoneStop
-    group.bench_function(BenchmarkId::new("SAFEZONESTOP", 0), |b| {
-        let input = SafeZoneStopInput::with_default_candles_long(&candles);
-        b.iter(|| safezonestop(black_box(&input)).expect("Failed to calculate SafeZoneStop"))
-    });
-
-    // PVI
-    group.bench_function(BenchmarkId::new("PVI", 0), |b| {
-        let input = PviInput::with_default_candles(&candles);
-        b.iter(|| pvi(black_box(&input)).expect("Failed to calculate PVI"))
-    });
-
-    // PPO
-    group.bench_function(BenchmarkId::new("PPO", 0), |b| {
-        let input = PpoInput::with_default_candles(&candles);
-        b.iter(|| ppo(black_box(&input)).expect("Failed to calculate PPO"))
-    });
-
-    // Qstick
-    group.bench_function(BenchmarkId::new("QSTICK", 0), |b| {
-        let input = QstickInput::with_default_candles(&candles);
-        b.iter(|| qstick(black_box(&input)).expect("Failed to calculate QSTICK"))
-    });
-
-    // PMA
-    group.bench_function(BenchmarkId::new("PMA", 0), |b| {
-        let input = PmaInput::with_default_candles(&candles);
-        b.iter(|| pma(black_box(&input)).expect("Failed to calculate PMA"))
-    });
-
-    // NATR
-    group.bench_function(BenchmarkId::new("NATR", 0), |b| {
-        let input = NatrInput::with_default_candles(&candles);
-        b.iter(|| natr(black_box(&input)).expect("Failed to calculate NATR"))
-    });
-
-    // PIVOT
-    group.bench_function(BenchmarkId::new("PIVOT", 0), |b| {
-        let input = PivotInput::with_default_candles(&candles);
-        b.iter(|| pivot(black_box(&input)).expect("Failed to calculate PIVOT"))
-    });
-
-    // MIDPRICE
-    group.bench_function(BenchmarkId::new("MIDPRICE", 0), |b| {
-        let input = MidpriceInput::with_default_candles(&candles);
-        b.iter(|| midprice(black_box(&input)).expect("Failed to calculate MIDPRICE"))
-    });
-
-    // MINMAX
-    group.bench_function(BenchmarkId::new("MINMAX", 0), |b| {
-        let input = MinmaxInput::with_default_candles(&candles);
-        b.iter(|| minmax(black_box(&input)).expect("Failed to calculate MINMAX"))
-    });
-
-    // MOM
-    group.bench_function(BenchmarkId::new("MOM", 0), |b| {
-        let input = MomInput::with_default_candles(&candles);
-        b.iter(|| mom(black_box(&input)).expect("Failed to calculate MOM"))
-    });
-
-    // MSW
-    group.bench_function(BenchmarkId::new("MSW", 0), |b| {
-        let input = MswInput::with_default_candles(&candles);
-        b.iter(|| msw(black_box(&input)).expect("Failed to calculate MSW"))
-    });
-
-    // MIDPOINT
-    group.bench_function(BenchmarkId::new("MIDPOINT", 0), |b| {
-        let input = MidpointInput::with_default_candles(&candles);
-        b.iter(|| midpoint(black_box(&input)).expect("Failed to calculate MIDPOINT"))
-    });
-
-    // MFI
-    group.bench_function(BenchmarkId::new("MFI", 0), |b| {
-        let input = MfiInput::with_default_candles(&candles);
-        b.iter(|| mfi(black_box(&input)).expect("Failed to calculate MFI"))
-    });
-
-    // Medprice
-    group.bench_function(BenchmarkId::new("MEDPRICE", 0), |b| {
-        let input = MedpriceInput::with_default_candles(&candles);
-        b.iter(|| medprice(black_box(&input)).expect("Failed to calculate MEDPRICE"))
-    });
-
-    // Medium AD
-    group.bench_function(BenchmarkId::new("MEDIUM_AD", 0), |b| {
-        let input = MediumAdInput::with_default_candles(&candles);
-        b.iter(|| medium_ad(black_box(&input)).expect("Failed to calculate MEDIUM_AD"))
-    });
-
-    // Kurtosis
-    group.bench_function(BenchmarkId::new("KURTOSIS", 0), |b| {
-        let input = KurtosisInput::with_default_candles(&candles);
-        b.iter(|| kurtosis(black_box(&input)).expect("Failed to calculate KURTOSIS"))
-    });
-
-    // Market EFI
-    group.bench_function(BenchmarkId::new("MARKETEFI", 0), |b| {
-        let input = MarketefiInput::with_default_candles(&candles);
-        b.iter(|| marketfi(black_box(&input)).expect("Failed to calculate MARKETEFI"))
-    });
-
-    // MEAN AD
-    group.bench_function(BenchmarkId::new("MEAN_AD", 0), |b| {
-        let input = MeanAdInput::with_default_candles(&candles);
-        b.iter(|| mean_ad(black_box(&input)).expect("Failed to calculate MEAN_AD"))
-    });
-
-    // MASS
-    group.bench_function(BenchmarkId::new("MASS", 0), |b| {
-        let input = MassInput::with_default_candles(&candles);
-        b.iter(|| mass(black_box(&input)).expect("Failed to calculate MASS"))
-    });
-
-    // MAB
-    group.bench_function(BenchmarkId::new("MAB", 0), |b| {
-        let input = MabInput::with_default_candles(&candles);
-        b.iter(|| mab(black_box(&input)).expect("Failed to calculate MAB"))
-    });
-
-    // MACD
-    group.bench_function(BenchmarkId::new("MACD", 0), |b| {
-        let input = MacdInput::with_default_candles(&candles);
-        b.iter(|| macd(black_box(&input)).expect("Failed to calculate MACD"))
-    });
-
-    // Linear Regression Slope
-    group.bench_function(BenchmarkId::new("LINEARREG_SLOPE", 0), |b| {
-        let input = LinearRegSlopeInput::with_default_candles(&candles);
-        b.iter(|| linearreg_slope(black_box(&input)).expect("Failed to calculate LINEARREG_SLOPE"))
-    });
-
-    // Linear regression intercept
-    group.bench_function(BenchmarkId::new("LINEARREG_INTERCEPT", 0), |b| {
-        let input = LinearRegInterceptInput::with_default_candles(&candles);
-        b.iter(|| {
-            linearreg_intercept(black_box(&input)).expect("Failed to calculate LINEARREG_INTERCEPT")
-        })
-    });
-
-    // LRSI
-    group.bench_function(BenchmarkId::new("LRSI", 0), |b| {
-        let input = LrsiInput::with_default_candles(&candles);
-        b.iter(|| lrsi(black_box(&input)).expect("Failed to calculate LRSI"))
-    });
-
-    // KVO
-    group.bench_function(BenchmarkId::new("KVO", 0), |b| {
-        let input = KvoInput::with_default_candles(&candles);
-        b.iter(|| kvo(black_box(&input)).expect("Failed to calculate KVO"))
-    });
-
-    // Linear Regression Angle
-    group.bench_function(BenchmarkId::new("LINEARREG_ANGLE", 0), |b| {
-        let input = Linearreg_angleInput::with_default_candles(&candles);
-        b.iter(|| linearreg_angle(black_box(&input)).expect("Failed to calculate LINEARREG_ANGLE"))
-    });
-
-    // keltern Channel
-    group.bench_function(BenchmarkId::new("KELTNER", 0), |b| {
-        let input = KeltnerInput::with_default_candles(&candles);
-        b.iter(|| keltner(black_box(&input)).expect("Failed to calculate KELTNER"))
-    });
-
-    // kaufman Stop
-    group.bench_function(BenchmarkId::new("KaufmanStop", 0), |b| {
-        let input = KaufmanstopInput::with_default_candles(&candles);
-        b.iter(|| kaufmanstop(black_box(&input)).expect("Failed to calculate Kaufman Stop"))
-    });
-
-    // kst
-    group.bench_function(BenchmarkId::new("KST", 0), |b| {
-        let input = KstInput::with_default_candles(&candles);
-        b.iter(|| kst(black_box(&input)).expect("Failed to calculate KST"))
-    });
-
-    // KDJ
-    group.bench_function(BenchmarkId::new("KDJ", 0), |b| {
-        let input = KdjInput::with_default_candles(&candles);
-        b.iter(|| kdj(black_box(&input)).expect("Failed to calculate KDJ"))
-    });
-
-    // IFT RSI
-    group.bench_function(BenchmarkId::new("IFT_RSI", 0), |b| {
-        let input = IftRsiInput::with_default_candles(&candles);
-        b.iter(|| ift_rsi(black_box(&input)).expect("Failed to calculate IFT_RSI"))
-    });
-
-    // HT_DCPeriod
-    group.bench_function(BenchmarkId::new("HT_DCPeriod", 0), |b| {
-        let input = HtDcPeriodInput::with_default_candles(&candles);
-        b.iter(|| ht_dcperiod(black_box(&input)).expect("Failed to calculate HT_DCPeriod"))
-    });
-
-    // Heikin Ashi Candles
-    group.bench_function(BenchmarkId::new("HEIKIN_ASHI", 0), |b| {
-        let input = HeikinAshiInput::with_default_candles(&candles);
-        b.iter(|| heikin_ashi_candles(black_box(&input)).expect("Failed to calculate Heikin Ashi"))
-    });
-
-    // FRAMA
-    group.bench_function(BenchmarkId::new("FRAMA", 0), |b| {
-        let input = FramaInput::with_default_candles(&candles);
-        b.iter(|| frama(black_box(&input)).expect("Failed to calculate FRAMA"))
-    });
-
-    // FOSC
-    group.bench_function(BenchmarkId::new("FOSC", 0), |b| {
-        let input = FoscInput::with_default_candles(&candles);
-        b.iter(|| fosc(black_box(&input)).expect("Failed to calculate FOSC"))
-    });
-
-    // Gator Oscillator
-    group.bench_function(BenchmarkId::new("GATOROSC", 0), |b| {
-        let input = GatorOscInput::with_default_candles(&candles);
-        b.iter(|| gatorosc(black_box(&input)).expect("Failed to calculate GATOROSC"))
-    });
-
-    // FISHER
-    group.bench_function(BenchmarkId::new("FISHER", 0), |b| {
-        let input = FisherInput::with_default_candles(&candles);
-        b.iter(|| fisher(black_box(&input)).expect("Failed to calculate Fisher Transform"))
-    });
-
-    // ERI
-    group.bench_function(BenchmarkId::new("ERI", 0), |b| {
-        let input = EriInput::with_default_candles(&candles);
-        b.iter(|| eri(black_box(&input)).expect("Failed to calculate ERI"))
-    });
-
-    // ER
-    group.bench_function(BenchmarkId::new("ER", 0), |b| {
-        let input = ErInput::with_default_candles(&candles);
-        b.iter(|| er(black_box(&input)).expect("Failed to calculate ER"))
-    });
-
-    // EMV
-    group.bench_function(BenchmarkId::new("EMV", 0), |b| {
-        let input = EmvInput::with_default_candles(&candles);
-        b.iter(|| emv(black_box(&input)).expect("Failed to calculate EMV"))
-    });
-
-    // EMD
-    group.bench_function(BenchmarkId::new("EMD", 0), |b| {
-        let input = EmdInput::with_default_candles(&candles);
-        b.iter(|| emd(black_box(&input)).expect("Failed to calculate EMD"))
-    });
-
-    // EFI
-    group.bench_function(BenchmarkId::new("EFI", 0), |b| {
-        let input = EfiInput::with_default_candles(&candles);
-        b.iter(|| efi(black_box(&input)).expect("Failed to calculate EFI"))
-    });
-
-    // DX
-    group.bench_function(BenchmarkId::new("DX", 0), |b| {
-        let input = DxInput::with_default_candles(&candles);
-        b.iter(|| dx(black_box(&input)).expect("Failed to calculate DX"))
-    });
-
-    // DTI
-    group.bench_function(BenchmarkId::new("DTI", 0), |b| {
-        let input = DtiInput::with_default_candles(&candles);
-        b.iter(|| dti(black_box(&input)).expect("Failed to calculate DTI"))
-    });
-
-    // Detrended Price Oscillator
-    group.bench_function(BenchmarkId::new("DPO", 0), |b| {
-        let input = DpoInput::with_default_candles(&candles);
-        b.iter(|| dpo(black_box(&input)).expect("Failed to calculate DPO"))
-    });
-
-    // Donchian Channel
-    group.bench_function(BenchmarkId::new("DONCHIAN", 0), |b| {
-        let input = DonchianInput::with_default_candles(&candles);
-        b.iter(|| donchian(black_box(&input)).expect("Failed to calculate DONCHIAN"))
-    });
-
-    // Directional Index
-    group.bench_function(BenchmarkId::new("DI", 0), |b| {
-        let input = DiInput::with_default_candles(&candles);
-        b.iter(|| di(black_box(&input)).expect("Failed to calculate DI"))
-    });
-
-    // Directional Movement
-    group.bench_function(BenchmarkId::new("DM", 0), |b| {
-        let input = DmInput::with_default_candles(&candles);
-        b.iter(|| dm(black_box(&input)).expect("Failed to calculate DM"))
-    });
-
-    // DEVIATION STOP
-    group.bench_function(BenchmarkId::new("DEVIATION STOP", 0), |b| {
-        let input = DevStopInput::with_default_candles(&candles);
-        b.iter(|| devstop(black_box(&input)).expect("Failed to calculate DEVIATION STOP"))
-    });
-
-    // DECYCLER
-    group.bench_function(BenchmarkId::new("DECYCLER", 0), |b| {
-        let input = DecyclerInput::with_default_candles(&candles);
-        b.iter(|| decycler(black_box(&input)).expect("Failed to calculate DECYCLER"))
-    });
-    // DECYCLER OSCILLATOR
-    group.bench_function(BenchmarkId::new("DECYCLER OSCILLATOR", 0), |b| {
-        let input = DecOscInput::with_default_candles(&candles);
-        b.iter(|| dec_osc(black_box(&input)).expect("Failed to calculate DECYCLER"))
-    });
-
-    // CORRELATION_CYCLE
-    group.bench_function(BenchmarkId::new("CORRELATION_CYCLE", 0), |b| {
-        let input = CorrelationCycleInput::with_default_candles(&candles);
-        b.iter(|| {
-            correlation_cycle(black_box(&input)).expect("Failed to calculate CORRELATION_CYCLE")
-        })
-    });
-
-    // CORREL_HL
-    group.bench_function(BenchmarkId::new("CORREL_HL", 0), |b| {
-        let input = CorrelHlInput::with_default_candles(&candles);
-        b.iter(|| correl_hl(black_box(&input)).expect("Failed to calculate CORREL_HL"))
-    });
-
-    // DAMIANI VOLATMETER
-    group.bench_function(BenchmarkId::new("DAMIANI_VOLATMETER", 0), |b| {
-        let input = DamianiVolatmeterInput::with_default_candles(&candles);
-        b.iter(|| {
-            damiani_volatmeter(black_box(&input)).expect("Failed to calculate DAMIANI_VOLATMETER")
-        })
-    });
-
-    //CVI
-    group.bench_function(BenchmarkId::new("CVI", 0), |b| {
-        let input = CviInput::with_default_candles(&candles);
-        b.iter(|| cvi(black_box(&input)).expect("Failed to calculate CVI"))
-    });
-
-    // CHANDE
-    group.bench_function(BenchmarkId::new("CHANDE", 0), |b| {
-        let input = ChandeInput::with_default_candles(&candles);
-        b.iter(|| chande(black_box(&input)).expect("Failed to calculate CHANDE"))
-    });
-
-    // CHOP
-    group.bench_function(BenchmarkId::new("CHOP", 0), |b| {
-        let input = ChopInput::with_default_candles(&candles);
-        b.iter(|| chop(black_box(&input)).expect("Failed to calculate CHOP"))
-    });
-
-    // Chande Kroll Stop
-    group.bench_function(BenchmarkId::new("CKSP", 0), |b| {
-        let input = CkspInput::with_default_candles(&candles);
-        b.iter(|| cksp(black_box(&input)).expect("Failed to calculate CKSP"))
-    });
-
-    // Chande Momentum Oscillator
-    group.bench_function(BenchmarkId::new("CMO", 0), |b| {
-        let input = CmoInput::with_default_candles(&candles);
-        b.iter(|| cmo(black_box(&input)).expect("Failed to calculate CMO"))
-    });
-
-    // Center of Gravity
-    group.bench_function(BenchmarkId::new("CG", 0), |b| {
-        let input = CgInput::with_default_candles(&candles);
-        b.iter(|| cg(black_box(&input)).expect("Failed to calculate CG"))
-    });
-
-    // Rate of Change Ratio
-    group.bench_function(BenchmarkId::new("ROCR", 0), |b| {
-        let input = RocrInput::with_default_candles(&candles);
-        b.iter(|| rocr(black_box(&input)).expect("Failed to calculate ROCR"))
-    });
-    // Chnade Forecast Oscillator
-    group.bench_function(BenchmarkId::new("CFO", 0), |b| {
-        let input = CfoInput::with_default_candles(&candles);
-        b.iter(|| cfo(black_box(&input)).expect("Failed to calculate CFO"))
-    });
-
-    // Coppock Curve
-    group.bench_function(BenchmarkId::new("COPPOCK", 0), |b| {
-        let input = CoppockInput::with_default_candles(&candles);
-        b.iter(|| coppock(black_box(&input)).expect("Failed to calculate COPPOCK"))
-    });
-
-    // Bollinger Bands Width
-    group.bench_function(BenchmarkId::new("BOLLINGER_BANDS_WIDTH", 0), |b| {
-        let input = BollingerBandsWidthInput::with_default_candles(&candles);
-        b.iter(|| {
-            bollinger_bands_width(black_box(&input))
-                .expect("Failed to calculate BOLLINGER_BANDS_WIDTH")
-        })
-    });
-
-    // ROCP
-    group.bench_function(BenchmarkId::new("ROCP", 0), |b| {
-        let input = RocpInput::with_default_candles(&candles);
-        b.iter(|| rocp(black_box(&input)).expect("Failed to calculate ROCP"))
-    });
-
-    // BOP
-    group.bench_function(BenchmarkId::new("BOP", 0), |b| {
-        let input = BopInput::with_default_candles(&candles);
-        b.iter(|| bop(black_box(&input)).expect("Failed to calculate BOP"))
-    });
-
-    // CCI
-    group.bench_function(BenchmarkId::new("CCI", 0), |b| {
-        let input = CciInput::with_default_candles(&candles);
-        b.iter(|| cci(black_box(&input)).expect("Failed to calculate CCI"))
-    });
-
-    // Bollinger Bands
-    group.bench_function(BenchmarkId::new("BOLLINGER_BANDS", 0), |b| {
-        let input = BollingerBandsInput::with_default_candles(&candles);
-        b.iter(|| bollinger_bands(black_box(&input)).expect("Failed to calculate BOLLINGER_BANDS"))
-    });
-
-    // ROC
-    group.bench_function(BenchmarkId::new("ROC", 0), |b| {
-        let input = RocInput::with_default_candles(&candles);
-        b.iter(|| roc(black_box(&input)).expect("Failed to calculate ROC"))
-    });
-
-    // EPMA
-    group.bench_function(BenchmarkId::new("EPMA", 0), |b| {
-        let input = EpmaInput::with_default_candles(&candles);
-        b.iter(|| epma(black_box(&input)).expect("Failed to calculate EPMA"))
-    });
-
-    // JSA
-    group.bench_function(BenchmarkId::new("JSA", 0), |b| {
-        let input = JsaInput::with_default_candles(&candles);
-        b.iter(|| jsa(black_box(&input)).expect("Failed to calculate JSA"))
-    });
-
-    // CWMA
-    group.bench_function(BenchmarkId::new("CWMA", 0), |b| {
-        let input = CwmaInput::with_default_candles(&candles);
-        b.iter(|| cwma(black_box(&input)).expect("Failed to calculate CWMA"))
-    });
-
-    // VPWMA
-    group.bench_function(BenchmarkId::new("VPWMA", 0), |b| {
-        let input = VpwmaInput::with_default_candles(&candles);
-        b.iter(|| vpwma(black_box(&input)).expect("Failed to calculate VPWMA"))
-    });
-
-    // SRWMA
-    group.bench_function(BenchmarkId::new("SRWMA", 0), |b| {
-        let input = SrwmaInput::with_default_candles(&candles);
-        b.iter(|| srwma(black_box(&input)).expect("Failed to calculate SRWMA"))
-    });
-
-    // SQWMA
-    group.bench_function(BenchmarkId::new("SQWMA", 0), |b| {
-        let input = SqwmaInput::with_default_candles(&candles);
-        b.iter(|| sqwma(black_box(&input)).expect("Failed to calculate SQWMA"))
-    });
-
-    // MAAQ
-    group.bench_function(BenchmarkId::new("MAAQ", 0), |b| {
-        let input = MaaqInput::with_default_candles(&candles);
-        b.iter(|| maaq(black_box(&input)).expect("Failed to calculate MAAQ"))
-    });
-
-    // MWDX
-    group.bench_function(BenchmarkId::new("MWDX", 0), |b| {
-        let input = MwdxInput::with_default_candles(&candles);
-        b.iter(|| mwdx(black_box(&input)).expect("Failed to calculate MWDX"))
-    });
-
-    // NMA
-    group.bench_function(BenchmarkId::new("NMA", 0), |b| {
-        let input = NmaInput::with_default_candles(&candles);
-        b.iter(|| nma(black_box(&input)).expect("Failed to calculate NMA"))
-    });
-
-    // EDCF
-    group.bench_function(BenchmarkId::new("EDCF", 0), |b| {
-        let input = EdcfInput::with_default_candles(&candles);
-        b.iter(|| edcf(black_box(&input)).expect("Failed to calculate EDCF"))
-    });
-
-    // VWAP
-    group.bench_function(BenchmarkId::new("VWAP", 0), |b| {
-        let input = VwapInput::with_default_candles(&candles);
-        b.iter(|| vwap(black_box(&input)).expect("Failed to calculate VWAP"))
-    });
-
-    // HWMA
-    group.bench_function(BenchmarkId::new("HWMA", 0), |b| {
-        let input = HwmaInput::with_default_candles(&candles);
-        b.iter(|| hwma(black_box(&input)).expect("Failed to calculate HWMA"))
-    });
-
-    // SWMA
-    group.bench_function(BenchmarkId::new("SWMA", 0), |b| {
-        let input = SwmaInput::with_default_candles(&candles);
-        b.iter(|| swma(black_box(&input)).expect("Failed to calculate SWMA"))
-    });
-
-    // TrendFlex
-    group.bench_function(BenchmarkId::new("TRENDFLEX", 0), |b| {
-        let input = TrendFlexInput::with_default_candles(&candles);
-        b.iter(|| trendflex(black_box(&input)).expect("Failed to calculate TRENDFLEX"))
-    });
-
-    // VWMA
-    group.bench_function(BenchmarkId::new("VWMA", 0), |b| {
-        let input = VwmaInput::with_default_candles(&candles);
-        b.iter(|| vwma(black_box(&input)).expect("Failed to calculate VWMA"))
-    });
-
-    // PWMA
-    group.bench_function(BenchmarkId::new("PWMA", 0), |b| {
-        let input = PwmaInput::with_default_candles(&candles);
-        b.iter(|| pwma(black_box(&input)).expect("Failed to calculate PWMA"))
-    });
-
-    // ITREND
-    group.bench_function(BenchmarkId::new("ITREND", 0), |b| {
-        let input = EhlersITrendInput::with_default_candles(&candles);
-        b.iter(|| ehlers_itrend(black_box(&input)).expect("Failed to calculate Ehler's ITrend"))
-    });
-
-    // SMMA
-    group.bench_function(BenchmarkId::new("SMMA", 0), |b| {
-        let input = SmmaInput::with_default_candles(&candles);
-        b.iter(|| smma(black_box(&input)).expect("Failed to calculate SMMA"))
-    });
-
-    // Reflex
-    group.bench_function(BenchmarkId::new("REFLEX", 0), |b| {
-        let input = ReflexInput::with_default_candles(&candles);
-        b.iter(|| reflex(black_box(&input)).expect("Failed to calculate REFLEX"))
-    });
-
-    // JMA
-    group.bench_function(BenchmarkId::new("JMA", 0), |b| {
-        let input = JmaInput::with_default_candles(&candles);
-        b.iter(|| jma(black_box(&input)).expect("Failed to calculate JMA"))
-    });
-
-    // High Pass 2 Pole
-    group.bench_function(BenchmarkId::new("HIGHPASS_2Pole", 0), |b| {
-        let input = HighPass2Input::with_default_candles(&candles);
-        b.iter(|| highpass_2_pole(black_box(&input)).expect("Failed to calculate HIGHPASS2"))
-    });
-
-    // High Pass
-    group.bench_function(BenchmarkId::new("HIGHPASS_1Pole", 0), |b| {
-        let input = HighPassInput::with_default_candles(&candles);
-        b.iter(|| highpass(black_box(&input)).expect("Failed to calculate HIGHPASS"))
-    });
-
-    // Gaussian
-    group.bench_function(BenchmarkId::new("GAUSSIAN", 0), |b| {
-        let input = GaussianInput::with_default_candles(&candles);
-        b.iter(|| gaussian(black_box(&input)).expect("Failed to calculate GAUSSIAN"))
-    });
-
-    // Super Smoother 3 Pole
-    group.bench_function(BenchmarkId::new("SUPERSMOOTHER3POLE", 0), |b| {
-        let input = SuperSmoother3PoleInput::with_default_candles(&candles);
-        b.iter(|| {
-            supersmoother_3_pole(black_box(&input)).expect("Failed to calculate SUPERSMOOTHER3POLE")
-        })
-    });
-
-    // Super Smoother
-    group.bench_function(BenchmarkId::new("SUPERSMOOTHER", 0), |b| {
-        let input = SuperSmootherInput::with_default_candles(&candles);
-        b.iter(|| supersmoother(black_box(&input)).expect("Failed to calculate SUPERSMOOTHER"))
-    });
-
-    // SinWMA
-    group.bench_function(BenchmarkId::new("SINWMA", 0), |b| {
-        let input = SinWmaInput::with_default_candles(&candles);
-        b.iter(|| sinwma(black_box(&input)).expect("Failed to calculate SINWMA"))
-    });
-
-    // Wilders
-    group.bench_function(BenchmarkId::new("WILDERS", 0), |b| {
-        let input = WildersInput::with_default_candles(&candles);
-        b.iter(|| wilders(black_box(&input)).expect("Failed to calculate WILDERS"))
-    });
-
-    // Linear Regression
-    group.bench_function(BenchmarkId::new("LINREG", 0), |b| {
-        let input = LinRegInput::with_default_candles(&candles);
-        b.iter(|| linreg(black_box(&input)).expect("Failed to calculate LINREG"))
-    });
-
-    // HMA
-    group.bench_function(BenchmarkId::new("HMA", 0), |b| {
-        let input = HmaInput::with_default_candles(&candles);
-        b.iter(|| hma(black_box(&input)).expect("Failed to calculate HMA"))
-    });
-
-    // FWMA
-    group.bench_function(BenchmarkId::new("FWMA", 0), |b| {
-        let input = FwmaInput::with_default_candles(&candles);
-        b.iter(|| fwma(black_box(&input)).expect("Failed to calculate FWMA"))
-    });
-
-    // MAMA
-    group.bench_function(BenchmarkId::new("MAMA", 0), |b| {
-        let input = MamaInput::with_default_candles(&candles);
-        b.iter(|| mama(black_box(&input)).expect("Failed to calculate MAMA"))
-    });
-
-    // TILSON
-    group.bench_function(BenchmarkId::new("TILSON", 0), |b| {
-        let input = TilsonInput::with_default_candles(&candles);
-        b.iter(|| tilson(black_box(&input)).expect("Failed to calculate T3"))
-    });
-
-    // KAMA
-    group.bench_function(BenchmarkId::new("KAMA", 0), |b| {
-        let input = KamaInput::with_default_candles(&candles);
-        b.iter(|| kama(black_box(&input)).expect("Failed to calculate KAMA"))
-    });
-
-    // TRIMA
-    group.bench_function(BenchmarkId::new("TRIMA", 0), |b| {
-        let input = TrimaInput::with_default_candles(&candles);
-        b.iter(|| trima(black_box(&input)).expect("Failed to calculate TRIMA"))
-    });
-
-    // TEMA
-    group.bench_function(BenchmarkId::new("TEMA", 0), |b| {
-        let input = TemaInput::with_default_candles(&candles);
-        b.iter(|| tema(black_box(&input)).expect("Failed to calculate TEMA"))
-    });
-
-    // DEMA
-    group.bench_function(BenchmarkId::new("DEMA", 0), |b| {
-        let input = DemaInput::with_default_candles(&candles);
-        b.iter(|| dema(black_box(&input)).expect("Failed to calculate DEMA"))
-    });
-
-    // WMA
-    group.bench_function(BenchmarkId::new("WMA", 0), |b| {
-        let input = WmaInput::with_default_candles(&candles);
-        b.iter(|| wma(black_box(&input)).expect("Failed to calculate WMA"))
-    });
-
-    // BANDPASS
-    group.bench_function(BenchmarkId::new("BANDPASS", 0), |b| {
-        let input = BandPassInput::with_default_candles(&candles);
-        b.iter(|| bandpass(black_box(&input)).expect("Failed to calculate BANDPASS"))
-    });
-
-    // HIGHPASS
-    group.bench_function(BenchmarkId::new("HIGHPASS", 0), |b| {
-        let input = HighPassInput::with_default_candles(&candles);
-        b.iter(|| highpass(black_box(&input)).expect("Failed to calculate HIGHPASS"))
-    });
-
-    // AVGPRICE
-    group.bench_function(BenchmarkId::new("AVGPRICE", 0), |b| {
-        let input = AvgPriceInput::with_default_candles(&candles);
-        b.iter(|| avgprice(&input).expect("Failed to calculate AVGPRICE"))
-    });
-
-    // ATR
-    group.bench_function(BenchmarkId::new("ATR", 0), |b| {
-        let input = AtrInput::with_default_candles(&candles);
-        b.iter(|| atr(black_box(&input)).expect("Failed to calculate ATR"))
-    });
-
-    // AROONOSC
-    group.bench_function(BenchmarkId::new("AROONOSC", 0), |b| {
-        let input = AroonOscInput::with_default_candles(&candles);
-        b.iter(|| aroon_osc(black_box(&input)).expect("Failed to calculate AROONOSC"))
-    });
-
-    // AROON
-    group.bench_function(BenchmarkId::new("AROON", 0), |b| {
-        let input = AroonInput::with_default_candles(&candles);
-        b.iter(|| aroon(black_box(&input)).expect("Failed to calculate AROON"))
-    });
-
-    // APO
-    group.bench_function(BenchmarkId::new("APO", 0), |b| {
-        let input = ApoInput::with_default_candles(&candles);
-        b.iter(|| apo(black_box(&input)).expect("Failed to calculate APO"))
-    });
-
-    // AO
-    group.bench_function(BenchmarkId::new("AO", 0), |b| {
-        let input = AoInput::with_default_candles(&candles);
-        b.iter(|| ao(black_box(&input)).expect("Failed to calculate AO"))
-    });
-
-    // ALMA
-    group.bench_function(BenchmarkId::new("ALMA", 0), |b| {
-        let input = AlmaInput::with_default_candles(&candles);
-        b.iter(|| alma(black_box(&input)).expect("Failed to calculate ALMA"))
-    });
-
-    // ADOSC
-    group.bench_function(BenchmarkId::new("ADOSC", 0), |b| {
-        let input = AdoscInput::with_default_candles(&candles);
-        b.iter(|| adosc(black_box(&input)).expect("Failed to calculate ADOSC"))
-    });
-
-    // ZLEMA
-    group.bench_function(BenchmarkId::new("ZLEMA", 0), |b| {
-        let input = ZlemaInput::with_default_candles(&candles);
-        b.iter(|| zlema(black_box(&input)).expect("Failed to calculate ZLEMA"))
-    });
-
-    // Alligator
-    group.bench_function(BenchmarkId::new("ALLIGATOR", 0), |b| {
-        let input = AlligatorInput::with_default_candles(&candles);
-        b.iter(|| alligator(black_box(&input)).expect("Failed to calculate alligator"))
-    });
-
-    // ADXR
-    group.bench_function(BenchmarkId::new("ADXR", 0), |b| {
-        let input = AdxrInput::with_default_candles(&candles);
-        b.iter(|| adxr(black_box(&input)).expect("Failed to calculate ADXR"))
-    });
-
-    // ADX
-    group.bench_function(BenchmarkId::new("ADX", 0), |b| {
-        let input = AdxInput::with_default_candles(&candles);
-        b.iter(|| adx(black_box(&input)).expect("Failed to calculate ADX"))
-    });
-
-    // SMA
-    group.bench_function(BenchmarkId::new("SMA", 0), |b| {
-        let input = SmaInput::with_default_candles(&candles);
-        b.iter(|| sma(black_box(&input)).expect("Failed to calculate SMA"))
-    });
-
-    // EMA
-    group.bench_function(BenchmarkId::new("EMA", 0), |b| {
-        let input = EmaInput::with_default_candles(&candles);
-        b.iter(|| ema(black_box(&input)).expect("Failed to calculate EMA"))
-    });
-
-    // RSI
-    group.bench_function(BenchmarkId::new("RSI", 0), |b| {
-        let input = RsiInput::with_default_candles(&candles);
-        b.iter(|| rsi(black_box(&input)).expect("Failed to calculate RSI"))
-    });
-
-    // ACOSC
-    group.bench_function(BenchmarkId::new("ACOSC", 0), |b| {
-        let input = AcoscInput::with_default_candles(&candles);
-        b.iter(|| acosc(black_box(&input)).expect("Failed to calculate ACOSC"))
-    });
-
-    // AD
-    group.bench_function(BenchmarkId::new("AD", 0), |b| {
-        let input = AdInput::with_default_candles(&candles);
-        b.iter(|| ad(black_box(&input)).expect("Failed to calculate AD"))
-    });
-
-    group.finish();
+ 
+ /* ------------------------------------------------- *
+  *  1.   Candle vectors – loaded *once*              *
+  * ------------------------------------------------- */
+ use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
+ 
+ static CANDLES_10K: Lazy<Candles> = Lazy::new(|| {
+     read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv")
+ });
+ static CANDLES_100K: Lazy<Candles> = Lazy::new(|| {
+     read_candles_from_csv("src/data/bitfinex btc-usd 100,000 candles ends 09-01-24.csv")
+         .expect("100 k candles csv")
+ });
+ static CANDLES_1M: Lazy<Candles> = Lazy::new(|| {
+     read_candles_from_csv("src/data/1MillionCandles.csv").expect("1 M candles csv")
+ });
+ 
+ /* ------------------------------------------------- *
+  *  2.  Trait every *Input* must implement           *
+  * ------------------------------------------------- */
+ trait InputLen {
+     fn with_len(len: usize) -> Self;
+ }
+ 
+ // Concrete `'static` aliases so we don't have to juggle lifetimes in the macro
+ pub type AcoscInputS = AcoscInput<'static>;
+ pub type AdInputS = AdInput<'static>;
+ pub type AdoscInputS = AdoscInput<'static>;
+ pub type AdxInputS = AdxInput<'static>;
+ pub type AdxrInputS = AdxrInput<'static>;
+ pub type AlligatorInputS = AlligatorInput<'static>;
+ pub type AlmaInputS = AlmaInput<'static>;
+ pub type AlmaInputF32S = AlmaInputF32<'static>;
+ pub type AoInputS = AoInput<'static>;
+ pub type ApoInputS = ApoInput<'static>;
+ pub type AroonInputS = AroonInput<'static>;
+ pub type AroonOscInputS = AroonOscInput<'static>;
+ pub type AtrInputS = AtrInput<'static>;
+ pub type AvgPriceInputS = AvgPriceInput<'static>;
+ pub type BandPassInputS = BandPassInput<'static>;
+ pub type BollingerBandsInputS = BollingerBandsInput<'static>;
+ pub type BollingerBandsWidthInputS = BollingerBandsWidthInput<'static>;
+ pub type BopInputS = BopInput<'static>;
+ pub type CciInputS = CciInput<'static>;
+ pub type CfoInputS = CfoInput<'static>;
+ pub type CgInputS = CgInput<'static>;
+ pub type ChandeInputS = ChandeInput<'static>;
+ pub type ChopInputS = ChopInput<'static>;
+ pub type CkspInputS = CkspInput<'static>;
+ pub type CmoInputS = CmoInput<'static>;
+ pub type CoppockInputS = CoppockInput<'static>;
+ pub type CorrelHlInputS = CorrelHlInput<'static>;
+ pub type CorrelationCycleInputS = CorrelationCycleInput<'static>;
+ pub type CviInputS = CviInput<'static>;
+ pub type CwmaInputS = CwmaInput<'static>;
+ pub type DamianiVolatmeterInputS = DamianiVolatmeterInput<'static>;
+ pub type DecOscInputS = DecOscInput<'static>;
+ pub type DecyclerInputS = DecyclerInput<'static>;
+ pub type DemaInputS = DemaInput<'static>;
+ pub type DevStopInputS = DevStopInput<'static>;
+ pub type DiInputS = DiInput<'static>;
+ pub type DmInputS = DmInput<'static>;
+ pub type DonchianInputS = DonchianInput<'static>;
+ pub type DpoInputS = DpoInput<'static>;
+ pub type DtiInputS = DtiInput<'static>;
+ pub type DxInputS = DxInput<'static>;
+ pub type EdcfInputS = EdcfInput<'static>;
+ pub type EfiInputS = EfiInput<'static>;
+ pub type EhlersITrendInputS = EhlersITrendInput<'static>;
+ pub type EmaInputS = EmaInput<'static>;
+ pub type EmdInputS = EmdInput<'static>;
+ pub type EmvInputS = EmvInput<'static>;
+ pub type EpmaInputS = EpmaInput<'static>;
+ pub type ErInputS = ErInput<'static>;
+ pub type EriInputS = EriInput<'static>;
+ pub type FisherInputS = FisherInput<'static>;
+ pub type FoscInputS = FoscInput<'static>;
+ pub type FramaInputS = FramaInput<'static>;
+ pub type FwmaInputS = FwmaInput<'static>;
+ pub type GatorOscInputS = GatorOscInput<'static>;
+ pub type GaussianInputS = GaussianInput<'static>;
+ pub type HeikinAshiInputS = HeikinAshiInput<'static>;
+ pub type HighPassInputS = HighPassInput<'static>;
+ pub type HighPass2InputS = HighPass2Input<'static>;
+ pub type HmaInputS = HmaInput<'static>;
+ pub type HtDcPeriodInputS = HtDcPeriodInput<'static>;
+ pub type HwmaInputS = HwmaInput<'static>;
+ pub type IftRsiInputS = IftRsiInput<'static>;
+ pub type JmaInputS = JmaInput<'static>;
+ pub type JsaInputS = JsaInput<'static>;
+ pub type KamaInputS = KamaInput<'static>;
+ pub type KaufmanstopInputS = KaufmanstopInput<'static>;
+ pub type KdjInputS = KdjInput<'static>;
+ pub type KeltnerInputS = KeltnerInput<'static>;
+ pub type KstInputS = KstInput<'static>;
+ pub type KurtosisInputS = KurtosisInput<'static>;
+ pub type KvoInputS = KvoInput<'static>;
+ pub type Linearreg_angleInputS = Linearreg_angleInput<'static>;
+ pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
+ pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
+ pub type LinRegInputS = LinRegInput<'static>;
+ pub type LrsiInputS = LrsiInput<'static>;
+ pub type MaaqInputS = MaaqInput<'static>;
+ pub type MabInputS = MabInput<'static>;
+ pub type MacdInputS = MacdInput<'static>;
+ pub type MamaInputS = MamaInput<'static>;
+ pub type MarketefiInputS = MarketefiInput<'static>;
+ pub type MassInputS = MassInput<'static>;
+ pub type MeanAdInputS = MeanAdInput<'static>;
+ pub type MediumAdInputS = MediumAdInput<'static>;
+ pub type MedpriceInputS = MedpriceInput<'static>;
+ pub type MfiInputS = MfiInput<'static>;
+ pub type MidpointInputS = MidpointInput<'static>;
+ pub type MidpriceInputS = MidpriceInput<'static>;
+ pub type MinmaxInputS = MinmaxInput<'static>;
+ pub type MomInputS = MomInput<'static>;
+ pub type MswInputS = MswInput<'static>;
+ pub type MwdxInputS = MwdxInput<'static>;
+ pub type NatrInputS = NatrInput<'static>;
+ pub type NmaInputS = NmaInput<'static>;
+ pub type PivotInputS = PivotInput<'static>;
+ pub type PmaInputS = PmaInput<'static>;
+ pub type PpoInputS = PpoInput<'static>;
+ pub type PviInputS = PviInput<'static>;
+ pub type PwmaInputS = PwmaInput<'static>;
+ pub type QstickInputS = QstickInput<'static>;
+ pub type ReflexInputS = ReflexInput<'static>;
+ pub type RocInputS = RocInput<'static>;
+ pub type RocpInputS = RocpInput<'static>;
+ pub type RocrInputS = RocrInput<'static>;
+ pub type RsiInputS = RsiInput<'static>;
+ pub type RviInputS = RviInput<'static>;
+ pub type SafeZoneStopInputS = SafeZoneStopInput<'static>;
+ pub type SarInputS = SarInput<'static>;
+ pub type SinWmaInputS = SinWmaInput<'static>;
+ pub type SmaInputS = SmaInput<'static>;
+ pub type SmmaInputS = SmmaInput<'static>;
+ pub type SqueezeMomentumInputS = SqueezeMomentumInput<'static>;
+ pub type SqwmaInputS = SqwmaInput<'static>;
+ pub type SrsiInputS = SrsiInput<'static>;
+ pub type SrwmaInputS = SrwmaInput<'static>;
+ pub type StcInputS = StcInput<'static>;
+ pub type StdDevInputS = StdDevInput<'static>;
+ pub type StochfInputS = StochfInput<'static>;
+ pub type SuperSmootherInputS = SuperSmootherInput<'static>;
+ pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
+ pub type SwmaInputS = SwmaInput<'static>;
+ pub type TemaInputS = TemaInput<'static>;
+ pub type TilsonInputS = TilsonInput<'static>;
+ pub type TrendFlexInputS = TrendFlexInput<'static>;
+ pub type TrimaInputS = TrimaInput<'static>;
+ pub type TrixInputS = TrixInput<'static>;
+ pub type TsiInputS = TsiInput<'static>;
+ pub type TtmTrendInputS = TtmTrendInput<'static>;
+ pub type UiInputS = UiInput<'static>;
+ pub type UltOscInputS = UltOscInput<'static>;
+ pub type VarInputS = VarInput<'static>;
+ pub type ViInputS = ViInput<'static>;
+ pub type VidyaInputS = VidyaInput<'static>;
+ pub type VlmaInputS = VlmaInput<'static>;
+ pub type VoscInputS = VoscInput<'static>;
+ pub type VossInputS = VossInput<'static>;
+ pub type VpciInputS = VpciInput<'static>;
+ pub type VptInputS = VptInput<'static>;
+ pub type VpwmaInputS = VpwmaInput<'static>;
+ pub type VwapInputS = VwapInput<'static>;
+ pub type VwmaInputS = VwmaInput<'static>;
+ pub type VwmacdInputS = VwmacdInput<'static>;
+ pub type WadInputS = WadInput<'static>;
+ pub type WavetrendInputS = WavetrendInput<'static>;
+ pub type WclpriceInputS = WclpriceInput<'static>;
+ pub type WildersInputS = WildersInput<'static>;
+ pub type WillrInputS = WillrInput<'static>;
+ pub type WmaInputS = WmaInput<'static>;
+ pub type ZlemaInputS = ZlemaInput<'static>;
+ pub type ZscoreInputS = ZscoreInput<'static>;
+
+ /* helper macro to implement the trait in one line  */
+ macro_rules! impl_input_len {
+     ($($ty:ty),* $(,)?) => {
+         $(
+             impl InputLen for $ty {
+                 fn with_len(len: usize) -> Self {
+                     match len {
+                         10_000    => Self::with_default_candles(&*CANDLES_10K),
+                         100_000   => Self::with_default_candles(&*CANDLES_100K),
+                         1_000_000 => Self::with_default_candles(&*CANDLES_1M),
+                         _ => panic!("unsupported len {len}"),
+                     }
+                 }
+             }
+         )*
+     };
+ }
+
+ /* ------------------------------------------------- *
+  *  3.  Generic bench runner                         *
+  * ------------------------------------------------- */
+  fn pretty_len(len: usize) -> &'static str {
+    match len {
+        10_000     => "10k",
+        100_000    => "100k",
+        1_000_000  => "1M",
+        _          => panic!("unsupported len {len}"),
+    }
 }
 
-criterion_group!(benches, benchmark_indicators);
-criterion_main!(benches);
+const SIZES: [usize; 3] = [10_000, 100_000, 1_000_000];
+
+fn bench_one<F, In>(
+    group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    label: &str,
+    fun: F,
+    len: usize,
+) where
+    F: Fn(&In) -> anyhow::Result<()> + Copy + 'static,
+    In: InputLen + 'static,
+{
+    let input = In::with_len(len);
+
+    group.bench_with_input(
+        BenchmarkId::new(label, pretty_len(len)),
+        &input,
+        move |b, input| {
+            b.iter(|| fun(black_box(input)).unwrap());
+        },
+    );
+
+    group.measurement_time(Duration::from_millis(900));
+    group.warm_up_time(Duration::from_millis(150));
+    group.sample_size(100);
+}
+
+ 
+ /* ------------------------------------------------- *
+  *  4.  Macro for scalar-only indicators             *
+  * ------------------------------------------------- */
+ macro_rules! bench_scalars {
+     ( $( $fun:ident => $typ:ty ),* $(,)? ) => {
+         paste! {
+             $(
+                 fn [<bench_ $fun>](c: &mut Criterion) {
+                     let mut group = c.benchmark_group(stringify!($fun));
+                     for &len in &SIZES {
+                         bench_one::<_, $typ>(&mut group, "scalar", $fun, len);
+                     }
+                     group.finish();
+                 }
+             )*
+             criterion_group!(benches_scalar, $( [<bench_ $fun>] ),*);
+         }
+     }
+ }
+ 
+ /* ------------------------------------------------- *
+  *  5.  Macro for multi‑variant indicators           *
+  * ------------------------------------------------- */
+ macro_rules! bench_variants {
+     ($root:ident => $typ:ty; $( $vfun:ident ),+ $(,)? ) => {
+         paste! {
+             fn [<bench_ $root>](c: &mut Criterion) {
+                 let mut group = c.benchmark_group(stringify!($root));
+                 for &len in &SIZES {
+                     $( bench_one::<_, $typ>(&mut group, stringify!($vfun), $vfun, len); )+
+                 }
+                 group.finish();
+             }
+             criterion_group!([<benches_ $root>], [<bench_ $root>]);
+         }
+     };
+ }
+ 
+ /* ------------------------------------------------- *
+  *  6.  Turn one “*_with_kernel” fn into N wrappers   *
+  * ------------------------------------------------- */
+ macro_rules! make_kernel_wrappers {
+     ( $stem:ident, $base:path, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
+         paste! {
+             $(
+                 #[inline(always)]
+                 fn [<$stem _ $k:lower>](input: &$ityp) -> anyhow::Result<()> {
+                     $base(input, Kernel::$k)
+                         .map(|_| ())
+                         .map_err(|e| anyhow!(e.to_string()))
+                 }
+             )+
+         }
+     };
+ }
+ 
+ /* ------------------------------------------------- *
+  *  7.  Implement the InputLen trait for the inputs   *
+  * ------------------------------------------------- */
+  impl_input_len!(
+    AcoscInputS,
+    AdInputS,
+    AdoscInputS,
+    AdxInputS,
+    AdxrInputS,
+    AlligatorInputS,
+    AlmaInputS,
+    AlmaInputF32S,
+    AoInputS,
+    ApoInputS,
+    AroonInputS,
+    AroonOscInputS,
+    AtrInputS,
+    AvgPriceInputS,
+    BandPassInputS,
+    BollingerBandsInputS,
+    BollingerBandsWidthInputS,
+    BopInputS,
+    CciInputS,
+    CfoInputS,
+    CgInputS,
+    ChandeInputS,
+    ChopInputS,
+    CkspInputS,
+    CmoInputS,
+    CoppockInputS,
+    CorrelHlInputS,
+    CorrelationCycleInputS,
+    CviInputS,
+    CwmaInputS,
+    DamianiVolatmeterInputS,
+    DecOscInputS,
+    DecyclerInputS,
+    DemaInputS,
+    DevStopInputS,
+    DiInputS,
+    DmInputS,
+    DonchianInputS,
+    DpoInputS,
+    DtiInputS,
+    DxInputS,
+    EdcfInputS,
+    EfiInputS,
+    EhlersITrendInputS,
+    EmaInputS,
+    EmdInputS,
+    EmvInputS,
+    EpmaInputS,
+    ErInputS,
+    EriInputS,
+    FisherInputS,
+    FoscInputS,
+    FramaInputS,
+    FwmaInputS,
+    GatorOscInputS,
+    GaussianInputS,
+    HeikinAshiInputS,
+    HighPassInputS,
+    HighPass2InputS,
+    HmaInputS,
+    HtDcPeriodInputS,
+    HwmaInputS,
+    IftRsiInputS,
+    JmaInputS,
+    JsaInputS,
+    KamaInputS,
+    KaufmanstopInputS,
+    KdjInputS,
+    KeltnerInputS,
+    KstInputS,
+    KurtosisInputS,
+    KvoInputS,
+    Linearreg_angleInputS,
+    LinearRegInterceptInputS,
+    LinearRegSlopeInputS,
+    LinRegInputS,
+    LrsiInputS,
+    MaaqInputS,
+    MabInputS,
+    MacdInputS,
+    MamaInputS,
+    MarketefiInputS,
+    MassInputS,
+    MeanAdInputS,
+    MediumAdInputS,
+    MedpriceInputS,
+    MfiInputS,
+    MidpointInputS,
+    MidpriceInputS,
+    MinmaxInputS,
+    MomInputS,
+    MswInputS,
+    MwdxInputS,
+    NatrInputS,
+    NmaInputS,
+    PivotInputS,
+    PmaInputS,
+    PpoInputS,
+    PviInputS,
+    PwmaInputS,
+    QstickInputS,
+    ReflexInputS,
+    RocInputS,
+    RocpInputS,
+    RocrInputS,
+    RsiInputS,
+    RviInputS,
+    SafeZoneStopInputS,
+    SarInputS,
+    SinWmaInputS,
+    SmaInputS,
+    SmmaInputS,
+    SqueezeMomentumInputS,
+    SqwmaInputS,
+    SrsiInputS,
+    SrwmaInputS,
+    StcInputS,
+    StdDevInputS,
+    StochfInputS,
+    SuperSmootherInputS,
+    SuperSmoother3PoleInputS,
+    SwmaInputS,
+    TemaInputS,
+    TilsonInputS,
+    TrendFlexInputS,
+    TrimaInputS,
+    TrixInputS,
+    TsiInputS,
+    TtmTrendInputS,
+    UiInputS,
+    UltOscInputS,
+    VarInputS,
+    ViInputS,
+    VidyaInputS,
+    VlmaInputS,
+    VoscInputS,
+    VossInputS,
+    VpciInputS,
+    VptInputS,
+    VpwmaInputS,
+    VwapInputS,
+    VwmaInputS,
+    VwmacdInputS,
+    WadInputS,
+    WavetrendInputS,
+    WclpriceInputS,
+    WildersInputS,
+    WillrInputS,
+    WmaInputS,
+    ZlemaInputS,
+    ZscoreInputS
+ );
+ 
+ /* ------------------------------------------------- *
+  *  8.  Thin wrappers for the scalar indicators      *
+  * ------------------------------------------------- */
+
+  #[macro_export]
+  macro_rules! bench_wrappers {
+      // This matches a list of tuples: (fn_name, raw_fn, input_type), (fn_name, raw_fn, input_type), ...
+      ( $( ($bench_fn:ident, $raw_fn:ident, $input_ty:ty) ),+ $(,)?) => {
+          $(
+              #[inline(always)]
+              fn $bench_fn(input: &$input_ty) -> anyhow::Result<()> {
+                  $raw_fn(input)
+                      .map(|_| ())
+                      .map_err(|e| anyhow::anyhow!(e.to_string()))
+              }
+          )+
+      };
+  }
+
+  bench_wrappers! {
+    (acosc_bench, acosc_raw, AcoscInputS),
+    (ad_bench, ad_raw, AdInputS),
+    (adosc_bench, adosc_raw, AdoscInputS),
+    (adx_bench, adx_raw, AdxInputS),
+    (adxr_bench, adxr_raw, AdxrInputS),
+    (alligator_bench, alligator_raw, AlligatorInputS),
+    (ao_bench, ao_raw, AoInputS),
+    (apo_bench, apo_raw, ApoInputS),
+    (aroon_bench, aroon_raw, AroonInputS),
+    (aroon_osc_bench, aroon_osc_raw, AroonOscInputS),
+    (atr_bench, atr_raw, AtrInputS),
+    (avgprice_bench, avgprice_raw, AvgPriceInputS),
+    (bandpass_bench, bandpass_raw, BandPassInputS),
+    (bollinger_bands_bench, bollinger_bands_raw, BollingerBandsInputS),
+    (bollinger_bands_width_bench, bollinger_bands_width_raw, BollingerBandsWidthInputS),
+    (bop_bench, bop_raw, BopInputS),
+    (cci_bench, cci_raw, CciInputS),
+    (cfo_bench, cfo_raw, CfoInputS),
+    (cg_bench, cg_raw, CgInputS),
+    (chande_bench, chande_raw, ChandeInputS),
+    (chop_bench, chop_raw, ChopInputS),
+    (cksp_bench, cksp_raw, CkspInputS),
+    (cmo_bench, cmo_raw, CmoInputS),
+    (coppock_bench, coppock_raw, CoppockInputS),
+    (correl_hl_bench, correl_hl_raw, CorrelHlInputS),
+    (correlation_cycle_bench, correlation_cycle_raw, CorrelationCycleInputS),
+    (cvi_bench, cvi_raw, CviInputS),
+    (cwma_bench, cwma_raw, CwmaInputS),
+    (damiani_volatmeter_bench, damiani_volatmeter_raw, DamianiVolatmeterInputS),
+    (dec_osc_bench, dec_osc_raw, DecOscInputS),
+    (decycler_bench, decycler_raw, DecyclerInputS),
+    (dema_bench, dema_raw, DemaInputS),
+    (devstop_bench, devstop_raw, DevStopInputS),
+    (di_bench, di_raw, DiInputS),
+    (dm_bench, dm_raw, DmInputS),
+    (donchian_bench, donchian_raw, DonchianInputS),
+    (dpo_bench, dpo_raw, DpoInputS),
+    (dti_bench, dti_raw, DtiInputS),
+    (dx_bench, dx_raw, DxInputS),
+    (edcf_bench, edcf_raw, EdcfInputS),
+    (efi_bench, efi_raw, EfiInputS),
+    (ehlers_itrend_bench, ehlers_itrend_raw, EhlersITrendInputS),
+    (ema_bench, ema_raw, EmaInputS),
+    (emd_bench, emd_raw, EmdInputS),
+    (emv_bench, emv_raw, EmvInputS),
+    (epma_bench, epma_raw, EpmaInputS),
+    (er_bench, er_raw, ErInputS),
+    (eri_bench, eri_raw, EriInputS),
+    (fisher_bench, fisher_raw, FisherInputS),
+    (fosc_bench, fosc_raw, FoscInputS),
+    (frama_bench, frama_raw, FramaInputS),
+    (fwma_bench, fwma_raw, FwmaInputS),
+    (gatorosc_bench, gatorosc_raw, GatorOscInputS),
+    (gaussian_bench, gaussian_raw, GaussianInputS),
+    (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
+    (highpass_bench, highpass_raw, HighPassInputS),
+    (highpass_2_pole_bench, highpass_2_pole_raw, HighPass2InputS),
+    (hma_bench, hma_raw, HmaInputS),
+    (ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
+    (hwma_bench, hwma_raw, HwmaInputS),
+    (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
+    (jma_bench, jma_raw, JmaInputS),
+    (jsa_bench, jsa_raw, JsaInputS),
+    (kama_bench, kama_raw, KamaInputS),
+    (kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
+    (kdj_bench, kdj_raw, KdjInputS),
+    (keltner_bench, keltner_raw, KeltnerInputS),
+    (kst_bench, kst_raw, KstInputS),
+    (kurtosis_bench, kurtosis_raw, KurtosisInputS),
+    (kvo_bench, kvo_raw, KvoInputS),
+    (linearreg_angle_bench, linearreg_angle_raw, Linearreg_angleInputS),
+    (linearreg_intercept_bench, linearreg_intercept_raw, LinearRegInterceptInputS),
+    (linearreg_slope_bench, linearreg_slope_raw, LinearRegSlopeInputS),
+    (linreg_bench, linreg_raw, LinRegInputS),
+    (lrsi_bench, lrsi_raw, LrsiInputS),
+    (maaq_bench, maaq_raw, MaaqInputS),
+    (mab_bench, mab_raw, MabInputS),
+    (macd_bench, macd_raw, MacdInputS),
+    (mama_bench, mama_raw, MamaInputS),
+    (marketfi_bench, marketfi_raw, MarketefiInputS),
+    (mass_bench, mass_raw, MassInputS),
+    (mean_ad_bench, mean_ad_raw, MeanAdInputS),
+    (medium_ad_bench, medium_ad_raw, MediumAdInputS),
+    (medprice_bench, medprice_raw, MedpriceInputS),
+    (mfi_bench, mfi_raw, MfiInputS),
+    (midpoint_bench, midpoint_raw, MidpointInputS),
+    (midprice_bench, midprice_raw, MidpriceInputS),
+    (minmax_bench, minmax_raw, MinmaxInputS),
+    (mom_bench, mom_raw, MomInputS),
+    (msw_bench, msw_raw, MswInputS),
+    (mwdx_bench, mwdx_raw, MwdxInputS),
+    (natr_bench, natr_raw, NatrInputS),
+    (nma_bench, nma_raw, NmaInputS),
+    (pivot_bench, pivot_raw, PivotInputS),
+    (pma_bench, pma_raw, PmaInputS),
+    (ppo_bench, ppo_raw, PpoInputS),
+    (pvi_bench, pvi_raw, PviInputS),
+    (pwma_bench, pwma_raw, PwmaInputS),
+    (qstick_bench, qstick_raw, QstickInputS),
+    (reflex_bench, reflex_raw, ReflexInputS),
+    (roc_bench, roc_raw, RocInputS),
+    (rocp_bench, rocp_raw, RocpInputS),
+    (rocr_bench, rocr_raw, RocrInputS),
+    (rsi_bench, rsi_raw, RsiInputS),
+    (rvi_bench, rvi_raw, RviInputS),
+    (safezonestop_bench, safezonestop_raw, SafeZoneStopInputS),
+    (sar_bench, sar_raw, SarInputS),
+    (sinwma_bench, sinwma_raw, SinWmaInputS),
+    (sma_bench, sma_raw, SmaInputS),
+    (smma_bench, smma_raw, SmmaInputS),
+    (squeeze_momentum_bench, squeeze_momentum_raw, SqueezeMomentumInputS),
+    (sqwma_bench, sqwma_raw, SqwmaInputS),
+    (srsi_bench, srsi_raw, SrsiInputS),
+    (srwma_bench, srwma_raw, SrwmaInputS),
+    (stc_bench, stc_raw, StcInputS),
+    (stddev_bench, stddev_raw, StdDevInputS),
+    (stochf_bench, stochf_raw, StochfInputS),
+    (supersmoother_bench, supersmoother_raw, SuperSmootherInputS),
+    (supersmoother_3_pole_bench, supersmoother_3_pole_raw, SuperSmoother3PoleInputS),
+    (swma_bench, swma_raw, SwmaInputS),
+    (tema_bench, tema_raw, TemaInputS),
+    (tilson_bench, tilson_raw, TilsonInputS),
+    (trendflex_bench, trendflex_raw, TrendFlexInputS),
+    (trima_bench, trima_raw, TrimaInputS),
+    (trix_bench, trix_raw, TrixInputS),
+    (tsi_bench, tsi_raw, TsiInputS),
+    (ttm_trend_bench, ttm_trend_raw, TtmTrendInputS),
+    (ui_bench, ui_raw, UiInputS),
+    (ultosc_bench, ultosc_raw, UltOscInputS),
+    (var_bench, var_raw, VarInputS),
+    (vi_bench, vi_raw, ViInputS),
+    (vidya_bench, vidya_raw, VidyaInputS),
+    (vlma_bench, vlma_raw, VlmaInputS),
+    (vosc_bench, vosc_raw, VoscInputS),
+    (voss_bench, voss_raw, VossInputS),
+    (vpci_bench, vpci_raw, VpciInputS),
+    (vpt_bench, vpt_raw, VptInputS),
+    (vpwma_bench, vpwma_raw, VpwmaInputS),
+    (vwap_bench, vwap_raw, VwapInputS),
+    (vwma_bench, vwma_raw, VwmaInputS),
+    (vwmacd_bench, vwmacd_raw, VwmacdInputS),
+    (wad_bench, wad_raw, WadInputS),
+    (wavetrend_bench, wavetrend_raw, WavetrendInputS),
+    (wclprice_bench, wclprice_raw, WclpriceInputS),
+    (wilders_bench, wilders_raw, WildersInputS),
+    (willr_bench, willr_raw, WillrInputS),
+    (wma_bench, wma_raw, WmaInputS),
+    (zlema_bench, zlema_raw, ZlemaInputS),
+    (zscore_bench, zscore_raw, ZscoreInputS),
+}
+
+  
+bench_scalars!(
+    acosc_bench => AcoscInputS,
+    ad_bench    => AdInputS,
+    adosc_bench => AdoscInputS,
+    adx_bench   => AdxInputS,
+    adxr_bench  => AdxrInputS,
+    alligator_bench => AlligatorInputS,
+
+    ao_bench   => AoInputS,
+    apo_bench  => ApoInputS,
+
+    aroon_bench        => AroonInputS,
+    aroon_osc_bench    => AroonOscInputS,
+    atr_bench          => AtrInputS,
+    avgprice_bench     => AvgPriceInputS,
+    bandpass_bench     => BandPassInputS,
+
+    bollinger_bands_bench => BollingerBandsInputS,
+    bollinger_bands_width_bench => BollingerBandsWidthInputS,
+    bop_bench         => BopInputS,
+    cci_bench         => CciInputS,
+    cfo_bench         => CfoInputS,
+    cg_bench          => CgInputS,
+    chande_bench      => ChandeInputS,
+    chop_bench        => ChopInputS,
+    cksp_bench        => CkspInputS,
+    cmo_bench         => CmoInputS,
+    coppock_bench     => CoppockInputS,
+    correl_hl_bench   => CorrelHlInputS,
+    correlation_cycle_bench => CorrelationCycleInputS,
+    cvi_bench         => CviInputS,
+    cwma_bench        => CwmaInputS,
+    damiani_volatmeter_bench => DamianiVolatmeterInputS,
+    dec_osc_bench     => DecOscInputS,
+    decycler_bench    => DecyclerInputS,
+    dema_bench        => DemaInputS,
+    devstop_bench     => DevStopInputS,
+    di_bench          => DiInputS,
+    dm_bench          => DmInputS,
+    donchian_bench    => DonchianInputS,
+    dpo_bench         => DpoInputS,
+    dti_bench         => DtiInputS,
+    dx_bench          => DxInputS,
+    edcf_bench        => EdcfInputS,
+    efi_bench         => EfiInputS,
+    ehlers_itrend_bench => EhlersITrendInputS,
+    ema_bench         => EmaInputS,
+    emd_bench         => EmdInputS,
+    emv_bench         => EmvInputS,
+    epma_bench        => EpmaInputS,
+    er_bench          => ErInputS,
+    eri_bench         => EriInputS,
+    fisher_bench      => FisherInputS,
+    fosc_bench        => FoscInputS,
+    frama_bench       => FramaInputS,
+    fwma_bench        => FwmaInputS,
+    gatorosc_bench    => GatorOscInputS,
+    gaussian_bench    => GaussianInputS,
+    heikin_ashi_candles_bench => HeikinAshiInputS,
+    highpass_bench    => HighPassInputS,
+    highpass_2_pole_bench => HighPass2InputS,
+    hma_bench         => HmaInputS,
+    ht_dcperiod_bench => HtDcPeriodInputS,
+    hwma_bench        => HwmaInputS,
+    ift_rsi_bench     => IftRsiInputS,
+    jma_bench         => JmaInputS,
+    jsa_bench         => JsaInputS,
+    kama_bench        => KamaInputS,
+    kaufmanstop_bench => KaufmanstopInputS,
+    kdj_bench         => KdjInputS,
+    keltner_bench     => KeltnerInputS,
+    kst_bench         => KstInputS,
+    kurtosis_bench    => KurtosisInputS,
+    kvo_bench         => KvoInputS,
+
+    linearreg_angle_bench     => Linearreg_angleInputS,
+    linearreg_intercept_bench => LinearRegInterceptInputS,
+    linearreg_slope_bench     => LinearRegSlopeInputS,
+    linreg_bench              => LinRegInputS,
+    lrsi_bench                => LrsiInputS,
+
+    maaq_bench => MaaqInputS,
+    mab_bench  => MabInputS,
+    macd_bench => MacdInputS,
+    mama_bench => MamaInputS,
+    marketfi_bench  => MarketefiInputS,
+    mass_bench      => MassInputS,
+    mean_ad_bench   => MeanAdInputS,
+    medium_ad_bench => MediumAdInputS,
+    medprice_bench  => MedpriceInputS,
+    mfi_bench       => MfiInputS,
+    midpoint_bench  => MidpointInputS,
+    midprice_bench  => MidpriceInputS,
+    minmax_bench    => MinmaxInputS,
+    mom_bench       => MomInputS,
+    msw_bench       => MswInputS,
+    mwdx_bench      => MwdxInputS,
+
+    natr_bench   => NatrInputS,
+    nma_bench    => NmaInputS,
+    pivot_bench  => PivotInputS,
+    pma_bench    => PmaInputS,
+    ppo_bench    => PpoInputS,
+    pvi_bench    => PviInputS,
+    pwma_bench   => PwmaInputS,
+    qstick_bench => QstickInputS,
+    reflex_bench => ReflexInputS,
+    roc_bench    => RocInputS,
+    rocp_bench   => RocpInputS,
+    rocr_bench   => RocrInputS,
+    rsi_bench    => RsiInputS,
+    rvi_bench    => RviInputS,
+    safezonestop_bench => SafeZoneStopInputS,
+    sar_bench    => SarInputS,
+    sinwma_bench => SinWmaInputS,
+    sma_bench    => SmaInputS,
+    smma_bench   => SmmaInputS,
+    squeeze_momentum_bench => SqueezeMomentumInputS,
+    sqwma_bench  => SqwmaInputS,
+    srsi_bench   => SrsiInputS,
+    srwma_bench  => SrwmaInputS,
+    stc_bench    => StcInputS,
+    stddev_bench => StdDevInputS,
+    stochf_bench => StochfInputS,
+    supersmoother_bench => SuperSmootherInputS,
+    supersmoother_3_pole_bench => SuperSmoother3PoleInputS,
+    swma_bench   => SwmaInputS,
+    tema_bench   => TemaInputS,
+    tilson_bench => TilsonInputS,
+    trendflex_bench => TrendFlexInputS,
+    trima_bench  => TrimaInputS,
+    trix_bench   => TrixInputS,
+    tsi_bench    => TsiInputS,
+    ttm_trend_bench => TtmTrendInputS,
+    ui_bench     => UiInputS,
+    ultosc_bench => UltOscInputS,
+    var_bench    => VarInputS,
+    vi_bench     => ViInputS,
+    vidya_bench  => VidyaInputS,
+    vlma_bench   => VlmaInputS,
+    vosc_bench   => VoscInputS,
+    voss_bench   => VossInputS,
+    vpci_bench   => VpciInputS,
+    vpt_bench    => VptInputS,
+    vpwma_bench  => VpwmaInputS,
+    vwap_bench   => VwapInputS,
+    vwma_bench   => VwmaInputS,
+    vwmacd_bench => VwmacdInputS,
+    wad_bench    => WadInputS,
+    wavetrend_bench => WavetrendInputS,
+    wclprice_bench => WclpriceInputS,
+    wilders_bench   => WildersInputS,
+    willr_bench     => WillrInputS,
+    wma_bench       => WmaInputS,
+    zlema_bench     => ZlemaInputS,
+    zscore_bench    => ZscoreInputS
+);
+
+
+ 
+ /* ------------------------------------------------- *
+  *  9.  ALMA – generate and register variant benches *
+  * ------------------------------------------------- */
+ make_kernel_wrappers!(alma_fp64, alma_with_kernel    , AlmaInputS    ; Scalar, Avx2, Avx512);
+ make_kernel_wrappers!(alma_fp32, alma_f32_with_kernel, AlmaInputF32S ; Scalar, Avx2, Avx512);
+ 
+ bench_variants!(
+     alma_fp64 => AlmaInputS;
+     alma_fp64_scalar,
+     alma_fp64_avx2,
+     alma_fp64_avx512,
+ );
+ bench_variants!(
+     alma_fp32 => AlmaInputF32S;
+     alma_fp32_scalar,
+     alma_fp32_avx2,
+     alma_fp32_avx512,
+ );
+ 
+ /* ------------------------------------------------- *
+  * 10.  Wire Criterion in                            *
+  * ------------------------------------------------- */
+ criterion_main!(
+     benches_scalar,
+     benches_alma_fp64,
+     benches_alma_fp32,
+ );
+ 

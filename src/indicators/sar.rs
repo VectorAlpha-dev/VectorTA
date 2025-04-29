@@ -77,8 +77,16 @@ impl<'a> SarInput<'a> {
         })
     }
 
-    pub fn with_default_candles(candles: &'a Candles) -> Result<Self, SarError> {
-        Self::from_candles(candles, SarParams::default())
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        debug_assert!(
+            !candles.high.is_empty() && !candles.low.is_empty(),
+            "sar: input candles are empty"
+        );
+    
+        Self {
+            data: SarData::Candles { candles },
+            params: SarParams::default(),
+        }
     }
 
     pub fn get_acceleration(&self) -> f64 {

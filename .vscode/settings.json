@@ -2,5 +2,8 @@
     "editor.formatOnSave": true,
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
     "rust-analyzer.checkOnSave.command": "clippy",
-    "rust-analyzer.cargo.runBuildScripts": true
+    "rust-analyzer.cargo.runBuildScripts": true,
+    "rust-analyzer.diagnostics.enable": true,
+    "rust-analyzer.server.path": "rustup",
+    "rust-analyzer.server.extraEnv": { "RUSTUP_TOOLCHAIN": "nightly" } // or "stable"
 }
