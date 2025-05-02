@@ -5,5 +5,7 @@
     "rust-analyzer.cargo.runBuildScripts": true,
     "rust-analyzer.diagnostics.enable": true,
     "rust-analyzer.server.path": "rustup",
-    "rust-analyzer.server.extraEnv": { "RUSTUP_TOOLCHAIN": "nightly" } // or "stable"
+    "rust-analyzer.server.extraEnv": { "RUSTUP_TOOLCHAIN": "nightly" },
+    "rust-analyzer.rustup.overrideToolchain": "nightly"
+
 }

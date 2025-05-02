@@ -26,9 +26,7 @@ use my_project::utilities::enums::Kernel;
     alligator::{alligator as alligator_raw, AlligatorInput},
     alma::{
         alma_with_kernel,
-        alma_f32_with_kernel,
         AlmaInput,
-        AlmaInputF32,
     },
     ao::{ao as ao_raw, AoInput},
     apo::{apo as apo_raw, ApoInput},
@@ -51,7 +49,7 @@ use my_project::utilities::enums::Kernel;
     correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
     correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
     cvi::{cvi as cvi_raw, CviInput},
-    cwma::{cwma as cwma_raw, CwmaInput},
+    cwma::{cwma_with_kernel, CwmaInput},
     damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
     dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
     decycler::{decycler as decycler_raw, DecyclerInput},
@@ -207,7 +205,6 @@ use my_project::utilities::enums::Kernel;
  pub type AdxrInputS = AdxrInput<'static>;
  pub type AlligatorInputS = AlligatorInput<'static>;
  pub type AlmaInputS = AlmaInput<'static>;
- pub type AlmaInputF32S = AlmaInputF32<'static>;
  pub type AoInputS = AoInput<'static>;
  pub type ApoInputS = ApoInput<'static>;
  pub type AroonInputS = AroonInput<'static>;
@@ -476,7 +473,6 @@ fn bench_one<F, In>(
     AdxrInputS,
     AlligatorInputS,
     AlmaInputS,
-    AlmaInputF32S,
     AoInputS,
     ApoInputS,
     AroonInputS,
@@ -669,7 +665,6 @@ fn bench_one<F, In>(
     (correl_hl_bench, correl_hl_raw, CorrelHlInputS),
     (correlation_cycle_bench, correlation_cycle_raw, CorrelationCycleInputS),
     (cvi_bench, cvi_raw, CviInputS),
-    (cwma_bench, cwma_raw, CwmaInputS),
     (damiani_volatmeter_bench, damiani_volatmeter_raw, DamianiVolatmeterInputS),
     (dec_osc_bench, dec_osc_raw, DecOscInputS),
     (decycler_bench, decycler_raw, DecyclerInputS),
@@ -825,7 +820,6 @@ bench_scalars!(
     correl_hl_bench   => CorrelHlInputS,
     correlation_cycle_bench => CorrelationCycleInputS,
     cvi_bench         => CviInputS,
-    cwma_bench        => CwmaInputS,
     damiani_volatmeter_bench => DamianiVolatmeterInputS,
     dec_osc_bench     => DecOscInputS,
     decycler_bench    => DecyclerInputS,
@@ -957,28 +951,28 @@ bench_scalars!(
  /* ------------------------------------------------- *
   *  9.  ALMA – generate and register variant benches *
   * ------------------------------------------------- */
- make_kernel_wrappers!(alma_fp64, alma_with_kernel    , AlmaInputS    ; Scalar, Avx2, Avx512);
- make_kernel_wrappers!(alma_fp32, alma_f32_with_kernel, AlmaInputF32S ; Scalar, Avx2, Avx512);
+ make_kernel_wrappers!(alma, alma_with_kernel    , AlmaInputS    ; Scalar, Avx2, Avx512);
+make_kernel_wrappers!(cwma, cwma_with_kernel    , CwmaInputS    ; Scalar, Avx2, Avx512);
  
  bench_variants!(
-     alma_fp64 => AlmaInputS;
-     alma_fp64_scalar,
-     alma_fp64_avx2,
-     alma_fp64_avx512,
- );
- bench_variants!(
-     alma_fp32 => AlmaInputF32S;
-     alma_fp32_scalar,
-     alma_fp32_avx2,
-     alma_fp32_avx512,
+     alma => AlmaInputS;
+     alma_scalar,
+     alma_avx2,
+     alma_avx512,
  );
  
+ bench_variants!(
+     cwma => CwmaInputS;
+     cwma_scalar,
+     cwma_avx2,
+     cwma_avx512,
+ );
  /* ------------------------------------------------- *
   * 10.  Wire Criterion in                            *
   * ------------------------------------------------- */
  criterion_main!(
      benches_scalar,
-     benches_alma_fp64,
-     benches_alma_fp32,
+     benches_alma,
+     benches_cwma,
  );
  

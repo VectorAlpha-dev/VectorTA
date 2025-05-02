@@ -1,12 +1,9 @@
 [build]
+rustc-wrapper = "sccache"          # ".exe" optional on Windows
 rustflags = [
   "-C", "target-cpu=native",
-  # AVX-512 + friends explicitly (helps when `native` is a vague superset)
   "-C", "target-feature=+avx512f,+avx512dq,+avx512vl,+fma",
-  # (optional) use LLD; shave a few seconds from link time
-  "-C", "link-arg=-fuse-ld=lld",
+  # Windows MSVC toolchain → use LLD-LINK instead of GNU’s -fuse-ld
+  "-C", "linker=lld-link",
 ]
-rustc-wrapper = "sccache.exe"
 
-[toolchain]
-channel = "nightly"
