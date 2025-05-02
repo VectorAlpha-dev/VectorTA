@@ -27,7 +27,6 @@ anyhow = "1.0.98"
 [lib]
 doctest = false
 path = "src/lib.rs"
-crate-type = ["rlib"]
 
 [[bin]]
 name = "my_project"
@@ -37,18 +36,20 @@ path = "src/main.rs"
 inherits = "dev"
 opt-level = 1
 codegen-units = 256
-incremental = true           # real incremental
+incremental = false           # real incremental
 lto = false
 debug = false
 
 [profile.release]
 opt-level       = 3         # default, shown for clarity
 lto             = "thin"    # ~95 % of “fat” LTO’s perf for ⅓ the link time
-codegen-units   = 1         # single CGU = maximum inlining across crates
-incremental     = true     # make sure we really optimise across the whole crate
+codegen-units   = 256         # single CGU = maximum inlining across crates
+incremental = false
 panic           = "abort"   # remove unwinding machinery (≈ −1 % run time, −5 % size)
 strip           = "symbols" # smaller binaries (optional)
 overflow-checks = false     # no integer overflow traps in release
 
+
 [profile.bench]
 inherits = "release"
+incremental = false
