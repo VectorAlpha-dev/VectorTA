@@ -24,7 +24,17 @@ use crate::utilities::helpers::detect_best_kernel;
 
 use core::arch::x86_64::*;
 use thiserror::Error;
+use std::convert::AsRef;
 
+impl<'a> AsRef<[f64]> for CwmaInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            CwmaData::Slice(slice) => slice,
+            CwmaData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CwmaData<'a> {
@@ -54,17 +64,17 @@ pub struct CwmaInput<'a> {
 }
 
 impl<'a> CwmaInput<'a> {
-    #[inline] pub fn from_candles(c: &'a Candles, s: &'a str, p: CwmaParams) -> Self {
+    #[inline(always)] pub fn from_candles(c: &'a Candles, s: &'a str, p: CwmaParams) -> Self {
         Self { data: CwmaData::Candles { candles: c, source: s }, params: p }
     }
-    #[inline] pub fn from_slice(sl: &'a [f64], p: CwmaParams) -> Self {
+    #[inline(always)] pub fn from_slice(sl: &'a [f64], p: CwmaParams) -> Self {
         Self { data: CwmaData::Slice(sl), params: p }
     }
-    #[inline] pub fn with_default_candles(c: &'a Candles) -> Self {
+    #[inline(always)] pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", CwmaParams::default())
     }
 
-    #[inline] pub fn get_period(&self) -> usize {
+    #[inline(always)] pub fn get_period(&self) -> usize {
         self.params.period.unwrap_or(14)
     }
 }
@@ -122,12 +132,11 @@ pub enum CwmaError {
 }
 
 
-#[inline] pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
+#[inline(always)] pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
     cwma_with_kernel(input, Kernel::Auto)
 }
 
 pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput, CwmaError> {
-    /* — validate data — */
     let data: &[f64] = match &input.data {
         CwmaData::Candles { candles, source } => source_type(candles, source),
         CwmaData::Slice(sl)                   => sl,
@@ -162,20 +171,26 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
         k            => k,
     };
 
-    unsafe {
-        match chosen {
-            Kernel::Scalar => cwma_scalar (data, &weights, period, first, inv_norm, &mut out),
-            Kernel::Avx2   => cwma_avx2   (data, &weights, period, first, inv_norm, &mut out),
-            Kernel::Avx512 => cwma_avx512 (data, &weights, period, first, inv_norm, &mut out),
-            Kernel::Auto   => unreachable!(),
-        }
+unsafe {
+    match chosen {
+        Kernel::Scalar  |
+        Kernel::ScalarBatch => cwma_scalar (data, &weights, period, first, inv_norm, &mut out),
+
+        Kernel::Avx2    |
+        Kernel::Avx2Batch   => cwma_avx2   (data, &weights, period, first, inv_norm, &mut out),
+
+        Kernel::Avx512  |
+        Kernel::Avx512Batch => cwma_avx512 (data, &weights, period, first, inv_norm, &mut out),
+
+        Kernel::Auto => unreachable!(),
     }
+}
 
     Ok(CwmaOutput { values: out })
 }
 
 
-#[inline]
+#[inline(always)]
 fn cwma_scalar(
     data:      &[f64],
     weights:   &[f64],
@@ -337,7 +352,6 @@ impl CwmaStream {
             return Err(CwmaError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // batch uses `period-1` cubic weights: period³ … 2³
         let mut weights = Vec::with_capacity(period - 1);
         for i in 0..period - 1 {
             weights.push(((period - i) as f64).powi(3));
@@ -356,7 +370,6 @@ impl CwmaStream {
         })
     }
 
-    /// Feed one value and (once enough data) return the CWMA; otherwise `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let idx = self.total_count;
@@ -391,25 +404,7 @@ impl CwmaStream {
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-
-    fn skip_if_unsupported(kernel: Kernel, test_name: &str) {
-        match kernel {
-            Kernel::Avx2 => {
-                if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
-                    eprintln!("[{}] Skipping AVX2 test on non-AVX2 CPU", test_name);
-                    std::process::exit(0);
-                }
-            }
-            Kernel::Avx512 => {
-                if !(is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("fma")) {
-                    eprintln!("[{}] Skipping AVX512 test on non-AVX512 CPU", test_name);
-                    std::process::exit(0);
-                }
-            }
-            Kernel::Scalar => {}
-            Kernel::Auto => {}
-        }
-    }
+    use crate::utilities::helpers::skip_if_unsupported;
 
     fn check_cwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
