@@ -62,7 +62,7 @@ pub struct AlmaParams {
 impl Default for AlmaParams {
     fn default() -> Self {
         Self {
-            period: Some(19),
+            period: Some(9),
             offset: Some(0.85),
             sigma:  Some(6.0),
         }
@@ -96,7 +96,7 @@ impl<'a> AlmaInput<'a> {
     }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(19)
+        self.params.period.unwrap_or(9)
     }
     #[inline]
     pub fn get_offset(&self) -> f64 {
@@ -568,7 +568,7 @@ impl AlmaStream {
         let mut norm    = 0.0;
         for i in 0..period {
             let diff = i as f64 - m;
-            let w    = (-(diff * diff) / s2).exp();
+            let w = (-(diff * diff) / s2).exp();
             weights.push(w);
             norm += w;
         }
@@ -620,7 +620,7 @@ pub struct AlmaBatchRange {
 impl Default for AlmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 24, 1),
+            period: (4, 14, 1),
             offset: (0.85, 0.85, 0.0),
             sigma:  (6.0,  6.0,  0.0),
         }
@@ -961,106 +961,207 @@ unsafe fn alma_row_avx512_short(
 ) {
     debug_assert!(period <= 32);
     const STEP: usize = 8;
-    let chunks   = period / STEP;
-    let tail_len = period % STEP;
-    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    let w0 = _mm512_loadu_pd(w_ptr);
-    let w1 = if chunks >= 2 {
+    let chunks    = period / STEP;
+    let tail_len  = period % STEP;
+    let w0        = _mm512_loadu_pd(w_ptr);
+    let w1        = if chunks >= 2 {
         Some(_mm512_loadu_pd(w_ptr.add(STEP)))
     } else { None };
 
+    if tail_len == 0 {
+        for i in (first + period - 1)..data.len() {
+            let start = i + 1 - period;
+            let mut acc = _mm512_fmadd_pd(
+                _mm512_loadu_pd(data.as_ptr().add(start)), w0,
+                _mm512_setzero_pd());
+
+            if let Some(w1v) = w1 {
+                let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
+                acc = _mm512_fmadd_pd(d1, w1v, acc);
+            }
+            *out.get_unchecked_mut(i) = _mm512_reduce_add_pd(acc) * inv_n;
+        }
+        return;
+    }
+
+    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+    let w_tail = _mm512_maskz_loadu_pd(tmask, w_ptr.add(chunks * STEP));
+
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
-        let mut acc = _mm512_setzero_pd();
-
-        let d0 = _mm512_loadu_pd(data.as_ptr().add(start));
-        acc = _mm512_fmadd_pd(d0, w0, acc);
+        let mut acc = _mm512_fmadd_pd(
+            _mm512_loadu_pd(data.as_ptr().add(start)), w0,
+            _mm512_setzero_pd());
 
         if let Some(w1v) = w1 {
             let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
             acc = _mm512_fmadd_pd(d1, w1v, acc);
         }
 
-        if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(
-                tmask,
-                data.as_ptr().add(start + chunks * STEP),
-            );
-            let w_tail = _mm512_maskz_loadu_pd(
-                tmask,
-                w_ptr.add(chunks * STEP),
-            );
-            acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
-        }
-
+        let d_tail = _mm512_maskz_loadu_pd(
+            tmask,
+            data.as_ptr().add(start + chunks * STEP),
+        );
+        acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
         *out.get_unchecked_mut(i) = _mm512_reduce_add_pd(acc) * inv_n;
     }
 }
 
 #[target_feature(enable = "avx512f,avx512dq,fma")]
-unsafe fn alma_row_avx512_long(
-    data:  &[f64],
-    first: usize,
+pub(crate) unsafe fn alma_row_avx512_long(
+    data:   &[f64],
+    first:  usize,
     period: usize,
     _stride: usize,
-    w_ptr: *const f64,
-    inv_n: f64,
-    out:   &mut [f64],
+    w_ptr:  *const f64,
+    inv_n:  f64,
+    out:    &mut [f64],
 ) {
     const STEP: usize = 8;
     let n_chunks  = period / STEP;
     let tail_len  = period % STEP;
-    let paired    = n_chunks & !3;
     let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks + (tail_len != 0) as usize);
+    const MAX_CHUNKS: usize = 512;
+    debug_assert!(n_chunks + (tail_len != 0) as usize <= MAX_CHUNKS);
+
+    let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] =
+        core::mem::MaybeUninit::uninit().assume_init();
+
     for blk in 0..n_chunks {
-        wregs.push(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
+        wregs[blk].as_mut_ptr().write(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
     }
     if tail_len != 0 {
-        wregs.push(_mm512_maskz_loadu_pd(tmask, w_ptr.add(n_chunks * STEP)));
+        wregs[n_chunks]
+            .as_mut_ptr()
+            .write(_mm512_maskz_loadu_pd(tmask, w_ptr.add(n_chunks * STEP)));
     }
 
-    let mut data_ptr = data.as_ptr().add(first);
-    let stop = data.as_ptr().add(data.len());
+    let wregs: &[__m512d] = core::slice::from_raw_parts(
+        wregs.as_ptr() as *const __m512d,
+        n_chunks + (tail_len != 0) as usize,
+    );
 
-    for dst in &mut out[first + period - 1..] {
+    if tail_len == 0 {
+        long_kernel_no_tail(data, first, n_chunks, wregs, inv_n, out);
+    } else {
+        long_kernel_with_tail(data, first, n_chunks, tail_len, tmask, wregs, inv_n, out);
+    }
+}
+
+#[inline(always)]
+unsafe fn long_kernel_no_tail(
+    data:    &[f64],
+    first:   usize,
+    n_chunks: usize,
+    wregs:   &[__m512d],
+    inv_n:   f64,
+    out:     &mut [f64],
+) {
+    const STEP: usize = 8;
+    let paired = n_chunks & !3;
+
+    let mut data_ptr = data.as_ptr().add(first);
+    let stop_ptr     = data.as_ptr().add(data.len());
+
+    for dst in &mut out[first + n_chunks * STEP - 1..] {
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
         let mut s3 = _mm512_setzero_pd();
 
-        for blk in (0..paired).step_by(4) {
-            _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
-            let d0 = _mm512_loadu_pd(data_ptr.add(blk * STEP));
+        let mut blk = 0;
+        while blk < paired {
+            _mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
+
+            let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
             let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
             let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
             let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
 
-            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk), s0);
+            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
             s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
             s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
             s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+
+            blk += 4;
         }
 
-        for blk in paired..n_chunks {
-            let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
-            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
-        }
-
-        if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(tmask, data_ptr.add(n_chunks * STEP));
-            s0 = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(n_chunks), s0);
+        for r in blk..n_chunks {
+            let d = _mm512_loadu_pd(data_ptr.add(r * STEP));
+            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
         }
 
         let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
         *dst = _mm512_reduce_add_pd(sum) * inv_n;
 
         data_ptr = data_ptr.add(1);
-        if data_ptr.add(period) > stop { break }
+        if data_ptr.add(n_chunks * STEP) > stop_ptr { break }
     }
 }
+
+#[inline(always)]
+unsafe fn long_kernel_with_tail(
+    data:      &[f64],
+    first:     usize,
+    n_chunks:  usize,
+    tail_len:  usize,
+    tmask:     __mmask8,
+    wregs:     &[__m512d],
+    inv_n:     f64,
+    out:       &mut [f64],
+) {
+    const STEP: usize = 8;
+    let paired = n_chunks & !3;
+
+    let w_tail = *wregs.get_unchecked(n_chunks);
+
+    let mut data_ptr = data.as_ptr().add(first);
+    let stop_ptr     = data.as_ptr().add(data.len());
+
+    for dst in &mut out[first + n_chunks * STEP + tail_len - 1..] {
+        let mut s0 = _mm512_setzero_pd();
+        let mut s1 = _mm512_setzero_pd();
+        let mut s2 = _mm512_setzero_pd();
+        let mut s3 = _mm512_setzero_pd();
+
+        let mut blk = 0;
+        while blk < paired {
+            _mm_prefetch(data_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
+
+            let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
+            let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
+            let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
+            let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
+
+            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+            s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+            s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+            s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+
+            blk += 4;
+        }
+
+        for r in blk..n_chunks {
+            let d = _mm512_loadu_pd(data_ptr.add(r * STEP));
+            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
+        }
+
+        let d_tail = _mm512_maskz_loadu_pd(
+            tmask,
+            data_ptr.add(n_chunks * STEP),
+        );
+        s0 = _mm512_fmadd_pd(d_tail, w_tail, s0);
+
+        let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
+        *dst = _mm512_reduce_add_pd(sum) * inv_n;
+
+        data_ptr = data_ptr.add(1);
+        if data_ptr.add(n_chunks * STEP + tail_len) > stop_ptr { break }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
