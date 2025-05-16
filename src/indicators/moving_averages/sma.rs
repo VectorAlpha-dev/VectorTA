@@ -102,46 +102,49 @@ pub fn sma(input: &SmaInput) -> Result<SmaOutput, SmaError> {
         SmaData::Candles { candles, source } => source_type(candles, source),
         SmaData::Slice(slice) => slice,
     };
-
-    if data.is_empty() {
-        return Err(SmaError::EmptyData);
-    }
+    if data.is_empty() { return Err(SmaError::EmptyData); }
 
     let period = input.get_period();
     if period == 0 || period > data.len() {
-        return Err(SmaError::InvalidPeriod {
-            period,
-            data_len: data.len(),
-        });
+        return Err(SmaError::InvalidPeriod { period, data_len: data.len() });
     }
 
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(SmaError::AllValuesNaN),
-    };
-
-    if (data.len() - first_valid_idx) < period {
+    let first = data.iter().position(|&x| !x.is_nan())
+        .ok_or(SmaError::AllValuesNaN)?;
+    if data.len() - first < period {
         return Err(SmaError::NotEnoughValidData {
             needed: period,
-            valid: data.len() - first_valid_idx,
+            valid : data.len() - first,
         });
     }
 
-    let mut sma_values = vec![f64::NAN; data.len()];
+    let len   = data.len();
+    let mut out: Vec<core::mem::MaybeUninit<f64>> = Vec::with_capacity(len);
+    unsafe { out.set_len(len); }
+
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
+
     let mut sum = 0.0;
-    for &value in data[first_valid_idx..(first_valid_idx + period)].iter() {
-        sum += value;
+    unsafe {
+        for k in 0..period {
+            sum += *dp.add(first + k);
+        }
+        let inv = 1.0 / period as f64;
+        *op.add(first + period - 1) = core::mem::MaybeUninit::new(sum * inv);
+
+        for i in (first + period)..len {
+            sum += *dp.add(i) - *dp.add(i - period);
+            *op.add(i) = core::mem::MaybeUninit::new(sum * inv);
+        }
     }
 
-    let inv_period = 1.0 / (period as f64);
-    sma_values[first_valid_idx + period - 1] = sum * inv_period;
-
-    for i in (first_valid_idx + period)..data.len() {
-        sum += data[i] - data[i - period];
-        sma_values[i] = sum * inv_period;
+    for v in &mut out[..first + period - 1] {
+        *v = core::mem::MaybeUninit::new(f64::NAN);
     }
 
-    Ok(SmaOutput { values: sma_values })
+    let values = unsafe { core::mem::transmute::<_, Vec<f64>>(out) };
+    Ok(SmaOutput { values })
 }
 
 #[cfg(test)]

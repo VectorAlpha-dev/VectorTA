@@ -5,10 +5,24 @@ pub enum Kernel {
     Scalar,
     Avx2,
     Avx512,
+    ScalarBatch,
+    Avx2Batch,
+    Avx512Batch,
 }
 
 impl Default for Kernel {
     fn default() -> Self {
         Kernel::Auto
+    }
+}
+
+impl Kernel {
+    /// `true` only for the three batch variants
+    #[inline(always)]
+    pub const fn is_batch(self) -> bool {
+        matches!(
+            self,
+            Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch
+        )
     }
 }

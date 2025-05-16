@@ -23,6 +23,7 @@ paste = "1.0.15"
 wide = "0.7.32"
 num-traits = "0.2.19"
 anyhow = "1.0.98"
+rayon = "1.10.0"
 
 [lib]
 doctest = false

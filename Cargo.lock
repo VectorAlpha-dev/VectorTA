@@ -405,6 +405,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "rayon",
  "serde",
  "thiserror",
  "wide",

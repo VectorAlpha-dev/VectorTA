@@ -1,9 +1,4 @@
-//! benches/indicator_benchmark.rs
-//! Run with:  cargo +nightly bench --bench indicator_benchmark
 
-/* ------------------------------------------------- *
- *  0.   Imports & helper defs                       *
- * ------------------------------------------------- */
  use std::time::{Instant, Duration};
  use once_cell::sync::Lazy;
  use criterion::{
@@ -13,10 +8,7 @@
  use paste::paste;
 use anyhow::anyhow;
 use my_project::utilities::enums::Kernel;
- 
- // -------------- indicators we will benchmark -----------------
- // Pull the functions into scope so that we can refer to them with a single
- // identifier – no `::` inside the `paste!` macro.
+
  use my_project::indicators::{
     acosc::{acosc as acosc_raw, AcoscInput},
     ad::{ad as ad_raw, AdInput},
@@ -27,6 +19,8 @@ use my_project::utilities::enums::Kernel;
     alma::{
         alma_with_kernel,
         AlmaInput,
+        AlmaData,
+        AlmaBatchBuilder,
     },
     ao::{ao as ao_raw, AoInput},
     apo::{apo as apo_raw, ApoInput},
@@ -49,7 +43,7 @@ use my_project::utilities::enums::Kernel;
     correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
     correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
     cvi::{cvi as cvi_raw, CviInput},
-    cwma::{cwma_with_kernel, CwmaInput},
+    cwma::{cwma_with_kernel, CwmaInput, CwmaData},
     damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
     dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
     decycler::{decycler as decycler_raw, DecyclerInput},
@@ -174,9 +168,6 @@ use my_project::utilities::enums::Kernel;
 };
 
  
- /* ------------------------------------------------- *
-  *  1.   Candle vectors – loaded *once*              *
-  * ------------------------------------------------- */
  use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
  
  static CANDLES_10K: Lazy<Candles> = Lazy::new(|| {
@@ -190,14 +181,11 @@ use my_project::utilities::enums::Kernel;
      read_candles_from_csv("src/data/1MillionCandles.csv").expect("1 M candles csv")
  });
  
- /* ------------------------------------------------- *
-  *  2.  Trait every *Input* must implement           *
-  * ------------------------------------------------- */
+
  trait InputLen {
      fn with_len(len: usize) -> Self;
  }
  
- // Concrete `'static` aliases so we don't have to juggle lifetimes in the macro
  pub type AcoscInputS = AcoscInput<'static>;
  pub type AdInputS = AdInput<'static>;
  pub type AdoscInputS = AdoscInput<'static>;
@@ -349,7 +337,6 @@ use my_project::utilities::enums::Kernel;
  pub type ZlemaInputS = ZlemaInput<'static>;
  pub type ZscoreInputS = ZscoreInput<'static>;
 
- /* helper macro to implement the trait in one line  */
  macro_rules! impl_input_len {
      ($($ty:ty),* $(,)?) => {
          $(
@@ -367,9 +354,6 @@ use my_project::utilities::enums::Kernel;
      };
  }
 
- /* ------------------------------------------------- *
-  *  3.  Generic bench runner                         *
-  * ------------------------------------------------- */
   fn pretty_len(len: usize) -> &'static str {
     match len {
         10_000     => "10k",
@@ -382,22 +366,25 @@ use my_project::utilities::enums::Kernel;
 const SIZES: [usize; 3] = [10_000, 100_000, 1_000_000];
 
 fn bench_one<F, In>(
-    group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    label: &str,
-    fun: F,
-    len: usize,
+    group:  &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    label:  &str,
+    fun:    F,
+    len:    usize,
+    elements: Option<u64>,          // <── NEW
 ) where
     F: Fn(&In) -> anyhow::Result<()> + Copy + 'static,
     In: InputLen + 'static,
 {
     let input = In::with_len(len);
 
+    if let Some(n) = elements {                // <── NEW
+        group.throughput(Throughput::Elements(n));
+    }
+
     group.bench_with_input(
         BenchmarkId::new(label, pretty_len(len)),
         &input,
-        move |b, input| {
-            b.iter(|| fun(black_box(input)).unwrap());
-        },
+        move |b, input| b.iter(|| fun(black_box(input)).unwrap()),
     );
 
     group.measurement_time(Duration::from_millis(900));
@@ -405,48 +392,48 @@ fn bench_one<F, In>(
     group.sample_size(100);
 }
 
+macro_rules! bench_scalars {
+    ( $( $fun:ident => $typ:ty ),* $(,)? ) => {
+        paste::paste! {
+            $(
+                fn [<bench_ $fun>](c: &mut Criterion) {
+                    let mut group = c.benchmark_group(stringify!($fun));
+                    for &len in &SIZES {
+                        bench_one::<_, $typ>(&mut group, "scalar", $fun, len, None);
+                    }
+                    group.finish();
+                }
+            )*
+            criterion_group!(benches_scalar, $( [<bench_ $fun>] ),*);
+        }
+    };
+}
+
  
- /* ------------------------------------------------- *
-  *  4.  Macro for scalar-only indicators             *
-  * ------------------------------------------------- */
- macro_rules! bench_scalars {
-     ( $( $fun:ident => $typ:ty ),* $(,)? ) => {
-         paste! {
-             $(
-                 fn [<bench_ $fun>](c: &mut Criterion) {
-                     let mut group = c.benchmark_group(stringify!($fun));
-                     for &len in &SIZES {
-                         bench_one::<_, $typ>(&mut group, "scalar", $fun, len);
-                     }
-                     group.finish();
-                 }
-             )*
-             criterion_group!(benches_scalar, $( [<bench_ $fun>] ),*);
-         }
-     }
- }
+macro_rules! bench_variants {
+    ($root:ident => $typ:ty; $elements:expr; $( $vfun:ident ),+ $(,)? ) => {
+        paste::paste! {
+            fn [<bench_ $root>](c: &mut Criterion) {
+                let mut group = c.benchmark_group(stringify!($root));
+                for &len in &SIZES {
+                    $(
+                        bench_one::<_, $typ>(
+                            &mut group,
+                            stringify!($vfun),
+                            $vfun,
+                            len,
+                            $elements
+                        );
+                    )+
+                }
+                group.finish();
+            }
+            criterion_group!([<benches_ $root>], [<bench_ $root>]);
+        }
+    };
+}
+
  
- /* ------------------------------------------------- *
-  *  5.  Macro for multi‑variant indicators           *
-  * ------------------------------------------------- */
- macro_rules! bench_variants {
-     ($root:ident => $typ:ty; $( $vfun:ident ),+ $(,)? ) => {
-         paste! {
-             fn [<bench_ $root>](c: &mut Criterion) {
-                 let mut group = c.benchmark_group(stringify!($root));
-                 for &len in &SIZES {
-                     $( bench_one::<_, $typ>(&mut group, stringify!($vfun), $vfun, len); )+
-                 }
-                 group.finish();
-             }
-             criterion_group!([<benches_ $root>], [<bench_ $root>]);
-         }
-     };
- }
- 
- /* ------------------------------------------------- *
-  *  6.  Turn one “*_with_kernel” fn into N wrappers   *
-  * ------------------------------------------------- */
  macro_rules! make_kernel_wrappers {
      ( $stem:ident, $base:path, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
          paste! {
@@ -462,9 +449,37 @@ fn bench_one<F, In>(
      };
  }
  
- /* ------------------------------------------------- *
-  *  7.  Implement the InputLen trait for the inputs   *
-  * ------------------------------------------------- */
+  #[macro_export]
+  macro_rules! bench_wrappers {
+      ( $( ($bench_fn:ident, $raw_fn:ident, $input_ty:ty) ),+ $(,)?) => {
+          $(
+              #[inline(always)]
+              fn $bench_fn(input: &$input_ty) -> anyhow::Result<()> {
+                  $raw_fn(input)
+                      .map(|_| ())
+                      .map_err(|e| anyhow::anyhow!(e.to_string()))
+              }
+          )+
+      };
+  }
+
+macro_rules! make_batch_wrappers {
+    ( $stem:ident, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
+        paste::paste! {
+            $(
+                #[inline(always)]
+                fn [<$stem _ $k:lower>](input: &$ityp) -> anyhow::Result<()> {
+                    let slice: &[f64] = input.as_ref();
+                    let _ = AlmaBatchBuilder::new()
+                        .kernel(Kernel::$k)
+                        .apply_slice(slice)?;
+                    Ok(())
+                }
+            )+
+        }
+    };
+}
+
   impl_input_len!(
     AcoscInputS,
     AdInputS,
@@ -617,25 +632,6 @@ fn bench_one<F, In>(
     ZlemaInputS,
     ZscoreInputS
  );
- 
- /* ------------------------------------------------- *
-  *  8.  Thin wrappers for the scalar indicators      *
-  * ------------------------------------------------- */
-
-  #[macro_export]
-  macro_rules! bench_wrappers {
-      // This matches a list of tuples: (fn_name, raw_fn, input_type), (fn_name, raw_fn, input_type), ...
-      ( $( ($bench_fn:ident, $raw_fn:ident, $input_ty:ty) ),+ $(,)?) => {
-          $(
-              #[inline(always)]
-              fn $bench_fn(input: &$input_ty) -> anyhow::Result<()> {
-                  $raw_fn(input)
-                      .map(|_| ())
-                      .map_err(|e| anyhow::anyhow!(e.to_string()))
-              }
-          )+
-      };
-  }
 
   bench_wrappers! {
     (acosc_bench, acosc_raw, AcoscInputS),
@@ -946,33 +942,39 @@ bench_scalars!(
     zscore_bench    => ZscoreInputS
 );
 
+ make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+ make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
 
- 
- /* ------------------------------------------------- *
-  *  9.  ALMA – generate and register variant benches *
-  * ------------------------------------------------- */
- make_kernel_wrappers!(alma, alma_with_kernel    , AlmaInputS    ; Scalar, Avx2, Avx512);
-make_kernel_wrappers!(cwma, cwma_with_kernel    , CwmaInputS    ; Scalar, Avx2, Avx512);
- 
+ make_batch_wrappers!(
+    alma_batch, AlmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+bench_variants!(
+    alma => AlmaInputS; None;
+    alma_scalar,
+    alma_avx2,
+    alma_avx512,
+);
+
+bench_variants!(
+    alma_batch => AlmaInputS; Some(11);
+    alma_batch_scalarbatch,
+    alma_batch_avx2batch,
+    alma_batch_avx512batch,
+);
+
  bench_variants!(
-     alma => AlmaInputS;
-     alma_scalar,
-     alma_avx2,
-     alma_avx512,
- );
- 
- bench_variants!(
-     cwma => CwmaInputS;
+     cwma => CwmaInputS; None;
      cwma_scalar,
      cwma_avx2,
      cwma_avx512,
  );
- /* ------------------------------------------------- *
-  * 10.  Wire Criterion in                            *
-  * ------------------------------------------------- */
+
  criterion_main!(
      benches_scalar,
      benches_alma,
+     benches_alma_batch,
      benches_cwma,
  );
  
