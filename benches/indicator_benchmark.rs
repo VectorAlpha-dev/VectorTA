@@ -370,14 +370,14 @@ fn bench_one<F, In>(
     label:  &str,
     fun:    F,
     len:    usize,
-    elements: Option<u64>,          // <── NEW
+    elements: Option<u64>,
 ) where
     F: Fn(&In) -> anyhow::Result<()> + Copy + 'static,
     In: InputLen + 'static,
 {
     let input = In::with_len(len);
 
-    if let Some(n) = elements {                // <── NEW
+    if let Some(n) = elements {
         group.throughput(Throughput::Elements(n));
     }
 
