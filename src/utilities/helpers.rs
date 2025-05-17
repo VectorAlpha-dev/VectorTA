@@ -36,8 +36,8 @@ pub fn skip_if_unsupported(kernel: Kernel, test_name: &str) {
     use std::arch::is_x86_feature_detected;
 
     let (need_avx2, need_avx512) = match kernel {
-        Kernel::Avx2 | Kernel::Avx2Batch     => (true,  false),
         Kernel::Avx512 | Kernel::Avx512Batch => (false, true),
+        Kernel::Avx2 | Kernel::Avx2Batch     => (true,  false),
         _                                    => (false, false),
     };
 

@@ -29,7 +29,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use thiserror::Error;
 use rayon::prelude::*;
 use std::convert::AsRef;
-
+use crate::utilities::aligned_vector::AlignedVec;
 
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
@@ -620,7 +620,7 @@ pub struct AlmaBatchRange {
 impl Default for AlmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (4, 14, 1),
+            period: (9, 240, 1),
             offset: (0.85, 0.85, 0.0),
             sigma:  (6.0,  6.0,  0.0),
         }
@@ -702,7 +702,6 @@ pub fn alma_batch_with_kernel(
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
-
     alma_batch_par_slice(data, sweep, simd)
 }
 
@@ -730,6 +729,7 @@ impl AlmaBatchOutput {
     }
 }
 
+#[inline(always)]
 fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end { return vec![start]; }
@@ -767,6 +767,7 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
     out
 }
 
+#[inline(always)]
 pub fn alma_batch_slice(
     data:  &[f64],
     sweep: &AlmaBatchRange,
@@ -775,6 +776,7 @@ pub fn alma_batch_slice(
     alma_batch_inner(data, sweep, kern, false)
 }
 
+#[inline(always)]
 pub fn alma_batch_par_slice(
     data:  &[f64],
     sweep: &AlmaBatchRange,
@@ -786,6 +788,7 @@ pub fn alma_batch_par_slice(
 #[inline] fn round_up8(x: usize) -> usize { (x + 7) & !7 }
 use std::alloc::{alloc, dealloc, Layout};
 
+#[inline(always)]
 fn alma_batch_inner(
     data:      &[f64],
     sweep:     &AlmaBatchRange,
@@ -799,9 +802,9 @@ fn alma_batch_inner(
 
     let first = data.iter().position(|x| !x.is_nan()).ok_or(AlmaError::AllValuesNaN)?;
     let max_p = combos.iter()
-                    .map(|c| round_up8(c.period.unwrap()))
-                    .max()
-                    .unwrap();   
+        .map(|c| round_up8(c.period.unwrap()))
+        .max()
+        .unwrap();
     if data.len() - first < max_p {
         return Err(AlmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
     }
@@ -811,19 +814,17 @@ fn alma_batch_inner(
     let mut inv_norms = vec![0.0; rows];
 
     let cap = rows * max_p;
-    let layout = Layout::from_size_align(cap * 8, 64)  // 8 bytes per f64
-                    .expect("layout");               // power-of-two, ≥ size_of::<usize>()
-    let ptr = unsafe { alloc(layout) as *mut f64 };    // 64-B aligned
-    if ptr.is_null() { std::alloc::handle_alloc_error(layout); }
-
-    let flat_w = unsafe { std::slice::from_raw_parts_mut(ptr, cap) };
+    let mut aligned = AlignedVec::with_capacity(cap);
+    let flat_w = aligned.as_mut_slice();
 
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let offset = prm.offset.unwrap();
         let sigma  = prm.sigma.unwrap();
 
-        if sigma <= 0.0        { return Err(AlmaError::InvalidSigma { sigma }); }
+        if sigma <= 0.0 {
+            return Err(AlmaError::InvalidSigma { sigma });
+        }
         if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
             return Err(AlmaError::InvalidOffset { offset });
         }
@@ -842,29 +843,20 @@ fn alma_batch_inner(
     }
 
     let mut values = vec![f64::NAN; rows * cols];
-        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-            let period = combos[row].period.unwrap();
-            let w_ptr  = flat_w.as_ptr().add(row * max_p);
-            let inv_n  = *inv_norms.get_unchecked(row);
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        let w_ptr  = flat_w.as_ptr().add(row * max_p);
+        let inv_n  = *inv_norms.get_unchecked(row);
 
-            match kern {
-                Kernel::Avx512 => alma_row_avx512(
-                    data, first, period, max_p, w_ptr,
-                    inv_n, out_row),
-                Kernel::Avx2   => alma_row_avx2(
-                    data, first, period, max_p, w_ptr,
-                    inv_n, out_row),
-                _              => alma_row_scalar(
-                    data, first, period, max_p, w_ptr,
-                    inv_n, out_row),
-            }
-        };
+        match kern {
+            Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2   => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            _              => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+        }
+    };
 
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -874,6 +866,8 @@ fn alma_batch_inner(
     Ok(AlmaBatchOutput { values, combos, rows, cols })
 }
 
+
+#[inline(always)]
 unsafe fn alma_row_scalar(
     data:  &[f64],
     first: usize,
@@ -1062,7 +1056,7 @@ pub(crate) unsafe fn alma_row_avx512_long(
     }
 }
 
-#[inline(always)]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_no_tail(
     data:    &[f64],
     first:   usize,
@@ -1113,7 +1107,7 @@ unsafe fn long_kernel_no_tail(
     }
 }
 
-#[inline(always)]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_with_tail(
     data:      &[f64],
     first:     usize,
