@@ -1,4 +1,3 @@
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Kernel {
     Auto,
@@ -17,7 +16,6 @@ impl Default for Kernel {
 }
 
 impl Kernel {
-    /// `true` only for the three batch variants
     #[inline(always)]
     pub const fn is_batch(self) -> bool {
         matches!(
