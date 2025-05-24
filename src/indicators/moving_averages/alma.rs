@@ -21,15 +21,15 @@
 //! - **`Ok(AlmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(AlmaError)`** otherwise.
 //!
+use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
-use core::arch::x86_64::*;
-use std::error::Error;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};    
-use thiserror::Error;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
-use crate::utilities::aligned_vector::AlignedVec;
+use std::error::Error;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
@@ -43,7 +43,10 @@ impl<'a> AsRef<[f64]> for AlmaInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum AlmaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -56,7 +59,7 @@ pub struct AlmaOutput {
 pub struct AlmaParams {
     pub period: Option<usize>,
     pub offset: Option<f64>,
-    pub sigma : Option<f64>,
+    pub sigma: Option<f64>,
 }
 
 impl Default for AlmaParams {
@@ -64,14 +67,14 @@ impl Default for AlmaParams {
         Self {
             period: Some(9),
             offset: Some(0.85),
-            sigma:  Some(6.0),
+            sigma: Some(6.0),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AlmaInput<'a> {
-    pub data:   AlmaData<'a>,
+    pub data: AlmaData<'a>,
     pub params: AlmaParams,
 }
 
@@ -79,7 +82,10 @@ impl<'a> AlmaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: AlmaParams) -> Self {
         Self {
-            data: AlmaData::Candles { candles: c, source: s },
+            data: AlmaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -89,7 +95,7 @@ impl<'a> AlmaInput<'a> {
             data: AlmaData::Slice(sl),
             params: p,
         }
-    }   
+    }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", AlmaParams::default())
@@ -108,12 +114,11 @@ impl<'a> AlmaInput<'a> {
     }
 }
 
-
 #[derive(Copy, Clone, Debug)]
 pub struct AlmaBuilder {
     period: Option<usize>,
     offset: Option<f64>,
-    sigma : Option<f64>,
+    sigma: Option<f64>,
     kernel: Kernel,
 }
 
@@ -159,7 +164,7 @@ impl AlmaBuilder {
         let p = AlmaParams {
             period: self.period,
             offset: self.offset,
-            sigma:  self.sigma,
+            sigma: self.sigma,
         };
         let i = AlmaInput::from_candles(c, "close", p);
         alma_with_kernel(&i, self.kernel)
@@ -170,7 +175,7 @@ impl AlmaBuilder {
         let p = AlmaParams {
             period: self.period,
             offset: self.offset,
-            sigma:  self.sigma,
+            sigma: self.sigma,
         };
         let i = AlmaInput::from_slice(d, p);
         alma_with_kernel(&i, self.kernel)
@@ -181,12 +186,11 @@ impl AlmaBuilder {
         let p = AlmaParams {
             period: self.period,
             offset: self.offset,
-            sigma:  self.sigma,
+            sigma: self.sigma,
         };
         AlmaStream::try_new(p)
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum AlmaError {
@@ -205,8 +209,6 @@ pub enum AlmaError {
     #[error("alma: Invalid offset: {offset}")]
     InvalidOffset { offset: f64 },
 }
-
-
 
 #[inline]
 pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, AlmaError> {
@@ -227,30 +229,33 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
     let len = data.len();
     let period = input.get_period();
     let offset = input.get_offset();
-    let sigma  = input.get_sigma();
+    let sigma = input.get_sigma();
 
     if period == 0 || period > len {
-        return Err(AlmaError::InvalidPeriod { period, data_len: len });
+        return Err(AlmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(AlmaError::NotEnoughValidData {
             needed: period,
-            valid:  len - first,
+            valid: len - first,
         });
     }
     if sigma <= 0.0 {
         return Err(AlmaError::InvalidSigma { sigma });
     }
     if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
-           return Err(AlmaError::InvalidOffset { offset });
-       }
+        return Err(AlmaError::InvalidOffset { offset });
+    }
 
-    let m   = offset * (period - 1) as f64;
-    let s   = period as f64 / sigma;
-    let s2  = 2.0 * s * s;
+    let m = offset * (period - 1) as f64;
+    let s = period as f64 / sigma;
+    let s2 = 2.0 * s * s;
 
     let mut weights = Vec::with_capacity(period);
-    let mut norm    = 0.0;
+    let mut norm = 0.0;
     for i in 0..period {
         let w = (-(i as f64 - m).powi(2) / s2).exp();
         weights.push(w);
@@ -262,23 +267,23 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other        => other,
+        other => other,
     };
 
-unsafe {
-    match chosen {
-        Kernel::Scalar | Kernel::ScalarBatch => {
-            alma_scalar(data, &weights, period, first, inv_norm, &mut out)
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                alma_scalar(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                alma_avx2(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                alma_avx512(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Auto => unreachable!(),
         }
-        Kernel::Avx2 | Kernel::Avx2Batch => {
-            alma_avx2(data, &weights, period, first, inv_norm, &mut out)
-        }
-        Kernel::Avx512 | Kernel::Avx512Batch => {
-            alma_avx512(data, &weights, period, first, inv_norm, &mut out)
-        }
-        Kernel::Auto => unreachable!(),
     }
-}
 
     Ok(AlmaOutput { values: out })
 }
@@ -301,12 +306,12 @@ pub fn alma_avx512(
 
 #[inline(always)]
 pub fn alma_scalar(
-    data:      &[f64],
-    weights:   &[f64],
-    period:    usize,
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
     first_val: usize,
-    inv_norm:  f64,
-    out:       &mut [f64],
+    inv_norm: f64,
+    out: &mut [f64],
 ) {
     assert_eq!(weights.len(), period, "weights.len() must equal `period`");
     assert!(
@@ -317,18 +322,15 @@ pub fn alma_scalar(
     let p4 = period & !3;
 
     for i in (first_val + period - 1)..data.len() {
-        let start  = i + 1 - period;
-        let window = &data[start .. start + period];
+        let start = i + 1 - period;
+        let window = &data[start..start + period];
 
         let mut sum = 0.0;
         for (d4, w4) in window[..p4]
             .chunks_exact(4)
             .zip(weights[..p4].chunks_exact(4))
         {
-            sum += d4[0] * w4[0]
-                 + d4[1] * w4[1]
-                 + d4[2] * w4[2]
-                 + d4[3] * w4[3];
+            sum += d4[0] * w4[0] + d4[1] * w4[1] + d4[2] * w4[2] + d4[3] * w4[3];
         }
 
         for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
@@ -339,7 +341,6 @@ pub fn alma_scalar(
     }
 }
 
-
 #[target_feature(enable = "avx2,fma")]
 unsafe fn alma_avx2(
     data: &[f64],
@@ -349,11 +350,9 @@ unsafe fn alma_avx2(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-
     const STEP: usize = 4;
     let chunks = period / STEP;
-    let tail   = period % STEP;
-
+    let tail = period % STEP;
 
     let tail_mask = match tail {
         0 => _mm256_setzero_si256(),
@@ -367,33 +366,24 @@ unsafe fn alma_avx2(
         let start = i + 1 - period;
         let mut acc = _mm256_setzero_pd();
 
-
         for blk in 0..chunks {
             let idx = blk * STEP;
-            let w   = _mm256_loadu_pd(weights.as_ptr().add(idx));
-            let d   = _mm256_loadu_pd(data.as_ptr().add(start + idx));
-            acc     = _mm256_fmadd_pd(d, w, acc);
+            let w = _mm256_loadu_pd(weights.as_ptr().add(idx));
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + idx));
+            acc = _mm256_fmadd_pd(d, w, acc);
         }
 
-
         if tail != 0 {
-            let w_tail = _mm256_maskload_pd(
-                weights.as_ptr().add(chunks * STEP),
-                tail_mask,
-            );
-            let d_tail = _mm256_maskload_pd(
-                data.as_ptr().add(start + chunks * STEP),
-                tail_mask,
-            );
+            let w_tail = _mm256_maskload_pd(weights.as_ptr().add(chunks * STEP), tail_mask);
+            let d_tail = _mm256_maskload_pd(data.as_ptr().add(start + chunks * STEP), tail_mask);
             acc = _mm256_fmadd_pd(d_tail, w_tail, acc);
         }
 
-
-        let hi  = _mm256_extractf128_pd(acc, 1);
-        let lo  = _mm256_castpd256_pd128(acc);
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
         let sum2 = _mm_add_pd(hi, lo);
         let sum1 = _mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2));
-        let sum  = _mm_cvtsd_f64(sum1);
+        let sum = _mm_cvtsd_f64(sum1);
 
         *out.get_unchecked_mut(i) = sum * inv_norm;
     }
@@ -412,9 +402,9 @@ unsafe fn alma_avx512_short(
     debug_assert!(data.len() == out.len());
     debug_assert!(weights.len() >= period);
 
-    const STEP: usize = 8; 
-    let chunks    = period / STEP;
-    let tail_len  = period % STEP; 
+    const STEP: usize = 8;
+    let chunks = period / STEP;
+    let tail_len = period % STEP;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     if chunks == 0 {
@@ -422,7 +412,7 @@ unsafe fn alma_avx512_short(
         for i in (first_valid + period - 1)..data.len() {
             let start = i + 1 - period;
             let d_vec = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
-            let sum   = _mm512_reduce_add_pd(_mm512_mul_pd(d_vec, w_vec));
+            let sum = _mm512_reduce_add_pd(_mm512_mul_pd(d_vec, w_vec));
             *out.get_unchecked_mut(i) = sum * inv_norm;
         }
         return;
@@ -431,7 +421,9 @@ unsafe fn alma_avx512_short(
     let w0 = _mm512_loadu_pd(weights.as_ptr());
     let w1 = if chunks >= 2 {
         Some(_mm512_loadu_pd(weights.as_ptr().add(STEP)))
-    } else { None };
+    } else {
+        None
+    };
 
     for i in (first_valid + period - 1)..data.len() {
         let start = i + 1 - period;
@@ -447,14 +439,8 @@ unsafe fn alma_avx512_short(
         }
 
         if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(
-                tail_mask,
-                data.as_ptr().add(start + chunks * STEP),
-            );
-            let w_tail = _mm512_maskz_loadu_pd(
-                tail_mask,
-                weights.as_ptr().add(chunks * STEP),
-            );
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
+            let w_tail = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(chunks * STEP));
             acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
         }
 
@@ -473,9 +459,9 @@ unsafe fn alma_avx512_long(
     out: &mut [f64],
 ) {
     const STEP: usize = 8;
-    let n_chunks  = period / STEP;
-    let tail_len  = period % STEP;
-    let paired    = n_chunks & !3;
+    let n_chunks = period / STEP;
+    let tail_len = period % STEP;
+    let paired = n_chunks & !3;
     let tail_mask = (1u8 << tail_len).wrapping_sub(1);
 
     debug_assert!(period >= 1 && n_chunks > 0);
@@ -487,13 +473,16 @@ unsafe fn alma_avx512_long(
         wregs.push(_mm512_loadu_pd(weights.as_ptr().add(blk * STEP)));
     }
     if tail_len != 0 {
-        wregs.push(_mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(n_chunks * STEP)));
+        wregs.push(_mm512_maskz_loadu_pd(
+            tail_mask,
+            weights.as_ptr().add(n_chunks * STEP),
+        ));
     }
 
     let mut data_ptr = data.as_ptr().add(first_valid);
-    let       stop   = data.as_ptr().add(data.len());
+    let stop = data.as_ptr().add(data.len());
 
-    for dst in &mut out[first_valid + period - 1 ..] {
+    for dst in &mut out[first_valid + period - 1..] {
         let mut sum0 = _mm512_setzero_pd();
         let mut sum1 = _mm512_setzero_pd();
         let mut sum2 = _mm512_setzero_pd();
@@ -502,70 +491,72 @@ unsafe fn alma_avx512_long(
         for blk in (0..paired).step_by(4) {
             _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
 
-            let d0 = _mm512_loadu_pd(data_ptr.add( blk      * STEP));
+            let d0 = _mm512_loadu_pd(data_ptr.add(blk * STEP));
             let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
             let d2 = _mm512_loadu_pd(data_ptr.add((blk + 2) * STEP));
             let d3 = _mm512_loadu_pd(data_ptr.add((blk + 3) * STEP));
 
-            sum0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked( blk      ), sum0);
-            sum1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked( blk + 1 ), sum1);
-            sum2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked( blk + 2 ), sum2);
-            sum3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked( blk + 3 ), sum3);
+            sum0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk), sum0);
+            sum1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), sum1);
+            sum2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), sum2);
+            sum3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), sum3);
         }
 
-        for blk in paired .. n_chunks {
+        for blk in paired..n_chunks {
             let d = _mm512_loadu_pd(data_ptr.add(blk * STEP));
-            sum0  = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), sum0);
+            sum0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), sum0);
         }
 
         if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(tail_mask,
-                                               data_ptr.add(n_chunks * STEP));
-            sum0 = _mm512_fmadd_pd(d_tail,
-                                   *wregs.get_unchecked(n_chunks),
-                                   sum0);
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data_ptr.add(n_chunks * STEP));
+            sum0 = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(n_chunks), sum0);
         }
 
-        let mut total = _mm512_add_pd(_mm512_add_pd(sum0,sum1), _mm512_add_pd(sum2,sum3));
-        let value     = _mm512_reduce_add_pd(total) * inv_norm;
+        let mut total = _mm512_add_pd(_mm512_add_pd(sum0, sum1), _mm512_add_pd(sum2, sum3));
+        let value = _mm512_reduce_add_pd(total) * inv_norm;
         *dst = value;
 
         data_ptr = data_ptr.add(1);
-        if data_ptr.add(period) > stop { break; }
+        if data_ptr.add(period) > stop {
+            break;
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AlmaStream {
-    period:   usize,
-    weights:  Vec<f64>,
+    period: usize,
+    weights: Vec<f64>,
     inv_norm: f64,
-    buffer:   Vec<f64>,
-    head:     usize,
-    filled:   bool,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
 }
 
 impl AlmaStream {
     pub fn try_new(params: AlmaParams) -> Result<Self, AlmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(AlmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(AlmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let offset = params.offset.unwrap_or(0.85);
         if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
             return Err(AlmaError::InvalidOffset { offset });
-       }
+        }
         let sigma = params.sigma.unwrap_or(6.0);
         if sigma <= 0.0 {
             return Err(AlmaError::InvalidSigma { sigma });
         }
 
-        let m  = offset * (period - 1) as f64;
-        let s  = period as f64 / sigma;
+        let m = offset * (period - 1) as f64;
+        let s = period as f64 / sigma;
         let s2 = 2.0 * s * s;
 
         let mut weights = Vec::with_capacity(period);
-        let mut norm    = 0.0;
+        let mut norm = 0.0;
         for i in 0..period {
             let diff = i as f64 - m;
             let w = (-(diff * diff) / s2).exp();
@@ -613,8 +604,8 @@ impl AlmaStream {
 #[derive(Clone, Debug)]
 pub struct AlmaBatchRange {
     pub period: (usize, usize, usize),
-    pub offset: (f64,   f64,   f64),
-    pub sigma:  (f64,   f64,   f64),
+    pub offset: (f64, f64, f64),
+    pub sigma: (f64, f64, f64),
 }
 
 impl Default for AlmaBatchRange {
@@ -622,83 +613,98 @@ impl Default for AlmaBatchRange {
         Self {
             period: (9, 240, 1),
             offset: (0.85, 0.85, 0.0),
-            sigma:  (6.0,  6.0,  0.0),
+            sigma: (6.0, 6.0, 0.0),
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct AlmaBatchBuilder {
-    range:  AlmaBatchRange,
+    range: AlmaBatchRange,
     kernel: Kernel,
 }
 
 impl AlmaBatchBuilder {
-    pub fn new() -> Self              { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-
-    #[inline] pub fn period_range(mut self, start:usize,end:usize,step:usize)->Self{
-        self.range.period=(start,end,step); self
+    pub fn new() -> Self {
+        Self::default()
     }
-    #[inline] pub fn period_static(mut self, p:usize)->Self{
-        self.range.period=(p,p,0); self
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
     }
 
-    #[inline] pub fn offset_range(mut self,start:f64,end:f64,step:f64)->Self{
-        self.range.offset=(start,end,step); self
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
     }
-    #[inline] pub fn offset_static(mut self,x:f64)->Self{
-        self.range.offset=(x,x,0.0); self
-    }
-
-    #[inline] pub fn sigma_range(mut self,start:f64,end:f64,step:f64)->Self{
-        self.range.sigma=(start,end,step); self
-    }
-    #[inline] pub fn sigma_static(mut self,s:f64)->Self{
-        self.range.sigma=(s,s,0.0); self
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
     }
 
-    pub fn apply_slice(self, data:&[f64]) -> Result<AlmaBatchOutput, AlmaError> {
+    #[inline]
+    pub fn offset_range(mut self, start: f64, end: f64, step: f64) -> Self {
+        self.range.offset = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn offset_static(mut self, x: f64) -> Self {
+        self.range.offset = (x, x, 0.0);
+        self
+    }
+
+    #[inline]
+    pub fn sigma_range(mut self, start: f64, end: f64, step: f64) -> Self {
+        self.range.sigma = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn sigma_static(mut self, s: f64) -> Self {
+        self.range.sigma = (s, s, 0.0);
+        self
+    }
+
+    pub fn apply_slice(self, data: &[f64]) -> Result<AlmaBatchOutput, AlmaError> {
         alma_batch_with_kernel(data, &self.range, self.kernel)
     }
 
-    pub fn with_default_slice(data:&[f64],k:Kernel)
-        -> Result<AlmaBatchOutput,AlmaError>
-    {
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<AlmaBatchOutput, AlmaError> {
         AlmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
 
-    pub fn apply_candles(self,c:&Candles,src:&str)
-        -> Result<AlmaBatchOutput,AlmaError>
-    {
-        let slice=source_type(c,src);
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<AlmaBatchOutput, AlmaError> {
+        let slice = source_type(c, src);
         self.apply_slice(slice)
     }
 
-    pub fn with_default_candles(c:&Candles)
-        -> Result<AlmaBatchOutput,AlmaError>
-    {
+    pub fn with_default_candles(c: &Candles) -> Result<AlmaBatchOutput, AlmaError> {
         AlmaBatchBuilder::new()
             .kernel(Kernel::Auto)
-            .apply_candles(c,"close")
+            .apply_candles(c, "close")
     }
 }
 
 pub fn alma_batch_with_kernel(
-    data:   &[f64],
-    sweep:  &AlmaBatchRange,
-    k:      Kernel,
+    data: &[f64],
+    sweep: &AlmaBatchRange,
+    k: Kernel,
 ) -> Result<AlmaBatchOutput, AlmaError> {
-
     let kernel = match k {
-        Kernel::Auto       => detect_best_batch_kernel(),
+        Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AlmaError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(AlmaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
 
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch   => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
@@ -709,22 +715,22 @@ pub fn alma_batch_with_kernel(
 pub struct AlmaBatchOutput {
     pub values: Vec<f64>,
     pub combos: Vec<AlmaParams>,
-    pub rows:   usize,
-    pub cols:   usize,
+    pub rows: usize,
+    pub cols: usize,
 }
 impl AlmaBatchOutput {
     pub fn row_for_params(&self, p: &AlmaParams) -> Option<usize> {
         self.combos.iter().position(|c| {
-            c.period.unwrap_or(9)  == p.period.unwrap_or(9)  &&
-            (c.offset.unwrap_or(0.85)  - p.offset.unwrap_or(0.85)).abs() < 1e-12 &&
-            (c.sigma.unwrap_or(6.0)   - p.sigma.unwrap_or(6.0)).abs()  < 1e-12
+            c.period.unwrap_or(9) == p.period.unwrap_or(9)
+                && (c.offset.unwrap_or(0.85) - p.offset.unwrap_or(0.85)).abs() < 1e-12
+                && (c.sigma.unwrap_or(6.0) - p.sigma.unwrap_or(6.0)).abs() < 1e-12
         })
     }
 
     pub fn values_for(&self, p: &AlmaParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
             let start = row * self.cols;
-            &self.values[start .. start + self.cols]
+            &self.values[start..start + self.cols]
         })
     }
 }
@@ -732,7 +738,9 @@ impl AlmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
@@ -750,7 +758,7 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
 
     let periods = axis_usize(r.period);
     let offsets = axis_f64(r.offset);
-    let sigmas  = axis_f64(r.sigma);
+    let sigmas = axis_f64(r.sigma);
 
     let mut out = Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
     for &p in &periods {
@@ -759,7 +767,7 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
                 out.push(AlmaParams {
                     period: Some(p),
                     offset: Some(o),
-                    sigma:  Some(s),
+                    sigma: Some(s),
                 });
             }
         }
@@ -769,44 +777,57 @@ fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
 
 #[inline(always)]
 pub fn alma_batch_slice(
-    data:  &[f64],
+    data: &[f64],
     sweep: &AlmaBatchRange,
-    kern:  Kernel,
+    kern: Kernel,
 ) -> Result<AlmaBatchOutput, AlmaError> {
     alma_batch_inner(data, sweep, kern, false)
 }
 
 #[inline(always)]
 pub fn alma_batch_par_slice(
-    data:  &[f64],
+    data: &[f64],
     sweep: &AlmaBatchRange,
-    kern:  Kernel,
+    kern: Kernel,
 ) -> Result<AlmaBatchOutput, AlmaError> {
     alma_batch_inner(data, sweep, kern, true)
 }
 
-#[inline] fn round_up8(x: usize) -> usize { (x + 7) & !7 }
+#[inline]
+fn round_up8(x: usize) -> usize {
+    (x + 7) & !7
+}
 use std::alloc::{alloc, dealloc, Layout};
 
 #[inline(always)]
 fn alma_batch_inner(
-    data:      &[f64],
-    sweep:     &AlmaBatchRange,
-    kern:      Kernel,
-    parallel:  bool,
+    data: &[f64],
+    sweep: &AlmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<AlmaBatchOutput, AlmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AlmaError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(AlmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(AlmaError::AllValuesNaN)?;
-    let max_p = combos.iter()
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(AlmaError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
         .map(|c| round_up8(c.period.unwrap()))
         .max()
         .unwrap();
     if data.len() - first < max_p {
-        return Err(AlmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(AlmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
 
     let rows = combos.len();
@@ -820,7 +841,7 @@ fn alma_batch_inner(
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let offset = prm.offset.unwrap();
-        let sigma  = prm.sigma.unwrap();
+        let sigma = prm.sigma.unwrap();
 
         if sigma <= 0.0 {
             return Err(AlmaError::InvalidSigma { sigma });
@@ -829,8 +850,8 @@ fn alma_batch_inner(
             return Err(AlmaError::InvalidOffset { offset });
         }
 
-        let m  = offset * (period - 1) as f64;
-        let s  = period as f64 / sigma;
+        let m = offset * (period - 1) as f64;
+        let s = period as f64 / sigma;
         let s2 = 2.0 * s * s;
 
         let mut norm = 0.0;
@@ -845,37 +866,44 @@ fn alma_batch_inner(
     let mut values = vec![f64::NAN; rows * cols];
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr  = flat_w.as_ptr().add(row * max_p);
-        let inv_n  = *inv_norms.get_unchecked(row);
+        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let inv_n = *inv_norms.get_unchecked(row);
 
         match kern {
             Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
-            Kernel::Avx2   => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
-            _              => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2 => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            _ => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
         }
     };
 
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(AlmaBatchOutput { values, combos, rows, cols })
+    Ok(AlmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
-
 
 #[inline(always)]
 unsafe fn alma_row_scalar(
-    data:  &[f64],
+    data: &[f64],
     first: usize,
     period: usize,
     stride: usize,
     w_ptr: *const f64,
     inv_n: f64,
-    out:   &mut [f64],
+    out: &mut [f64],
 ) {
     let p4 = period & !3;
     for i in (first + period - 1)..data.len() {
@@ -883,7 +911,7 @@ unsafe fn alma_row_scalar(
         let mut sum = 0.0;
         for k in (0..p4).step_by(4) {
             let w = std::slice::from_raw_parts(w_ptr.add(k), 4);
-            let d = &data[start + k .. start + k + 4];
+            let d = &data[start + k..start + k + 4];
             sum += d[0] * w[0] + d[1] * w[1] + d[2] * w[2] + d[3] * w[3];
         }
         for k in p4..period {
@@ -895,18 +923,18 @@ unsafe fn alma_row_scalar(
 
 #[target_feature(enable = "avx2,fma")]
 unsafe fn alma_row_avx2(
-    data:  &[f64],
+    data: &[f64],
     first: usize,
     period: usize,
     stride: usize,
     w_ptr: *const f64,
     inv_n: f64,
-    out:   &mut [f64],
+    out: &mut [f64],
 ) {
     const STEP: usize = 4;
     let vec_blocks = period / STEP;
-    let tail       = period % STEP;
-    let tail_mask  = match tail {
+    let tail = period % STEP;
+    let tail_mask = match tail {
         0 => _mm256_setzero_si256(),
         1 => _mm256_setr_epi64x(-1, 0, 0, 0),
         2 => _mm256_setr_epi64x(-1, -1, 0, 0),
@@ -921,32 +949,32 @@ unsafe fn alma_row_avx2(
         for blk in 0..vec_blocks {
             let d = _mm256_loadu_pd(data.as_ptr().add(start + blk * STEP));
             let w = _mm256_loadu_pd(w_ptr.add(blk * STEP));
-            acc   = _mm256_fmadd_pd(d, w, acc);
+            acc = _mm256_fmadd_pd(d, w, acc);
         }
 
         if tail != 0 {
             let d = _mm256_maskload_pd(data.as_ptr().add(start + vec_blocks * STEP), tail_mask);
             let w = _mm256_maskload_pd(w_ptr.add(vec_blocks * STEP), tail_mask);
-            acc   = _mm256_fmadd_pd(d, w, acc);
+            acc = _mm256_fmadd_pd(d, w, acc);
         }
 
-        let hi   = _mm256_extractf128_pd(acc, 1);
-        let lo   = _mm256_castpd256_pd128(acc);
-        let s2   = _mm_add_pd(hi, lo);
-        let s1   = _mm_add_pd(s2, _mm_unpackhi_pd(s2, s2));
-        out[i]   = _mm_cvtsd_f64(s1) * inv_n;
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
+        let s2 = _mm_add_pd(hi, lo);
+        let s1 = _mm_add_pd(s2, _mm_unpackhi_pd(s2, s2));
+        out[i] = _mm_cvtsd_f64(s1) * inv_n;
     }
 }
 
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_row_avx512(
-    data:  &[f64],
+    data: &[f64],
     first: usize,
     period: usize,
     stride: usize,
     w_ptr: *const f64,
     inv_n: f64,
-    out:   &mut [f64],
+    out: &mut [f64],
 ) {
     if period <= 32 {
         alma_row_avx512_short(data, first, period, stride, w_ptr, inv_n, out);
@@ -957,30 +985,34 @@ unsafe fn alma_row_avx512(
 
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_row_avx512_short(
-    data:  &[f64],
+    data: &[f64],
     first: usize,
     period: usize,
     _stride: usize,
     w_ptr: *const f64,
     inv_n: f64,
-    out:   &mut [f64],
+    out: &mut [f64],
 ) {
     debug_assert!(period <= 32);
     const STEP: usize = 8;
 
-    let chunks    = period / STEP;
-    let tail_len  = period % STEP;
-    let w0        = _mm512_loadu_pd(w_ptr);
-    let w1        = if chunks >= 2 {
+    let chunks = period / STEP;
+    let tail_len = period % STEP;
+    let w0 = _mm512_loadu_pd(w_ptr);
+    let w1 = if chunks >= 2 {
         Some(_mm512_loadu_pd(w_ptr.add(STEP)))
-    } else { None };
+    } else {
+        None
+    };
 
     if tail_len == 0 {
         for i in (first + period - 1)..data.len() {
             let start = i + 1 - period;
             let mut acc = _mm512_fmadd_pd(
-                _mm512_loadu_pd(data.as_ptr().add(start)), w0,
-                _mm512_setzero_pd());
+                _mm512_loadu_pd(data.as_ptr().add(start)),
+                w0,
+                _mm512_setzero_pd(),
+            );
 
             if let Some(w1v) = w1 {
                 let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
@@ -997,18 +1029,17 @@ unsafe fn alma_row_avx512_short(
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
         let mut acc = _mm512_fmadd_pd(
-            _mm512_loadu_pd(data.as_ptr().add(start)), w0,
-            _mm512_setzero_pd());
+            _mm512_loadu_pd(data.as_ptr().add(start)),
+            w0,
+            _mm512_setzero_pd(),
+        );
 
         if let Some(w1v) = w1 {
             let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
             acc = _mm512_fmadd_pd(d1, w1v, acc);
         }
 
-        let d_tail = _mm512_maskz_loadu_pd(
-            tmask,
-            data.as_ptr().add(start + chunks * STEP),
-        );
+        let d_tail = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
         acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
         *out.get_unchecked_mut(i) = _mm512_reduce_add_pd(acc) * inv_n;
     }
@@ -1016,17 +1047,17 @@ unsafe fn alma_row_avx512_short(
 
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub(crate) unsafe fn alma_row_avx512_long(
-    data:   &[f64],
-    first:  usize,
+    data: &[f64],
+    first: usize,
     period: usize,
     _stride: usize,
-    w_ptr:  *const f64,
-    inv_n:  f64,
-    out:    &mut [f64],
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
 ) {
     const STEP: usize = 8;
-    let n_chunks  = period / STEP;
-    let tail_len  = period % STEP;
+    let n_chunks = period / STEP;
+    let tail_len = period % STEP;
     let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     const MAX_CHUNKS: usize = 512;
@@ -1036,7 +1067,9 @@ pub(crate) unsafe fn alma_row_avx512_long(
         core::mem::MaybeUninit::uninit().assume_init();
 
     for blk in 0..n_chunks {
-        wregs[blk].as_mut_ptr().write(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
+        wregs[blk]
+            .as_mut_ptr()
+            .write(_mm512_loadu_pd(w_ptr.add(blk * STEP)));
     }
     if tail_len != 0 {
         wregs[n_chunks]
@@ -1058,18 +1091,18 @@ pub(crate) unsafe fn alma_row_avx512_long(
 
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_no_tail(
-    data:    &[f64],
-    first:   usize,
+    data: &[f64],
+    first: usize,
     n_chunks: usize,
-    wregs:   &[__m512d],
-    inv_n:   f64,
-    out:     &mut [f64],
+    wregs: &[__m512d],
+    inv_n: f64,
+    out: &mut [f64],
 ) {
     const STEP: usize = 8;
     let paired = n_chunks & !3;
 
     let mut data_ptr = data.as_ptr().add(first);
-    let stop_ptr     = data.as_ptr().add(data.len());
+    let stop_ptr = data.as_ptr().add(data.len());
 
     for dst in &mut out[first + n_chunks * STEP - 1..] {
         let mut s0 = _mm512_setzero_pd();
@@ -1103,20 +1136,22 @@ unsafe fn long_kernel_no_tail(
         *dst = _mm512_reduce_add_pd(sum) * inv_n;
 
         data_ptr = data_ptr.add(1);
-        if data_ptr.add(n_chunks * STEP) > stop_ptr { break }
+        if data_ptr.add(n_chunks * STEP) > stop_ptr {
+            break;
+        }
     }
 }
 
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_with_tail(
-    data:      &[f64],
-    first:     usize,
-    n_chunks:  usize,
-    tail_len:  usize,
-    tmask:     __mmask8,
-    wregs:     &[__m512d],
-    inv_n:     f64,
-    out:       &mut [f64],
+    data: &[f64],
+    first: usize,
+    n_chunks: usize,
+    tail_len: usize,
+    tmask: __mmask8,
+    wregs: &[__m512d],
+    inv_n: f64,
+    out: &mut [f64],
 ) {
     const STEP: usize = 8;
     let paired = n_chunks & !3;
@@ -1124,7 +1159,7 @@ unsafe fn long_kernel_with_tail(
     let w_tail = *wregs.get_unchecked(n_chunks);
 
     let mut data_ptr = data.as_ptr().add(first);
-    let stop_ptr     = data.as_ptr().add(data.len());
+    let stop_ptr = data.as_ptr().add(data.len());
 
     for dst in &mut out[first + n_chunks * STEP + tail_len - 1..] {
         let mut s0 = _mm512_setzero_pd();
@@ -1154,17 +1189,16 @@ unsafe fn long_kernel_with_tail(
             s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
         }
 
-        let d_tail = _mm512_maskz_loadu_pd(
-            tmask,
-            data_ptr.add(n_chunks * STEP),
-        );
+        let d_tail = _mm512_maskz_loadu_pd(tmask, data_ptr.add(n_chunks * STEP));
         s0 = _mm512_fmadd_pd(d_tail, w_tail, s0);
 
         let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
         *dst = _mm512_reduce_add_pd(sum) * inv_n;
 
         data_ptr = data_ptr.add(1);
-        if data_ptr.add(n_chunks * STEP + tail_len) > stop_ptr { break }
+        if data_ptr.add(n_chunks * STEP + tail_len) > stop_ptr {
+            break;
+        }
     }
 }
 
@@ -1172,7 +1206,7 @@ unsafe fn long_kernel_with_tail(
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate ::utilities::helpers::skip_if_unsupported;
+    use crate::utilities::helpers::skip_if_unsupported;
 
     fn check_alma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported(kernel, test_name);
@@ -1182,7 +1216,7 @@ mod tests {
         let default_params = AlmaParams {
             period: None,
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let input = AlmaInput::from_candles(&candles, "close", default_params);
         let output = alma_with_kernel(&input, kernel)?;
@@ -1243,7 +1277,7 @@ mod tests {
         let params = AlmaParams {
             period: Some(0),
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let input = AlmaInput::from_slice(&input_data, params);
         let res = alma_with_kernel(&input, kernel);
@@ -1264,7 +1298,7 @@ mod tests {
         let params = AlmaParams {
             period: Some(10),
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let input = AlmaInput::from_slice(&data_small, params);
         let res = alma_with_kernel(&input, kernel);
@@ -1285,7 +1319,7 @@ mod tests {
         let params = AlmaParams {
             period: Some(9),
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let input = AlmaInput::from_slice(&single_point, params);
         let res = alma_with_kernel(&input, kernel);
@@ -1305,7 +1339,7 @@ mod tests {
         let first_params = AlmaParams {
             period: Some(9),
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let first_input = AlmaInput::from_candles(&candles, "close", first_params);
         let first_result = alma_with_kernel(&first_input, kernel)?;
@@ -1313,7 +1347,7 @@ mod tests {
         let second_params = AlmaParams {
             period: Some(9),
             offset: None,
-            sigma:  None,
+            sigma: None,
         };
         let second_input = AlmaInput::from_slice(&first_result.values, second_params);
         let second_result = alma_with_kernel(&second_input, kernel)?;
@@ -1379,7 +1413,7 @@ mod tests {
 
         let period = 9;
         let offset = 0.85;
-        let sigma  = 6.0;
+        let sigma = 6.0;
 
         let input = AlmaInput::from_candles(
             &candles,
@@ -1387,7 +1421,7 @@ mod tests {
             AlmaParams {
                 period: Some(period),
                 offset: Some(offset),
-                sigma:  Some(sigma),
+                sigma: Some(sigma),
             },
         );
         let batch_output = alma_with_kernel(&input, kernel)?.values;
@@ -1395,7 +1429,7 @@ mod tests {
         let mut stream = AlmaStream::try_new(AlmaParams {
             period: Some(period),
             offset: Some(offset),
-            sigma:  Some(sigma),
+            sigma: Some(sigma),
         })?;
 
         let mut stream_values = Vec::with_capacity(candles.close.len());
@@ -1460,23 +1494,18 @@ mod tests {
         check_alma_streaming
     );
 
-    fn check_batch_default_row(
-        test:   &str,
-        kernel: Kernel,
-    ) -> Result<(), Box<dyn Error>> {
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c    = read_candles_from_csv(file)?;
+        let c = read_candles_from_csv(file)?;
 
         let output = AlmaBatchBuilder::new()
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
         let def = AlmaParams::default();
-        let row = output
-            .values_for(&def)
-            .expect("default row missing");
+        let row = output.values_for(&def).expect("default row missing");
 
         assert_eq!(row.len(), c.close.len());
 

@@ -26,6 +26,11 @@ impl AlignedVec {
     }
 
     #[inline]
+    pub fn as_slice(&self) -> &[f64] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [f64] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
@@ -41,4 +46,8 @@ impl Drop for AlignedVec {
         let layout = Layout::from_size_align(self.cap * 8, 64).unwrap();
         unsafe { dealloc(self.ptr.as_ptr() as *mut u8, layout) };
     }
+}
+
+impl AsRef<[f64]> for AlignedVec {
+    #[inline] fn as_ref(&self) -> &[f64] { self.as_slice() }
 }

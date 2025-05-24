@@ -1,30 +1,30 @@
 //! # Cubic Weighted Moving Average (CWMA)
 //!
-//! A polynomial-weighted moving average that emphasises recent observations by
-//! applying a **cubic** weight curve.  The newest sample receives the weight
-//! `period³`, the second-newest `(period-1)³`, …, while the oldest sample in
-//! the window is weighted `1³`.
+//! A polynomial-weighted moving average that emphasizes recent observations by
+//! applying a **cubic** weight curve. The newest sample receives the weight
+//! period³, the second-newest (period-1)³, …, while the oldest sample in
+//! the window is weighted 1³.
 //!
 //! ## Parameters
-//! * **period** – window length in data-points (defaults to 14).
+//! - **period**: Window size (number of data points, defaults to 14).
 //!
 //! ## Errors
-//! * **AllValuesNaN**      – every element in the input slice is `NaN`.
-//! * **InvalidPeriod**     – `period == 0` or `period > data.len()`.
-//! * **NotEnoughValidData**– fewer than *period* non-`NaN` values exist after
-//!   the first valid entry.
+//! - **AllValuesNaN**: cwma: All input data values are NaN.
+//! - **InvalidPeriod**: cwma: period is zero or exceeds the data length.
+//! - **NotEnoughValidData**: cwma: Not enough valid data points for the requested period.
 //!
 //! ## Returns
-//! * **`Ok(CwmaOutput)`** on success (vector length == input length, leading
-//!   values are `NaN` until the window is filled).
-//! * **`Err(CwmaError)`** otherwise.
+//! - **Ok(CwmaOutput)** on success, containing a Vec<f64> of length matching the input.
+//! - **Err(CwmaError)** otherwise.
+
+use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::detect_best_kernel;
-
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use core::arch::x86_64::*;
-use thiserror::Error;
+use rayon::prelude::*;
 use std::convert::AsRef;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CwmaInput<'a> {
     #[inline(always)]
@@ -38,7 +38,10 @@ impl<'a> AsRef<[f64]> for CwmaInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum CwmaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -51,6 +54,7 @@ pub struct CwmaOutput {
 pub struct CwmaParams {
     pub period: Option<usize>,
 }
+
 impl Default for CwmaParams {
     fn default() -> Self {
         Self { period: Some(14) }
@@ -59,67 +63,95 @@ impl Default for CwmaParams {
 
 #[derive(Debug, Clone)]
 pub struct CwmaInput<'a> {
-    pub data:   CwmaData<'a>,
+    pub data: CwmaData<'a>,
     pub params: CwmaParams,
 }
 
 impl<'a> CwmaInput<'a> {
-    #[inline(always)] pub fn from_candles(c: &'a Candles, s: &'a str, p: CwmaParams) -> Self {
-        Self { data: CwmaData::Candles { candles: c, source: s }, params: p }
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: CwmaParams) -> Self {
+        Self {
+            data: CwmaData::Candles {
+                candles: c,
+                source: s,
+            },
+            params: p,
+        }
     }
-    #[inline(always)] pub fn from_slice(sl: &'a [f64], p: CwmaParams) -> Self {
-        Self { data: CwmaData::Slice(sl), params: p }
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: CwmaParams) -> Self {
+        Self {
+            data: CwmaData::Slice(sl),
+            params: p,
+        }
     }
-    #[inline(always)] pub fn with_default_candles(c: &'a Candles) -> Self {
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", CwmaParams::default())
     }
-
-    #[inline(always)] pub fn get_period(&self) -> usize {
+    #[inline]
+    pub fn get_period(&self) -> usize {
         self.params.period.unwrap_or(14)
     }
 }
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct CwmaBuilder {
     period: Option<usize>,
     kernel: Kernel,
 }
+
 impl Default for CwmaBuilder {
-        fn default() -> Self {
-            Self {
-                period: None,
-                kernel: Kernel::Auto,
-            }
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
         }
     }
-    
-    impl CwmaBuilder {
-    #[inline(always)] pub fn new() -> Self { Self::default() }
-    #[inline(always)] pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
-    #[inline(always)] pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+}
+
+impl CwmaBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
 
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<CwmaOutput, CwmaError> {
-        let p = CwmaParams { period: self.period };
+        let p = CwmaParams {
+            period: self.period,
+        };
         let i = CwmaInput::from_candles(c, "close", p);
         cwma_with_kernel(&i, self.kernel)
     }
 
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<CwmaOutput, CwmaError> {
-        let p = CwmaParams { period: self.period };
+        let p = CwmaParams {
+            period: self.period,
+        };
         let i = CwmaInput::from_slice(d, p);
         cwma_with_kernel(&i, self.kernel)
     }
 
     #[inline(always)]
     pub fn into_stream(self) -> Result<CwmaStream, CwmaError> {
-        let p = CwmaParams { period: self.period };
+        let p = CwmaParams {
+            period: self.period,
+        };
         CwmaStream::try_new(p)
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum CwmaError {
@@ -127,36 +159,45 @@ pub enum CwmaError {
     AllValuesNaN,
     #[error("cwma: Invalid period specified for CWMA calculation: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("cwma: Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}")]
+    #[error(
+        "cwma: Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}"
+    )]
     NotEnoughValidData { needed: usize, valid: usize },
 }
 
-
-#[inline(always)] pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
+#[inline]
+pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
     cwma_with_kernel(input, Kernel::Auto)
 }
 
 pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput, CwmaError> {
     let data: &[f64] = match &input.data {
         CwmaData::Candles { candles, source } => source_type(candles, source),
-        CwmaData::Slice(sl)                   => sl,
+        CwmaData::Slice(sl) => sl,
     };
-    let first = data.iter().position(|x| !x.is_nan())
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
 
-    let len    = data.len();
+    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(CwmaError::InvalidPeriod { period, data_len: len });
+        return Err(CwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(CwmaError::NotEnoughValidData {
-            needed: period, valid: len - first });
+            needed: period,
+            valid: len - first,
+        });
     }
 
     let mut weights = Vec::with_capacity(period - 1);
-    let mut norm    = 0.0;
+    let mut norm = 0.0;
     for i in 0..period - 1 {
         let w = ((period - i) as f64).powi(3);
         weights.push(w);
@@ -168,41 +209,38 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        k            => k,
+        k => k,
     };
 
-unsafe {
-    match chosen {
-        Kernel::Scalar  |
-        Kernel::ScalarBatch => cwma_scalar (data, &weights, period, first, inv_norm, &mut out),
-
-        Kernel::Avx2    |
-        Kernel::Avx2Batch   => cwma_avx2   (data, &weights, period, first, inv_norm, &mut out),
-
-        Kernel::Avx512  |
-        Kernel::Avx512Batch => cwma_avx512 (data, &weights, period, first, inv_norm, &mut out),
-
-        Kernel::Auto => unreachable!(),
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                cwma_scalar(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                cwma_avx2(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                cwma_avx512(data, &weights, period, first, inv_norm, &mut out)
+            }
+            Kernel::Auto => unreachable!(),
+        }
     }
-}
 
     Ok(CwmaOutput { values: out })
 }
 
-
 #[inline(always)]
-fn cwma_scalar(
-    data:      &[f64],
-    weights:   &[f64],
-    _period:   usize,
+pub unsafe fn cwma_scalar(
+    data: &[f64],
+    weights: &[f64],
+    _period: usize,
     first_val: usize,
-    inv_norm:  f64,
-    out:       &mut [f64],
+    inv_norm: f64,
+    out: &mut [f64],
 ) {
     let wlen = weights.len();
-
     for i in (first_val + wlen + 1)..data.len() {
-
         let mut acc = 0.0;
         for (k, &w) in weights.iter().enumerate() {
             acc = data[i - k].mul_add(w, acc);
@@ -213,18 +251,18 @@ fn cwma_scalar(
 
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn cwma_avx2(
-    data:        &[f64],
-    weights:     &[f64],
-    _period:     usize,
+    data: &[f64],
+    weights: &[f64],
+    _period: usize,
     first_valid: usize,
-    inv_norm:    f64,
-    out:         &mut [f64],
+    inv_norm: f64,
+    out: &mut [f64],
 ) {
     const STEP: usize = 4;
 
-    let wlen   = weights.len();
+    let wlen = weights.len();
     let chunks = wlen / STEP;
-    let tail   = wlen % STEP;
+    let tail = wlen % STEP;
     let first_out = first_valid + wlen + 1;
 
     for i in first_out..data.len() {
@@ -232,11 +270,11 @@ pub unsafe fn cwma_avx2(
 
         for blk in 0..chunks {
             let idx = blk * STEP;
-            let w   = _mm256_loadu_pd(weights.as_ptr().add(idx));
+            let w = _mm256_loadu_pd(weights.as_ptr().add(idx));
 
             let base = i - idx - (STEP - 1);
             let mut d = _mm256_loadu_pd(data.as_ptr().add(base));
-            d = _mm256_permute4x64_pd(d, 0b00011011); 
+            d = _mm256_permute4x64_pd(d, 0b00011011);
 
             acc = _mm256_fmadd_pd(d, w, acc);
         }
@@ -246,13 +284,13 @@ pub unsafe fn cwma_avx2(
             let base = chunks * STEP;
             for k in 0..tail {
                 let w = *weights.get_unchecked(base + k);
-                let d = *data   .get_unchecked(i - (base + k));
+                let d = *data.get_unchecked(i - (base + k));
                 tail_sum = d.mul_add(w, tail_sum);
             }
         }
 
-        let hi   = _mm256_extractf128_pd(acc, 1);
-        let lo   = _mm256_castpd256_pd128(acc);
+        let hi = _mm256_extractf128_pd(acc, 1);
+        let lo = _mm256_castpd256_pd128(acc);
         let sum2 = _mm_add_pd(hi, lo);
         let sum1 = _mm_add_pd(sum2, _mm_unpackhi_pd(sum2, sum2));
         let mut sum = _mm_cvtsd_f64(sum1);
@@ -261,95 +299,188 @@ pub unsafe fn cwma_avx2(
         *out.get_unchecked_mut(i) = sum * inv_norm;
     }
 }
-#[target_feature(enable = "avx512f,fma")]
-fn make_weight_blocks(weights: &[f64]) -> Vec<core::arch::x86_64::__m512d> {
-    use core::arch::x86_64::{_mm512_loadu_pd, _mm512_permutexvar_pd, _mm512_set_epi64};
+
+#[inline(always)]
+pub fn cwma_avx512(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first_valid: usize,
+    inv_norm: f64,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        unsafe { cwma_avx512_short(data, weights, period, first_valid, inv_norm, out) }
+    } else {
+        unsafe { cwma_avx512_long(data, weights, period, first_valid, inv_norm, out) }
+    }
+}
+
+#[target_feature(enable = "avx512f")]
+unsafe fn reverse_vec(v: __m512d) -> __m512d {
+    let lanes = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+    _mm512_permutexvar_pd(lanes, v)
+}
+
+#[target_feature(enable = "avx512f")]
+unsafe fn make_weight_blocks(weights: &[f64]) -> Vec<__m512d> {
     const STEP: usize = 8;
-    let lanes = _mm512_set_epi64(0,1,2,3,4,5,6,7);
-    weights.chunks_exact(STEP)
-           .map(|chunk| unsafe {
-               let v   = _mm512_loadu_pd(chunk.as_ptr());
-               _mm512_permutexvar_pd(lanes, v)
-           })
-           .collect()
+    weights
+        .chunks_exact(STEP)
+        .map(|chunk| {
+            let v = _mm512_loadu_pd(chunk.as_ptr());
+            reverse_vec(v)
+        })
+        .collect()
 }
 
 #[target_feature(enable = "avx512f,fma")]
-pub unsafe fn cwma_avx512(
-    data:        &[f64],
-    weights:     &[f64],
-    period:      usize,
+pub unsafe fn cwma_avx512_short(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
     first_valid: usize,
-    inv_norm:    f64,
-    out:         &mut [f64],
+    inv_norm: f64,
+    out: &mut [f64],
 ) {
-    if weights.len() < 24 {
-        return cwma_avx2(data, weights, period, first_valid, inv_norm, out);
-    }
+    debug_assert!(period <= 32);
+    debug_assert_eq!(weights.len(), period - 1);
 
     const STEP: usize = 8;
-    let wlen        = weights.len();
-    let chunks      = wlen / STEP;
-    let tail        = wlen % STEP;
-    let first_out   = first_valid + wlen + 1;
+    let wlen = weights.len();
+    let chunks = wlen / STEP;
+    let tail = wlen % STEP;
+    let first_out = first_valid + wlen + 1;
+
+    let mut wv: [__m512d; 4] = [_mm512_setzero_pd(); 4];
+    if chunks >= 1 {
+        wv[0] = reverse_vec(_mm512_loadu_pd(weights.as_ptr()));
+    }
+    if chunks >= 2 {
+        wv[1] = reverse_vec(_mm512_loadu_pd(weights.as_ptr().add(STEP)));
+    }
+    if chunks >= 3 {
+        wv[2] = reverse_vec(_mm512_loadu_pd(weights.as_ptr().add(2 * STEP)));
+    }
+    if chunks == 4 {
+        wv[3] = reverse_vec(_mm512_loadu_pd(weights.as_ptr().add(3 * STEP)));
+    }
+
+    for i in first_out..data.len() {
+        let mut acc = _mm512_setzero_pd();
+
+        if chunks >= 1 {
+            let d0 = _mm512_loadu_pd(data.as_ptr().add(i - 7));
+            acc = _mm512_fmadd_pd(d0, wv[0], acc);
+        }
+        if chunks >= 2 {
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - STEP - 7));
+            acc = _mm512_fmadd_pd(d1, wv[1], acc);
+        }
+        if chunks >= 3 {
+            let d2 = _mm512_loadu_pd(data.as_ptr().add(i - 2 * STEP - 7));
+            acc = _mm512_fmadd_pd(d2, wv[2], acc);
+        }
+        if chunks == 4 {
+            let d3 = _mm512_loadu_pd(data.as_ptr().add(i - 3 * STEP - 7));
+            acc = _mm512_fmadd_pd(d3, wv[3], acc);
+        }
+
+        let mut sum = _mm512_reduce_add_pd(acc);
+
+        if tail != 0 {
+            let base = chunks * STEP;
+            for k in 0..tail {
+                let w = *weights.get_unchecked(base + k);
+                let d = *data.get_unchecked(i - (base + k));
+                sum = d.mul_add(w, sum);
+            }
+        }
+
+        *out.get_unchecked_mut(i) = sum * inv_norm;
+    }
+}
+
+#[target_feature(enable = "avx512f,fma")]
+pub unsafe fn cwma_avx512_long(
+    data: &[f64],
+    weights: &[f64],
+    _period: usize,
+    first_valid: usize,
+    inv_norm: f64,
+    out: &mut [f64],
+) {
+    const STEP: usize = 8;
+
+    let wlen = weights.len();
+    let chunks = wlen / STEP;
+    let tail = wlen % STEP;
+    let first_out = first_valid + wlen + 1;
+
+    if wlen < 24 {
+        cwma_avx2(data, weights, _period, first_valid, inv_norm, out);
+        return;
+    }
 
     let wblocks = make_weight_blocks(weights);
 
-    for i in first_out .. data.len() {
+    for i in first_out..data.len() {
         let mut acc0 = _mm512_setzero_pd();
         let mut acc1 = _mm512_setzero_pd();
 
         let paired = chunks & !1;
         let mut blk = 0;
-        while blk < paired {
-            let d0 = _mm512_loadu_pd(data.as_ptr().add(i - blk*STEP       - 7));
-            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - (blk+1)*STEP   - 7));
 
-            acc0 = _mm512_fmadd_pd(d0, *wblocks.get_unchecked(blk    ), acc0);
+        while blk < paired {
+            let d0 = _mm512_loadu_pd(data.as_ptr().add(i - blk * STEP - 7));
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - (blk + 1) * STEP - 7));
+
+            acc0 = _mm512_fmadd_pd(d0, *wblocks.get_unchecked(blk), acc0);
             acc1 = _mm512_fmadd_pd(d1, *wblocks.get_unchecked(blk + 1), acc1);
 
             blk += 2;
         }
 
         if blk < chunks {
-            let d = _mm512_loadu_pd(data.as_ptr().add(i - blk*STEP - 7));
-            acc0  = _mm512_fmadd_pd(d, *wblocks.get_unchecked(blk), acc0);
+            let d = _mm512_loadu_pd(data.as_ptr().add(i - blk * STEP - 7));
+            acc0 = _mm512_fmadd_pd(d, *wblocks.get_unchecked(blk), acc0);
         }
 
-        let mut tail_sum = 0.0;
+        let mut sum = _mm512_reduce_add_pd(_mm512_add_pd(acc0, acc1));
+
         if tail != 0 {
             let base = chunks * STEP;
             for k in 0..tail {
                 let w = *weights.get_unchecked(base + k);
-                let d = *data   .get_unchecked(i - (base + k));
-                tail_sum = d.mul_add(w, tail_sum);
+                let d = *data.get_unchecked(i - (base + k));
+                sum = d.mul_add(w, sum);
             }
         }
 
-        let mut acc = _mm512_add_pd(acc0, acc1);
-        let mut sum = _mm512_reduce_add_pd(acc);
-        sum += tail_sum;
         *out.get_unchecked_mut(i) = sum * inv_norm;
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct CwmaStream {
-    period:      usize,
-    weights:     Vec<f64>,
-    inv_norm:    f64,
-    ring:        Vec<f64>,
-    head:        usize,
+    period: usize,
+    weights: Vec<f64>,
+    inv_norm: f64,
+    ring: Vec<f64>,
+    head: usize,
     total_count: usize,
     found_first: bool,
-    first_idx:   usize,
+    first_idx: usize,
 }
 
 impl CwmaStream {
     pub fn try_new(params: CwmaParams) -> Result<Self, CwmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(CwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(CwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let mut weights = Vec::with_capacity(period - 1);
@@ -380,16 +511,13 @@ impl CwmaStream {
             self.first_idx = idx;
         }
 
-        // overwrite the oldest slot, then move the head to the new oldest
         self.ring[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
-        // --- emit only when batch would: first_idx + period  *** changed ***
-        if !self.found_first || idx < self.first_idx + self.period {          // ***
+        if !self.found_first || idx < self.first_idx + self.period {
             return None;
         }
 
-        // dot-product: newest sample gets the largest weight (period³)
         let mut sum = 0.0;
         for k in 0..self.period - 1 {
             let ring_idx = (self.head + self.period - 1 - k) % self.period;
@@ -400,13 +528,484 @@ impl CwmaStream {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CwmaBatchRange {
+    pub period: (usize, usize, usize),
+}
+
+impl Default for CwmaBatchRange {
+    fn default() -> Self {
+        Self {
+            period: (14, 240, 1),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CwmaBatchBuilder {
+    range: CwmaBatchRange,
+    kernel: Kernel,
+}
+
+impl CwmaBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+
+    pub fn apply_slice(self, data: &[f64]) -> Result<CwmaBatchOutput, CwmaError> {
+        cwma_batch_with_kernel(data, &self.range, self.kernel)
+    }
+
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<CwmaBatchOutput, CwmaError> {
+        CwmaBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<CwmaBatchOutput, CwmaError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+
+    pub fn with_default_candles(c: &Candles) -> Result<CwmaBatchOutput, CwmaError> {
+        CwmaBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+pub fn cwma_batch_with_kernel(
+    data: &[f64],
+    sweep: &CwmaBatchRange,
+    k: Kernel,
+) -> Result<CwmaBatchOutput, CwmaError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(CwmaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
+
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    cwma_batch_par_slice(data, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct CwmaBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<CwmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl CwmaBatchOutput {
+    pub fn row_for_params(&self, p: &CwmaParams) -> Option<usize> {
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
+    }
+    pub fn values_for(&self, p: &CwmaParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &CwmaBatchRange) -> Vec<CwmaParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+
+    let periods = axis_usize(r.period);
+
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(CwmaParams { period: Some(p) });
+    }
+    out
+}
+
+#[inline(always)]
+pub fn cwma_batch_slice(
+    data: &[f64],
+    sweep: &CwmaBatchRange,
+    kern: Kernel,
+) -> Result<CwmaBatchOutput, CwmaError> {
+    cwma_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn cwma_batch_par_slice(
+    data: &[f64],
+    sweep: &CwmaBatchRange,
+    kern: Kernel,
+) -> Result<CwmaBatchOutput, CwmaError> {
+    cwma_batch_inner(data, sweep, kern, true)
+}
+
+#[inline]
+fn round_up8(x: usize) -> usize {
+    (x + 7) & !7
+}
+
+#[inline(always)]
+fn cwma_batch_inner(
+    data: &[f64],
+    sweep: &CwmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<CwmaBatchOutput, CwmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(CwmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CwmaError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
+        .map(|c| round_up8(c.period.unwrap()))
+        .max()
+        .unwrap();
+    if data.len() - first < max_p {
+        return Err(CwmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    let mut inv_norms = vec![0.0; rows];
+
+    let cap = rows * max_p;
+    let mut aligned = AlignedVec::with_capacity(cap);
+    let flat_w = aligned.as_mut_slice();
+
+    for (row, prm) in combos.iter().enumerate() {
+        let period = prm.period.unwrap();
+        let mut norm = 0.0;
+        for i in 0..period - 1 {
+            let w = ((period - i) as f64).powi(3);
+            flat_w[row * max_p + i] = w;
+            norm += w;
+        }
+        inv_norms[row] = 1.0 / norm;
+    }
+
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let inv_n = *inv_norms.get_unchecked(row);
+
+        match kern {
+            Kernel::Avx512 => cwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2 => cwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            _ => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+        }
+    };
+
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(CwmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+unsafe fn cwma_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    let wlen = period - 1;
+    for i in (first + wlen + 1)..data.len() {
+        let mut sum = 0.0;
+        for k in 0..wlen {
+            let w = *w_ptr.add(k);
+            let d = *data.get_unchecked(i - k);
+            sum += d * w;
+        }
+        out[i] = sum * inv_n;
+    }
+}
+
+#[inline(always)]
+unsafe fn load_w512_rev(ptr: *const f64) -> __m512d {
+    let rev = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+    _mm512_permutexvar_pd(rev, _mm512_loadu_pd(ptr))
+}
+
+#[inline(always)]
+unsafe fn load_w256_rev(ptr: *const f64) -> __m256d {
+    _mm256_permute4x64_pd::<0b00011011>(_mm256_loadu_pd(ptr))
+}
+
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn cwma_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    _stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        cwma_row_avx512_short(data, first, period, w_ptr, inv_n, out);
+    } else {
+        cwma_row_avx512_long(data, first, period, w_ptr, inv_n, out);
+    }
+}
+
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn cwma_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    const STEP: usize = 8;
+    let wlen = period - 1;
+    let chunks = wlen / STEP;
+    let tail_len = wlen % STEP;
+    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+
+    let w0 = load_w512_rev(w_ptr);
+    let w1 = if chunks >= 2 {
+        Some(load_w512_rev(w_ptr.add(STEP)))
+    } else {
+        None
+    };
+
+    for i in (first + wlen + 1)..data.len() {
+        let mut acc = _mm512_fmadd_pd(
+            _mm512_loadu_pd(data.as_ptr().add(i - 7)),
+            w0,
+            _mm512_setzero_pd(),
+        );
+
+        if let Some(w1v) = w1 {
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - STEP - 7));
+            acc = _mm512_fmadd_pd(d1, w1v, acc);
+        }
+
+        let mut tail_sum = 0.0;
+        if tail_len != 0 {
+            let base = chunks * STEP;
+            for k in 0..tail_len {
+                let w = *w_ptr.add(base + k);
+                let d = *data.get_unchecked(i - (base + k));
+                tail_sum = d.mul_add(w, tail_sum);
+            }
+        }
+
+        let sum = _mm512_reduce_add_pd(acc) + tail_sum;
+        *out.get_unchecked_mut(i) = sum * inv_n;
+    }
+}
+
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+unsafe fn cwma_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    const STEP: usize = 8;
+    const MAX: usize = 512;
+
+    let wlen = period - 1;
+    let n_chunks = wlen / STEP;
+    let tail_len = wlen % STEP;
+    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+
+    debug_assert!(n_chunks + (tail_len != 0) as usize <= MAX);
+
+    let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX] =
+        core::mem::MaybeUninit::uninit().assume_init();
+
+    for blk in 0..n_chunks {
+        let src = w_ptr.add(wlen - (blk + 1) * STEP);
+        wregs[blk].as_mut_ptr().write(load_w512_rev(src));
+    }
+    if tail_len != 0 {
+        let src = w_ptr.add(wlen - n_chunks * STEP - tail_len);
+        let wtl = _mm512_maskz_loadu_pd(tmask, src);
+        wregs[n_chunks].as_mut_ptr().write(_mm512_permutexvar_pd(
+            _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7),
+            wtl,
+        ));
+    }
+    let wregs: &[__m512d] = core::slice::from_raw_parts(
+        wregs.as_ptr() as *const __m512d,
+        n_chunks + (tail_len != 0) as usize,
+    );
+
+    let paired = n_chunks & !3;
+    let mut start_ptr = data.as_ptr().add(first + 2);
+    let stop_ptr = data.as_ptr().add(data.len());
+
+    for dst in &mut out[first + wlen + 1..] {
+        let mut s0 = _mm512_setzero_pd();
+        let mut s1 = _mm512_setzero_pd();
+        let mut s2 = _mm512_setzero_pd();
+        let mut s3 = _mm512_setzero_pd();
+
+        let mut blk = 0;
+        while blk < paired {
+            _mm_prefetch(start_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
+
+            let d0 = _mm512_loadu_pd(start_ptr.add((blk + 0) * STEP));
+            let d1 = _mm512_loadu_pd(start_ptr.add((blk + 1) * STEP));
+            let d2 = _mm512_loadu_pd(start_ptr.add((blk + 2) * STEP));
+            let d3 = _mm512_loadu_pd(start_ptr.add((blk + 3) * STEP));
+
+            s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
+            s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
+            s2 = _mm512_fmadd_pd(d2, *wregs.get_unchecked(blk + 2), s2);
+            s3 = _mm512_fmadd_pd(d3, *wregs.get_unchecked(blk + 3), s3);
+
+            blk += 4;
+        }
+        for r in blk..n_chunks {
+            let d = _mm512_loadu_pd(start_ptr.add(r * STEP));
+            s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
+        }
+
+        if tail_len != 0 {
+            let d_tail = _mm512_maskz_loadu_pd(tmask, start_ptr.add(n_chunks * STEP));
+            s0 = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(n_chunks), s0);
+        }
+
+        let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
+        *dst = _mm512_reduce_add_pd(sum) * inv_n;
+
+        start_ptr = start_ptr.add(1);
+        if start_ptr.add(wlen) >= stop_ptr {
+            break;
+        }
+    }
+}
+
+#[target_feature(enable = "avx2,fma")]
+unsafe fn cwma_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    _stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    const STEP: usize = 4;
+    let wlen = period - 1;
+    let vec_blks = wlen / STEP;
+    let tail = wlen % STEP;
+
+    let tail_mask = match tail {
+        0 => _mm256_setzero_si256(),
+        1 => _mm256_setr_epi64x(-1, 0, 0, 0),
+        2 => _mm256_setr_epi64x(-1, -1, 0, 0),
+        3 => _mm256_setr_epi64x(-1, -1, -1, 0),
+        _ => unreachable!(),
+    };
+
+    for i in (first + wlen + 1)..data.len() {
+        let mut acc = _mm256_setzero_pd();
+
+        for blk in 0..vec_blks {
+            let d = _mm256_loadu_pd(data.as_ptr().add(i - blk * STEP - 3));
+            let w = load_w256_rev(w_ptr.add(blk * STEP));
+            acc = _mm256_fmadd_pd(d, w, acc);
+        }
+
+        if tail != 0 {
+            let base = vec_blks * STEP;
+            let mut tail_sum = 0.0;
+            for k in 0..tail {
+                let w = *w_ptr.add(base + k);
+                let d = *data.get_unchecked(i - (base + k));
+                tail_sum = d.mul_add(w, tail_sum);
+            }
+            let hi = _mm256_extractf128_pd(acc, 1);
+            let lo = _mm256_castpd256_pd128(acc);
+            let tmp = _mm_add_pd(hi, lo);
+            let tmp2 = _mm_add_pd(tmp, _mm_unpackhi_pd(tmp, tmp));
+            out[i] = (_mm_cvtsd_f64(tmp2) + tail_sum) * inv_n;
+        } else {
+            let hi = _mm256_extractf128_pd(acc, 1);
+            let lo = _mm256_castpd256_pd128(acc);
+            let tmp = _mm_add_pd(hi, lo);
+            let tmp2 = _mm_add_pd(tmp, _mm_unpackhi_pd(tmp, tmp));
+            out[i] = _mm_cvtsd_f64(tmp2) * inv_n;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::helpers::skip_if_unsupported;
 
-    fn check_cwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -429,7 +1028,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cwma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -462,7 +1064,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cwma_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -478,7 +1083,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cwma_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = CwmaParams { period: Some(0) };
@@ -497,7 +1105,11 @@ mod tests {
         let params = CwmaParams { period: Some(10) };
         let input = CwmaInput::from_slice(&data_small, params);
         let res = cwma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Should fail with period exceeding length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
 
@@ -510,11 +1122,18 @@ mod tests {
         let params = CwmaParams { period: Some(9) };
         let input = CwmaInput::from_slice(&single_point, params);
         let res = cwma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_cwma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -541,7 +1160,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cwma_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -562,16 +1184,27 @@ mod tests {
         Ok(())
     }
 
-    fn check_cwma_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_cwma_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let period = 9;
-        let input = CwmaInput::from_candles(&candles, "close", CwmaParams { period: Some(period) });
+        let input = CwmaInput::from_candles(
+            &candles,
+            "close",
+            CwmaParams {
+                period: Some(period),
+            },
+        );
         let batch_output = cwma_with_kernel(&input, kernel)?.values;
 
-        let mut stream = CwmaStream::try_new(CwmaParams { period: Some(period) })?;
+        let mut stream = CwmaStream::try_new(CwmaParams {
+            period: Some(period),
+        })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
             match stream.update(price) {
@@ -631,4 +1264,60 @@ mod tests {
         check_cwma_nan_handling,
         check_cwma_streaming
     );
+
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        let output = CwmaBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+
+        let def = CwmaParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+
+        assert_eq!(row.len(), c.close.len());
+
+        let expected = [
+            59224.641237300435,
+            59213.64831277214,
+            59171.21190130624,
+            59167.01279027576,
+            59039.413552249636,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-8,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]),
+                                     Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

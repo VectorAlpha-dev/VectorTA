@@ -4,6 +4,7 @@
 #![feature(stdarch_x86_avx512)]
 #![feature(portable_simd)]
 #![feature(avx512_target_feature)]
+#![feature(likely_unlikely)] 
 #[allow(non_snake_case)]
 
 
