@@ -22,6 +22,10 @@
 //! - **`Err(AlmaError)`** otherwise.
 //!
 use crate::utilities::aligned_vector::AlignedVec;
+use crate::utilities::aligned_vector::{
+    align_up, copy_to_aligned, is_aligned, is_avx2_aligned, is_avx512_aligned, AlignedVec,
+    Alignment,
+};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
@@ -30,7 +34,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
