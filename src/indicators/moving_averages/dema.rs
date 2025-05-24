@@ -1,24 +1,33 @@
-/// # Double Exponential Moving Average (DEMA)
-///
-/// A moving average technique that seeks to reduce lag by combining two
-/// exponential moving averages (EMA). First, an EMA is calculated on the input
-/// data. Then, a second EMA is computed on the first EMA. Finally, the DEMA is
-/// determined by subtracting the second EMA from twice the first EMA.
-///
-/// ## Parameters
-/// - **period**: Lookback period for the EMA calculations (must be ≥ 1).
-///
-/// ## Errors
-/// - **AllValuesNaN**: DEMA: All input data values are `NaN`.
-/// - **InvalidPeriod**: DEMA: `period` is less than 1.
-/// - **NotEnoughData**: DEMA: Not enough data points (needs `2 * (period - 1)`).
-///
-/// ## Returns
-/// - **`Ok(DemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-/// - **`Err(DemaError)`** otherwise.
-///
+//! # Double Exponential Moving Average (DEMA)
+//!
+//! A moving average technique that seeks to reduce lag by combining two
+//! exponential moving averages (EMA). First, an EMA is calculated on the input
+//! data. Then, a second EMA is computed on the first EMA. Finally, the DEMA is
+//! determined by subtracting the second EMA from twice the first EMA.
+//!
+//! ## Parameters
+//! - **period**: Lookback period for the EMA calculations (must be ≥ 1).
+//!
+//! ## Errors
+//! - **AllValuesNaN**: DEMA: All input data values are `NaN`.
+//! - **InvalidPeriod**: DEMA: `period` is less than 1 or exceeds the data length.
+//! - **NotEnoughData**: DEMA: Not enough data points (needs `2 * (period - 1)`).
+//!
+//! ## Returns
+//! - **`Ok(DemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+//! - **`Err(DemaError)`** otherwise.
+
+//! Scalar Only
+
+use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
 use std::error::Error;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum DemaData<'a> {
@@ -27,6 +36,16 @@ pub enum DemaData<'a> {
         source: &'a str,
     },
     Slice(&'a [f64]),
+}
+
+impl<'a> AsRef<[f64]> for DemaInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            DemaData::Slice(slice) => slice,
+            DemaData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,162 +60,544 @@ impl Default for DemaParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct DemaOutput {
-    pub values: Vec<f64>,
-}
-
-#[derive(Debug, Clone)]
 pub struct DemaInput<'a> {
     pub data: DemaData<'a>,
     pub params: DemaParams,
 }
 
 impl<'a> DemaInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: DemaParams) -> Self {
-        Self {
-            data: DemaData::Candles { candles, source },
-            params,
-        }
-    }
-
-    pub fn from_slice(slice: &'a [f64], params: DemaParams) -> Self {
-        Self {
-            data: DemaData::Slice(slice),
-            params,
-        }
-    }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: DemaParams) -> Self {
         Self {
             data: DemaData::Candles {
-                candles,
-                source: "close",
+                candles: c,
+                source: s,
             },
-            params: DemaParams::default(),
+            params: p,
         }
     }
-
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: DemaParams) -> Self {
+        Self {
+            data: DemaData::Slice(sl),
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", DemaParams::default())
+    }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| DemaParams::default().period.unwrap())
+        self.params.period.unwrap_or(30)
     }
 }
 
-use thiserror::Error;
+#[derive(Debug, Clone)]
+pub struct DemaOutput {
+    pub values: Vec<f64>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DemaBuilder {
+    period: Option<usize>,
+    kernel: Kernel,
+}
+
+impl Default for DemaBuilder {
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl DemaBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<DemaOutput, DemaError> {
+        let p = DemaParams {
+            period: self.period,
+        };
+        let i = DemaInput::from_candles(c, "close", p);
+        dema_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<DemaOutput, DemaError> {
+        let p = DemaParams {
+            period: self.period,
+        };
+        let i = DemaInput::from_slice(d, p);
+        dema_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<DemaStream, DemaError> {
+        let p = DemaParams {
+            period: self.period,
+        };
+        DemaStream::try_new(p)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum DemaError {
     #[error("dema: All values are NaN.")]
     AllValuesNaN,
 
-    #[error("dema: Invalid period: period = {period} (must be >= 1).")]
+    #[error("dema: Invalid period: period = {period}")]
     InvalidPeriod { period: usize },
 
-    #[error("dema: Not enough data to calculate DEMA for the specified period: needed = {needed}, valid = {valid}.")]
+    #[error("dema: Not enough data: needed = {needed}, valid = {valid}")]
     NotEnoughData { needed: usize, valid: usize },
 }
 
 #[inline]
 pub fn dema(input: &DemaInput) -> Result<DemaOutput, DemaError> {
+    dema_with_kernel(input, Kernel::Auto)
+}
+
+pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput, DemaError> {
     let data: &[f64] = match &input.data {
         DemaData::Candles { candles, source } => source_type(candles, source),
-        DemaData::Slice(slice) => slice,
+        DemaData::Slice(sl) => sl,
     };
 
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(DemaError::AllValuesNaN),
-    };
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(DemaError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
 
-    let size: usize = data.len();
-    let period: usize = input.get_period();
-
-    if period < 1 {
+    if period < 1 || period > len {
         return Err(DemaError::InvalidPeriod { period });
     }
-
     let needed = 2 * (period - 1);
-    if size < needed {
-        return Err(DemaError::NotEnoughData {
-            needed,
-            valid: size,
-        });
+    if len < needed {
+        return Err(DemaError::NotEnoughData { needed, valid: len });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    let mut out = vec![f64::NAN; len];
+    unsafe { dema_scalar(data, period, first, &mut out) };
+    Ok(DemaOutput { values: out })
+}
+
+#[target_feature(enable = "fma")]
+#[inline]
+pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    debug_assert!(period >= 1 && data.len() == out.len());
+    if first >= data.len() {
+        return;
     }
 
     let alpha = 2.0 / (period as f64 + 1.0);
     let alpha_1 = 1.0 - alpha;
+    let n = data.len();
 
-    let mut output = vec![f64::NAN; size];
+    let mut p = data.as_ptr().add(first);
+    let mut q = out.as_mut_ptr().add(first);
 
-    let mut ema = data[first_valid_idx];
+    let mut ema = *p;
+    let mut ema2 = ema;
+    *q = ema;
+
+    for i in (first + 1)..n {
+        p = p.add(1);
+        q = q.add(1);
+        if i + 8 < n {
+            core::arch::x86_64::_mm_prefetch(
+                p.add(8) as *const i8,
+                core::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+        let price = *p;
+        ema = ema.mul_add(alpha_1, price * alpha);
+        ema2 = ema2.mul_add(alpha_1, ema * alpha);
+
+        *q = (2.0 * ema) - ema2;
+    }
+}
+
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    use core::arch::x86_64::*;
+    let n = data.len();
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let a1 = 1.0 - alpha;
+
+    let a_vec = _mm256_set1_pd(alpha);
+    let a1_vec = _mm256_set1_pd(a1);
+
+    let mut ema = data[first];
     let mut ema2 = ema;
 
-    for i in first_valid_idx..size {
-        ema = ema * alpha_1 + data[i] * alpha;
+    for i in first..n {
+        let x_vec = _mm256_set1_pd(data[i]);
+        let ema_vec = _mm256_set1_pd(ema);
+        ema = _mm256_cvtsd_f64(_mm256_fmadd_pd(
+            x_vec,
+            a_vec,
+            _mm256_mul_pd(ema_vec, a1_vec),
+        ));
 
-        if i == (period - 1) {
+        if i == period - 1 {
             ema2 = ema;
         }
-        if i >= (period - 1) {
-            ema2 = ema2 * alpha_1 + ema * alpha;
+        if i >= period - 1 {
+            let ema2_vec = _mm256_set1_pd(ema2);
+            ema2 = _mm256_cvtsd_f64(_mm256_fmadd_pd(
+                _mm256_set1_pd(ema),
+                a_vec,
+                _mm256_mul_pd(ema2_vec, a1_vec),
+            ));
         }
 
         if i >= 2 * (period - 1) {
-            output[i] = (2.0 * ema) - ema2;
+            out[i] = 2.0 * ema - ema2;
         }
     }
+}
 
-    Ok(DemaOutput { values: output })
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    let n = data.len();
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let a1 = 1.0 - alpha;
+
+    let a_vec = _mm_set1_pd(alpha);
+    let a1_vec = _mm_set1_pd(a1);
+
+    let mut ema = data[first];
+    let mut ema2 = ema;
+
+    for i in first..n {
+        let x_vec = _mm_set_sd(*data.get_unchecked(i));
+        let ema_v = _mm_set_sd(ema);
+        ema = _mm_cvtsd_f64(_mm_fmadd_sd(a_vec, x_vec, _mm_mul_sd(a1_vec, ema_v)));
+
+        if i == period - 1 {
+            ema2 = ema;
+        }
+        if i >= period - 1 {
+            let ema2_v = _mm_set_sd(ema2);
+            ema2 = _mm_cvtsd_f64(_mm_fmadd_sd(
+                a_vec,
+                _mm_set_sd(ema),
+                _mm_mul_sd(a1_vec, ema2_v),
+            ));
+        }
+
+        if i >= 2 * (period - 1) {
+            out[i] = 2.0 * ema - ema2;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DemaStream {
+    period: usize,
+    alpha: f64,
+    alpha_1: f64,
+    ema: f64,
+    ema2: f64,
+    filled: usize,
+    nan_fill: usize,
+}
+
+impl DemaStream {
+    pub fn try_new(params: DemaParams) -> Result<Self, DemaError> {
+        let period = params.period.unwrap_or(30);
+        if period < 1 {
+            return Err(DemaError::InvalidPeriod { period });
+        }
+        Ok(Self {
+            period,
+            alpha: 2.0 / (period as f64 + 1.0),
+            alpha_1: 1.0 - 2.0 / (period as f64 + 1.0),
+            ema: f64::NAN,
+            ema2: f64::NAN,
+            filled: 0,
+            nan_fill: 2 * (period - 1),
+        })
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        if self.ema.is_nan() {
+            self.ema = value;
+        } else {
+            self.ema = self.ema * self.alpha_1 + value * self.alpha;
+        }
+
+        if self.filled == self.period - 1 {
+            self.ema2 = self.ema;
+            self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
+        } else if self.filled >= self.period {
+            self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
+        }
+        let out = if self.filled >= self.nan_fill {
+            (2.0 * self.ema) - self.ema2
+        } else {
+            f64::NAN
+        };
+
+        self.filled += 1;
+        Some(out)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DemaBatchRange {
+    pub period: (usize, usize, usize),
+}
+
+impl Default for DemaBatchRange {
+    fn default() -> Self {
+        Self {
+            period: (30, 240, 1),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DemaBatchBuilder {
+    range: DemaBatchRange,
+    kernel: Kernel,
+}
+
+impl DemaBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<DemaBatchOutput, DemaError> {
+        dema_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<DemaBatchOutput, DemaError> {
+        DemaBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<DemaBatchOutput, DemaError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<DemaBatchOutput, DemaError> {
+        DemaBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+pub struct DemaBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<DemaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl DemaBatchOutput {
+    pub fn row_for_params(&self, p: &DemaParams) -> Option<usize> {
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(30) == p.period.unwrap_or(30))
+    }
+    pub fn values_for(&self, p: &DemaParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis_usize(r.period);
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(DemaParams { period: Some(p) });
+    }
+    out
+}
+
+#[inline(always)]
+pub fn dema_batch_slice(
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    kern: Kernel,
+) -> Result<DemaBatchOutput, DemaError> {
+    dema_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn dema_batch_par_slice(
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    kern: Kernel,
+) -> Result<DemaBatchOutput, DemaError> {
+    dema_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn dema_batch_with_kernel(
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    k: Kernel,
+) -> Result<DemaBatchOutput, DemaError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => return Err(DemaError::InvalidPeriod { period: 0 }),
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    dema_batch_par_slice(data, sweep, simd)
+}
+
+#[inline(always)]
+fn dema_batch_inner(
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<DemaBatchOutput, DemaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(DemaError::InvalidPeriod { period: 0 });
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(DemaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let needed = 2 * (max_p - 1);
+    if data.len() < needed {
+        return Err(DemaError::NotEnoughData {
+            needed,
+            valid: data.len(),
+        });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        match kern {
+            Kernel::Avx512 => dema_row_avx512(data, first, period, out_row),
+            Kernel::Avx2 => dema_row_avx2(data, first, period, out_row),
+            _ => dema_row_scalar(data, first, period, out_row),
+        }
+    };
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(DemaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    dema_scalar(data, period, first, out)
+}
+
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dema_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    dema_scalar(data, period, first, out)
+}
+
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
+    dema_scalar(data, period, first, out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::utilities::helpers::skip_if_unsupported;
 
-    #[test]
-    fn test_dema_partial_params() {
+    fn check_dema_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let default_params = DemaParams { period: None };
         let input_default = DemaInput::from_candles(&candles, "close", default_params);
-        let output_default = dema(&input_default).expect("Failed DEMA with default params");
-        assert_eq!(
-            output_default.values.len(),
-            candles.close.len(),
-            "Output length must match candle data length"
-        );
+        let output_default = dema_with_kernel(&input_default, kernel)?;
+        assert_eq!(output_default.values.len(), candles.close.len());
 
         let params_period_14 = DemaParams { period: Some(14) };
         let input_period_14 = DemaInput::from_candles(&candles, "hl2", params_period_14);
-        let output_period_14 =
-            dema(&input_period_14).expect("Failed DEMA with period=14, source=hl2");
-        assert_eq!(
-            output_period_14.values.len(),
-            candles.close.len(),
-            "Output length must match candle data length"
-        );
+        let output_period_14 = dema_with_kernel(&input_period_14, kernel)?;
+        assert_eq!(output_period_14.values.len(), candles.close.len());
 
         let params_custom = DemaParams { period: Some(20) };
         let input_custom = DemaInput::from_candles(&candles, "hlc3", params_custom);
-        let output_custom = dema(&input_custom).expect("Failed DEMA fully custom");
-        assert_eq!(
-            output_custom.values.len(),
-            candles.close.len(),
-            "Output length must match candle data length"
-        );
+        let output_custom = dema_with_kernel(&input_custom, kernel)?;
+        assert_eq!(output_custom.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_accuracy() {
+    fn check_dema_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let input = DemaInput::with_default_candles(&candles);
-        let result = dema(&input).expect("Failed to calculate DEMA");
+        let result = dema_with_kernel(&input, kernel)?;
 
         let expected_last_five = [
             59189.73193987478,
@@ -205,13 +606,6 @@ mod tests {
             59011.5555611042,
             58908.370159946775,
         ];
-
-        assert_eq!(
-            result.values.len(),
-            candles.close.len(),
-            "DEMA output length does not match input length"
-        );
-
         let start_index = result.values.len().saturating_sub(5);
         let last_five = &result.values[start_index..];
         for (i, &val) in last_five.iter().enumerate() {
@@ -224,122 +618,229 @@ mod tests {
                 val
             );
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_params_with_default_params() {
-        let default_params = DemaParams::default();
-        assert_eq!(
-            default_params.period,
-            Some(30),
-            "Expected default period to be Some(30)"
-        );
-    }
-
-    #[test]
-    fn test_dema_input_with_default_candles() {
+    fn check_dema_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let input = DemaInput::with_default_candles(&candles);
         match input.data {
-            DemaData::Candles { source, .. } => {
-                assert_eq!(source, "close", "Default source should be 'close'");
-            }
-            _ => panic!("Expected DemaData::Candles variant"),
+            DemaData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected DemaData::Candles"),
         }
-        assert_eq!(
-            input.params.period,
-            Some(30),
-            "Expected default period to be Some(30)"
-        );
+        assert_eq!(input.params.period, Some(30));
+        let output = dema_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_with_zero_period() {
+    fn check_dema_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = DemaParams { period: Some(0) };
         let input = DemaInput::from_slice(&input_data, params);
-        let result = dema(&input);
-        assert!(result.is_err(), "Expected an error for zero period");
+        let result = dema_with_kernel(&input, kernel);
+        assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_with_period_exceeding_data_length() {
-        let input_data = [10.0, 20.0, 30.0];
+    fn check_dema_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
         let params = DemaParams { period: Some(10) };
-        let input = DemaInput::from_slice(&input_data, params);
-        let result = dema(&input);
-        assert!(result.is_err(), "Expected an error for period > data.len()");
+        let input = DemaInput::from_slice(&data_small, params);
+        let result = dema_with_kernel(&input, kernel);
+        assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_very_small_data_set() {
-        let input_data = [42.0];
+    fn check_dema_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
+        let single_point = [42.0];
         let params = DemaParams { period: Some(9) };
-        let input = DemaInput::from_slice(&input_data, params);
-        let result = dema(&input);
-        assert!(
-            result.is_err(),
-            "Expected error for data smaller than required length"
-        );
+        let input = DemaInput::from_slice(&single_point, params);
+        let result = dema_with_kernel(&input, kernel);
+        assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_with_slice_data_reinput() {
+    fn check_dema_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let first_params = DemaParams { period: Some(80) };
         let first_input = DemaInput::from_candles(&candles, "close", first_params);
-        let first_result = dema(&first_input).expect("Failed to calculate first DEMA");
-        assert_eq!(
-            first_result.values.len(),
-            candles.close.len(),
-            "First DEMA output length mismatch"
-        );
+        let first_result = dema_with_kernel(&first_input, kernel)?;
 
         let second_params = DemaParams { period: Some(60) };
         let second_input = DemaInput::from_slice(&first_result.values, second_params);
-        let second_result = dema(&second_input).expect("Failed to calculate second DEMA");
-        assert_eq!(
-            second_result.values.len(),
-            first_result.values.len(),
-            "Second DEMA output length mismatch"
-        );
+        let second_result = dema_with_kernel(&second_input, kernel)?;
 
+        assert_eq!(second_result.values.len(), first_result.values.len());
         if second_result.values.len() > 240 {
             for i in 240..second_result.values.len() {
-                assert!(
-                    !second_result.values[i].is_nan(),
-                    "Unexpected NaN at index {} in second DEMA",
-                    i
-                );
+                assert!(!second_result.values[i].is_nan());
             }
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_dema_accuracy_nan_check() {
+    fn check_dema_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
         let params = DemaParams { period: Some(30) };
         let input = DemaInput::from_candles(&candles, "close", params);
-        let result = dema(&input).expect("Failed to calculate DEMA");
-        assert_eq!(
-            result.values.len(),
-            candles.close.len(),
-            "DEMA output length mismatch"
-        );
-
+        let result = dema_with_kernel(&input, kernel)?;
         if result.values.len() > 240 {
             for i in 240..result.values.len() {
-                assert!(
-                    !result.values[i].is_nan(),
-                    "Unexpected NaN at index {} in final DEMA",
-                    i
-                );
+                assert!(!result.values[i].is_nan());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_dema_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let period = 30;
+        let input = DemaInput::from_candles(
+            &candles,
+            "close",
+            DemaParams {
+                period: Some(period),
+            },
+        );
+        let batch_output = dema_with_kernel(&input, kernel)?.values;
+
+        let mut stream = DemaStream::try_new(DemaParams {
+            period: Some(period),
+        })?;
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for &price in &candles.close {
+            stream_values.push(stream.update(price).unwrap());
+        }
+
+        assert_eq!(batch_output.len(), stream_values.len());
+
+        for (i, (&b, &s)) in batch_output
+            .iter()
+            .zip(&stream_values)
+            .enumerate()
+            .skip(600)
+        {
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+
+            let diff = (b - s).abs();
+            assert!(
+                diff < 1e-9,
+                "[{}] DEMA streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
+                test_name,
+                i,
+                b,
+                s,
+                diff
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! generate_all_dema_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
             }
         }
     }
+
+    generate_all_dema_tests!(
+        check_dema_partial_params,
+        check_dema_accuracy,
+        check_dema_default_candles,
+        check_dema_zero_period,
+        check_dema_period_exceeds_length,
+        check_dema_very_small_dataset,
+        check_dema_reinput,
+        check_dema_nan_handling,
+        check_dema_streaming
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        let output = DemaBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+
+        let def = DemaParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+
+        assert_eq!(row.len(), c.close.len());
+
+        let expected = [
+            59189.73193987478,
+            59129.24920772847,
+            59058.80282420511,
+            59011.5555611042,
+            58908.370159946775,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-6,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

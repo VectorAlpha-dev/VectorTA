@@ -49,6 +49,7 @@ incremental = false
 panic           = "abort"
 strip           = "symbols"
 overflow-checks = false
+target-cpu     = "native"
 
 
 [profile.bench]

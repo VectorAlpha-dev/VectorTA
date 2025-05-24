@@ -39,9 +39,7 @@ pub struct HighPass2Params {
 
 impl Default for HighPass2Params {
     fn default() -> Self {
-        Self {
-            period: Some(48),
-        }
+        Self { period: Some(48) }
     }
 }
 
@@ -149,9 +147,7 @@ mod tests {
         let close_prices = candles
             .select_candle_field("close")
             .expect("Failed to extract close prices");
-        let params = HighPass2Params {
-            period: Some(48),
-        };
+        let params = HighPass2Params { period: Some(48) };
         let input = HighPass2Input::from_candles(&candles, "close", params);
         let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         let expected_last_five = [
@@ -191,9 +187,7 @@ mod tests {
     #[test]
     fn test_high_pass_2_pole_invalid_period() {
         let data = [10.0, 20.0, 30.0];
-        let params = HighPass2Params {
-            period: Some(1),
-        };
+        let params = HighPass2Params { period: Some(1) };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input);
         assert!(result.is_err());
@@ -202,9 +196,7 @@ mod tests {
     #[test]
     fn test_high_pass_2_pole_no_data() {
         let data: [f64; 0] = [];
-        let params = HighPass2Params {
-            period: Some(48),
-        };
+        let params = HighPass2Params { period: Some(48) };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input);
         assert!(result.is_err());
@@ -213,9 +205,7 @@ mod tests {
     #[test]
     fn test_high_pass_2_pole_very_small_data_set() {
         let data = [42.0];
-        let params = HighPass2Params {
-            period: Some(2),
-        };
+        let params = HighPass2Params { period: Some(2) };
         let input = HighPass2Input::from_slice(&data, params);
         let result = highpass_2_pole(&input).expect("Should handle single data with period=2");
         assert_eq!(result.values.len(), data.len());
@@ -226,15 +216,11 @@ mod tests {
     fn test_high_pass_2_pole_slice_data_reinput() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let first_params = HighPass2Params {
-            period: Some(48),
-        };
+        let first_params = HighPass2Params { period: Some(48) };
         let first_input = HighPass2Input::from_candles(&candles, "close", first_params);
         let first_result = highpass_2_pole(&first_input).expect("Failed first pass");
         assert_eq!(first_result.values.len(), candles.close.len());
-        let second_params = HighPass2Params {
-            period: Some(32),
-        };
+        let second_params = HighPass2Params { period: Some(32) };
         let second_input = HighPass2Input::from_slice(&first_result.values, second_params);
         let second_result = highpass_2_pole(&second_input).expect("Failed second pass");
         assert_eq!(second_result.values.len(), first_result.values.len());
@@ -247,9 +233,7 @@ mod tests {
     fn test_high_pass_2_pole_nan_check() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params = HighPass2Params {
-            period: Some(48),
-        };
+        let params = HighPass2Params { period: Some(48) };
         let input = HighPass2Input::from_candles(&candles, "close", params);
         let result = highpass_2_pole(&input).expect("Failed to calculate 2-pole high pass filter");
         assert_eq!(result.values.len(), candles.close.len());

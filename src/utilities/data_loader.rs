@@ -17,15 +17,6 @@ pub struct Candles {
     pub hlc3: Vec<f64>,
     pub ohlc4: Vec<f64>,
     pub hlcc4: Vec<f64>,
-    pub open_f32: Vec<f32>,
-    pub high_f32: Vec<f32>,
-    pub low_f32: Vec<f32>,
-    pub close_f32: Vec<f32>,
-    pub volume_f32: Vec<f32>,
-    pub hl2_f32: Vec<f32>,
-    pub hlc3_f32: Vec<f32>,
-    pub ohlc4_f32: Vec<f32>,
-    pub hlcc4_f32: Vec<f32>,
 }
 
 impl Candles {
@@ -48,34 +39,13 @@ impl Candles {
             hlc3: Vec::new(),
             ohlc4: Vec::new(),
             hlcc4: Vec::new(),
-            open_f32: Vec::new(),
-            high_f32: Vec::new(),
-            low_f32: Vec::new(),
-            close_f32: Vec::new(),
-            volume_f32: Vec::new(),
-            hl2_f32: Vec::new(),
-            hlc3_f32: Vec::new(),
-            ohlc4_f32: Vec::new(),
-            hlcc4_f32: Vec::new(),
         };
 
         candles.precompute_fields();
-        candles.cast_all_to_f32();
 
         candles
     }
 
-    fn cast_all_to_f32(&mut self) {
-        self.open_f32 = self.open.iter().map(|&v| v as f32).collect();
-        self.high_f32 = self.high.iter().map(|&v| v as f32).collect();
-        self.low_f32 = self.low.iter().map(|&v| v as f32).collect();
-        self.close_f32 = self.close.iter().map(|&v| v as f32).collect();
-        self.volume_f32 = self.volume.iter().map(|&v| v as f32).collect();
-        self.hl2_f32 = self.hl2.iter().map(|&v| v as f32).collect();
-        self.hlc3_f32 = self.hlc3.iter().map(|&v| v as f32).collect();
-        self.ohlc4_f32 = self.ohlc4.iter().map(|&v| v as f32).collect();
-        self.hlcc4_f32 = self.hlcc4.iter().map(|&v| v as f32).collect();
-    }
     pub fn get_timestamp(&self) -> Result<&[i64], Box<dyn Error>> {
         Ok(&self.timestamp)
     }
@@ -137,24 +107,6 @@ impl Candles {
         }
     }
 
-    pub fn select_candle_field_f32(
-        &self,
-        field: &str,
-    ) -> Result<&[f32], Box<dyn std::error::Error>> {
-        match field.to_lowercase().as_str() {
-            "open" => Ok(&self.open_f32),
-            "high" => Ok(&self.high_f32),
-            "low" => Ok(&self.low_f32),
-            "close" => Ok(&self.close_f32),
-            "volume" => Ok(&self.volume_f32),
-            "hl2" => Ok(&self.hl2_f32),
-            "hlc3" => Ok(&self.hlc3_f32),
-            "ohlc4" => Ok(&self.ohlc4_f32),
-            "hlcc4" => Ok(&self.hlcc4_f32),
-            _ => Err(format!("Invalid f32 field: {}", field).into()),
-        }
-    }
-
     fn precompute_fields(&mut self) {
         let len = self.high.len();
         let mut hl2 = Vec::with_capacity(len);
@@ -203,24 +155,6 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
     }
 
     Ok(Candles::new(timestamp, open, high, low, close, volume))
-}
-
-pub fn source_type_f32<'a>(candles: &'a Candles, source: &str) -> &'a [f32] {
-    match source.to_lowercase().as_str() {
-        "open" => &candles.open_f32,
-        "high" => &candles.high_f32,
-        "low" => &candles.low_f32,
-        "close" => &candles.close_f32,
-        "volume" => &candles.volume_f32,
-        "hl2" => &candles.hl2_f32,
-        "hlc3" => &candles.hlc3_f32,
-        "ohlc4" => &candles.ohlc4_f32,
-        "hlcc4" => &candles.hlcc4_f32,
-        _ => {
-            eprintln!("Warning: Invalid price source '{source}'. Defaulting to 'close' (f32).");
-            &candles.close_f32
-        }
-    }
 }
 
 pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {

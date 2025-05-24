@@ -1,27 +1,20 @@
-
- use std::time::{Instant, Duration};
- use once_cell::sync::Lazy;
- use criterion::{
-     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
-     Throughput,
- };
- use paste::paste;
 use anyhow::anyhow;
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
 use my_project::utilities::enums::Kernel;
+use once_cell::sync::Lazy;
+use paste::paste;
+use std::time::{Duration, Instant};
 
- use my_project::indicators::{
+use my_project::indicators::{
     acosc::{acosc as acosc_raw, AcoscInput},
     ad::{ad as ad_raw, AdInput},
     adosc::{adosc as adosc_raw, AdoscInput},
     adx::{adx as adx_raw, AdxInput},
     adxr::{adxr as adxr_raw, AdxrInput},
     alligator::{alligator as alligator_raw, AlligatorInput},
-    alma::{
-        alma_with_kernel,
-        AlmaInput,
-        AlmaData,
-        AlmaBatchBuilder,
-    },
+    alma::{alma_with_kernel, AlmaBatchBuilder, AlmaData, AlmaInput},
     ao::{ao as ao_raw, AoInput},
     apo::{apo as apo_raw, ApoInput},
     aroon::{aroon as aroon_raw, AroonInput},
@@ -30,7 +23,9 @@ use my_project::utilities::enums::Kernel;
     avgprice::{avgprice as avgprice_raw, AvgPriceInput},
     bandpass::{bandpass as bandpass_raw, BandPassInput},
     bollinger_bands::{bollinger_bands as bollinger_bands_raw, BollingerBandsInput},
-    bollinger_bands_width::{bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput},
+    bollinger_bands_width::{
+        bollinger_bands_width as bollinger_bands_width_raw, BollingerBandsWidthInput,
+    },
     bop::{bop as bop_raw, BopInput},
     cci::{cci as cci_raw, CciInput},
     cfo::{cfo as cfo_raw, CfoInput},
@@ -43,11 +38,11 @@ use my_project::utilities::enums::Kernel;
     correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
     correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
     cvi::{cvi as cvi_raw, CviInput},
-    cwma::{cwma_with_kernel, CwmaInput, CwmaData},
+    cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaData, CwmaInput},
     damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
     dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
     decycler::{decycler as decycler_raw, DecyclerInput},
-    dema::{dema as dema_raw, DemaInput},
+    dema::{dema_with_kernel, DemaBatchBuilder, DemaData, DemaInput},
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
     dm::{dm as dm_raw, DmInput},
@@ -55,19 +50,21 @@ use my_project::utilities::enums::Kernel;
     dpo::{dpo as dpo_raw, DpoInput},
     dti::{dti as dti_raw, DtiInput},
     dx::{dx as dx_raw, DxInput},
-    edcf::{edcf as edcf_raw, EdcfInput},
+    edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfData, EdcfInput},
     efi::{efi as efi_raw, EfiInput},
-    ehlers_itrend::{ehlers_itrend as ehlers_itrend_raw, EhlersITrendInput},
-    ema::{ema as ema_raw, EmaInput},
+    ehlers_itrend::{
+        ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendData, EhlersITrendInput,
+    },
+    ema::{ema_with_kernel, EmaBatchBuilder, EmaData, EmaInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, EmvInput},
-    epma::{epma as epma_raw, EpmaInput},
+    epma::{epma_with_kernel, EpmaBatchBuilder, EpmaData, EpmaInput},
     er::{er as er_raw, ErInput},
     eri::{eri as eri_raw, EriInput},
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, FoscInput},
-    frama::{frama as frama_raw, FramaInput},
-    fwma::{fwma as fwma_raw, FwmaInput},
+    frama::{frama_with_kernel, FramaBatchBuilder, FramaData, FramaInput},
+    fwma::{fwma_with_kernel, FwmaBatchBuilder, FwmaData, FwmaInput},
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
     gaussian::{gaussian as gaussian_raw, GaussianInput},
     heikin_ashi_candles::{heikin_ashi_candles as heikin_ashi_candles_raw, HeikinAshiInput},
@@ -87,7 +84,9 @@ use my_project::utilities::enums::Kernel;
     kurtosis::{kurtosis as kurtosis_raw, KurtosisInput},
     kvo::{kvo as kvo_raw, KvoInput},
     linearreg_angle::{linearreg_angle as linearreg_angle_raw, Linearreg_angleInput},
-    linearreg_intercept::{linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput},
+    linearreg_intercept::{
+        linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput,
+    },
     linearreg_slope::{linearreg_slope as linearreg_slope_raw, LinearRegSlopeInput},
     linreg::{linreg as linreg_raw, LinRegInput},
     lrsi::{lrsi as lrsi_raw, LrsiInput},
@@ -134,7 +133,9 @@ use my_project::utilities::enums::Kernel;
     stddev::{stddev as stddev_raw, StdDevInput},
     stochf::{stochf as stochf_raw, StochfInput},
     supersmoother::{supersmoother as supersmoother_raw, SuperSmootherInput},
-    supersmoother_3_pole::{supersmoother_3_pole as supersmoother_3_pole_raw, SuperSmoother3PoleInput},
+    supersmoother_3_pole::{
+        supersmoother_3_pole as supersmoother_3_pole_raw, SuperSmoother3PoleInput,
+    },
     swma::{swma as swma_raw, SwmaInput},
     tema::{tema as tema_raw, TemaInput},
     tilson::{tilson as tilson_raw, TilsonInput},
@@ -167,177 +168,173 @@ use my_project::utilities::enums::Kernel;
     zscore::{zscore as zscore_raw, ZscoreInput},
 };
 
- 
- use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
- 
- static CANDLES_10K: Lazy<Candles> = Lazy::new(|| {
-     read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv")
- });
- static CANDLES_100K: Lazy<Candles> = Lazy::new(|| {
-     read_candles_from_csv("src/data/bitfinex btc-usd 100,000 candles ends 09-01-24.csv")
-         .expect("100 k candles csv")
- });
- static CANDLES_1M: Lazy<Candles> = Lazy::new(|| {
-     read_candles_from_csv("src/data/1MillionCandles.csv").expect("1 M candles csv")
- });
- 
+use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
 
- trait InputLen {
-     fn with_len(len: usize) -> Self;
- }
- 
- pub type AcoscInputS = AcoscInput<'static>;
- pub type AdInputS = AdInput<'static>;
- pub type AdoscInputS = AdoscInput<'static>;
- pub type AdxInputS = AdxInput<'static>;
- pub type AdxrInputS = AdxrInput<'static>;
- pub type AlligatorInputS = AlligatorInput<'static>;
- pub type AlmaInputS = AlmaInput<'static>;
- pub type AoInputS = AoInput<'static>;
- pub type ApoInputS = ApoInput<'static>;
- pub type AroonInputS = AroonInput<'static>;
- pub type AroonOscInputS = AroonOscInput<'static>;
- pub type AtrInputS = AtrInput<'static>;
- pub type AvgPriceInputS = AvgPriceInput<'static>;
- pub type BandPassInputS = BandPassInput<'static>;
- pub type BollingerBandsInputS = BollingerBandsInput<'static>;
- pub type BollingerBandsWidthInputS = BollingerBandsWidthInput<'static>;
- pub type BopInputS = BopInput<'static>;
- pub type CciInputS = CciInput<'static>;
- pub type CfoInputS = CfoInput<'static>;
- pub type CgInputS = CgInput<'static>;
- pub type ChandeInputS = ChandeInput<'static>;
- pub type ChopInputS = ChopInput<'static>;
- pub type CkspInputS = CkspInput<'static>;
- pub type CmoInputS = CmoInput<'static>;
- pub type CoppockInputS = CoppockInput<'static>;
- pub type CorrelHlInputS = CorrelHlInput<'static>;
- pub type CorrelationCycleInputS = CorrelationCycleInput<'static>;
- pub type CviInputS = CviInput<'static>;
- pub type CwmaInputS = CwmaInput<'static>;
- pub type DamianiVolatmeterInputS = DamianiVolatmeterInput<'static>;
- pub type DecOscInputS = DecOscInput<'static>;
- pub type DecyclerInputS = DecyclerInput<'static>;
- pub type DemaInputS = DemaInput<'static>;
- pub type DevStopInputS = DevStopInput<'static>;
- pub type DiInputS = DiInput<'static>;
- pub type DmInputS = DmInput<'static>;
- pub type DonchianInputS = DonchianInput<'static>;
- pub type DpoInputS = DpoInput<'static>;
- pub type DtiInputS = DtiInput<'static>;
- pub type DxInputS = DxInput<'static>;
- pub type EdcfInputS = EdcfInput<'static>;
- pub type EfiInputS = EfiInput<'static>;
- pub type EhlersITrendInputS = EhlersITrendInput<'static>;
- pub type EmaInputS = EmaInput<'static>;
- pub type EmdInputS = EmdInput<'static>;
- pub type EmvInputS = EmvInput<'static>;
- pub type EpmaInputS = EpmaInput<'static>;
- pub type ErInputS = ErInput<'static>;
- pub type EriInputS = EriInput<'static>;
- pub type FisherInputS = FisherInput<'static>;
- pub type FoscInputS = FoscInput<'static>;
- pub type FramaInputS = FramaInput<'static>;
- pub type FwmaInputS = FwmaInput<'static>;
- pub type GatorOscInputS = GatorOscInput<'static>;
- pub type GaussianInputS = GaussianInput<'static>;
- pub type HeikinAshiInputS = HeikinAshiInput<'static>;
- pub type HighPassInputS = HighPassInput<'static>;
- pub type HighPass2InputS = HighPass2Input<'static>;
- pub type HmaInputS = HmaInput<'static>;
- pub type HtDcPeriodInputS = HtDcPeriodInput<'static>;
- pub type HwmaInputS = HwmaInput<'static>;
- pub type IftRsiInputS = IftRsiInput<'static>;
- pub type JmaInputS = JmaInput<'static>;
- pub type JsaInputS = JsaInput<'static>;
- pub type KamaInputS = KamaInput<'static>;
- pub type KaufmanstopInputS = KaufmanstopInput<'static>;
- pub type KdjInputS = KdjInput<'static>;
- pub type KeltnerInputS = KeltnerInput<'static>;
- pub type KstInputS = KstInput<'static>;
- pub type KurtosisInputS = KurtosisInput<'static>;
- pub type KvoInputS = KvoInput<'static>;
- pub type Linearreg_angleInputS = Linearreg_angleInput<'static>;
- pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
- pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
- pub type LinRegInputS = LinRegInput<'static>;
- pub type LrsiInputS = LrsiInput<'static>;
- pub type MaaqInputS = MaaqInput<'static>;
- pub type MabInputS = MabInput<'static>;
- pub type MacdInputS = MacdInput<'static>;
- pub type MamaInputS = MamaInput<'static>;
- pub type MarketefiInputS = MarketefiInput<'static>;
- pub type MassInputS = MassInput<'static>;
- pub type MeanAdInputS = MeanAdInput<'static>;
- pub type MediumAdInputS = MediumAdInput<'static>;
- pub type MedpriceInputS = MedpriceInput<'static>;
- pub type MfiInputS = MfiInput<'static>;
- pub type MidpointInputS = MidpointInput<'static>;
- pub type MidpriceInputS = MidpriceInput<'static>;
- pub type MinmaxInputS = MinmaxInput<'static>;
- pub type MomInputS = MomInput<'static>;
- pub type MswInputS = MswInput<'static>;
- pub type MwdxInputS = MwdxInput<'static>;
- pub type NatrInputS = NatrInput<'static>;
- pub type NmaInputS = NmaInput<'static>;
- pub type PivotInputS = PivotInput<'static>;
- pub type PmaInputS = PmaInput<'static>;
- pub type PpoInputS = PpoInput<'static>;
- pub type PviInputS = PviInput<'static>;
- pub type PwmaInputS = PwmaInput<'static>;
- pub type QstickInputS = QstickInput<'static>;
- pub type ReflexInputS = ReflexInput<'static>;
- pub type RocInputS = RocInput<'static>;
- pub type RocpInputS = RocpInput<'static>;
- pub type RocrInputS = RocrInput<'static>;
- pub type RsiInputS = RsiInput<'static>;
- pub type RviInputS = RviInput<'static>;
- pub type SafeZoneStopInputS = SafeZoneStopInput<'static>;
- pub type SarInputS = SarInput<'static>;
- pub type SinWmaInputS = SinWmaInput<'static>;
- pub type SmaInputS = SmaInput<'static>;
- pub type SmmaInputS = SmmaInput<'static>;
- pub type SqueezeMomentumInputS = SqueezeMomentumInput<'static>;
- pub type SqwmaInputS = SqwmaInput<'static>;
- pub type SrsiInputS = SrsiInput<'static>;
- pub type SrwmaInputS = SrwmaInput<'static>;
- pub type StcInputS = StcInput<'static>;
- pub type StdDevInputS = StdDevInput<'static>;
- pub type StochfInputS = StochfInput<'static>;
- pub type SuperSmootherInputS = SuperSmootherInput<'static>;
- pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
- pub type SwmaInputS = SwmaInput<'static>;
- pub type TemaInputS = TemaInput<'static>;
- pub type TilsonInputS = TilsonInput<'static>;
- pub type TrendFlexInputS = TrendFlexInput<'static>;
- pub type TrimaInputS = TrimaInput<'static>;
- pub type TrixInputS = TrixInput<'static>;
- pub type TsiInputS = TsiInput<'static>;
- pub type TtmTrendInputS = TtmTrendInput<'static>;
- pub type UiInputS = UiInput<'static>;
- pub type UltOscInputS = UltOscInput<'static>;
- pub type VarInputS = VarInput<'static>;
- pub type ViInputS = ViInput<'static>;
- pub type VidyaInputS = VidyaInput<'static>;
- pub type VlmaInputS = VlmaInput<'static>;
- pub type VoscInputS = VoscInput<'static>;
- pub type VossInputS = VossInput<'static>;
- pub type VpciInputS = VpciInput<'static>;
- pub type VptInputS = VptInput<'static>;
- pub type VpwmaInputS = VpwmaInput<'static>;
- pub type VwapInputS = VwapInput<'static>;
- pub type VwmaInputS = VwmaInput<'static>;
- pub type VwmacdInputS = VwmacdInput<'static>;
- pub type WadInputS = WadInput<'static>;
- pub type WavetrendInputS = WavetrendInput<'static>;
- pub type WclpriceInputS = WclpriceInput<'static>;
- pub type WildersInputS = WildersInput<'static>;
- pub type WillrInputS = WillrInput<'static>;
- pub type WmaInputS = WmaInput<'static>;
- pub type ZlemaInputS = ZlemaInput<'static>;
- pub type ZscoreInputS = ZscoreInput<'static>;
+static CANDLES_10K: Lazy<Candles> =
+    Lazy::new(|| read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv"));
+static CANDLES_100K: Lazy<Candles> = Lazy::new(|| {
+    read_candles_from_csv("src/data/bitfinex btc-usd 100,000 candles ends 09-01-24.csv")
+        .expect("100 k candles csv")
+});
+static CANDLES_1M: Lazy<Candles> =
+    Lazy::new(|| read_candles_from_csv("src/data/1MillionCandles.csv").expect("1 M candles csv"));
 
- macro_rules! impl_input_len {
+trait InputLen {
+    fn with_len(len: usize) -> Self;
+}
+
+pub type AcoscInputS = AcoscInput<'static>;
+pub type AdInputS = AdInput<'static>;
+pub type AdoscInputS = AdoscInput<'static>;
+pub type AdxInputS = AdxInput<'static>;
+pub type AdxrInputS = AdxrInput<'static>;
+pub type AlligatorInputS = AlligatorInput<'static>;
+pub type AlmaInputS = AlmaInput<'static>;
+pub type AoInputS = AoInput<'static>;
+pub type ApoInputS = ApoInput<'static>;
+pub type AroonInputS = AroonInput<'static>;
+pub type AroonOscInputS = AroonOscInput<'static>;
+pub type AtrInputS = AtrInput<'static>;
+pub type AvgPriceInputS = AvgPriceInput<'static>;
+pub type BandPassInputS = BandPassInput<'static>;
+pub type BollingerBandsInputS = BollingerBandsInput<'static>;
+pub type BollingerBandsWidthInputS = BollingerBandsWidthInput<'static>;
+pub type BopInputS = BopInput<'static>;
+pub type CciInputS = CciInput<'static>;
+pub type CfoInputS = CfoInput<'static>;
+pub type CgInputS = CgInput<'static>;
+pub type ChandeInputS = ChandeInput<'static>;
+pub type ChopInputS = ChopInput<'static>;
+pub type CkspInputS = CkspInput<'static>;
+pub type CmoInputS = CmoInput<'static>;
+pub type CoppockInputS = CoppockInput<'static>;
+pub type CorrelHlInputS = CorrelHlInput<'static>;
+pub type CorrelationCycleInputS = CorrelationCycleInput<'static>;
+pub type CviInputS = CviInput<'static>;
+pub type CwmaInputS = CwmaInput<'static>;
+pub type DamianiVolatmeterInputS = DamianiVolatmeterInput<'static>;
+pub type DecOscInputS = DecOscInput<'static>;
+pub type DecyclerInputS = DecyclerInput<'static>;
+pub type DemaInputS = DemaInput<'static>;
+pub type DevStopInputS = DevStopInput<'static>;
+pub type DiInputS = DiInput<'static>;
+pub type DmInputS = DmInput<'static>;
+pub type DonchianInputS = DonchianInput<'static>;
+pub type DpoInputS = DpoInput<'static>;
+pub type DtiInputS = DtiInput<'static>;
+pub type DxInputS = DxInput<'static>;
+pub type EdcfInputS = EdcfInput<'static>;
+pub type EfiInputS = EfiInput<'static>;
+pub type EhlersITrendInputS = EhlersITrendInput<'static>;
+pub type EmaInputS = EmaInput<'static>;
+pub type EmdInputS = EmdInput<'static>;
+pub type EmvInputS = EmvInput<'static>;
+pub type EpmaInputS = EpmaInput<'static>;
+pub type ErInputS = ErInput<'static>;
+pub type EriInputS = EriInput<'static>;
+pub type FisherInputS = FisherInput<'static>;
+pub type FoscInputS = FoscInput<'static>;
+pub type FramaInputS = FramaInput<'static>;
+pub type FwmaInputS = FwmaInput<'static>;
+pub type GatorOscInputS = GatorOscInput<'static>;
+pub type GaussianInputS = GaussianInput<'static>;
+pub type HeikinAshiInputS = HeikinAshiInput<'static>;
+pub type HighPassInputS = HighPassInput<'static>;
+pub type HighPass2InputS = HighPass2Input<'static>;
+pub type HmaInputS = HmaInput<'static>;
+pub type HtDcPeriodInputS = HtDcPeriodInput<'static>;
+pub type HwmaInputS = HwmaInput<'static>;
+pub type IftRsiInputS = IftRsiInput<'static>;
+pub type JmaInputS = JmaInput<'static>;
+pub type JsaInputS = JsaInput<'static>;
+pub type KamaInputS = KamaInput<'static>;
+pub type KaufmanstopInputS = KaufmanstopInput<'static>;
+pub type KdjInputS = KdjInput<'static>;
+pub type KeltnerInputS = KeltnerInput<'static>;
+pub type KstInputS = KstInput<'static>;
+pub type KurtosisInputS = KurtosisInput<'static>;
+pub type KvoInputS = KvoInput<'static>;
+pub type Linearreg_angleInputS = Linearreg_angleInput<'static>;
+pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
+pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
+pub type LinRegInputS = LinRegInput<'static>;
+pub type LrsiInputS = LrsiInput<'static>;
+pub type MaaqInputS = MaaqInput<'static>;
+pub type MabInputS = MabInput<'static>;
+pub type MacdInputS = MacdInput<'static>;
+pub type MamaInputS = MamaInput<'static>;
+pub type MarketefiInputS = MarketefiInput<'static>;
+pub type MassInputS = MassInput<'static>;
+pub type MeanAdInputS = MeanAdInput<'static>;
+pub type MediumAdInputS = MediumAdInput<'static>;
+pub type MedpriceInputS = MedpriceInput<'static>;
+pub type MfiInputS = MfiInput<'static>;
+pub type MidpointInputS = MidpointInput<'static>;
+pub type MidpriceInputS = MidpriceInput<'static>;
+pub type MinmaxInputS = MinmaxInput<'static>;
+pub type MomInputS = MomInput<'static>;
+pub type MswInputS = MswInput<'static>;
+pub type MwdxInputS = MwdxInput<'static>;
+pub type NatrInputS = NatrInput<'static>;
+pub type NmaInputS = NmaInput<'static>;
+pub type PivotInputS = PivotInput<'static>;
+pub type PmaInputS = PmaInput<'static>;
+pub type PpoInputS = PpoInput<'static>;
+pub type PviInputS = PviInput<'static>;
+pub type PwmaInputS = PwmaInput<'static>;
+pub type QstickInputS = QstickInput<'static>;
+pub type ReflexInputS = ReflexInput<'static>;
+pub type RocInputS = RocInput<'static>;
+pub type RocpInputS = RocpInput<'static>;
+pub type RocrInputS = RocrInput<'static>;
+pub type RsiInputS = RsiInput<'static>;
+pub type RviInputS = RviInput<'static>;
+pub type SafeZoneStopInputS = SafeZoneStopInput<'static>;
+pub type SarInputS = SarInput<'static>;
+pub type SinWmaInputS = SinWmaInput<'static>;
+pub type SmaInputS = SmaInput<'static>;
+pub type SmmaInputS = SmmaInput<'static>;
+pub type SqueezeMomentumInputS = SqueezeMomentumInput<'static>;
+pub type SqwmaInputS = SqwmaInput<'static>;
+pub type SrsiInputS = SrsiInput<'static>;
+pub type SrwmaInputS = SrwmaInput<'static>;
+pub type StcInputS = StcInput<'static>;
+pub type StdDevInputS = StdDevInput<'static>;
+pub type StochfInputS = StochfInput<'static>;
+pub type SuperSmootherInputS = SuperSmootherInput<'static>;
+pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
+pub type SwmaInputS = SwmaInput<'static>;
+pub type TemaInputS = TemaInput<'static>;
+pub type TilsonInputS = TilsonInput<'static>;
+pub type TrendFlexInputS = TrendFlexInput<'static>;
+pub type TrimaInputS = TrimaInput<'static>;
+pub type TrixInputS = TrixInput<'static>;
+pub type TsiInputS = TsiInput<'static>;
+pub type TtmTrendInputS = TtmTrendInput<'static>;
+pub type UiInputS = UiInput<'static>;
+pub type UltOscInputS = UltOscInput<'static>;
+pub type VarInputS = VarInput<'static>;
+pub type ViInputS = ViInput<'static>;
+pub type VidyaInputS = VidyaInput<'static>;
+pub type VlmaInputS = VlmaInput<'static>;
+pub type VoscInputS = VoscInput<'static>;
+pub type VossInputS = VossInput<'static>;
+pub type VpciInputS = VpciInput<'static>;
+pub type VptInputS = VptInput<'static>;
+pub type VpwmaInputS = VpwmaInput<'static>;
+pub type VwapInputS = VwapInput<'static>;
+pub type VwmaInputS = VwmaInput<'static>;
+pub type VwmacdInputS = VwmacdInput<'static>;
+pub type WadInputS = WadInput<'static>;
+pub type WavetrendInputS = WavetrendInput<'static>;
+pub type WclpriceInputS = WclpriceInput<'static>;
+pub type WildersInputS = WildersInput<'static>;
+pub type WillrInputS = WillrInput<'static>;
+pub type WmaInputS = WmaInput<'static>;
+pub type ZlemaInputS = ZlemaInput<'static>;
+pub type ZscoreInputS = ZscoreInput<'static>;
+
+macro_rules! impl_input_len {
      ($($ty:ty),* $(,)?) => {
          $(
              impl InputLen for $ty {
@@ -354,22 +351,22 @@ use my_project::utilities::enums::Kernel;
      };
  }
 
-  fn pretty_len(len: usize) -> &'static str {
+fn pretty_len(len: usize) -> &'static str {
     match len {
-        10_000     => "10k",
-        100_000    => "100k",
-        1_000_000  => "1M",
-        _          => panic!("unsupported len {len}"),
+        10_000 => "10k",
+        100_000 => "100k",
+        1_000_000 => "1M",
+        _ => panic!("unsupported len {len}"),
     }
 }
 
 const SIZES: [usize; 3] = [10_000, 100_000, 1_000_000];
 
 fn bench_one<F, In>(
-    group:  &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    label:  &str,
-    fun:    F,
-    len:    usize,
+    group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    label: &str,
+    fun: F,
+    len: usize,
     elements: Option<u64>,
 ) where
     F: Fn(&In) -> anyhow::Result<()> + Copy + 'static,
@@ -409,7 +406,6 @@ macro_rules! bench_scalars {
     };
 }
 
- 
 macro_rules! bench_variants {
     ($root:ident => $typ:ty; $elements:expr; $( $vfun:ident ),+ $(,)? ) => {
         paste::paste! {
@@ -433,8 +429,7 @@ macro_rules! bench_variants {
     };
 }
 
- 
- macro_rules! make_kernel_wrappers {
+macro_rules! make_kernel_wrappers {
      ( $stem:ident, $base:path, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
          paste! {
              $(
@@ -448,9 +443,9 @@ macro_rules! bench_variants {
          }
      };
  }
- 
-  #[macro_export]
-  macro_rules! bench_wrappers {
+
+#[macro_export]
+macro_rules! bench_wrappers {
       ( $( ($bench_fn:ident, $raw_fn:ident, $input_ty:ty) ),+ $(,)?) => {
           $(
               #[inline(always)]
@@ -464,13 +459,13 @@ macro_rules! bench_variants {
   }
 
 macro_rules! make_batch_wrappers {
-    ( $stem:ident, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
+    ( $stem:ident, $builder:path, $ityp:ty ; $( $k:ident ),+ $(,)? ) => {
         paste::paste! {
             $(
                 #[inline(always)]
                 fn [<$stem _ $k:lower>](input: &$ityp) -> anyhow::Result<()> {
                     let slice: &[f64] = input.as_ref();
-                    let _ = AlmaBatchBuilder::new()
+                    <$builder>::new()
                         .kernel(Kernel::$k)
                         .apply_slice(slice)?;
                     Ok(())
@@ -480,7 +475,7 @@ macro_rules! make_batch_wrappers {
     };
 }
 
-  impl_input_len!(
+impl_input_len!(
     AcoscInputS,
     AdInputS,
     AdoscInputS,
@@ -631,9 +626,9 @@ macro_rules! make_batch_wrappers {
     WmaInputS,
     ZlemaInputS,
     ZscoreInputS
- );
+);
 
-  bench_wrappers! {
+bench_wrappers! {
     (acosc_bench, acosc_raw, AcoscInputS),
     (ad_bench, ad_raw, AdInputS),
     (adosc_bench, adosc_raw, AdoscInputS),
@@ -664,7 +659,6 @@ macro_rules! make_batch_wrappers {
     (damiani_volatmeter_bench, damiani_volatmeter_raw, DamianiVolatmeterInputS),
     (dec_osc_bench, dec_osc_raw, DecOscInputS),
     (decycler_bench, decycler_raw, DecyclerInputS),
-    (dema_bench, dema_raw, DemaInputS),
     (devstop_bench, devstop_raw, DevStopInputS),
     (di_bench, di_raw, DiInputS),
     (dm_bench, dm_raw, DmInputS),
@@ -672,18 +666,13 @@ macro_rules! make_batch_wrappers {
     (dpo_bench, dpo_raw, DpoInputS),
     (dti_bench, dti_raw, DtiInputS),
     (dx_bench, dx_raw, DxInputS),
-    (edcf_bench, edcf_raw, EdcfInputS),
     (efi_bench, efi_raw, EfiInputS),
-    (ehlers_itrend_bench, ehlers_itrend_raw, EhlersITrendInputS),
-    (ema_bench, ema_raw, EmaInputS),
     (emd_bench, emd_raw, EmdInputS),
     (emv_bench, emv_raw, EmvInputS),
-    (epma_bench, epma_raw, EpmaInputS),
     (er_bench, er_raw, ErInputS),
     (eri_bench, eri_raw, EriInputS),
     (fisher_bench, fisher_raw, FisherInputS),
     (fosc_bench, fosc_raw, FoscInputS),
-    (frama_bench, frama_raw, FramaInputS),
     (fwma_bench, fwma_raw, FwmaInputS),
     (gatorosc_bench, gatorosc_raw, GatorOscInputS),
     (gaussian_bench, gaussian_raw, GaussianInputS),
@@ -784,7 +773,6 @@ macro_rules! make_batch_wrappers {
     (zscore_bench, zscore_raw, ZscoreInputS),
 }
 
-  
 bench_scalars!(
     acosc_bench => AcoscInputS,
     ad_bench    => AdInputS,
@@ -819,7 +807,6 @@ bench_scalars!(
     damiani_volatmeter_bench => DamianiVolatmeterInputS,
     dec_osc_bench     => DecOscInputS,
     decycler_bench    => DecyclerInputS,
-    dema_bench        => DemaInputS,
     devstop_bench     => DevStopInputS,
     di_bench          => DiInputS,
     dm_bench          => DmInputS,
@@ -827,19 +814,13 @@ bench_scalars!(
     dpo_bench         => DpoInputS,
     dti_bench         => DtiInputS,
     dx_bench          => DxInputS,
-    edcf_bench        => EdcfInputS,
     efi_bench         => EfiInputS,
-    ehlers_itrend_bench => EhlersITrendInputS,
-    ema_bench         => EmaInputS,
     emd_bench         => EmdInputS,
     emv_bench         => EmvInputS,
-    epma_bench        => EpmaInputS,
     er_bench          => ErInputS,
     eri_bench         => EriInputS,
     fisher_bench      => FisherInputS,
     fosc_bench        => FoscInputS,
-    frama_bench       => FramaInputS,
-    fwma_bench        => FwmaInputS,
     gatorosc_bench    => GatorOscInputS,
     gaussian_bench    => GaussianInputS,
     heikin_ashi_candles_bench => HeikinAshiInputS,
@@ -942,12 +923,122 @@ bench_scalars!(
     zscore_bench    => ZscoreInputS
 );
 
- make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
- make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(alma, alma_with_kernel, AlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(cwma, cwma_with_kernel, CwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(dema, dema_with_kernel, DemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(edcf, edcf_with_kernel, EdcfInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(fwma, fwma_with_kernel, FwmaInputS; Scalar,Avx2,Avx512);
 
- make_batch_wrappers!(
-    alma_batch, AlmaInputS;
+make_batch_wrappers!(
+    alma_batch, AlmaBatchBuilder, AlmaInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    cwma_batch, CwmaBatchBuilder, CwmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    dema_batch, DemaBatchBuilder, DemaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    edcf_batch, EdcfBatchBuilder, EdcfInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    ehlers_itrend_batch, EhlersITrendBatchBuilder, EhlersITrendInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    ema_batch, EmaBatchBuilder, EmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    epma_batch, EpmaBatchBuilder, EpmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    frama_batch, FramaBatchBuilder, FramaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    fwma_batch, FwmaBatchBuilder, FwmaInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+bench_variants!(
+    alma_batch => AlmaInputS; Some(232);
+    alma_batch_scalarbatch,
+    alma_batch_avx2batch,
+    alma_batch_avx512batch,
+);
+
+bench_variants!(
+    cwma_batch => CwmaInputS; Some(227);
+    cwma_batch_scalarbatch,
+    cwma_batch_avx2batch,
+    cwma_batch_avx512batch,
+);
+
+bench_variants!(
+   dema_batch => DemaInputS; Some(227);
+   dema_batch_scalarbatch,
+   dema_batch_avx2batch,
+   dema_batch_avx512batch,
+);
+
+bench_variants!(
+   edcf_batch => EdcfInputS; Some(227);
+   edcf_batch_scalarbatch,
+   edcf_batch_avx2batch,
+   edcf_batch_avx512batch,
+);
+
+bench_variants!(
+    ehlers_itrend_batch => EhlersITrendInputS; Some(227);
+    ehlers_itrend_batch_scalarbatch,
+    ehlers_itrend_batch_avx2batch,
+    ehlers_itrend_batch_avx512batch,
+);
+
+bench_variants!(
+    ema_batch => EmaInputS; Some(227);
+    ema_batch_scalarbatch,
+    ema_batch_avx2batch,
+    ema_batch_avx512batch,
+);
+
+bench_variants!(
+    epma_batch => EpmaInputS; Some(227);
+    epma_batch_scalarbatch,
+    epma_batch_avx2batch,
+    epma_batch_avx512batch,
+);
+
+bench_variants!(
+    frama_batch => FramaInputS; Some(227);
+    frama_batch_scalarbatch,
+    frama_batch_avx2batch,
+    frama_batch_avx512batch,
+);
+
+bench_variants!(
+    fwma_batch => FwmaInputS; Some(227);
+    fwma_batch_scalarbatch,
+    fwma_batch_avx2batch,
+    fwma_batch_avx512batch,
 );
 
 bench_variants!(
@@ -958,23 +1049,79 @@ bench_variants!(
 );
 
 bench_variants!(
-    alma_batch => AlmaInputS; Some(11);
-    alma_batch_scalarbatch,
-    alma_batch_avx2batch,
-    alma_batch_avx512batch,
+   cwma => CwmaInputS; None;
+   cwma_scalar,
+   cwma_avx2,
+   cwma_avx512,
 );
 
- bench_variants!(
-     cwma => CwmaInputS; None;
-     cwma_scalar,
-     cwma_avx2,
-     cwma_avx512,
- );
+bench_variants!(
+   dema => DemaInputS; None;
+   dema_scalar,
+   dema_avx2,
+   dema_avx512,
+);
 
- criterion_main!(
-     benches_scalar,
-     benches_alma,
-     benches_alma_batch,
-     benches_cwma,
- );
- 
+bench_variants!(
+    edcf => EdcfInputS; None;
+    edcf_scalar,
+    edcf_avx2,
+    edcf_avx512,
+);
+
+bench_variants!(
+    ehlers_itrend => EhlersITrendInputS; None;
+    ehlers_itrend_scalar,
+    ehlers_itrend_avx2,
+    ehlers_itrend_avx512,
+);
+
+bench_variants!(
+    ema => EmaInputS; None;
+    ema_scalar,
+    ema_avx2,
+    ema_avx512,
+);
+
+bench_variants!(
+    epma => EpmaInputS; None;
+    epma_scalar,
+    epma_avx2,
+    epma_avx512,
+);
+
+bench_variants!(
+    frama => FramaInputS; None;
+    frama_scalar,
+    frama_avx2,
+    frama_avx512,
+);
+
+bench_variants!(
+    fwma => FwmaInputS; None;
+    fwma_scalar,
+    fwma_avx2,
+    fwma_avx512,
+);
+
+criterion_main!(
+    benches_scalar,
+    benches_alma,
+    benches_alma_batch,
+    benches_cwma,
+    benches_cwma_batch,
+    benches_dema,
+    benches_dema_batch,
+    benches_edcf,
+    benches_edcf_batch,
+    benches_ehlers_itrend,
+    benches_ehlers_itrend_batch,
+    benches_ema,
+    benches_ema_batch,
+    benches_epma,
+    benches_epma_batch,
+    benches_frama,
+    benches_frama_batch,
+    benches_fwma,
+    benches_fwma_batch
+);

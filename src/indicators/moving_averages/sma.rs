@@ -102,25 +102,34 @@ pub fn sma(input: &SmaInput) -> Result<SmaOutput, SmaError> {
         SmaData::Candles { candles, source } => source_type(candles, source),
         SmaData::Slice(slice) => slice,
     };
-    if data.is_empty() { return Err(SmaError::EmptyData); }
+    if data.is_empty() {
+        return Err(SmaError::EmptyData);
+    }
 
     let period = input.get_period();
     if period == 0 || period > data.len() {
-        return Err(SmaError::InvalidPeriod { period, data_len: data.len() });
+        return Err(SmaError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
     }
 
-    let first = data.iter().position(|&x| !x.is_nan())
+    let first = data
+        .iter()
+        .position(|&x| !x.is_nan())
         .ok_or(SmaError::AllValuesNaN)?;
     if data.len() - first < period {
         return Err(SmaError::NotEnoughValidData {
             needed: period,
-            valid : data.len() - first,
+            valid: data.len() - first,
         });
     }
 
-    let len   = data.len();
+    let len = data.len();
     let mut out: Vec<core::mem::MaybeUninit<f64>> = Vec::with_capacity(len);
-    unsafe { out.set_len(len); }
+    unsafe {
+        out.set_len(len);
+    }
 
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
