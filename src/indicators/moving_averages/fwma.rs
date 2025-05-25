@@ -233,7 +233,13 @@ pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput,
 }
 
 #[inline(always)]
-pub fn fwma_scalar(data: &[f64], fib: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+pub unsafe fn fwma_scalar(
+    data: &[f64],
+    fib: &[f64],
+    period: usize,
+    first_val: usize,
+    out: &mut [f64],
+) {
     assert_eq!(fib.len(), period, "fib.len() must equal period");
     assert!(
         out.len() >= data.len(),
@@ -255,13 +261,223 @@ pub fn fwma_scalar(data: &[f64], fib: &[f64], period: usize, first_val: usize, o
     }
 }
 
-#[inline(always)]
-pub fn fwma_avx512(data: &[f64], fib: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    fwma_scalar(data, fib, period, first_valid, out)
+#[target_feature(enable = "avx2")]
+unsafe fn horizontal_sum_avx2(v: __m256d) -> f64 {
+    let high_low = _mm256_hadd_pd(v, v);
+    let high = _mm256_extractf128_pd(high_low, 1);
+    let low = _mm256_castpd256_pd128(high_low);
+    let sum = _mm_add_pd(high, low);
+    let result = _mm_hadd_pd(sum, sum);
+    _mm_cvtsd_f64(result) * 0.5
 }
-#[inline(always)]
-pub fn fwma_avx2(data: &[f64], fib: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    fwma_scalar(data, fib, period, first_valid, out)
+
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn fwma_avx512_short(
+    data: &[f64],
+    fib: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    const SIMD_WIDTH: usize = 8;
+    let simd_chunks = period / SIMD_WIDTH;
+    let remainder = period % SIMD_WIDTH;
+
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    let mut aligned_fib = AlignedVec::with_capacity(period + SIMD_WIDTH);
+    let fib_buf = aligned_fib.as_mut_slice();
+    fib_buf[..period].copy_from_slice(fib);
+    let fib_ptr = fib_buf.as_ptr();
+
+    let mut fib_vecs = Vec::with_capacity(simd_chunks);
+    for chunk in 0..simd_chunks {
+        fib_vecs.push(_mm512_load_pd(fib_ptr.add(chunk * SIMD_WIDTH)));
+    }
+
+    let tail_mask: __mmask8 = (1u8 << remainder).wrapping_sub(1);
+
+    for idx in (first + period - 1)..data.len() {
+        let start = idx + 1 - period;
+        let window_ptr = data_ptr.add(start);
+
+        _mm_prefetch(window_ptr.add(64) as *const i8, _MM_HINT_T0);
+
+        let mut sum0 = _mm512_setzero_pd();
+        let mut sum1 = _mm512_setzero_pd();
+        let mut sum2 = _mm512_setzero_pd();
+        let mut sum3 = _mm512_setzero_pd();
+
+        let chunks4 = simd_chunks / 4;
+        for i in 0..chunks4 {
+            let base = window_ptr.add(i * 32);
+            sum0 = _mm512_fmadd_pd(_mm512_loadu_pd(base), fib_vecs[i * 4 + 0], sum0);
+            sum1 = _mm512_fmadd_pd(_mm512_loadu_pd(base.add(8)), fib_vecs[i * 4 + 1], sum1);
+            sum2 = _mm512_fmadd_pd(_mm512_loadu_pd(base.add(16)), fib_vecs[i * 4 + 2], sum2);
+            sum3 = _mm512_fmadd_pd(_mm512_loadu_pd(base.add(24)), fib_vecs[i * 4 + 3], sum3);
+        }
+
+        for i in (chunks4 * 4)..simd_chunks {
+            let base = window_ptr.add(i * SIMD_WIDTH);
+            sum0 = _mm512_fmadd_pd(_mm512_loadu_pd(base), fib_vecs[i], sum0);
+        }
+
+        sum0 = _mm512_add_pd(sum0, sum1);
+        sum2 = _mm512_add_pd(sum2, sum3);
+        sum0 = _mm512_add_pd(sum0, sum2);
+
+        if remainder != 0 {
+            let data_tail =
+                _mm512_maskz_loadu_pd(tail_mask, window_ptr.add(simd_chunks * SIMD_WIDTH));
+            let weight_tail =
+                _mm512_maskz_load_pd(tail_mask, fib_ptr.add(simd_chunks * SIMD_WIDTH));
+            sum0 = _mm512_fmadd_pd(data_tail, weight_tail, sum0);
+        }
+
+        let total = _mm512_reduce_add_pd(sum0);
+        *out_ptr.add(idx) = total;
+    }
+}
+
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn fwma_avx512_long(
+    data: &[f64],
+    fib: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    const W: usize = 8;
+    let full = period / W;
+    let tail = period % W;
+    let tail_mask: __mmask8 = (1u8 << tail).wrapping_sub(1);
+
+    let mut aligned = AlignedVec::with_capacity(period + W);
+    let fib_aln = aligned.as_mut_slice();
+    fib_aln[..period].copy_from_slice(fib);
+    let wptr = fib_aln.as_ptr();
+
+    let dptr = data.as_ptr();
+    let optr = out.as_mut_ptr();
+
+    for i in (first + period - 1)..data.len() {
+        let base = dptr.add(i + 1 - period);
+
+        let mut acc0 = _mm512_setzero_pd();
+        let mut acc1 = _mm512_setzero_pd();
+        let mut acc2 = _mm512_setzero_pd();
+        let mut acc3 = _mm512_setzero_pd();
+
+        let mut j = 0;
+        while j + 32 <= period {
+            _mm_prefetch(base.add(j + 64) as *const i8, _MM_HINT_T0);
+
+            let v0 = _mm512_loadu_pd(base.add(j));
+            let w0 = _mm512_load_pd(wptr.add(j));
+            acc0 = _mm512_fmadd_pd(v0, w0, acc0);
+
+            let v1 = _mm512_loadu_pd(base.add(j + 8));
+            let w1 = _mm512_load_pd(wptr.add(j + 8));
+            acc1 = _mm512_fmadd_pd(v1, w1, acc1);
+
+            let v2 = _mm512_loadu_pd(base.add(j + 16));
+            let w2 = _mm512_load_pd(wptr.add(j + 16));
+            acc2 = _mm512_fmadd_pd(v2, w2, acc2);
+
+            let v3 = _mm512_loadu_pd(base.add(j + 24));
+            let w3 = _mm512_load_pd(wptr.add(j + 24));
+            acc3 = _mm512_fmadd_pd(v3, w3, acc3);
+
+            j += 32;
+        }
+
+        while j + 8 <= period {
+            let v = _mm512_loadu_pd(base.add(j));
+            let w = _mm512_load_pd(wptr.add(j));
+            acc0 = _mm512_fmadd_pd(v, w, acc0);
+            j += 8;
+        }
+
+        acc0 = _mm512_add_pd(acc0, acc2);
+        acc1 = _mm512_add_pd(acc1, acc3);
+        let sum_vec = _mm512_add_pd(acc0, acc1);
+
+        let mut sum = _mm512_reduce_add_pd(sum_vec);
+
+        if tail > 0 {
+            let v_tail = _mm512_maskz_loadu_pd(tail_mask, base.add(full * W));
+            let w_tail = _mm512_maskz_load_pd(tail_mask, wptr.add(full * W));
+            sum += _mm512_reduce_add_pd(_mm512_mul_pd(v_tail, w_tail));
+        }
+
+        *optr.add(i) = sum;
+    }
+}
+
+#[target_feature(enable = "avx512f,fma")]
+pub unsafe fn fwma_avx512(data: &[f64], fib: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period <= 32 {
+        fwma_avx512_short(data, fib, period, first, out);
+    } else {
+        fwma_avx512_long(data, fib, period, first, out);
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub unsafe fn fwma_avx2(
+    data: &[f64],
+    fib: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    const W: usize = 4;
+    let full = period / W;
+    let tail = period % W;
+
+    let mut aligned = AlignedVec::with_capacity(period + W);
+    let fib_aln = aligned.as_mut_slice();
+    fib_aln[..period].copy_from_slice(fib);
+    let wptr = fib_aln.as_ptr();
+
+    let dptr = data.as_ptr();
+    let optr = out.as_mut_ptr();
+
+    for i in (first_valid + period - 1)..data.len() {
+        let base = dptr.add(i + 1 - period);
+
+        let mut acc0 = _mm256_setzero_pd();
+        let mut acc1 = _mm256_setzero_pd();
+
+        let mut j = 0;
+        while j + 8 <= period {
+            let v0 = _mm256_loadu_pd(base.add(j));
+            let w0 = _mm256_load_pd(wptr.add(j));
+            acc0 = _mm256_fmadd_pd(v0, w0, acc0);
+
+            let v1 = _mm256_loadu_pd(base.add(j + 4));
+            let w1 = _mm256_load_pd(wptr.add(j + 4));
+            acc1 = _mm256_fmadd_pd(v1, w1, acc1);
+
+            j += 8;
+        }
+        if j + 4 <= period {
+            let v = _mm256_loadu_pd(base.add(j));
+            let w = _mm256_load_pd(wptr.add(j));
+            acc0 = _mm256_fmadd_pd(v, w, acc0);
+            j += 4;
+        }
+
+        let sum_vec = _mm256_add_pd(acc0, acc1);
+        let mut sum = horizontal_sum_avx2(sum_vec);
+
+        for k in 0..tail {
+            let idx = period - tail + k;
+            sum += *base.add(idx) * *wptr.add(idx);
+        }
+        *optr.add(i) = sum;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -334,7 +550,9 @@ pub struct FwmaBatchRange {
 }
 impl Default for FwmaBatchRange {
     fn default() -> Self {
-        Self { period: (5, 40, 1) }
+        Self {
+            period: (5, 120, 1),
+        }
     }
 }
 
@@ -541,52 +759,45 @@ fn fwma_batch_inner(
     })
 }
 
-#[inline(always)]
+#[inline]
 unsafe fn fwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize,
     fib_ptr: *const f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let mut sum = 0.0;
-        for k in (0..p4).step_by(4) {
-            let fib = std::slice::from_raw_parts(fib_ptr.add(k), 4);
-            let d = &data[start + k..start + k + 4];
-            sum += d[0] * fib[0] + d[1] * fib[1] + d[2] * fib[2] + d[3] * fib[3];
-        }
-        for k in p4..period {
-            sum += *data.get_unchecked(start + k) * *fib_ptr.add(k);
-        }
-        out[i] = sum;
-    }
+    let fib = std::slice::from_raw_parts(fib_ptr, period);
+    fwma_scalar(data, fib, period, first, out);
 }
 
-#[inline(always)]
+#[target_feature(enable = "avx2")]
+#[inline]
 unsafe fn fwma_row_avx2(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize,
     fib_ptr: *const f64,
     out: &mut [f64],
 ) {
-    fwma_row_scalar(data, first, period, stride, fib_ptr, out)
+    let fib = std::slice::from_raw_parts(fib_ptr, period);
+    fwma_avx2(data, fib, period, first, out);
 }
-#[inline(always)]
+
+#[target_feature(enable = "avx512f,fma")]
+#[inline]
 unsafe fn fwma_row_avx512(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize,
     fib_ptr: *const f64,
     out: &mut [f64],
 ) {
-    fwma_row_scalar(data, first, period, stride, fib_ptr, out)
+    let fib = std::slice::from_raw_parts(fib_ptr, period);
+    fwma_avx512(data, fib, period, first, out);
 }
 
 #[cfg(test)]

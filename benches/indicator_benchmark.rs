@@ -673,7 +673,6 @@ bench_wrappers! {
     (eri_bench, eri_raw, EriInputS),
     (fisher_bench, fisher_raw, FisherInputS),
     (fosc_bench, fosc_raw, FoscInputS),
-    (fwma_bench, fwma_raw, FwmaInputS),
     (gatorosc_bench, gatorosc_raw, GatorOscInputS),
     (gaussian_bench, gaussian_raw, GaussianInputS),
     (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
