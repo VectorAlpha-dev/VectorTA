@@ -21,14 +21,10 @@
 //! - **`Ok(AlmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(AlmaError)`** otherwise.
 //!
-use crate::utilities::aligned_vector::AlignedVec;
-use crate::utilities::aligned_vector::{
-    align_up, copy_to_aligned, is_aligned, is_avx2_aligned, is_avx512_aligned, AlignedVec,
-    Alignment,
-};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -257,11 +253,13 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
     let s = period as f64 / sigma;
     let s2 = 2.0 * s * s;
 
-    let mut weights = Vec::with_capacity(period);
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+    weights.resize(period, 0.0);
     let mut norm = 0.0;
+
     for i in 0..period {
         let w = (-(i as f64 - m).powi(2) / s2).exp();
-        weights.push(w);
+        weights[i] = w;
         norm += w;
     }
     let inv_norm = 1.0 / norm;
@@ -838,8 +836,9 @@ fn alma_batch_inner(
     let mut inv_norms = vec![0.0; rows];
 
     let cap = rows * max_p;
-    let mut aligned = AlignedVec::with_capacity(cap);
-    let flat_w = aligned.as_mut_slice();
+    let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
+    flat_w.resize(cap, 0.0); // <-- give it ‘cap’ elements
+    let flat_slice = flat_w.as_mut_slice(); // now length == capacity
 
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
