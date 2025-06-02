@@ -22,6 +22,6 @@ Cargo.lock
 src/data/backup/
 profiling.ps1
 file_structure.py
-project_structure.txt
-AGENTS.md
 profile.ps1
+build.rs
+third_party/
