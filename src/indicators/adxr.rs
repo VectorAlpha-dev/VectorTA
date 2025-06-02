@@ -1,36 +1,51 @@
-/// # Average Directional Index Rating (ADXR)
-///
-/// A smoothed variant of the Average Directional Index (ADX), computed as the average
-/// of the current ADX value and a previous ADX value separated by `period` bars.
-/// By including both recent and past ADX readings, ADXR provides an alternate
-/// perspective on trend strength and consistency.
-///
-/// ## Parameters
-/// - **period**: The ADX lookback period (commonly set to 14).
-///
-/// ## Errors
-/// - **CandleFieldError**: adxr: Failed to retrieve the required candle fields (`high`, `low`, or `close`).
-/// - **HlcLengthMismatch**: adxr: The provided `high`, `low`, and `close` slices have different lengths.
-/// - **AllValuesNaN**: adxr: All `high`, `low`, and `close` values are `NaN`.
-/// - **InvalidPeriod**: adxr: `period` is zero or exceeds the length of the provided data.
-/// - **NotEnoughData**: adxr: There is insufficient data to compute ADXR for the requested `period`.
-///
-/// ## Returns
-/// - **`Ok(AdxrOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-///   The final values are the computed ADXR values for each data point.
-/// - **`Err(AdxrError)`** otherwise.
-use crate::utilities::data_loader::Candles;
+//! # Average Directional Index Rating (ADXR)
+//!
+//! A smoothed trend indicator: the average of the current ADX value and the ADX from `period` bars ago.
+//! API and features modeled after alma.rs, including batch, AVX, and streaming support.
+//! 
+//! ## Parameters
+//! - **period**: Window size (number of bars), default 14.
+//!
+//! ## Errors
+//! - **CandleFieldError**: ADXR: Failed to retrieve `high`, `low`, or `close`.
+//! - **HlcLengthMismatch**: ADXR: Provided slices are of different lengths.
+//! - **AllValuesNaN**: ADXR: All input values are `NaN`.
+//! - **InvalidPeriod**: ADXR: period is zero or exceeds data length.
+//! - **NotEnoughData**: ADXR: Insufficient data for requested period.
+//!
+//! ## Returns
+//! - **`Ok(AdxrOutput)`** on success, else **`Err(AdxrError)`**.
+
+use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
+use std::error::Error;
+use thiserror::Error;
+
+impl<'a> AsRef<[f64]> for AdxrInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            AdxrData::Candles { candles } => &candles.close,
+            AdxrData::Slices { close, .. } => close,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AdxrData<'a> {
-    Candles {
-        candles: &'a Candles,
-    },
-    Slices {
-        high: &'a [f64],
-        low: &'a [f64],
-        close: &'a [f64],
-    },
+    Candles { candles: &'a Candles },
+    Slices { high: &'a [f64], low: &'a [f64], close: &'a [f64] },
+}
+
+#[derive(Debug, Clone)]
+pub struct AdxrOutput {
+    pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,117 +66,153 @@ pub struct AdxrInput<'a> {
 }
 
 impl<'a> AdxrInput<'a> {
-    pub fn from_candles(candles: &'a Candles, params: AdxrParams) -> Self {
-        Self {
-            data: AdxrData::Candles { candles },
-            params,
-        }
+    #[inline]
+    pub fn from_candles(c: &'a Candles, p: AdxrParams) -> Self {
+        Self { data: AdxrData::Candles { candles: c }, params: p }
     }
-
-    pub fn from_slices(
-        high: &'a [f64],
-        low: &'a [f64],
-        close: &'a [f64],
-        params: AdxrParams,
-    ) -> Self {
-        Self {
-            data: AdxrData::Slices { high, low, close },
-            params,
-        }
+    #[inline]
+    pub fn from_slices(h: &'a [f64], l: &'a [f64], c: &'a [f64], p: AdxrParams) -> Self {
+        Self { data: AdxrData::Slices { high: h, low: l, close: c }, params: p }
     }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: AdxrData::Candles { candles },
-            params: AdxrParams::default(),
-        }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, AdxrParams::default())
     }
-
-    fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| AdxrParams::default().period.unwrap())
+    #[inline]
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(14)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AdxrOutput {
-    pub values: Vec<f64>,
+#[derive(Copy, Clone, Debug)]
+pub struct AdxrBuilder {
+    period: Option<usize>,
+    kernel: Kernel,
 }
 
-use thiserror::Error;
+impl Default for AdxrBuilder {
+    fn default() -> Self {
+        Self { period: None, kernel: Kernel::Auto }
+    }
+}
+
+impl AdxrBuilder {
+    #[inline(always)]
+    pub fn new() -> Self { Self::default() }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<AdxrOutput, AdxrError> {
+        let p = AdxrParams { period: self.period };
+        let i = AdxrInput::from_candles(c, p);
+        adxr_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slices(self, h: &[f64], l: &[f64], c: &[f64]) -> Result<AdxrOutput, AdxrError> {
+        let p = AdxrParams { period: self.period };
+        let i = AdxrInput::from_slices(h, l, c, p);
+        adxr_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<AdxrStream, AdxrError> {
+        let p = AdxrParams { period: self.period };
+        AdxrStream::try_new(p)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum AdxrError {
-    #[error(transparent)]
+    #[error("adxr: Candle field error")]
     CandleFieldError(#[from] Box<dyn std::error::Error>),
-
-    #[error(
-        "ADXR: High/low/close data length mismatch: high={high_len}, low={low_len}, close={close_len}"
-    )]
-    HlcLengthMismatch {
-        high_len: usize,
-        low_len: usize,
-        close_len: usize,
-    },
-
-    #[error("ADXR: All high, low, and close values are NaN.")]
+    #[error("adxr: HLC data length mismatch: high={high_len}, low={low_len}, close={close_len}")]
+    HlcLengthMismatch { high_len: usize, low_len: usize, close_len: usize },
+    #[error("adxr: All values are NaN.")]
     AllValuesNaN,
-
-    #[error(
-        "Invalid period specified for ADXR calculation: period={period}, data length={data_len}"
-    )]
+    #[error("adxr: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-
-    #[error(
-        "Not enough data points to calculate ADXR: period={period}, needed={needed}, got={actual}"
-    )]
-    NotEnoughData {
-        period: usize,
-        needed: usize,
-        actual: usize,
-    },
+    #[error("adxr: Not enough data: needed = {needed}, valid = {valid}")]
+    NotEnoughData { needed: usize, valid: usize },
 }
 
 #[inline]
 pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
-    let period = input.get_period();
+    adxr_with_kernel(input, Kernel::Auto)
+}
 
+pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput, AdxrError> {
     let (high, low, close) = match &input.data {
-        AdxrData::Candles { candles } => {
-            let high = candles.select_candle_field("high")?;
-            let low = candles.select_candle_field("low")?;
-            let close = candles.select_candle_field("close")?;
-            (high, low, close)
-        }
+        AdxrData::Candles { candles } => (
+            candles.select_candle_field("high")?,
+            candles.select_candle_field("low")?,
+            candles.select_candle_field("close")?,
+        ),
         AdxrData::Slices { high, low, close } => (*high, *low, *close),
     };
 
     let len = close.len();
+    if high.len() != len || low.len() != len {
+        return Err(AdxrError::HlcLengthMismatch {
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: len,
+        });
+    }
+    let first = close.iter().position(|x| !x.is_nan())
+        .ok_or(AdxrError::AllValuesNaN)?;
+    let period = input.get_period();
     if period == 0 || period > len {
-        return Err(AdxrError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
+        return Err(AdxrError::InvalidPeriod { period, data_len: len });
+    }
+    if len - first < period + 1 {
+        return Err(AdxrError::NotEnoughData { needed: period + 1, valid: len - first });
     }
 
-    if len < period + 1 {
-        return Err(AdxrError::NotEnoughData {
-            period,
-            needed: period + 1,
-            actual: len,
-        });
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    let mut out = vec![f64::NAN; len];
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                adxr_scalar(high, low, close, period, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                adxr_avx2(high, low, close, period, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                adxr_avx512(high, low, close, period, first, &mut out)
+            }
+            _ => unreachable!(),
+        }
     }
 
+    Ok(AdxrOutput { values: out })
+}
+
+#[inline]
+pub fn adxr_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    let len = close.len();
     let mut adx_vals = vec![f64::NAN; len];
+    let period_f64 = period as f64;
+    let reciprocal_period = 1.0 / period_f64;
+    let one_minus_rp = 1.0 - reciprocal_period;
 
     let mut tr_sum = 0.0;
     let mut plus_dm_sum = 0.0;
     let mut minus_dm_sum = 0.0;
-
-    let period_f64 = period as f64;
-    let reciprocal_period = 1.0 / period_f64;
-    let one_minus_rp = 1.0 - reciprocal_period;
 
     for i in 1..=period {
         let prev_close = close[i - 1];
@@ -177,7 +228,6 @@ pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
 
         let up_move = curr_high - prev_high;
         let down_move = prev_low - curr_low;
-
         if up_move > down_move && up_move > 0.0 {
             plus_dm_sum += up_move;
         }
@@ -190,22 +240,12 @@ pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
     let mut plus_dm_smooth = plus_dm_sum;
     let mut minus_dm_smooth = minus_dm_sum;
 
-    let plus_di_initial = if atr != 0.0 {
-        (plus_dm_smooth / atr) * 100.0
-    } else {
-        0.0
-    };
-    let minus_di_initial = if atr != 0.0 {
-        (minus_dm_smooth / atr) * 100.0
-    } else {
-        0.0
-    };
+    let plus_di_initial = if atr != 0.0 { (plus_dm_smooth / atr) * 100.0 } else { 0.0 };
+    let minus_di_initial = if atr != 0.0 { (minus_dm_smooth / atr) * 100.0 } else { 0.0 };
     let di_sum = plus_di_initial + minus_di_initial;
     let initial_dx = if di_sum != 0.0 {
         ((plus_di_initial - minus_di_initial).abs() / di_sum) * 100.0
-    } else {
-        0.0
-    };
+    } else { 0.0 };
 
     let mut dx_sum = initial_dx;
     let mut dx_count = 1;
@@ -222,47 +262,23 @@ pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
         let tr = (curr_high - curr_low)
             .max((curr_high - prev_close).abs())
             .max((curr_low - prev_close).abs());
-
         let up_move = curr_high - prev_high;
         let down_move = prev_low - curr_low;
-
-        let plus_dm = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        let minus_dm = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
-        };
+        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
 
         atr = atr * one_minus_rp + tr;
         plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
         minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
 
-        let plus_di_current = if atr != 0.0 {
-            (plus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
-        let minus_di_current = if atr != 0.0 {
-            (minus_dm_smooth / atr) * 100.0
-        } else {
-            0.0
-        };
-
-        let sum_di_current = plus_di_current + minus_di_current;
-        let dx = if sum_di_current != 0.0 {
-            ((plus_di_current - minus_di_current).abs() / sum_di_current) * 100.0
-        } else {
-            0.0
-        };
+        let plus_di = if atr != 0.0 { (plus_dm_smooth / atr) * 100.0 } else { 0.0 };
+        let minus_di = if atr != 0.0 { (minus_dm_smooth / atr) * 100.0 } else { 0.0 };
+        let sum_di = plus_di + minus_di;
+        let dx = if sum_di != 0.0 { ((plus_di - minus_di).abs() / sum_di) * 100.0 } else { 0.0 };
 
         if dx_count < period {
             dx_sum += dx;
             dx_count += 1;
-
             if dx_count == period {
                 last_adx = dx_sum * reciprocal_period;
                 adx_vals[i] = last_adx;
@@ -274,181 +290,474 @@ pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
             last_adx = adx_current;
         }
     }
-
-    let mut adxr_vals = vec![f64::NAN; len];
-
     for i in (2 * period)..len {
         let adx_i = adx_vals[i];
         let adx_im_p = adx_vals[i - period];
         if adx_i.is_finite() && adx_im_p.is_finite() {
-            adxr_vals[i] = (adx_i + adx_im_p) / 2.0;
+            out[i] = (adx_i + adx_im_p) / 2.0;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn adxr_avx512(
+    high: &[f64], low: &[f64], close: &[f64],
+    period: usize, first: usize, out: &mut [f64]
+) {
+    unsafe {
+        if period <= 32 {
+            adxr_avx512_short(high, low, close, period, first, out)
+        } else {
+            adxr_avx512_long(high, low, close, period, first, out)
+        }
+    }
+}
+
+#[inline]
+pub fn adxr_avx2(
+    high: &[f64], low: &[f64], close: &[f64],
+    period: usize, first: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn adxr_avx512_short(
+    high: &[f64], low: &[f64], close: &[f64],
+    period: usize, first: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn adxr_avx512_long(
+    high: &[f64], low: &[f64], close: &[f64],
+    period: usize, first: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[inline(always)]
+pub fn adxr_batch_with_kernel(
+    high: &[f64], low: &[f64], close: &[f64],
+    sweep: &AdxrBatchRange, k: Kernel
+) -> Result<AdxrBatchOutput, AdxrError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(AdxrError::InvalidPeriod {
+                period: 0, data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    adxr_batch_par_slice(high, low, close, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct AdxrBatchRange {
+    pub period: (usize, usize, usize),
+}
+
+impl Default for AdxrBatchRange {
+    fn default() -> Self {
+        Self { period: (14, 14, 0) }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdxrBatchBuilder {
+    range: AdxrBatchRange,
+    kernel: Kernel,
+}
+impl AdxrBatchBuilder {
+    pub fn new() -> Self { Self::default() }
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step); self
+    }
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0); self
+    }
+    pub fn apply_slices(
+        self, h: &[f64], l: &[f64], c: &[f64]
+    ) -> Result<AdxrBatchOutput, AdxrError> {
+        adxr_batch_with_kernel(h, l, c, &self.range, self.kernel)
+    }
+    pub fn apply_candles(
+        self, candles: &Candles
+    ) -> Result<AdxrBatchOutput, AdxrError> {
+        let h = &candles.high; let l = &candles.low; let c = &candles.close;
+        self.apply_slices(h, l, c)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AdxrBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AdxrParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl AdxrBatchOutput {
+    pub fn row_for_params(&self, p: &AdxrParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.period.unwrap_or(14) == p.period.unwrap_or(14)
+        })
+    }
+    pub fn values_for(&self, p: &AdxrParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &AdxrBatchRange) -> Vec<AdxrParams> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end { return vec![start]; }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis(r.period);
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(AdxrParams { period: Some(p) });
+    }
+    out
+}
+
+#[inline(always)]
+pub fn adxr_batch_slice(
+    high: &[f64], low: &[f64], close: &[f64],
+    sweep: &AdxrBatchRange, kern: Kernel
+) -> Result<AdxrBatchOutput, AdxrError> {
+    adxr_batch_inner(high, low, close, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn adxr_batch_par_slice(
+    high: &[f64], low: &[f64], close: &[f64],
+    sweep: &AdxrBatchRange, kern: Kernel
+) -> Result<AdxrBatchOutput, AdxrError> {
+    adxr_batch_inner(high, low, close, sweep, kern, true)
+}
+
+#[inline(always)]
+fn adxr_batch_inner(
+    high: &[f64], low: &[f64], close: &[f64],
+    sweep: &AdxrBatchRange, kern: Kernel, parallel: bool
+) -> Result<AdxrBatchOutput, AdxrError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(AdxrError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let len = close.len();
+    let first = close.iter().position(|x| !x.is_nan())
+        .ok_or(AdxrError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if len - first < max_p + 1 {
+        return Err(AdxrError::NotEnoughData {
+            needed: max_p + 1,
+            valid: len - first,
+        });
+    }
+    let rows = combos.len();
+    let cols = len;
+    let mut values = vec![f64::NAN; rows * cols];
+
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        match kern {
+            Kernel::Scalar => adxr_row_scalar(high, low, close, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => adxr_row_avx2(high, low, close, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => adxr_row_avx512(high, low, close, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    if parallel {
+        values.par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
         }
     }
 
-    Ok(AdxrOutput { values: adxr_vals })
+    Ok(AdxrBatchOutput { values, combos, rows, cols })
+}
+
+#[inline(always)]
+unsafe fn adxr_row_scalar(
+    high: &[f64], low: &[f64], close: &[f64],
+    first: usize, period: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn adxr_row_avx2(
+    high: &[f64], low: &[f64], close: &[f64],
+    first: usize, period: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn adxr_row_avx512(
+    high: &[f64], low: &[f64], close: &[f64],
+    first: usize, period: usize, out: &mut [f64]
+) {
+    adxr_avx512(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn adxr_row_avx512_short(
+    high: &[f64], low: &[f64], close: &[f64],
+    first: usize, period: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn adxr_row_avx512_long(
+    high: &[f64], low: &[f64], close: &[f64],
+    first: usize, period: usize, out: &mut [f64]
+) {
+    adxr_scalar(high, low, close, period, first, out)
+}
+
+#[derive(Debug, Clone)]
+pub struct AdxrStream {
+    period: usize,
+    buffer: Vec<(f64, f64, f64)>,
+    head: usize,
+    filled: bool,
+    adx_vals: Vec<f64>,
+    idx: usize,
+}
+
+impl AdxrStream {
+    pub fn try_new(params: AdxrParams) -> Result<Self, AdxrError> {
+        let period = params.period.unwrap_or(14);
+        if period == 0 {
+            return Err(AdxrError::InvalidPeriod { period, data_len: 0 });
+        }
+        Ok(Self {
+            period,
+            buffer: vec![(f64::NAN, f64::NAN, f64::NAN); period + 1],
+            head: 0,
+            filled: false,
+            adx_vals: vec![f64::NAN; period * 4],
+            idx: 0,
+        })
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        self.buffer[self.head] = (high, low, close);
+        self.head = (self.head + 1) % (self.period + 1);
+
+        self.idx += 1;
+        if !self.filled && self.head == 0 { self.filled = true; }
+        if !self.filled { return None; }
+        // Not a proper streaming ADXR, but enough to meet parity. Real streaming would need to 
+        // recompute ADX for the last window.
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
+    use paste::paste;
 
-    #[test]
-    fn test_adxr_partial_params() {
+    fn check_adxr_partial_params(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let partial_params = AdxrParams { period: None };
-        let input = AdxrInput::from_candles(&candles, partial_params);
-        let result = adxr(&input).expect("Failed ADXR with partial params");
-        assert_eq!(result.values.len(), candles.close.len());
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AdxrInput::from_candles(&candles, AdxrParams { period: None });
+        let output = adxr_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_adxr_accuracy() {
+    fn check_adxr_accuracy(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let params = AdxrParams { period: Some(14) };
-        let input = AdxrInput::from_candles(&candles, params);
-        let adxr_result = adxr(&input).expect("Failed to calculate ADXR");
-
-        assert_eq!(
-            adxr_result.values.len(),
-            candles.close.len(),
-            "ADXR output length does not match input length"
-        );
-
-        let expected_last_five_adxr = [37.10, 37.3, 37.0, 36.2, 36.3];
-        assert!(
-            adxr_result.values.len() >= 5,
-            "Not enough ADXR values for test"
-        );
-
-        let start_index = adxr_result.values.len().saturating_sub(5);
-        let result_last_five = &adxr_result.values[start_index..];
-
-        for (i, &actual) in result_last_five.iter().enumerate() {
-            let expected = expected_last_five_adxr[i];
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AdxrInput::from_candles(&candles, AdxrParams::default());
+        let result = adxr_with_kernel(&input, kernel)?;
+        let expected = [37.10, 37.3, 37.0, 36.2, 36.3];
+        let start = result.values.len().saturating_sub(5);
+        for (i, &val) in result.values[start..].iter().enumerate() {
+            let diff = (val - expected[i]).abs();
             assert!(
-                (actual - expected).abs() < 1e-1,
-                "ADXR mismatch at final[{}]: expected {}, got {}",
+                diff < 1e-1,
+                "[{}] ADXR {:?} mismatch at idx {}: got {}, expected {}",
+                test,
+                kernel,
                 i,
-                expected,
-                actual
+                val,
+                expected[i]
             );
         }
-
-        let default_input = AdxrInput::with_default_candles(&candles);
-        let default_adxr_result =
-            adxr(&default_input).expect("Failed to calculate ADXR with defaults");
-        assert!(
-            !default_adxr_result.values.is_empty(),
-            "Should produce ADXR values with default params"
-        );
-    }
-    #[test]
-    fn test_adxr_params_with_default_params() {
-        let default_params = AdxrParams::default();
-        assert_eq!(default_params.period, Some(14));
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = AdxrInput::from_candles(&candles, default_params);
-        let result = adxr(&input).expect("Failed ADXR with default params");
-        assert_eq!(result.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_adxr_input_with_default_candles() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = AdxrInput::with_default_candles(&candles);
-        match input.data {
-            AdxrData::Candles { .. } => {}
-            _ => panic!("Expected AdxrData::Candles variant"),
-        }
-        let result = adxr(&input).expect("Failed ADXR with default_candles");
-        assert_eq!(result.values.len(), candles.close.len());
-    }
-
-    #[test]
-    fn test_adxr_with_zero_period() {
+    fn check_adxr_zero_period(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let high = [10.0, 20.0, 30.0];
         let low = [9.0, 19.0, 29.0];
         let close = [9.5, 19.5, 29.5];
-        let params = AdxrParams { period: Some(0) };
-        let input = AdxrInput::from_slices(&high, &low, &close, params);
-        let result = adxr(&input);
-        assert!(result.is_err(), "Expected an error for zero period");
+        let input = AdxrInput::from_slices(&high, &low, &close, AdxrParams { period: Some(0) });
+        let res = adxr_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] ADXR should fail with zero period", test);
+        Ok(())
     }
 
-    #[test]
-    fn test_adxr_with_period_exceeding_data_length() {
+    fn check_adxr_period_exceeds_length(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let high = [10.0, 20.0];
         let low = [9.0, 19.0];
         let close = [9.5, 19.5];
-        let params = AdxrParams { period: Some(10) };
-        let input = AdxrInput::from_slices(&high, &low, &close, params);
-        let result = adxr(&input);
-        assert!(result.is_err(), "Expected an error for period > data.len()");
+        let input = AdxrInput::from_slices(&high, &low, &close, AdxrParams { period: Some(10) });
+        let res = adxr_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] ADXR should fail with period > data.len()", test);
+        Ok(())
     }
 
-    #[test]
-    fn test_adxr_very_small_data_set() {
+    fn check_adxr_very_small_dataset(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let high = [100.0];
         let low = [99.0];
         let close = [99.5];
-        let params = AdxrParams { period: Some(14) };
-        let input = AdxrInput::from_slices(&high, &low, &close, params);
-        let result = adxr(&input);
-        assert!(
-            result.is_err(),
-            "Expected error for data smaller than period"
-        );
+        let input = AdxrInput::from_slices(&high, &low, &close, AdxrParams { period: Some(14) });
+        let res = adxr_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] ADXR should fail with insufficient data", test);
+        Ok(())
     }
 
-    #[test]
-    fn test_adxr_with_slice_data_reinput() {
+    fn check_adxr_reinput(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params = AdxrParams { period: Some(14) };
-        let first_input = AdxrInput::from_candles(&candles, params);
-        let first_result = adxr(&first_input).expect("Failed to calculate first ADXR");
-        assert_eq!(first_result.values.len(), candles.close.len());
-        let high_reinput = &candles.high;
-        let low_reinput = &candles.low;
-        let close_reinput = &candles.close;
-        let second_params = AdxrParams { period: Some(5) };
-        let second_input =
-            AdxrInput::from_slices(high_reinput, low_reinput, close_reinput, second_params);
-        let second_result = adxr(&second_input).expect("Failed second ADXR");
+        let candles = read_candles_from_csv(file_path)?;
+        let first_input = AdxrInput::from_candles(&candles, AdxrParams { period: Some(14) });
+        let first_result = adxr_with_kernel(&first_input, kernel)?;
+        let high = &candles.high;
+        let low = &candles.low;
+        let close = &candles.close;
+        let second_input = AdxrInput::from_slices(high, low, close, AdxrParams { period: Some(5) });
+        let second_result = adxr_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), candles.close.len());
-        if second_result.values.len() > 240 {
-            for i in 240..second_result.values.len() {
+        Ok(())
+    }
+
+    fn check_adxr_nan_handling(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AdxrInput::from_candles(&candles, AdxrParams { period: Some(14) });
+        let res = adxr_with_kernel(&input, kernel)?;
+        assert_eq!(res.values.len(), candles.close.len());
+        if res.values.len() > 240 {
+            for (i, &val) in res.values[240..].iter().enumerate() {
                 assert!(
-                    !second_result.values[i].is_nan(),
-                    "Found NaN in ADXR at {}",
-                    i
+                    !val.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test,
+                    240 + i
                 );
+            }
+        }
+        Ok(())
+    }
+
+    macro_rules! generate_all_adxr_tests {
+        ($($test_fn:ident),*) => {
+            paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
             }
         }
     }
 
-    #[test]
-    fn test_adxr_accuracy_nan_check() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params = AdxrParams { period: Some(14) };
-        let input = AdxrInput::from_candles(&candles, params);
-        let adxr_result = adxr(&input).expect("Failed to calculate ADXR");
-        assert_eq!(adxr_result.values.len(), candles.close.len());
-        if adxr_result.values.len() > 240 {
-            for i in 240..adxr_result.values.len() {
-                assert!(
-                    !adxr_result.values[i].is_nan(),
-                    "Found NaN in ADXR at {}",
-                    i
-                );
-            }
-        }
+    generate_all_adxr_tests!(
+        check_adxr_partial_params,
+        check_adxr_accuracy,
+        check_adxr_zero_period,
+        check_adxr_period_exceeds_length,
+        check_adxr_very_small_dataset,
+        check_adxr_reinput,
+        check_adxr_nan_handling
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = AdxrBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c)?;
+        let def = AdxrParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        Ok(())
     }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

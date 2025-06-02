@@ -23,8 +23,10 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::hint::unlikely;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -265,21 +267,22 @@ pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutp
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => {
             frama_scalar(high, low, close, window, sc, fc, first, len)
         }
 
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
             frama_avx2(high, low, close, window, sc, fc, first, len)
         },
 
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
             frama_avx512(high, low, close, window, sc, fc, first, len)
         },
 
-        Kernel::Auto => unreachable!("`Auto` must be resolved above"),
+        _ => unreachable!("`Auto` must be resolved above"),
     }
 }
 
@@ -613,8 +616,8 @@ unsafe fn frama_small_scan(
     }
     Ok(())
 }
-use std::hint::unlikely;
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hmax_pd256(v: __m256d) -> f64 {
     let hi = _mm256_extractf128_pd::<1>(v);
@@ -623,6 +626,8 @@ unsafe fn hmax_pd256(v: __m256d) -> f64 {
     let m = _mm_max_pd(m, _mm_permute_pd::<0b01>(m));
     _mm_cvtsd_f64(m)
 }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hmin_pd256(v: __m256d) -> f64 {
     let hi = _mm256_extractf128_pd::<1>(v);
@@ -632,6 +637,7 @@ unsafe fn hmin_pd256(v: __m256d) -> f64 {
     _mm_cvtsd_f64(m)
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn frama_avx2_small<const WIN: usize>(
     high: &[f64],
@@ -737,6 +743,7 @@ unsafe fn frama_avx2_small<const WIN: usize>(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn frama_avx512_small<const WIN: usize>(
     high: &[f64],
@@ -856,7 +863,8 @@ unsafe fn frama_avx512_small<const WIN: usize>(
     }
 }
 
-#[inline(always)]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub fn frama_avx2(
     high: &[f64],
     low: &[f64],
@@ -885,7 +893,8 @@ pub fn frama_avx2(
     }
 }
 
-#[inline(always)]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub fn frama_avx512(
     high: &[f64],
     low: &[f64],
@@ -1056,7 +1065,9 @@ pub fn frama_batch_with_kernel(
         }
     };
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
@@ -1121,10 +1132,13 @@ fn frama_batch_inner(
         let fc = p.fc.unwrap();
 
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => frama_row_avx512(high, low, close, first, window, out_row, sc, fc),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => frama_row_avx2(high, low, close, first, window, out_row, sc, fc),
             _ => frama_row_scalar(high, low, close, first, window, out_row, sc, fc),
         }
+
     };
     if parallel {
         values
@@ -1280,6 +1294,7 @@ pub unsafe fn frama_row_scalar(
     out.copy_from_slice(&tmp.values);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn frama_row_avx2(
     high: &[f64],
@@ -1305,6 +1320,7 @@ pub unsafe fn frama_row_avx2(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn frama_row_avx512(
     high: &[f64],
@@ -1335,11 +1351,11 @@ mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
     use paste::paste;
 
     fn check_frama_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let default_params = FramaParams {
@@ -1353,7 +1369,7 @@ mod tests {
         Ok(())
     }
     fn check_frama_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = FramaInput::from_candles(&candles, FramaParams::default());
@@ -1381,7 +1397,7 @@ mod tests {
         Ok(())
     }
     fn check_frama_zero_window(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = FramaParams {
             window: Some(0),
@@ -1401,7 +1417,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = FramaParams {
             window: Some(10),
@@ -1421,7 +1437,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = FramaParams {
             window: Some(9),
@@ -1438,7 +1454,7 @@ mod tests {
         Ok(())
     }
     fn check_frama_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let nan_data = [f64::NAN, f64::NAN, f64::NAN];
         let params = FramaParams::default();
         let input = FramaInput::from_slices(&nan_data, &nan_data, &nan_data, params);
@@ -1447,7 +1463,7 @@ mod tests {
         Ok(())
     }
     fn check_frama_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let high = candles.select_candle_field("high").unwrap();
@@ -1497,7 +1513,7 @@ mod tests {
         Ok(())
     }
     fn check_frama_default_candles(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(k, test);
+        skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let input = FramaInput::with_default_candles(&c);
@@ -1513,9 +1529,26 @@ mod tests {
     macro_rules! generate_all_frama_tests {
         ($($test_fn:ident),*) => {
             paste! {
-                $( #[test] fn [<$test_fn _scalar_f64>]() { let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar); } )*
-                $( #[test] fn [<$test_fn _avx2_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2); } )*
-                $( #[test] fn [<$test_fn _avx512_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512); } )*
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                $(
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                )*
+                $(
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
             }
         }
     }
@@ -1530,7 +1563,7 @@ mod tests {
         check_frama_default_candles
     );
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let output = FramaBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
@@ -1556,12 +1589,25 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste! {
-                #[test] fn [<$fn_name _scalar>]() { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
-                #[test] fn [<$fn_name _avx2>]() { let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); }
-                #[test] fn [<$fn_name _avx512>]() { let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); }
-                #[test] fn [<$fn_name _auto_detect>]() { let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); }
+                #[test]
+                fn [<$fn_name _scalar>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
             }
         };
     }
-    gen_batch_tests!(check_batch_default_row);
 }

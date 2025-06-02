@@ -23,8 +23,10 @@
 //!
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+use std::alloc::{alloc, dealloc, Layout};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -264,7 +266,8 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
     }
     let inv_norm = 1.0 / norm;
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period - 1;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -276,20 +279,23 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
             Kernel::Scalar | Kernel::ScalarBatch => {
                 alma_scalar(data, &weights, period, first, inv_norm, &mut out)
             }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 alma_avx2(data, &weights, period, first, inv_norm, &mut out)
             }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 alma_avx512(data, &weights, period, first, inv_norm, &mut out)
             }
-            Kernel::Auto => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
     Ok(AlmaOutput { values: out })
 }
 
-#[inline(always)]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub fn alma_avx512(
     data: &[f64],
     weights: &[f64],
@@ -305,7 +311,7 @@ pub fn alma_avx512(
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn alma_scalar(
     data: &[f64],
     weights: &[f64],
@@ -342,6 +348,7 @@ pub fn alma_scalar(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn alma_avx2(
     data: &[f64],
@@ -390,6 +397,7 @@ unsafe fn alma_avx2(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_avx512_short(
     data: &[f64],
@@ -450,6 +458,9 @@ unsafe fn alma_avx512_short(
     }
 }
 
+
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn alma_avx512_long(
     data: &[f64],
@@ -798,7 +809,6 @@ pub fn alma_batch_par_slice(
 fn round_up8(x: usize) -> usize {
     (x + 7) & !7
 }
-use std::alloc::{alloc, dealloc, Layout};
 
 #[inline(always)]
 fn alma_batch_inner(
@@ -837,8 +847,8 @@ fn alma_batch_inner(
 
     let cap = rows * max_p;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
-    flat_w.resize(cap, 0.0); // <-- give it ‘cap’ elements
-    let flat_slice = flat_w.as_mut_slice(); // now length == capacity
+    flat_w.resize(cap, 0.0);
+    let flat_slice = flat_w.as_mut_slice();
 
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
@@ -865,16 +875,35 @@ fn alma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let mut values = vec![f64::NAN; rows * cols];
+    let mut raw = make_uninit_matrix(rows, cols);      // step 1
+
+    // collect warm-up lengths per row once
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };  // step 2
+
+    // turn into Vec<f64>
+    let mut values: Vec<f64> = unsafe {
+        let ptr = raw.as_mut_ptr() as *mut f64;
+        let cap = raw.capacity();
+        std::mem::forget(raw);
+        Vec::from_raw_parts(ptr, rows * cols, cap)
+    };
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
         let inv_n = *inv_norms.get_unchecked(row);
 
         match kern {
-            Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Scalar => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
-            _ => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+            _ => unreachable!(),
         }
     };
 
@@ -923,6 +952,7 @@ unsafe fn alma_row_scalar(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn alma_row_avx2(
     data: &[f64],
@@ -968,8 +998,9 @@ unsafe fn alma_row_avx2(
     }
 }
 
-#[target_feature(enable = "avx512f,fma")]
-unsafe fn alma_row_avx512(
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma,avx512dq")]
+pub unsafe fn alma_row_avx512(
     data: &[f64],
     first: usize,
     period: usize,
@@ -983,8 +1014,11 @@ unsafe fn alma_row_avx512(
     } else {
         alma_row_avx512_long(data, first, period, stride, w_ptr, inv_n, out);
     }
+
+    _mm_sfence();
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn alma_row_avx512_short(
     data: &[f64],
@@ -1000,6 +1034,7 @@ unsafe fn alma_row_avx512_short(
 
     let chunks = period / STEP;
     let tail_len = period % STEP;
+
     let w0 = _mm512_loadu_pd(w_ptr);
     let w1 = if chunks >= 2 {
         Some(_mm512_loadu_pd(w_ptr.add(STEP)))
@@ -1020,7 +1055,9 @@ unsafe fn alma_row_avx512_short(
                 let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
                 acc = _mm512_fmadd_pd(d1, w1v, acc);
             }
-            *out.get_unchecked_mut(i) = _mm512_reduce_add_pd(acc) * inv_n;
+
+            let res = _mm512_reduce_add_pd(acc) * inv_n;
+            _mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
         }
         return;
     }
@@ -1043,10 +1080,13 @@ unsafe fn alma_row_avx512_short(
 
         let d_tail = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
         acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
-        *out.get_unchecked_mut(i) = _mm512_reduce_add_pd(acc) * inv_n;
+
+        let res = _mm512_reduce_add_pd(acc) * inv_n;
+        _mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub(crate) unsafe fn alma_row_avx512_long(
     data: &[f64],
@@ -1091,6 +1131,7 @@ pub(crate) unsafe fn alma_row_avx512_long(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_no_tail(
     data: &[f64],
@@ -1105,8 +1146,9 @@ unsafe fn long_kernel_no_tail(
 
     let mut data_ptr = data.as_ptr().add(first);
     let stop_ptr = data.as_ptr().add(data.len());
+    let mut dst_ptr = out.as_mut_ptr().add(first + n_chunks * STEP - 1);
 
-    for dst in &mut out[first + n_chunks * STEP - 1..] {
+    while data_ptr < stop_ptr {
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
@@ -1135,15 +1177,19 @@ unsafe fn long_kernel_no_tail(
         }
 
         let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
-        *dst = _mm512_reduce_add_pd(sum) * inv_n;
+        let res = _mm512_reduce_add_pd(sum) * inv_n;
+
+        _mm_stream_sd(dst_ptr as *mut f64, _mm_set_sd(res));
 
         data_ptr = data_ptr.add(1);
+        dst_ptr = dst_ptr.add(1);
         if data_ptr.add(n_chunks * STEP) > stop_ptr {
             break;
         }
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn long_kernel_with_tail(
     data: &[f64],
@@ -1162,8 +1208,9 @@ unsafe fn long_kernel_with_tail(
 
     let mut data_ptr = data.as_ptr().add(first);
     let stop_ptr = data.as_ptr().add(data.len());
+    let mut dst_ptr = out.as_mut_ptr().add(first + n_chunks * STEP + tail_len - 1);
 
-    for dst in &mut out[first + n_chunks * STEP + tail_len - 1..] {
+    while data_ptr < stop_ptr {
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
@@ -1195,9 +1242,12 @@ unsafe fn long_kernel_with_tail(
         s0 = _mm512_fmadd_pd(d_tail, w_tail, s0);
 
         let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
-        *dst = _mm512_reduce_add_pd(sum) * inv_n;
+        let res = _mm512_reduce_add_pd(sum) * inv_n;
+
+        _mm_stream_sd(dst_ptr as *mut f64, _mm_set_sd(res));
 
         data_ptr = data_ptr.add(1);
+        dst_ptr = dst_ptr.add(1);
         if data_ptr.add(n_chunks * STEP + tail_len) > stop_ptr {
             break;
         }
@@ -1208,10 +1258,10 @@ unsafe fn long_kernel_with_tail(
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_alma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1228,7 +1278,7 @@ mod tests {
     }
 
     fn check_alma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1258,7 +1308,7 @@ mod tests {
     }
 
     fn check_alma_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1274,7 +1324,7 @@ mod tests {
     }
 
     fn check_alma_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = AlmaParams {
             period: Some(0),
@@ -1295,7 +1345,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = AlmaParams {
             period: Some(10),
@@ -1316,7 +1366,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = AlmaParams {
             period: Some(9),
@@ -1334,7 +1384,7 @@ mod tests {
     }
 
     fn check_alma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1379,7 +1429,7 @@ mod tests {
     }
 
     fn check_alma_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1408,7 +1458,7 @@ mod tests {
     }
 
     fn check_alma_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -1469,12 +1519,13 @@ mod tests {
                     fn [<$test_fn _scalar_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
-
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
-
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -1483,6 +1534,7 @@ mod tests {
             }
         }
     }
+
 
     generate_all_alma_tests!(
         check_alma_partial_params,
@@ -1497,7 +1549,7 @@ mod tests {
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -1534,9 +1586,11 @@ mod tests {
                 #[test] fn [<$fn_name _scalar>]()      {
                     let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test] fn [<$fn_name _avx2>]()        {
                     let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 #[test] fn [<$fn_name _avx512>]()      {
                     let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }

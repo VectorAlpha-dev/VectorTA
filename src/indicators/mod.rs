@@ -79,7 +79,6 @@ pub mod msw;
 pub mod natr;
 pub mod nvi;
 pub mod obv;
-pub mod pattern_recognition;
 pub mod pfe;
 pub mod pivot;
 pub mod pma;

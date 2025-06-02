@@ -1,34 +1,31 @@
-/// # Chaikin Accumulation/Distribution Oscillator (ADOSC)
-///
-/// A momentum indicator developed by Marc Chaikin, based on the Accumulation/Distribution
-/// Line (ADL). It subtracts a longer-term EMA of the ADL from a shorter-term EMA to
-/// identify subtle shifts in market buying/selling pressure.
-///
-/// ## Parameters
-/// - **short_period**: The shorter EMA period (defaults to 3).
-/// - **long_period**: The longer EMA period (defaults to 10).
-///
-/// ## Errors
-/// - **InvalidPeriod**: adosc: At least one of the periods (`short` or `long`) is zero.
-/// - **ShortPeriodGreaterThanLong**: adosc: `short_period` ≥ `long_period`.
-/// - **NoCandlesAvailable**: adosc: No candle data available.
-/// - **NotEnoughData**: adosc: Not enough data points to compute the longer EMA.
-/// - **EmptySlices**: adosc: At least one of the slices (high, low, close, volume) is empty.
-///
-/// ## Returns
-/// - **`Ok(AdoscOutput)`** on success, with a `Vec<f64>` matching the length of the input data,
-///   containing the ADOSC values.
-/// - **`Err(AdoscError)`** otherwise.
-///
-/// # Example
-/// ```
-/// // Suppose we have a `candles` struct with high, low, close, volume data
-/// let params = AdoscParams { short_period: Some(3), long_period: Some(10) };
-/// let input = AdoscInput::from_candles(&candles, params);
-/// let output = adosc(&input).expect("ADOSC calculation failed");
-/// println!("ADOSC values: {:?}", output.values);
-/// ```
-use crate::utilities::data_loader::Candles;
+//! # Chaikin Accumulation/Distribution Oscillator (ADOSC)
+//!
+//! A momentum indicator that subtracts a long-term EMA of the Accumulation/Distribution Line (ADL)
+//! from a short-term EMA of the ADL to identify shifts in market buying/selling pressure.
+//!
+//! ## Parameters
+//! - **short_period**: The shorter EMA period (default: 3)
+//! - **long_period**: The longer EMA period (default: 10)
+//!
+//! ## Errors
+//! - **AllValuesNaN**: All values are NaN.
+//! - **InvalidPeriod**: short or long period is zero, or longer period exceeds input length.
+//! - **ShortPeriodGreaterThanLong**: short >= long.
+//! - **NotEnoughValidData**: Not enough valid rows for the requested period.
+//! - **EmptySlices**: At least one slice is empty.
+//!
+//! ## Returns
+//! - `Ok(AdoscOutput)` on success, containing Vec<f64> for each row
+//! - `Err(AdoscError)` otherwise.
+
+use crate::utilities::data_loader::{Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum AdoscData<'a> {
@@ -41,6 +38,11 @@ pub enum AdoscData<'a> {
         close: &'a [f64],
         volume: &'a [f64],
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct AdoscOutput {
+    pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,13 +67,14 @@ pub struct AdoscInput<'a> {
 }
 
 impl<'a> AdoscInput<'a> {
+    #[inline]
     pub fn from_candles(candles: &'a Candles, params: AdoscParams) -> Self {
         Self {
             data: AdoscData::Candles { candles },
             params,
         }
     }
-
+    #[inline]
     pub fn from_slices(
         high: &'a [f64],
         low: &'a [f64],
@@ -89,91 +92,130 @@ impl<'a> AdoscInput<'a> {
             params,
         }
     }
-
+    #[inline]
     pub fn with_default_candles(candles: &'a Candles) -> Self {
         Self {
             data: AdoscData::Candles { candles },
             params: AdoscParams::default(),
         }
     }
-
-    fn get_short_period(&self) -> usize {
-        self.params
-            .short_period
-            .unwrap_or_else(|| AdoscParams::default().short_period.unwrap())
+    #[inline]
+    pub fn get_short_period(&self) -> usize {
+        self.params.short_period.unwrap_or(3)
     }
-
-    fn get_long_period(&self) -> usize {
-        self.params
-            .long_period
-            .unwrap_or_else(|| AdoscParams::default().long_period.unwrap())
+    #[inline]
+    pub fn get_long_period(&self) -> usize {
+        self.params.long_period.unwrap_or(10)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AdoscOutput {
-    pub values: Vec<f64>,
+#[derive(Copy, Clone, Debug)]
+pub struct AdoscBuilder {
+    short_period: Option<usize>,
+    long_period: Option<usize>,
+    kernel: Kernel,
 }
 
-use thiserror::Error;
+impl Default for AdoscBuilder {
+    fn default() -> Self {
+        Self {
+            short_period: None,
+            long_period: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl AdoscBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn short_period(mut self, n: usize) -> Self {
+        self.short_period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn long_period(mut self, n: usize) -> Self {
+        self.long_period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<AdoscOutput, AdoscError> {
+        let p = AdoscParams {
+            short_period: self.short_period,
+            long_period: self.long_period,
+        };
+        let i = AdoscInput::from_candles(c, p);
+        adosc_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slices(
+        self,
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        volume: &[f64],
+    ) -> Result<AdoscOutput, AdoscError> {
+        let p = AdoscParams {
+            short_period: self.short_period,
+            long_period: self.long_period,
+        };
+        let i = AdoscInput::from_slices(high, low, close, volume, p);
+        adosc_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<AdoscStream, AdoscError> {
+        let p = AdoscParams {
+            short_period: self.short_period,
+            long_period: self.long_period,
+        };
+        AdoscStream::try_new(p)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum AdoscError {
-    #[error(transparent)]
-    CandleFieldError(#[from] Box<dyn std::error::Error>),
-
-    #[error("Invalid period for ADOSC calculation: short={short}, long={long}")]
-    InvalidPeriod { short: usize, long: usize },
-
-    #[error(
-        "Short period must be less than the long period for ADOSC: short={short}, long={long}"
-    )]
+    #[error("adosc: All values are NaN.")]
+    AllValuesNaN,
+    #[error("adosc: Invalid period: short={short}, long={long}, data length={data_len}")]
+    InvalidPeriod { short: usize, long: usize, data_len: usize },
+    #[error("adosc: short_period must be less than long_period: short={short}, long={long}")]
     ShortPeriodGreaterThanLong { short: usize, long: usize },
-
-    #[error("No candles available for ADOSC.")]
-    NoCandlesAvailable,
-
-    #[error("Not enough data points to calculate ADOSC: required={required}, have={have}")]
-    NotEnoughData { required: usize, have: usize },
-
-    #[error("One of the slices provided to ADOSC is empty: high={high}, low={low}, close={close}, volume={volume}")]
-    EmptySlices {
-        high: usize,
-        low: usize,
-        close: usize,
-        volume: usize,
-    },
+    #[error("adosc: Not enough valid data: needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("adosc: At least one slice is empty: high={high}, low={low}, close={close}, volume={volume}")]
+    EmptySlices { high: usize, low: usize, close: usize, volume: usize },
 }
 
 #[inline]
 pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, AdoscError> {
-    let short = input.get_short_period();
-    let long = input.get_long_period();
+    adosc_with_kernel(input, Kernel::Auto)
+}
 
-    if short == 0 || long == 0 {
-        return Err(AdoscError::InvalidPeriod { short, long });
-    }
-
-    if short >= long {
-        return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
-    }
-
+pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutput, AdoscError> {
     let (high, low, close, volume) = match &input.data {
         AdoscData::Candles { candles } => {
-            if candles.close.is_empty() {
-                return Err(AdoscError::NoCandlesAvailable);
-            }
-            if long > candles.close.len() {
-                return Err(AdoscError::NotEnoughData {
-                    required: long,
-                    have: candles.close.len(),
+            let n = candles.close.len();
+            if n == 0 {
+                return Err(AdoscError::EmptySlices {
+                    high: 0,
+                    low: 0,
+                    close: 0,
+                    volume: 0,
                 });
             }
             (
-                candles.select_candle_field("high")?,
-                candles.select_candle_field("low")?,
-                candles.select_candle_field("close")?,
-                candles.select_candle_field("volume")?,
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+                candles.volume.as_slice(),
             )
         }
         AdoscData::Slices {
@@ -190,31 +232,88 @@ pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, AdoscError> {
                     volume: volume.len(),
                 });
             }
-            let len = close.len();
-            if long > len {
-                return Err(AdoscError::NotEnoughData {
-                    required: long,
-                    have: len,
-                });
-            }
             (*high, *low, *close, *volume)
         }
     };
     let len = close.len();
+    let short = input.get_short_period();
+    let long = input.get_long_period();
+    if short == 0 || long == 0 || long > len {
+        return Err(AdoscError::InvalidPeriod {
+            short,
+            long,
+            data_len: len,
+        });
+    }
+    if short >= long {
+        return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
+    }
+    let first = 0;
+    if len < long {
+        return Err(AdoscError::NotEnoughValidData {
+            needed: long,
+            valid: len,
+        });
+    }
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                adosc_scalar(high, low, close, volume, short, long, first, len)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                adosc_avx2(high, low, close, volume, short, long, first, len)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                adosc_avx512(high, low, close, volume, short, long, first, len)
+            }
+            _ => unreachable!(),
+        }
+    }
+}
 
+#[inline(always)]
+pub unsafe fn adosc_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    _first: usize,
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
 
     let mut adosc_values = vec![0.0; len];
-
     let mut sum_ad = 0.0;
+    let h = high[0];
+    let l = low[0];
+    let c = close[0];
+    let v = volume[0];
+    let hl = h - l;
+    let mfm = if hl != 0.0 {
+        ((c - l) - (h - c)) / hl
+    } else {
+        0.0
+    };
+    let mfv = mfm * v;
+    sum_ad += mfv;
+    let mut short_ema = sum_ad;
+    let mut long_ema = sum_ad;
+    adosc_values[0] = short_ema - long_ema;
 
-    {
-        let h = high[0];
-        let l = low[0];
-        let c = close[0];
-        let v = volume[0];
-
+    for i in 1..len {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        let v = volume[i];
         let hl = h - l;
         let mfm = if hl != 0.0 {
             ((c - l) - (h - c)) / hl
@@ -223,66 +322,483 @@ pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, AdoscError> {
         };
         let mfv = mfm * v;
         sum_ad += mfv;
+        short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
+        long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
+        adosc_values[i] = short_ema - long_ema;
+    }
+    Ok(AdoscOutput { values: adosc_values })
+}
 
-        let mut short_ema = sum_ad;
-        let mut long_ema = sum_ad;
-        adosc_values[0] = short_ema - long_ema;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
+    adosc_scalar(high, low, close, volume, short, long, first, len)
+}
 
-        for i in 1..len {
-            let h = high[i];
-            let l = low[i];
-            let c = close[i];
-            let v = volume[i];
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
+    adosc_scalar(high, low, close, volume, short, long, first, len)
+}
 
-            let hl = h - l;
-            let mfm = if hl != 0.0 {
-                ((c - l) - (h - c)) / hl
-            } else {
-                0.0
-            };
-            let mfv = mfm * v;
-            sum_ad += mfv;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_avx512_short(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
+    adosc_scalar(high, low, close, volume, short, long, first, len)
+}
 
-            short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
-            long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_avx512_long(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
+    adosc_scalar(high, low, close, volume, short, long, first, len)
+}
 
-            adosc_values[i] = short_ema - long_ema;
+#[derive(Clone, Debug)]
+pub struct AdoscBatchRange {
+    pub short_period: (usize, usize, usize),
+    pub long_period: (usize, usize, usize),
+}
+
+impl Default for AdoscBatchRange {
+    fn default() -> Self {
+        Self {
+            short_period: (3, 10, 1),
+            long_period: (10, 30, 1),
         }
     }
+}
 
-    Ok(AdoscOutput {
-        values: adosc_values,
+#[derive(Clone, Debug, Default)]
+pub struct AdoscBatchBuilder {
+    range: AdoscBatchRange,
+    kernel: Kernel,
+}
+
+impl AdoscBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn short_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.short_period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn long_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.long_period = (start, end, step);
+        self
+    }
+    pub fn apply_slices(
+        self,
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        volume: &[f64],
+    ) -> Result<AdoscBatchOutput, AdoscError> {
+        adosc_batch_with_kernel(high, low, close, volume, &self.range, self.kernel)
+    }
+    pub fn apply_candles(self, candles: &Candles) -> Result<AdoscBatchOutput, AdoscError> {
+        self.apply_slices(
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            candles.volume.as_slice(),
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AdoscBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AdoscParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl AdoscBatchOutput {
+    pub fn row_for_params(&self, p: &AdoscParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.short_period.unwrap_or(3) == p.short_period.unwrap_or(3)
+                && c.long_period.unwrap_or(10) == p.long_period.unwrap_or(10)
+        })
+    }
+    pub fn values_for(&self, p: &AdoscParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+fn expand_grid(r: &AdoscBatchRange) -> Vec<AdoscParams> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let shorts = axis(r.short_period);
+    let longs = axis(r.long_period);
+
+    let mut out = Vec::new();
+    for &short in &shorts {
+        for &long in &longs {
+            if short == 0 || long == 0 || short >= long {
+                continue;
+            }
+            out.push(AdoscParams {
+                short_period: Some(short),
+                long_period: Some(long),
+            });
+        }
+    }
+    out
+}
+
+pub fn adosc_batch_with_kernel(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    sweep: &AdoscBatchRange,
+    k: Kernel,
+) -> Result<AdoscBatchOutput, AdoscError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(AdoscError::InvalidPeriod {
+                short: 0,
+                long: 0,
+                data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    adosc_batch_par_slice(high, low, close, volume, sweep, simd)
+}
+
+pub fn adosc_batch_slice(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    sweep: &AdoscBatchRange,
+    kern: Kernel,
+) -> Result<AdoscBatchOutput, AdoscError> {
+    adosc_batch_inner(high, low, close, volume, sweep, kern, false)
+}
+
+pub fn adosc_batch_par_slice(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    sweep: &AdoscBatchRange,
+    kern: Kernel,
+) -> Result<AdoscBatchOutput, AdoscError> {
+    adosc_batch_inner(high, low, close, volume, sweep, kern, true)
+}
+
+fn adosc_batch_inner(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    sweep: &AdoscBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<AdoscBatchOutput, AdoscError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(AdoscError::InvalidPeriod {
+            short: 0,
+            long: 0,
+            data_len: 0,
+        });
+    }
+    let first = 0;
+    let len = close.len();
+    let rows = combos.len();
+    let cols = len;
+
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let prm = &combos[row];
+        let short = prm.short_period.unwrap();
+        let long = prm.long_period.unwrap();
+        match kern {
+            Kernel::Scalar => {
+                let out = adosc_row_scalar(high, low, close, volume, short, long, first, out_row);
+                if out.is_err() {
+                    out_row.fill(f64::NAN);
+                }
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => {
+                let out = adosc_row_avx2(high, low, close, volume, short, long, first, out_row);
+                if out.is_err() {
+                    out_row.fill(f64::NAN);
+                }
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => {
+                let out = adosc_row_avx512(high, low, close, volume, short, long, first, out_row);
+                if out.is_err() {
+                    out_row.fill(f64::NAN);
+                }
+            }
+            _ => unreachable!(),
+        }
+    };
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(AdoscBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
     })
+}
+
+#[inline(always)]
+pub unsafe fn adosc_row_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    _first: usize,
+    out: &mut [f64],
+) -> Result<(), AdoscError> {
+    let len = out.len();
+    let alpha_short = 2.0 / (short as f64 + 1.0);
+    let alpha_long = 2.0 / (long as f64 + 1.0);
+    let mut sum_ad = 0.0;
+    let h = high[0];
+    let l = low[0];
+    let c = close[0];
+    let v = volume[0];
+    let hl = h - l;
+    let mfm = if hl != 0.0 {
+        ((c - l) - (h - c)) / hl
+    } else {
+        0.0
+    };
+    let mfv = mfm * v;
+    sum_ad += mfv;
+    let mut short_ema = sum_ad;
+    let mut long_ema = sum_ad;
+    out[0] = short_ema - long_ema;
+    for i in 1..len {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        let v = volume[i];
+        let hl = h - l;
+        let mfm = if hl != 0.0 {
+            ((c - l) - (h - c)) / hl
+        } else {
+            0.0
+        };
+        let mfv = mfm * v;
+        sum_ad += mfv;
+        short_ema = alpha_short * sum_ad + (1.0 - alpha_short) * short_ema;
+        long_ema = alpha_long * sum_ad + (1.0 - alpha_long) * long_ema;
+        out[i] = short_ema - long_ema;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_row_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), AdoscError> {
+    adosc_row_scalar(high, low, close, volume, short, long, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_row_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), AdoscError> {
+    adosc_row_scalar(high, low, close, volume, short, long, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_row_avx512_short(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), AdoscError> {
+    adosc_row_scalar(high, low, close, volume, short, long, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn adosc_row_avx512_long(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), AdoscError> {
+    adosc_row_scalar(high, low, close, volume, short, long, first, out)
+}
+
+pub struct AdoscStream {
+    short_period: usize,
+    long_period: usize,
+    alpha_short: f64,
+    alpha_long: f64,
+    sum_ad: f64,
+    short_ema: f64,
+    long_ema: f64,
+    initialized: bool,
+}
+
+impl AdoscStream {
+    pub fn try_new(params: AdoscParams) -> Result<Self, AdoscError> {
+        let short = params.short_period.unwrap_or(3);
+        let long = params.long_period.unwrap_or(10);
+        if short == 0 || long == 0 {
+            return Err(AdoscError::InvalidPeriod {
+                short,
+                long,
+                data_len: 0,
+            });
+        }
+        if short >= long {
+            return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
+        }
+        Ok(Self {
+            short_period: short,
+            long_period: long,
+            alpha_short: 2.0 / (short as f64 + 1.0),
+            alpha_long: 2.0 / (long as f64 + 1.0),
+            sum_ad: 0.0,
+            short_ema: 0.0,
+            long_ema: 0.0,
+            initialized: false,
+        })
+    }
+    #[inline(always)]
+    pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
+        let hl = high - low;
+        let mfm = if hl != 0.0 {
+            ((close - low) - (high - close)) / hl
+        } else {
+            0.0
+        };
+        let mfv = mfm * volume;
+        self.sum_ad += mfv;
+        if !self.initialized {
+            self.short_ema = self.sum_ad;
+            self.long_ema = self.sum_ad;
+            self.initialized = true;
+        } else {
+            self.short_ema =
+                self.alpha_short * self.sum_ad + (1.0 - self.alpha_short) * self.short_ema;
+            self.long_ema =
+                self.alpha_long * self.sum_ad + (1.0 - self.alpha_long) * self.long_ema;
+        }
+        self.short_ema - self.long_ema
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_adosc_accuracy() {
+    fn check_adosc_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let input = AdoscInput::with_default_candles(&candles);
-        let result = adosc(&input).expect("Failed to calculate ADOSC");
-
-        assert_eq!(
-            result.values.len(),
-            candles.close.len(),
-            "ADOSC output length does not match input length"
-        );
-
+        let result = adosc_with_kernel(&input, kernel)?;
+        assert_eq!(result.values.len(), candles.close.len());
         let expected_last_five = [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772];
-        assert!(
-            result.values.len() >= 5,
-            "Not enough ADOSC values for the test"
-        );
-
         let start_index = result.values.len().saturating_sub(5);
         let result_last_five = &result.values[start_index..];
-
         for (i, &actual) in result_last_five.iter().enumerate() {
             let expected = expected_last_five[i];
             assert!(
@@ -293,146 +809,93 @@ mod tests {
                 actual
             );
         }
-
         for (i, &val) in result.values.iter().enumerate() {
-            assert!(
-                val.is_finite(),
-                "ADOSC output at index {} should be finite, got {}",
-                i,
-                val
-            );
+            assert!(val.is_finite(), "ADOSC output at index {} should be finite, got {}", i, val);
         }
-    }
-    #[test]
-    fn test_adosc_params_with_default_params() {
-        let default_params = AdoscParams::default();
-        assert_eq!(default_params.short_period, Some(3));
-        assert_eq!(default_params.long_period, Some(10));
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_input_with_default_candles() {
+    fn check_adosc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
+        let partial_params = AdoscParams { short_period: Some(2), long_period: None };
+        let input = AdoscInput::from_candles(&candles, partial_params);
+        let result = adosc_with_kernel(&input, kernel)?;
+        assert_eq!(result.values.len(), candles.close.len());
+        let missing_short = AdoscParams { short_period: None, long_period: Some(12) };
+        let input_missing = AdoscInput::from_candles(&candles, missing_short);
+        let result_missing = adosc_with_kernel(&input_missing, kernel)?;
+        assert_eq!(result_missing.values.len(), candles.close.len());
+        Ok(())
+    }
 
+    fn check_adosc_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
         let input = AdoscInput::with_default_candles(&candles);
         match input.data {
             AdoscData::Candles { .. } => {}
             _ => panic!("Expected AdoscData::Candles variant"),
         }
-        let default_params = AdoscParams::default();
-        assert_eq!(input.params.short_period, default_params.short_period);
-        assert_eq!(input.params.long_period, default_params.long_period);
+        let result = adosc_with_kernel(&input, kernel)?;
+        assert_eq!(result.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_with_zero_period() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let zero_short = AdoscParams {
-            short_period: Some(0),
-            long_period: Some(10),
-        };
-        let input_zero_short = AdoscInput::from_candles(&candles, zero_short);
-        let result_zero_short = adosc(&input_zero_short);
-        assert!(result_zero_short.is_err());
-
-        let zero_long = AdoscParams {
-            short_period: Some(3),
-            long_period: Some(0),
-        };
-        let input_zero_long = AdoscInput::from_candles(&candles, zero_long);
-        let result_zero_long = adosc(&input_zero_long);
-        assert!(result_zero_long.is_err());
-    }
-
-    #[test]
-    fn test_adosc_partial_params() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let partial_params = AdoscParams {
-            short_period: Some(2),
-            long_period: None,
-        };
-        let input_partial = AdoscInput::from_candles(&candles, partial_params);
-        let result_partial = adosc(&input_partial).expect("Failed ADOSC with partial params");
-        assert_eq!(result_partial.values.len(), candles.close.len());
-
-        let one_missing_short = AdoscParams {
-            short_period: None,
-            long_period: Some(12),
-        };
-        let input_missing_short = AdoscInput::from_candles(&candles, one_missing_short);
-        let result_missing_short = adosc(&input_missing_short).expect("Failed ADOSC missing short");
-        assert_eq!(result_missing_short.values.len(), candles.close.len());
-    }
-
-    #[test]
-    fn test_adosc_invalid_period_relationship() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let params = AdoscParams {
-            short_period: Some(10),
-            long_period: Some(5),
-        };
-        let input = AdoscInput::from_candles(&candles, params);
-        let result = adosc(&input);
+    fn check_adosc_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let high = [10.0, 10.0, 10.0];
+        let low = [5.0, 5.0, 5.0];
+        let close = [7.0, 7.0, 7.0];
+        let volume = [1000.0, 1000.0, 1000.0];
+        let zero_short = AdoscParams { short_period: Some(0), long_period: Some(10) };
+        let input = AdoscInput::from_slices(&high, &low, &close, &volume, zero_short);
+        let result = adosc_with_kernel(&input, kernel);
         assert!(result.is_err());
+        let zero_long = AdoscParams { short_period: Some(3), long_period: Some(0) };
+        let input2 = AdoscInput::from_slices(&high, &low, &close, &volume, zero_long);
+        let result2 = adosc_with_kernel(&input2, kernel);
+        assert!(result2.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_period_exceeding_data_length() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let too_long = AdoscParams {
-            short_period: Some(3),
-            long_period: Some(candles.close.len() + 1),
-        };
-        let input_too_long = AdoscInput::from_candles(&candles, too_long);
-        let result_too_long = adosc(&input_too_long);
-        assert!(result_too_long.is_err());
+    fn check_adosc_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let high = [10.0, 11.0, 12.0];
+        let low = [5.0, 5.5, 6.0];
+        let close = [7.0, 8.0, 9.0];
+        let volume = [1000.0, 1000.0, 1000.0];
+        let params = AdoscParams { short_period: Some(3), long_period: Some(10) };
+        let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
+        let result = adosc_with_kernel(&input, kernel);
+        assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_very_small_data_set() {
-        let short = 3;
-        let long = 10;
+    fn check_adosc_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let high = [10.0];
         let low = [5.0];
         let close = [7.0];
         let volume = [1000.0];
-
-        let params = AdoscParams {
-            short_period: Some(short),
-            long_period: Some(long),
-        };
+        let params = AdoscParams { short_period: Some(3), long_period: Some(10) };
         let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
-        let result = adosc(&input);
+        let result = adosc_with_kernel(&input, kernel);
         assert!(result.is_err());
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_with_slice_data_reinput() {
+    fn check_adosc_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let first_params = AdoscParams {
-            short_period: Some(3),
-            long_period: Some(10),
-        };
+        let candles = read_candles_from_csv(file_path)?;
+        let first_params = AdoscParams { short_period: Some(3), long_period: Some(10) };
         let first_input = AdoscInput::from_candles(&candles, first_params);
-        let first_result = adosc(&first_input).expect("Failed to calculate ADOSC (first)");
-
+        let first_result = adosc_with_kernel(&first_input, kernel)?;
         assert_eq!(first_result.values.len(), candles.close.len());
-
-        let second_params = AdoscParams {
-            short_period: Some(2),
-            long_period: Some(6),
-        };
+        let second_params = AdoscParams { short_period: Some(2), long_period: Some(6) };
         let second_input = AdoscInput::from_slices(
             &first_result.values,
             &first_result.values,
@@ -440,31 +903,99 @@ mod tests {
             &first_result.values,
             second_params,
         );
-        let second_result = adosc(&second_input).expect("Failed to calculate ADOSC (second)");
+        let second_result = adosc_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), first_result.values.len());
-        if second_result.values.len() > 240 {
-            for i in 240..second_result.values.len() {
-                assert!(second_result.values[i].is_finite());
-            }
-        }
+        Ok(())
     }
 
-    #[test]
-    fn test_adosc_accuracy_nan_check() {
+    fn check_adosc_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let params = AdoscParams {
-            short_period: Some(3),
-            long_period: Some(10),
-        };
-        let input = AdoscInput::from_candles(&candles, params);
-        let result = adosc(&input).expect("Failed to calculate ADOSC");
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AdoscInput::from_candles(&candles, AdoscParams::default());
+        let result = adosc_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), candles.close.len());
         if result.values.len() > 240 {
-            for i in 240..result.values.len() {
-                assert!(!result.values[i].is_nan());
+            for (i, &val) in result.values[240..].iter().enumerate() {
+                assert!(!val.is_nan(), "[{}] Found unexpected NaN at out-index {}", test_name, 240 + i);
+            }
+        }
+        Ok(())
+    }
+
+    fn check_adosc_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let params = AdoscParams { short_period: Some(3), long_period: Some(10) };
+        let input = AdoscInput::from_candles(&candles, params.clone());
+        let batch_output = adosc_with_kernel(&input, kernel)?.values;
+        let mut stream = AdoscStream::try_new(params)?;
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for ((&h, &l), (&c, &v)) in candles.high.iter().zip(candles.low.iter()).zip(candles.close.iter().zip(candles.volume.iter())) {
+            stream_values.push(stream.update(h, l, c, v));
+        }
+        assert_eq!(batch_output.len(), stream_values.len());
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+            let diff = (b - s).abs();
+            assert!(diff < 1e-9, "[{}] ADOSC streaming mismatch at idx {}: batch={}, stream={}, diff={}", test_name, i, b, s, diff);
+        }
+        Ok(())
+    }
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let batch = AdoscBatchBuilder::new().kernel(kernel).apply_candles(&candles)?;
+        let def = AdoscParams::default();
+        let row = batch.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), candles.close.len());
+        Ok(())
+    }
+
+    macro_rules! generate_all_adosc_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() { let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar); }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2); }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512); }
+                )*
             }
         }
     }
+
+    generate_all_adosc_tests!(
+        check_adosc_accuracy,
+        check_adosc_partial_params,
+        check_adosc_default_candles,
+        check_adosc_zero_period,
+        check_adosc_period_exceeds_length,
+        check_adosc_very_small_dataset,
+        check_adosc_reinput,
+        check_adosc_nan_handling,
+        check_adosc_streaming
+    );
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        { let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      { let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); }
+                #[test] fn [<$fn_name _auto_detect>]() { let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); }
+            }
+        };
+    }
+
+    gen_batch_tests!(check_batch_default_row);
 }

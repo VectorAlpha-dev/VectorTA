@@ -21,6 +21,8 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
@@ -153,14 +155,17 @@ pub fn ehlers_itrend_with_kernel(
         Kernel::Scalar | Kernel::ScalarBatch => unsafe {
             ehlers_itrend_scalar(data, warmup_bars, max_dc, first, &mut out)
         },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 | Kernel::Avx2Batch => {
             ehlers_itrend_avx2(data, warmup_bars, max_dc, first, &mut out);
         }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 | Kernel::Avx512Batch => {
             ehlers_itrend_avx512(data, warmup_bars, max_dc, first, &mut out);
         }
         _ => unreachable!(),
     }
+
     Ok(EhlersITrendOutput { values: out })
 }
 
@@ -437,7 +442,7 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
         }
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn ehlers_itrend_avx2(
     data: &[f64],
@@ -448,7 +453,7 @@ pub fn ehlers_itrend_avx2(
 ) {
     ehlers_itrend_scalar(data, warmup_bars, max_dc, first_valid, out);
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn ehlers_itrend_avx512(
     data: &[f64],
@@ -767,11 +772,14 @@ pub fn ehlers_itrend_batch_with_kernel(
     };
 
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
+
 
     ehlers_itrend_batch_par_slice(data, sweep, simd)
 }
@@ -808,7 +816,9 @@ fn ehlers_itrend_batch_inner(
         let warmup_bars = p.warmup_bars.unwrap();
         let max_dc = p.max_dc_period.unwrap();
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => ehlers_itrend_row_avx512(data, warmup_bars, max_dc, first, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => ehlers_itrend_row_avx2(data, warmup_bars, max_dc, first, out_row),
             _ => ehlers_itrend_row_scalar(data, warmup_bars, max_dc, first, out_row),
         }
@@ -905,7 +915,7 @@ pub fn ehlers_itrend_row_scalar(
 ) {
     ehlers_itrend_scalar(data, warmup_bars, max_dc, first, out);
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn ehlers_itrend_row_avx2(
     data: &[f64],
@@ -916,7 +926,7 @@ pub fn ehlers_itrend_row_avx2(
 ) {
     ehlers_itrend_scalar(data, warmup_bars, max_dc, first, out);
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn ehlers_itrend_row_avx512(
     data: &[f64],
@@ -932,10 +942,10 @@ pub fn ehlers_itrend_row_avx512(
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_itrend_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let default_params = EhlersITrendParams {
@@ -949,7 +959,7 @@ mod tests {
     }
 
     fn check_itrend_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EhlersITrendInput::with_default_candles(&candles);
@@ -972,7 +982,7 @@ mod tests {
     }
 
     fn check_itrend_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EhlersITrendInput::with_default_candles(&candles);
@@ -986,7 +996,7 @@ mod tests {
     }
 
     fn check_itrend_no_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [];
         let params = EhlersITrendParams {
             warmup_bars: Some(12),
@@ -1003,7 +1013,7 @@ mod tests {
     }
 
     fn check_itrend_all_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [f64::NAN, f64::NAN, f64::NAN];
         let params = EhlersITrendParams {
             warmup_bars: Some(12),
@@ -1023,7 +1033,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [42.0; 5];
         let params = EhlersITrendParams {
             warmup_bars: Some(12),
@@ -1043,7 +1053,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
         let params = EhlersITrendParams {
             warmup_bars: Some(0),
@@ -1056,7 +1066,7 @@ mod tests {
     }
 
     fn check_itrend_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let first_params = EhlersITrendParams {
@@ -1086,7 +1096,7 @@ mod tests {
     }
 
     fn check_itrend_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EhlersITrendInput::from_candles(
@@ -1113,7 +1123,7 @@ mod tests {
     }
 
     fn check_itrend_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let warmup_bars = 12;
@@ -1165,10 +1175,12 @@ mod tests {
                     fn [<$test_fn _scalar_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -1177,6 +1189,7 @@ mod tests {
             }
         }
     }
+
     generate_all_itrend_tests!(
         check_itrend_partial_params,
         check_itrend_accuracy,
@@ -1191,7 +1204,7 @@ mod tests {
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let output = EhlersITrendBatchBuilder::new()
@@ -1214,16 +1227,22 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
+                #[test]
+                fn [<$fn_name _scalar>]() {
                     let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
-                #[test] fn [<$fn_name _avx2>]()        {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
-                #[test] fn [<$fn_name _avx512>]()      {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }
-                #[test] fn [<$fn_name _auto_detect>]() {
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
                     let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
                 }
             }

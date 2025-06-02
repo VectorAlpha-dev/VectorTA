@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
-#![feature(stdarch_x86_avx512)]
-#![feature(portable_simd)]
-#![feature(avx512_target_feature)]
-#![feature(likely_unlikely)] 
-#[allow(non_snake_case)]
+#![cfg_attr(feature = "nightly-avx", feature(stdarch_x86_avx512))]
+#![cfg_attr(feature = "nightly-avx", feature(portable_simd))]
+#![cfg_attr(feature = "nightly-avx", feature(avx512_target_feature))]
+#![cfg_attr(feature = "nightly-avx", feature(likely_unlikely))]
+#![allow(warnings)]
+#![allow(non_snake_case)]
+
 
 
 mod indicators;

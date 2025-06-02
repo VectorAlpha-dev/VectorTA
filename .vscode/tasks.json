@@ -1,17 +1,18 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-	  {
-		"label": "cargo watch",
-		"type": "shell",
-		"command": "cargo",
-		"args": ["watch", "-x", "build"],
-		"problemMatcher": ["$rustc"],
-		"isBackground": true,
-		"group": {
-		  "kind": "build",
-		  "isDefault": true
-		}
-	  }
-	]
-  }
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo watch (nightly+AVX)",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "watch",
+        "-x",
+        "build --features nightly-avx"
+      ],
+      "problemMatcher": ["$rustc"],
+      "isBackground": true,
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}
