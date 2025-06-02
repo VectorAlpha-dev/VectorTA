@@ -20,6 +20,7 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -208,9 +209,11 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => edcf_scalar(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => edcf_avx2(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => edcf_avx512(data, period, first, &mut out),
-            Kernel::Auto => unreachable!(),
+            _ => unreachable!(),
         }
     }
     Ok(EdcfOutput { values: out })
@@ -254,7 +257,7 @@ pub fn edcf_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
         }
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hsum_m256d(v: __m256d) -> f64 {
     let hi = _mm256_extractf128_pd(v, 1);
@@ -264,6 +267,7 @@ unsafe fn hsum_m256d(v: __m256d) -> f64 {
     _mm_cvtsd_f64(_mm_add_sd(sum2, hi64))
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     const STEP: usize = 4;
@@ -323,7 +327,7 @@ pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
         }
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     const STEP: usize = 8;
@@ -459,10 +463,6 @@ impl EdcfStream {
     }
 }
 
-pub fn edcf_streaming_update(_value: f64, _state: &mut EdcfStream) -> Option<f64> {
-    None
-}
-
 #[derive(Clone, Debug)]
 pub struct EdcfBatchRange {
     pub period: (usize, usize, usize),
@@ -533,7 +533,9 @@ pub fn edcf_batch_with_kernel(
         }
     };
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
@@ -627,7 +629,9 @@ fn edcf_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => edcf_row_avx512(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => edcf_row_avx2(data, first, period, out_row),
             _ => edcf_row_scalar(data, first, period, out_row),
         }
@@ -654,12 +658,12 @@ fn edcf_batch_inner(
 unsafe fn edcf_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     edcf_scalar(data, period, first, out)
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn edcf_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     edcf_avx2(data, period, first, out);
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn edcf_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     edcf_avx512(data, period, first, out);
@@ -668,13 +672,13 @@ unsafe fn edcf_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_edcf_partial_params(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: None });
@@ -687,7 +691,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EdcfInput::from_candles(&candles, "hl2", EdcfParams { period: Some(15) });
@@ -718,7 +722,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EdcfInput::with_default_candles(&candles);
@@ -735,7 +739,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(0) });
         let result = edcf_with_kernel(&input, kernel);
@@ -747,7 +751,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data: [f64; 0] = [];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf_with_kernel(&input, kernel);
@@ -759,7 +763,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(10) });
         let result = edcf_with_kernel(&input, kernel);
@@ -771,7 +775,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
         let input = EdcfInput::from_slice(&data, EdcfParams { period: Some(15) });
         let result = edcf_with_kernel(&input, kernel);
@@ -783,7 +787,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let first_input =
@@ -809,7 +813,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 15;
@@ -835,13 +839,25 @@ mod tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
-                    #[test] fn [<$test_fn _scalar_f64>]() { let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar); }
-                    #[test] fn [<$test_fn _avx2_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2); }
-                    #[test] fn [<$test_fn _avx512_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512); }
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
                 )*
             }
         }
     }
+
     generate_all_edcf_tests!(
         check_edcf_partial_params,
         check_edcf_accuracy_last_five,
@@ -858,7 +874,7 @@ mod tests {
         test: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let output = EdcfBatchBuilder::new()
@@ -873,12 +889,27 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
-                #[test] fn [<$fn_name _avx2>]()        { let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); }
-                #[test] fn [<$fn_name _avx512>]()      { let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); }
-                #[test] fn [<$fn_name _auto_detect>]() { let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); }
+                #[test]
+                fn [<$fn_name _scalar>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
             }
         };
     }
+
     gen_batch_tests!(check_batch_default_row);
 }

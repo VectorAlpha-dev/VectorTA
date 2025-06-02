@@ -6,6 +6,6 @@
     "rust-analyzer.diagnostics.enable": true,
     "rust-analyzer.server.path": "rustup",
     "rust-analyzer.server.extraEnv": { "RUSTUP_TOOLCHAIN": "nightly" },
-    "rust-analyzer.rustup.overrideToolchain": "nightly"
-
+    "rust-analyzer.rustup.overrideToolchain": "nightly",
+    "rust-analyzer.cargo.features": ["nightly-avx"]
 }

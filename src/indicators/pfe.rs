@@ -1,26 +1,40 @@
-/// # Polarized Fractal Efficiency (PFE)
-///
-/// A technical indicator that measures how efficiently price moves from one point to another
-/// over a given period. It outputs positive values for upward movement efficiency and negative
-/// values for downward movement efficiency, then smooths the result with an EMA.
-///
-/// ## Parameters
-/// - **period**: The lookback window size. Defaults to 10.
-/// - **smoothing**: The smoothing period for the EMA. Defaults to 5.
-///
-/// ## Errors
-/// - **EmptyData**: pfe: Input data slice is empty.
-/// - **InvalidPeriod**: pfe: `period` is zero or exceeds the data length.
-/// - **NotEnoughValidData**: pfe: Fewer than `period` valid (non-`NaN`) data points remain after the first valid index.
-/// - **AllValuesNaN**: pfe: All input data values are `NaN`.
-///
-/// ## Returns
-/// - **`Ok(PfeOutput)`** on success, containing a `Vec<f64>` matching the input length,
-///   with leading `NaN` until the indicator can be calculated.
-/// - **`Err(PfeError)`** otherwise.
+//! # Polarized Fractal Efficiency (PFE)
+//!
+//! Measures the efficiency of price movement over a period, producing signed values
+//! (positive = upward efficiency, negative = downward), then smooths with EMA.
+//!
+//! ## Parameters
+//! - **period**: Lookback window (default: 10)
+//! - **smoothing**: EMA smoothing window (default: 5)
+//!
+//! ## Errors
+//! - **AllValuesNaN**: pfe: All input data values are `NaN`.
+//! - **InvalidPeriod**: pfe: `period` is zero or exceeds the data length.
+//! - **NotEnoughValidData**: pfe: Not enough valid data points for the requested `period`.
+//!
+//! ## Returns
+//! - **`Ok(PfeOutput)`**: `Vec<f64>` matching input length (leading NaN for non-computable values)
+//! - **`Err(PfeError)`** otherwise
 use crate::utilities::data_loader::{source_type, Candles};
-use std::f64;
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
+use std::error::Error;
 use thiserror::Error;
+
+impl<'a> AsRef<[f64]> for PfeInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            PfeData::Slice(slice) => slice,
+            PfeData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum PfeData<'a> {
@@ -58,102 +72,188 @@ pub struct PfeInput<'a> {
 }
 
 impl<'a> PfeInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: PfeParams) -> Self {
-        Self {
-            data: PfeData::Candles { candles, source },
-            params,
-        }
-    }
-
-    pub fn from_slice(slice: &'a [f64], params: PfeParams) -> Self {
-        Self {
-            data: PfeData::Slice(slice),
-            params,
-        }
-    }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: PfeParams) -> Self {
         Self {
             data: PfeData::Candles {
-                candles,
-                source: "close",
+                candles: c,
+                source: s,
             },
-            params: PfeParams::default(),
+            params: p,
         }
     }
-
-    pub fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| PfeParams::default().period.unwrap())
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: PfeParams) -> Self {
+        Self {
+            data: PfeData::Slice(sl),
+            params: p,
+        }
     }
-
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", PfeParams::default())
+    }
+    #[inline]
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(10)
+    }
+    #[inline]
     pub fn get_smoothing(&self) -> usize {
-        self.params
-            .smoothing
-            .unwrap_or_else(|| PfeParams::default().smoothing.unwrap())
+        self.params.smoothing.unwrap_or(5)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PfeBuilder {
+    period: Option<usize>,
+    smoothing: Option<usize>,
+    kernel: Kernel,
+}
+
+impl Default for PfeBuilder {
+    fn default() -> Self {
+        Self {
+            period: None,
+            smoothing: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl PfeBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn smoothing(mut self, s: usize) -> Self {
+        self.smoothing = Some(s);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<PfeOutput, PfeError> {
+        let p = PfeParams {
+            period: self.period,
+            smoothing: self.smoothing,
+        };
+        let i = PfeInput::from_candles(c, "close", p);
+        pfe_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<PfeOutput, PfeError> {
+        let p = PfeParams {
+            period: self.period,
+            smoothing: self.smoothing,
+        };
+        let i = PfeInput::from_slice(d, p);
+        pfe_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<PfeStream, PfeError> {
+        let p = PfeParams {
+            period: self.period,
+            smoothing: self.smoothing,
+        };
+        PfeStream::try_new(p)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum PfeError {
-    #[error("pfe: Empty data provided.")]
-    EmptyData,
+    #[error("pfe: All values are NaN.")]
+    AllValuesNaN,
     #[error("pfe: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("pfe: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("pfe: All values are NaN.")]
-    AllValuesNaN,
+    #[error("pfe: Invalid smoothing: {smoothing}")]
+    InvalidSmoothing { smoothing: usize },
 }
 
 #[inline]
 pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
+    pfe_with_kernel(input, Kernel::Auto)
+}
+
+pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, PfeError> {
     let data: &[f64] = match &input.data {
         PfeData::Candles { candles, source } => source_type(candles, source),
-        PfeData::Slice(slice) => slice,
+        PfeData::Slice(sl) => sl,
     };
 
-    if data.is_empty() {
-        return Err(PfeError::EmptyData);
-    }
-
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(PfeError::AllValuesNaN)?;
+    let len = data.len();
     let period = input.get_period();
     let smoothing = input.get_smoothing();
 
-    if period == 0 || period > data.len() {
+    if period == 0 || period > len {
         return Err(PfeError::InvalidPeriod {
             period,
-            data_len: data.len(),
+            data_len: len,
         });
     }
-
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(PfeError::AllValuesNaN),
-    };
-
-    if (data.len() - first_valid_idx) < period {
+    if (len - first) < period {
         return Err(PfeError::NotEnoughValidData {
             needed: period,
-            valid: data.len() - first_valid_idx,
+            valid: len - first,
         });
     }
+    if smoothing == 0 {
+        return Err(PfeError::InvalidSmoothing { smoothing });
+    }
 
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                pfe_scalar(data, period, smoothing, first, &mut vec![])
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                pfe_avx2(data, period, smoothing, first, &mut vec![])
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                pfe_avx512(data, period, smoothing, first, &mut vec![])
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[inline]
+pub fn pfe_scalar(
+    data: &[f64],
+    period: usize,
+    smoothing: usize,
+    first_valid: usize,
+    _out: &mut Vec<f64>,
+) -> Result<PfeOutput, PfeError> {
     let ln = period.saturating_sub(1);
-
     let diff_len = data.len().saturating_sub(ln);
     let mut diff_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         diff_array[i] = data[i + ln] - data[i];
     }
-
     let mut a_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         let d = diff_array[i];
         a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
     }
-
     let mut b_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         let start = i;
@@ -165,7 +265,6 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
         }
         b_array[i] = b_sum;
     }
-
     let mut pfe_tmp = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         if b_array[i].abs() < f64::EPSILON {
@@ -174,7 +273,6 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
             pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
         }
     }
-
     let mut signed_pfe = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         let d = diff_array[i];
@@ -186,7 +284,6 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
             signed_pfe[i] = -pfe_tmp[i];
         }
     }
-
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let mut ema_array = vec![f64::NAN; diff_len];
     let mut started = false;
@@ -211,66 +308,502 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
             pfe_values[out_idx] = val;
         }
     }
-
     Ok(PfeOutput { values: pfe_values })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn pfe_avx512(
+    data: &[f64],
+    period: usize,
+    smoothing: usize,
+    first_valid: usize,
+    out: &mut Vec<f64>,
+) -> Result<PfeOutput, PfeError> {
+    pfe_scalar(data, period, smoothing, first_valid, out)
+}
+
+#[inline]
+pub fn pfe_avx2(
+    data: &[f64],
+    period: usize,
+    smoothing: usize,
+    first_valid: usize,
+    out: &mut Vec<f64>,
+) -> Result<PfeOutput, PfeError> {
+    pfe_scalar(data, period, smoothing, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn pfe_avx512_short(
+    data: &[f64],
+    period: usize,
+    smoothing: usize,
+    first_valid: usize,
+    out: &mut Vec<f64>,
+) -> Result<PfeOutput, PfeError> {
+    pfe_scalar(data, period, smoothing, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn pfe_avx512_long(
+    data: &[f64],
+    period: usize,
+    smoothing: usize,
+    first_valid: usize,
+    out: &mut Vec<f64>,
+) -> Result<PfeOutput, PfeError> {
+    pfe_scalar(data, period, smoothing, first_valid, out)
+}
+
+#[inline]
+pub fn pfe_batch_with_kernel(
+    data: &[f64],
+    sweep: &PfeBatchRange,
+    k: Kernel,
+) -> Result<PfeBatchOutput, PfeError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(PfeError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    pfe_batch_par_slice(data, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct PfeBatchRange {
+    pub period: (usize, usize, usize),
+    pub smoothing: (usize, usize, usize),
+}
+
+impl Default for PfeBatchRange {
+    fn default() -> Self {
+        Self {
+            period: (10, 40, 1),
+            smoothing: (5, 10, 1),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PfeBatchBuilder {
+    range: PfeBatchRange,
+    kernel: Kernel,
+}
+
+impl PfeBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    #[inline]
+    pub fn smoothing_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.smoothing = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn smoothing_static(mut self, s: usize) -> Self {
+        self.range.smoothing = (s, s, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<PfeBatchOutput, PfeError> {
+        pfe_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<PfeBatchOutput, PfeError> {
+        PfeBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<PfeBatchOutput, PfeError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<PfeBatchOutput, PfeError> {
+        PfeBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PfeBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<PfeParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl PfeBatchOutput {
+    pub fn row_for_params(&self, p: &PfeParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.period.unwrap_or(10) == p.period.unwrap_or(10)
+                && c.smoothing.unwrap_or(5) == p.smoothing.unwrap_or(5)
+        })
+    }
+    pub fn values_for(&self, p: &PfeParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &PfeBatchRange) -> Vec<PfeParams> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis(r.period);
+    let smoothings = axis(r.smoothing);
+
+    let mut out = Vec::with_capacity(periods.len() * smoothings.len());
+    for &p in &periods {
+        for &s in &smoothings {
+            out.push(PfeParams {
+                period: Some(p),
+                smoothing: Some(s),
+            });
+        }
+    }
+    out
+}
+
+#[inline(always)]
+pub fn pfe_batch_slice(
+    data: &[f64],
+    sweep: &PfeBatchRange,
+    kern: Kernel,
+) -> Result<PfeBatchOutput, PfeError> {
+    pfe_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn pfe_batch_par_slice(
+    data: &[f64],
+    sweep: &PfeBatchRange,
+    kern: Kernel,
+) -> Result<PfeBatchOutput, PfeError> {
+    pfe_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn pfe_batch_inner(
+    data: &[f64],
+    sweep: &PfeBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<PfeBatchOutput, PfeError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(PfeError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(PfeError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(PfeError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        let smoothing = combos[row].smoothing.unwrap();
+        match kern {
+            Kernel::Scalar => {
+                let out = pfe_row_scalar(data, first, period, smoothing, out_row);
+                out;
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => {
+                let out = pfe_row_avx2(data, first, period, smoothing, out_row);
+                out;
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => {
+                let out = pfe_row_avx512(data, first, period, smoothing, out_row);
+                out;
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(PfeBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+unsafe fn pfe_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out: &mut [f64],
+) {
+    let ln = period.saturating_sub(1);
+    let diff_len = data.len().saturating_sub(ln);
+    let mut diff_array = vec![f64::NAN; diff_len];
+    for i in 0..diff_len {
+        diff_array[i] = data[i + ln] - data[i];
+    }
+    let mut a_array = vec![f64::NAN; diff_len];
+    for i in 0..diff_len {
+        let d = diff_array[i];
+        a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
+    }
+    let mut b_array = vec![f64::NAN; diff_len];
+    for i in 0..diff_len {
+        let start = i;
+        let end = i + ln;
+        let mut b_sum = 0.0;
+        for j in start..end {
+            let step_diff = data[j + 1] - data[j];
+            b_sum += (1.0 + step_diff.powi(2)).sqrt();
+        }
+        b_array[i] = b_sum;
+    }
+    let mut pfe_tmp = vec![f64::NAN; diff_len];
+    for i in 0..diff_len {
+        if b_array[i].abs() < f64::EPSILON {
+            pfe_tmp[i] = 0.0;
+        } else {
+            pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
+        }
+    }
+    let mut signed_pfe = vec![f64::NAN; diff_len];
+    for i in 0..diff_len {
+        let d = diff_array[i];
+        if d.is_nan() {
+            signed_pfe[i] = f64::NAN;
+        } else if d > 0.0 {
+            signed_pfe[i] = pfe_tmp[i];
+        } else {
+            signed_pfe[i] = -pfe_tmp[i];
+        }
+    }
+    let alpha = 2.0 / (smoothing as f64 + 1.0);
+    let mut ema_array = vec![f64::NAN; diff_len];
+    let mut started = false;
+    let mut ema_val = 0.0;
+    for i in 0..diff_len {
+        let val = signed_pfe[i];
+        if val.is_nan() {
+            ema_array[i] = f64::NAN;
+        } else if !started {
+            ema_val = val;
+            ema_array[i] = val;
+            started = true;
+        } else {
+            ema_val = alpha * val + (1.0 - alpha) * ema_val;
+            ema_array[i] = ema_val;
+        }
+    }
+    for (i, &val) in ema_array.iter().enumerate() {
+        let out_idx = i + ln;
+        if out_idx < out.len() {
+            out[out_idx] = val;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn pfe_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out: &mut [f64],
+) {
+    pfe_row_scalar(data, first, period, smoothing, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn pfe_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out: &mut [f64],
+) {
+    pfe_row_scalar(data, first, period, smoothing, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn pfe_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out: &mut [f64],
+) {
+    pfe_row_scalar(data, first, period, smoothing, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn pfe_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    smoothing: usize,
+    out: &mut [f64],
+) {
+    pfe_row_scalar(data, first, period, smoothing, out)
+}
+
+#[derive(Debug, Clone)]
+pub struct PfeStream {
+    period: usize,
+    smoothing: usize,
+    buffer: Vec<f64>,
+    ema_val: f64,
+    head: usize,
+    filled: bool,
+    started: bool,
+}
+
+impl PfeStream {
+    pub fn try_new(params: PfeParams) -> Result<Self, PfeError> {
+        let period = params.period.unwrap_or(10);
+        if period == 0 {
+            return Err(PfeError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
+        }
+        let smoothing = params.smoothing.unwrap_or(5);
+        if smoothing == 0 {
+            return Err(PfeError::InvalidSmoothing { smoothing });
+        }
+        Ok(Self {
+            period,
+            smoothing,
+            buffer: vec![f64::NAN; period],
+            ema_val: 0.0,
+            head: 0,
+            filled: false,
+            started: false,
+        })
+    }
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % self.period;
+        if !self.filled && self.head == 0 {
+            self.filled = true;
+        }
+        if !self.filled {
+            return None;
+        }
+        let ln = self.period - 1;
+        let diff = self.buffer[(self.head + ln) % self.period] - self.buffer[self.head];
+        let a = (diff.powi(2) + (self.period as f64).powi(2)).sqrt();
+        let mut b_sum = 0.0;
+        for i in 0..ln {
+            let j = (self.head + i) % self.period;
+            let step_diff = self.buffer[(j + 1) % self.period] - self.buffer[j];
+            b_sum += (1.0 + step_diff.powi(2)).sqrt();
+        }
+        let pfe_val = if b_sum.abs() < f64::EPSILON {
+            0.0
+        } else {
+            let sign = if diff > 0.0 { 1.0 } else { -1.0 };
+            sign * 100.0 * a / b_sum
+        };
+        let alpha = 2.0 / (self.smoothing as f64 + 1.0);
+        if !self.started {
+            self.ema_val = pfe_val;
+            self.started = true;
+        } else {
+            self.ema_val = alpha * pfe_val + (1.0 - alpha) * self.ema_val;
+        }
+        Some(self.ema_val)
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_pfe_partial_params() {
+    fn check_pfe_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let default_params = PfeParams {
             period: None,
             smoothing: None,
         };
-        let input_default = PfeInput::from_candles(&candles, "close", default_params);
-        let output_default = pfe(&input_default).expect("Failed PFE with default params");
-        assert_eq!(output_default.values.len(), candles.close.len());
+        let input = PfeInput::from_candles(&candles, "close", default_params);
+        let output = pfe_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
 
-        let params_period_14 = PfeParams {
-            period: Some(14),
-            smoothing: Some(5),
-        };
-        let input_period_14 = PfeInput::from_candles(&candles, "hl2", params_period_14);
-        let output_period_14 =
-            pfe(&input_period_14).expect("Failed PFE with period=14, source=hl2");
-        assert_eq!(output_period_14.values.len(), candles.close.len());
-
-        let params_custom = PfeParams {
-            period: Some(20),
-            smoothing: Some(10),
-        };
-        let input_custom = PfeInput::from_candles(&candles, "hlc3", params_custom);
-        let output_custom = pfe(&input_custom).expect("Failed PFE fully custom");
-        assert_eq!(output_custom.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    #[ignore]
-    fn test_pfe_accuracy() {
+    fn check_pfe_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
+        let candles = read_candles_from_csv(file_path)?;
+        let close_prices = &candles.close;
 
         let params = PfeParams {
             period: Some(10),
             smoothing: Some(5),
         };
         let input = PfeInput::from_candles(&candles, "close", params);
-        let pfe_result = pfe(&input).expect("Failed to calculate PFE");
+        let pfe_result = pfe_with_kernel(&input, kernel)?;
 
-        assert_eq!(
-            pfe_result.values.len(),
-            close_prices.len(),
-            "PFE length mismatch"
-        );
+        assert_eq!(pfe_result.values.len(), close_prices.len());
 
         let expected_last_five_pfe = [
             464.4835119128518,
@@ -279,17 +812,17 @@ mod tests {
             -122.09984956859148,
             76.97379946575279,
         ];
-        assert!(pfe_result.values.len() >= 5, "PFE length too short");
         let start_index = pfe_result.values.len() - 5;
         let result_last_five_pfe = &pfe_result.values[start_index..];
         for (i, &value) in result_last_five_pfe.iter().enumerate() {
             let expected_value = expected_last_five_pfe[i];
             assert!(
                 (value - expected_value).abs() < 1e-8,
-                "PFE mismatch at index {}: expected {}, got {}",
+                "[{}] PFE mismatch at idx {}: got {}, expected {}",
+                test_name,
                 i,
-                expected_value,
-                value
+                value,
+                expected_value
             );
         }
 
@@ -297,157 +830,279 @@ mod tests {
             assert!(pfe_result.values[i].is_nan());
         }
 
-        let default_input = PfeInput::with_default_candles(&candles);
-        let default_pfe_result = pfe(&default_input).expect("Failed to calculate PFE defaults");
-        assert_eq!(default_pfe_result.values.len(), close_prices.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_pfe_params_with_default_params() {
-        let default_params = PfeParams::default();
-        assert_eq!(
-            default_params.period,
-            Some(10),
-            "Expected period to default to 10"
-        );
-        assert_eq!(
-            default_params.smoothing,
-            Some(5),
-            "Expected smoothing to default to 5"
-        );
-    }
-
-    #[test]
-    fn test_pfe_input_with_default_candles() {
+    fn check_pfe_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let input = PfeInput::with_default_candles(&candles);
         match input.data {
-            PfeData::Candles { source, .. } => {
-                assert_eq!(source, "close", "Expected default source to be 'close'");
-            }
-            _ => panic!("Expected PfeData::Candles variant"),
+            PfeData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected PfeData::Candles"),
         }
+        let output = pfe_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+
+        Ok(())
     }
 
-    #[test]
-    fn test_pfe_with_zero_period() {
+    fn check_pfe_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = PfeParams {
             period: Some(0),
             smoothing: Some(5),
         };
         let input = PfeInput::from_slice(&input_data, params);
-
-        let result = pfe(&input);
-        assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Invalid period"),
-                "Expected 'Invalid period' error message, got: {}",
-                e
-            );
-        }
-    }
-
-    #[test]
-    fn test_pfe_with_period_exceeding_data_length() {
-        let input_data = [10.0, 20.0, 30.0];
-        let params = PfeParams {
-            period: Some(10),
-            smoothing: Some(2),
-        };
-        let input = PfeInput::from_slice(&input_data, params);
-
-        let result = pfe(&input);
-        assert!(result.is_err(), "Expected an error for period > data.len()");
-    }
-
-    #[test]
-    fn test_pfe_very_small_data_set() {
-        let input_data = [42.0];
-        let params = PfeParams {
-            period: Some(10),
-            smoothing: Some(2),
-        };
-        let input = PfeInput::from_slice(&input_data, params);
-
-        let result = pfe(&input);
+        let res = pfe_with_kernel(&input, kernel);
         assert!(
-            result.is_err(),
-            "Expected error for data smaller than period"
+            res.is_err(),
+            "[{}] PFE should fail with zero period",
+            test_name
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_pfe_with_slice_data_reinput() {
+    fn check_pfe_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = PfeParams {
+            period: Some(10),
+            smoothing: Some(2),
+        };
+        let input = PfeInput::from_slice(&data_small, params);
+        let res = pfe_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] PFE should fail with period exceeding length",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_pfe_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
+        let params = PfeParams {
+            period: Some(10),
+            smoothing: Some(2),
+        };
+        let input = PfeInput::from_slice(&single_point, params);
+        let res = pfe_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] PFE should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_pfe_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let first_params = PfeParams {
             period: Some(10),
             smoothing: Some(5),
         };
         let first_input = PfeInput::from_candles(&candles, "close", first_params);
-        let first_result = pfe(&first_input).expect("Failed to calculate first PFE");
-
-        assert_eq!(
-            first_result.values.len(),
-            candles.close.len(),
-            "First PFE output length mismatch"
-        );
+        let first_result = pfe_with_kernel(&first_input, kernel)?;
 
         let second_params = PfeParams {
             period: Some(10),
             smoothing: Some(5),
         };
         let second_input = PfeInput::from_slice(&first_result.values, second_params);
-        let second_result = pfe(&second_input).expect("Failed to calculate second PFE");
+        let second_result = pfe_with_kernel(&second_input, kernel)?;
 
-        assert_eq!(
-            second_result.values.len(),
-            first_result.values.len(),
-            "Second PFE output length mismatch"
-        );
-
+        assert_eq!(second_result.values.len(), first_result.values.len());
         for i in 20..second_result.values.len() {
             assert!(
                 !second_result.values[i].is_nan(),
-                "Expected no NaN after index 20, but found NaN at index {}",
+                "[{}] Expected no NaN after index 20, but found NaN at index {}",
+                test_name,
                 i
             );
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_pfe_accuracy_nan_check() {
+    fn check_pfe_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = &candles.close;
+        let candles = read_candles_from_csv(file_path)?;
 
-        let period = 10;
-        let params = PfeParams {
-            period: Some(period),
-            smoothing: Some(5),
-        };
-        let input = PfeInput::from_candles(&candles, "close", params);
-        let pfe_result = pfe(&input).expect("Failed to calculate PFE");
-
-        assert_eq!(
-            pfe_result.values.len(),
-            close_prices.len(),
-            "PFE length mismatch"
+        let input = PfeInput::from_candles(
+            &candles,
+            "close",
+            PfeParams {
+                period: Some(10),
+                smoothing: Some(5),
+            },
         );
-
-        if pfe_result.values.len() > 240 {
-            for i in 240..pfe_result.values.len() {
+        let res = pfe_with_kernel(&input, kernel)?;
+        assert_eq!(res.values.len(), candles.close.len());
+        if res.values.len() > 240 {
+            for (i, &val) in res.values[240..].iter().enumerate() {
                 assert!(
-                    !pfe_result.values[i].is_nan(),
-                    "Expected no NaN after index 240, but found NaN at index {}",
-                    i
+                    !val.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test_name,
+                    240 + i
                 );
             }
         }
+        Ok(())
     }
+
+    fn check_pfe_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let period = 10;
+        let smoothing = 5;
+
+        let input = PfeInput::from_candles(
+            &candles,
+            "close",
+            PfeParams {
+                period: Some(period),
+                smoothing: Some(smoothing),
+            },
+        );
+        let batch_output = pfe_with_kernel(&input, kernel)?.values;
+
+        let mut stream = PfeStream::try_new(PfeParams {
+            period: Some(period),
+            smoothing: Some(smoothing),
+        })?;
+
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for &price in &candles.close {
+            match stream.update(price) {
+                Some(val) => stream_values.push(val),
+                None => stream_values.push(f64::NAN),
+            }
+        }
+
+        assert_eq!(batch_output.len(), stream_values.len());
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+            let diff = (b - s).abs();
+            assert!(
+                diff < 1e-9,
+                "[{}] PFE streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
+                test_name,
+                i,
+                b,
+                s,
+                diff
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! generate_all_pfe_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
+            }
+        }
+    }
+
+    generate_all_pfe_tests!(
+        check_pfe_partial_params,
+        check_pfe_accuracy,
+        check_pfe_default_candles,
+        check_pfe_zero_period,
+        check_pfe_period_exceeds_length,
+        check_pfe_very_small_dataset,
+        check_pfe_reinput,
+        check_pfe_nan_handling,
+        check_pfe_streaming
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        let output = PfeBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+
+        let def = PfeParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+
+        assert_eq!(row.len(), c.close.len());
+
+        let expected = [
+            464.4835119128518,
+            -311.47775707009305,
+            63.47691006853603,
+            -122.09984956859148,
+            76.97379946575279,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-8,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

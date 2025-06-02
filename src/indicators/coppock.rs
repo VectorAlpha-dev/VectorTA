@@ -1,41 +1,54 @@
-use crate::indicators::moving_averages::ma::{ma, MaData}; // <--- Adjust path as needed
-/// # Coppock Curve (CC)
-///
-/// The Coppock Curve is a momentum indicator that sums two different ROC values
-/// (long and short), and then smooths the sum with a chosen MA (e.g. WMA, SMA, etc.).
-///
-/// Classic defaults:
-/// - Short ROC = 11
-/// - Long ROC = 14
-/// - MA period = 10
-/// - MA type = "wma"
-///
-/// Formula (classic):
-/// ```text
-/// Coppock = MA( ROC(price, longPeriod) + ROC(price, shortPeriod), maPeriod )
-/// ```
-///
-/// ## Parameters
-/// - **short_roc_period**: Period for short ROC (defaults to 11).
-/// - **long_roc_period**: Period for long ROC (defaults to 14).
-/// - **ma_period**: Period for smoothing (defaults to 10).
-/// - **ma_type**: Type of MA (e.g., `"wma"`, `"ema"`, `"sma"`). Defaults to `"wma"`.
-/// - **source**: Candle field (e.g. `"close"`, `"hlc3"`). Defaults to `"close"`.
-///
-/// ## Errors
-/// - **EmptyData**: Input data slice is empty.
-/// - **AllValuesNaN**: All data values are `NaN`.
-/// - **NotEnoughValidData**: Not enough valid data to compute at least one output.
-/// - **InvalidPeriod**: Zero or out-of-bounds short/long/MA periods.
-/// - **MaError**: Underlying error from the `ma(...)` function.
-///
-/// ## Returns
-/// - `Ok(CoppockOutput)` on success, containing a vector matching the input length,
-///   with leading `NaN`s until the earliest valid index.
-/// - `Err(CoppockError)` otherwise.
+//! # Coppock Curve (CC)
+//!
+//! The Coppock Curve is a momentum indicator that sums two different ROC values
+//! (long and short), and then smooths the sum with a chosen MA (e.g. WMA, SMA, etc.).
+//!
+//! Classic defaults:
+//! - Short ROC = 11
+//! - Long ROC = 14
+//! - MA period = 10
+//! - MA type = "wma"
+//!
+//! ## Parameters
+//! - **short_roc_period**: Period for short ROC (defaults to 11).
+//! - **long_roc_period**: Period for long ROC (defaults to 14).
+//! - **ma_period**: Period for smoothing (defaults to 10).
+//! - **ma_type**: Type of MA (e.g., `"wma"`, `"ema"`, `"sma"`). Defaults to `"wma"`.
+//! - **source**: Candle field (e.g. `"close"`, `"hlc3"`). Defaults to `"close"`.
+//!
+//! ## Errors
+//! - **EmptyData**: Input data slice is empty.
+//! - **AllValuesNaN**: All data values are `NaN`.
+//! - **NotEnoughValidData**: Not enough valid data to compute at least one output.
+//! - **InvalidPeriod**: Zero or out-of-bounds short/long/MA periods.
+//! - **MaError**: Underlying error from the `ma(...)` function.
+//!
+//! ## Returns
+//! - `Ok(CoppockOutput)` on success, containing a vector matching the input length,
+//!   with leading `NaN`s until the earliest valid index.
+//! - `Err(CoppockError)` otherwise.
+
 use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use crate::indicators::moving_averages::ma::{ma, MaData};
+
+impl<'a> AsRef<[f64]> for CoppockInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            CoppockData::Slice(slice) => slice,
+            CoppockData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CoppockData<'a> {
@@ -77,53 +90,124 @@ pub struct CoppockInput<'a> {
 }
 
 impl<'a> CoppockInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: CoppockParams) -> Self {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: CoppockParams) -> Self {
         Self {
-            data: CoppockData::Candles { candles, source },
-            params,
+            data: CoppockData::Candles { candles: c, source: s },
+            params: p,
         }
     }
-
-    pub fn from_slice(slice: &'a [f64], params: CoppockParams) -> Self {
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: CoppockParams) -> Self {
         Self {
-            data: CoppockData::Slice(slice),
-            params,
+            data: CoppockData::Slice(sl),
+            params: p,
         }
     }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: CoppockData::Candles {
-                candles,
-                source: "close",
-            },
-            params: CoppockParams::default(),
-        }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", CoppockParams::default())
     }
-
+    #[inline]
     pub fn get_short_roc_period(&self) -> usize {
-        self.params
-            .short_roc_period
-            .unwrap_or_else(|| CoppockParams::default().short_roc_period.unwrap())
+        self.params.short_roc_period.unwrap_or(11)
     }
-
+    #[inline]
     pub fn get_long_roc_period(&self) -> usize {
-        self.params
-            .long_roc_period
-            .unwrap_or_else(|| CoppockParams::default().long_roc_period.unwrap())
+        self.params.long_roc_period.unwrap_or(14)
     }
-
+    #[inline]
     pub fn get_ma_period(&self) -> usize {
-        self.params
-            .ma_period
-            .unwrap_or_else(|| CoppockParams::default().ma_period.unwrap())
+        self.params.ma_period.unwrap_or(10)
     }
-
+    #[inline]
     pub fn get_ma_type(&self) -> String {
-        self.params
-            .ma_type
-            .clone()
-            .unwrap_or_else(|| CoppockParams::default().ma_type.unwrap())
+        self.params.ma_type.clone().unwrap_or_else(|| "wma".to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CoppockBuilder {
+    short: Option<usize>,
+    long: Option<usize>,
+    ma: Option<usize>,
+    ma_type: Option<String>,
+    kernel: Kernel,
+}
+
+impl Default for CoppockBuilder {
+    fn default() -> Self {
+        Self {
+            short: None,
+            long: None,
+            ma: None,
+            ma_type: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl CoppockBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn short_roc_period(mut self, n: usize) -> Self {
+        self.short = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn long_roc_period(mut self, n: usize) -> Self {
+        self.long = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn ma_period(mut self, n: usize) -> Self {
+        self.ma = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn ma_type<T: Into<String>>(mut self, t: T) -> Self {
+        self.ma_type = Some(t.into());
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<CoppockOutput, CoppockError> {
+        let p = CoppockParams {
+            short_roc_period: self.short,
+            long_roc_period: self.long,
+            ma_period: self.ma,
+            ma_type: self.ma_type,
+        };
+        let i = CoppockInput::from_candles(c, "close", p);
+        coppock_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<CoppockOutput, CoppockError> {
+        let p = CoppockParams {
+            short_roc_period: self.short,
+            long_roc_period: self.long,
+            ma_period: self.ma,
+            ma_type: self.ma_type,
+        };
+        let i = CoppockInput::from_slice(d, p);
+        coppock_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<CoppockStream, CoppockError> {
+        let p = CoppockParams {
+            short_roc_period: self.short,
+            long_roc_period: self.long,
+            ma_period: self.ma,
+            ma_type: self.ma_type,
+        };
+        CoppockStream::try_new(p)
     }
 }
 
@@ -150,11 +234,11 @@ pub enum CoppockError {
 
 #[inline]
 pub fn coppock(input: &CoppockInput) -> Result<CoppockOutput, CoppockError> {
-    let data: &[f64] = match &input.data {
-        CoppockData::Candles { candles, source } => source_type(candles, source),
-        CoppockData::Slice(slice) => slice,
-    };
+    coppock_with_kernel(input, Kernel::Auto)
+}
 
+pub fn coppock_with_kernel(input: &CoppockInput, kernel: Kernel) -> Result<CoppockOutput, CoppockError> {
+    let data: &[f64] = input.as_ref();
     if data.is_empty() {
         return Err(CoppockError::EmptyData);
     }
@@ -164,92 +248,510 @@ pub fn coppock(input: &CoppockInput) -> Result<CoppockOutput, CoppockError> {
     let ma_p = input.get_ma_period();
     let data_len = data.len();
 
-    if short == 0
-        || long == 0
-        || ma_p == 0
-        || short > data_len
-        || long > data_len
-        || ma_p > data_len
-    {
-        return Err(CoppockError::InvalidPeriod {
-            short,
-            long,
-            ma: ma_p,
-            data_len,
-        });
+    if short == 0 || long == 0 || ma_p == 0 || short > data_len || long > data_len || ma_p > data_len {
+        return Err(CoppockError::InvalidPeriod { short, long, ma: ma_p, data_len });
     }
 
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(CoppockError::AllValuesNaN),
-    };
-
+    let first = data.iter().position(|&x| !x.is_nan()).ok_or(CoppockError::AllValuesNaN)?;
     let largest_roc = short.max(long);
-    if (data_len - first_valid_idx) < largest_roc {
-        return Err(CoppockError::NotEnoughValidData {
-            needed: largest_roc,
-            valid: data_len - first_valid_idx,
-        });
+    if (data_len - first) < largest_roc {
+        return Err(CoppockError::NotEnoughValidData { needed: largest_roc, valid: data_len - first });
     }
 
-    let mut sum_roc = vec![f64::NAN; data_len];
+    let mut sum_roc = AVec::<f64>::with_capacity(CACHELINE_ALIGN, data_len);
+    sum_roc.resize(data_len, f64::NAN);
 
-    let start_idx = first_valid_idx + largest_roc;
-    for i in start_idx..data_len {
+    unsafe {
+        match match kernel { Kernel::Auto => detect_best_kernel(), other => other } {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                coppock_scalar(data, short, long, first, &mut sum_roc)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                coppock_avx2(data, short, long, first, &mut sum_roc)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                coppock_avx512(data, short, long, first, &mut sum_roc)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let ma_type = input.get_ma_type();
+    let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p)
+        .map_err(CoppockError::MaError)?;
+
+    Ok(CoppockOutput { values: smoothed })
+}
+
+#[inline]
+pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+    let largest = short.max(long);
+    let start_idx = first + largest;
+    for i in start_idx..data.len() {
         let current = data[i];
         let prev_short = data[i - short];
         let short_val = ((current / prev_short) - 1.0) * 100.0;
         let prev_long = data[i - long];
         let long_val = ((current / prev_long) - 1.0) * 100.0;
-        sum_roc[i] = short_val + long_val;
+        out[i] = short_val + long_val;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+    coppock_scalar(data, short, long, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+    if short.max(long) <= 32 {
+        coppock_avx512_short(data, short, long, first, out)
+    } else {
+        coppock_avx512_long(data, short, long, first, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_avx512_short(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+    coppock_scalar(data, short, long, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_avx512_long(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+    coppock_scalar(data, short, long, first, out)
+}
+
+#[derive(Debug, Clone)]
+pub struct CoppockStream {
+    short: usize,
+    long: usize,
+    ma_period: usize,
+    ma_type: String,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
+    ma_buf: Vec<f64>,
+    ma_head: usize,
+    ma_filled: bool,
+}
+
+impl CoppockStream {
+    pub fn try_new(params: CoppockParams) -> Result<Self, CoppockError> {
+        let short = params.short_roc_period.unwrap_or(11);
+        let long = params.long_roc_period.unwrap_or(14);
+        let ma_period = params.ma_period.unwrap_or(10);
+        let ma_type = params.ma_type.unwrap_or_else(|| "wma".to_string());
+        if short == 0 || long == 0 || ma_period == 0 {
+            return Err(CoppockError::InvalidPeriod {
+                short, long, ma: ma_period, data_len: 0,
+            });
+        }
+        Ok(Self {
+            short,
+            long,
+            ma_period,
+            ma_type,
+            buffer: vec![f64::NAN; long.max(short) + 1],
+            head: 0,
+            filled: false,
+            ma_buf: vec![f64::NAN; ma_period],
+            ma_head: 0,
+            ma_filled: false,
+        })
     }
 
-    let ma_type = input.get_ma_type();
-    let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p)?;
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        let n = self.buffer.len();
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % n;
+        if !self.filled && self.head == 0 {
+            self.filled = true;
+        }
+        if !self.filled {
+            return None;
+        }
+        let idx = self.head;
+        let cur = self.buffer[idx];
+        let prev_short = self.buffer[(idx + n - self.short) % n];
+        let prev_long = self.buffer[(idx + n - self.long) % n];
+        if prev_short.is_nan() || prev_long.is_nan() || cur.is_nan() {
+            return None;
+        }
+        let short_val = ((cur / prev_short) - 1.0) * 100.0;
+        let long_val = ((cur / prev_long) - 1.0) * 100.0;
+        let sum_roc = short_val + long_val;
+        let ma_n = self.ma_buf.len();
+        self.ma_buf[self.ma_head] = sum_roc;
+        self.ma_head = (self.ma_head + 1) % ma_n;
+        if !self.ma_filled && self.ma_head == 0 {
+            self.ma_filled = true;
+        }
+        if !self.ma_filled {
+            return None;
+        }
+        let mut smoothed = 0.0;
+        if self.ma_type == "wma" {
+            let denom = (ma_n * (ma_n + 1) / 2) as f64;
+            for i in 0..ma_n {
+                let idx = (self.ma_head + i) % ma_n;
+                smoothed += self.ma_buf[idx] * (i + 1) as f64;
+            }
+            smoothed /= denom;
+        } else if self.ma_type == "sma" {
+            let mut count = 0;
+            for i in 0..ma_n {
+                let idx = (self.ma_head + i) % ma_n;
+                let v = self.ma_buf[idx];
+                if !v.is_nan() {
+                    smoothed += v;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                smoothed /= count as f64;
+            }
+        } else {
+            return None;
+        }
+        Some(smoothed)
+    }
+}
 
-    Ok(CoppockOutput { values: smoothed })
+#[derive(Clone, Debug)]
+pub struct CoppockBatchRange {
+    pub short: (usize, usize, usize),
+    pub long: (usize, usize, usize),
+    pub ma: (usize, usize, usize),
+}
+
+impl Default for CoppockBatchRange {
+    fn default() -> Self {
+        Self {
+            short: (11, 11, 0),
+            long: (14, 14, 0),
+            ma: (10, 10, 0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CoppockBatchBuilder {
+    range: CoppockBatchRange,
+    kernel: Kernel,
+}
+
+impl CoppockBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn short_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.short = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn short_static(mut self, n: usize) -> Self {
+        self.range.short = (n, n, 0);
+        self
+    }
+    #[inline]
+    pub fn long_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.long = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn long_static(mut self, n: usize) -> Self {
+        self.range.long = (n, n, 0);
+        self
+    }
+    #[inline]
+    pub fn ma_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.ma = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn ma_static(mut self, n: usize) -> Self {
+        self.range.ma = (n, n, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<CoppockBatchOutput, CoppockError> {
+        coppock_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<CoppockBatchOutput, CoppockError> {
+        CoppockBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<CoppockBatchOutput, CoppockError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<CoppockBatchOutput, CoppockError> {
+        CoppockBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+pub fn coppock_batch_with_kernel(
+    data: &[f64],
+    sweep: &CoppockBatchRange,
+    k: Kernel,
+) -> Result<CoppockBatchOutput, CoppockError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(CoppockError::InvalidPeriod {
+                short: 0,
+                long: 0,
+                ma: 0,
+                data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    coppock_batch_par_slice(data, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct CoppockBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<CoppockParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl CoppockBatchOutput {
+    pub fn row_for_params(&self, p: &CoppockParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.short_roc_period.unwrap_or(11) == p.short_roc_period.unwrap_or(11)
+                && c.long_roc_period.unwrap_or(14) == p.long_roc_period.unwrap_or(14)
+                && c.ma_period.unwrap_or(10) == p.ma_period.unwrap_or(10)
+        })
+    }
+    pub fn values_for(&self, p: &CoppockParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &CoppockBatchRange) -> Vec<CoppockParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let shorts = axis_usize(r.short);
+    let longs = axis_usize(r.long);
+    let mas = axis_usize(r.ma);
+    let mut out = Vec::with_capacity(shorts.len() * longs.len() * mas.len());
+    for &s in &shorts {
+        for &l in &longs {
+            for &m in &mas {
+                out.push(CoppockParams {
+                    short_roc_period: Some(s),
+                    long_roc_period: Some(l),
+                    ma_period: Some(m),
+                    ma_type: Some("wma".to_string()),
+                });
+            }
+        }
+    }
+    out
+}
+
+#[inline(always)]
+pub fn coppock_batch_slice(
+    data: &[f64],
+    sweep: &CoppockBatchRange,
+    kern: Kernel,
+) -> Result<CoppockBatchOutput, CoppockError> {
+    coppock_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn coppock_batch_par_slice(
+    data: &[f64],
+    sweep: &CoppockBatchRange,
+    kern: Kernel,
+) -> Result<CoppockBatchOutput, CoppockError> {
+    coppock_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn coppock_batch_inner(
+    data: &[f64],
+    sweep: &CoppockBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<CoppockBatchOutput, CoppockError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(CoppockError::InvalidPeriod { short: 0, long: 0, ma: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(CoppockError::AllValuesNaN)?;
+    let max_roc = combos.iter().map(|c| c.short_roc_period.unwrap().max(c.long_roc_period.unwrap())).max().unwrap();
+    if data.len() - first < max_roc {
+        return Err(CoppockError::NotEnoughValidData { needed: max_roc, valid: data.len() - first });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let c = &combos[row];
+        let short = c.short_roc_period.unwrap();
+        let long = c.long_roc_period.unwrap();
+        let largest = short.max(long);
+        for i in 0..cols {
+            out_row[i] = f64::NAN;
+        }
+        for i in (first + largest)..cols {
+            let current = data[i];
+            let prev_short = data[i - short];
+            let short_val = ((current / prev_short) - 1.0) * 100.0;
+            let prev_long = data[i - long];
+            let long_val = ((current / prev_long) - 1.0) * 100.0;
+            out_row[i] = short_val + long_val;
+        }
+    };
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(CoppockBatchOutput { values, combos, rows, cols })
+}
+
+#[inline(always)]
+pub fn coppock_row_scalar(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    _stride: usize,
+    _w_ptr: *const f64,
+    _inv_n: f64,
+    out: &mut [f64],
+) {
+    let largest = short.max(long);
+    for i in (first + largest)..data.len() {
+        let current = data[i];
+        let prev_short = data[i - short];
+        let short_val = ((current / prev_short) - 1.0) * 100.0;
+        let prev_long = data[i - long];
+        let long_val = ((current / prev_long) - 1.0) * 100.0;
+        out[i] = short_val + long_val;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_row_avx2(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_row_avx512(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    if short.max(long) <= 32 {
+        coppock_row_avx512_short(data, first, short, long, stride, w_ptr, inv_n, out)
+    } else {
+        coppock_row_avx512_long(data, first, short, long, stride, w_ptr, inv_n, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn coppock_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    stride: usize,
+    w_ptr: *const f64,
+    inv_n: f64,
+    out: &mut [f64],
+) {
+    coppock_row_scalar(data, first, short, long, stride, w_ptr, inv_n, out)
+}
+
+#[inline(always)]
+fn expand_grid_coppock(_r: &CoppockBatchRange) -> Vec<CoppockParams> {
+    vec![CoppockParams::default()]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_coppock_partial_params() {
+    fn check_coppock_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let default_params = CoppockParams::default();
-        let input_default = CoppockInput::from_candles(&candles, "close", default_params);
-        let output_default = coppock(&input_default).expect("Failed Coppock with defaults");
-        assert_eq!(output_default.values.len(), candles.close.len());
-
-        let custom_params = CoppockParams {
-            short_roc_period: Some(9),
-            long_roc_period: Some(13),
-            ma_period: Some(8),
-            ma_type: Some("sma".to_string()),
-        };
-        let input_custom = CoppockInput::from_candles(&candles, "hlc3", custom_params);
-        let output_custom = coppock(&input_custom).expect("Failed Coppock with custom");
-        assert_eq!(output_custom.values.len(), candles.close.len());
+        let input = CoppockInput::from_candles(&candles, "close", default_params);
+        let output = coppock_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
-
-    #[test]
-    fn test_coppock_accuracy() {
+    fn check_coppock_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let input = CoppockInput::with_default_candles(&candles);
-        let coppock_result = coppock(&input).expect("Failed to calculate Coppock");
-
-        assert_eq!(
-            coppock_result.values.len(),
-            candles.close.len(),
-            "Coppock length mismatch"
-        );
-
+        let result = coppock_with_kernel(&input, kernel)?;
         let expected_last_five = [
             -1.4542764618985533,
             -1.3795224034983653,
@@ -257,104 +759,94 @@ mod tests {
             -1.9179048338714915,
             -2.1096548435774625,
         ];
-
-        assert!(
-            coppock_result.values.len() >= 5,
-            "Not enough data to check the last 5 values"
-        );
-
-        let start_idx = coppock_result.values.len() - 5;
-        let last_five_values = &coppock_result.values[start_idx..];
-
-        for (i, &actual) in last_five_values.iter().enumerate() {
-            let expected = expected_last_five[i];
+        let start = result.values.len().saturating_sub(5);
+        for (i, &val) in result.values[start..].iter().enumerate() {
+            let diff = (val - expected_last_five[i]).abs();
             assert!(
-                (actual - expected).abs() < 1e-7,
-                "Coppock mismatch at final 5 index {}: expected {}, got {}",
+                diff < 1e-7,
+                "[{}] Coppock {:?} mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
                 i,
-                expected,
-                actual
+                val,
+                expected_last_five[i]
             );
         }
+        Ok(())
     }
-
-    #[test]
-    fn test_coppock_params_with_default_params() {
-        let defaults = CoppockParams::default();
-        assert_eq!(defaults.short_roc_period, Some(11));
-        assert_eq!(defaults.long_roc_period, Some(14));
-        assert_eq!(defaults.ma_period, Some(10));
-        assert_eq!(defaults.ma_type.as_deref(), Some("wma"));
-    }
-
-    #[test]
-    fn test_coppock_input_with_default_candles() {
+    fn check_coppock_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
         let input = CoppockInput::with_default_candles(&candles);
-
         match input.data {
-            CoppockData::Candles { source, .. } => {
-                assert_eq!(source, "close", "Expected default source='close'");
-            }
+            CoppockData::Candles { source, .. } => assert_eq!(source, "close"),
             _ => panic!("Expected CoppockData::Candles"),
         }
+        let output = coppock_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
-
-    #[test]
-    fn test_coppock_with_invalid_periods() {
-        let data = [10.0, 11.0, 12.0];
-
-        let zero_params = CoppockParams {
+    fn check_coppock_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0];
+        let params = CoppockParams {
             short_roc_period: Some(0),
             long_roc_period: Some(14),
             ma_period: Some(10),
             ma_type: Some("wma".to_string()),
         };
-        let zero_input = CoppockInput::from_slice(&data, zero_params);
-        let result = coppock(&zero_input);
-        assert!(result.is_err(), "Expected error with zero short period");
-
-        let big_params = CoppockParams {
+        let input = CoppockInput::from_slice(&input_data, params);
+        let res = coppock_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] Coppock should fail with zero short period",
+            test_name
+        );
+        Ok(())
+    }
+    fn check_coppock_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = CoppockParams {
             short_roc_period: Some(14),
             long_roc_period: Some(20),
             ma_period: Some(10),
             ma_type: Some("wma".to_string()),
         };
-        let big_input = CoppockInput::from_slice(&data, big_params);
-        let result2 = coppock(&big_input);
-        assert!(result2.is_err(), "Expected error for short/long>data.len()");
-    }
-
-    #[test]
-    fn test_coppock_all_nan() {
-        let data = [f64::NAN, f64::NAN, f64::NAN];
-        let input = CoppockInput::from_slice(&data, CoppockParams::default());
-        let result = coppock(&input);
-        assert!(result.is_err(), "Expected AllValuesNaN error");
-    }
-
-    #[test]
-    fn test_coppock_not_enough_valid_data() {
-        let data = [f64::NAN, f64::NAN, 10.0, 11.0, 12.0, 13.0, 14.0];
-        let input = CoppockInput::from_slice(&data, CoppockParams::default());
-        let result = coppock(&input);
-        assert!(result.is_err(), "Expected NotEnoughValidData error");
-    }
-
-    #[test]
-    fn test_coppock_with_slice_data_reinput() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
-        let first_input = CoppockInput::with_default_candles(&candles);
-        let first_result = coppock(&first_input).expect("Failed first Coppock");
-        assert_eq!(
-            first_result.values.len(),
-            candles.close.len(),
-            "First length mismatch"
+        let input = CoppockInput::from_slice(&data_small, params);
+        let res = coppock_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] Coppock should fail with short/long>data.len()",
+            test_name
         );
-
+        Ok(())
+    }
+    fn check_coppock_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
+        let params = CoppockParams {
+            short_roc_period: Some(11),
+            long_roc_period: Some(14),
+            ma_period: Some(10),
+            ma_type: Some("wma".to_string()),
+        };
+        let input = CoppockInput::from_slice(&single_point, params);
+        let res = coppock_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] Coppock should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
+    fn check_coppock_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let first_input = CoppockInput::with_default_candles(&candles);
+        let first_result = coppock_with_kernel(&first_input, kernel)?;
         let second_params = CoppockParams {
             short_roc_period: Some(5),
             long_roc_period: Some(8),
@@ -362,19 +854,176 @@ mod tests {
             ma_type: Some("sma".to_string()),
         };
         let second_input = CoppockInput::from_slice(&first_result.values, second_params);
-        let second_result = coppock(&second_input).expect("Failed second Coppock");
-        assert_eq!(
-            second_result.values.len(),
-            first_result.values.len(),
-            "Second length mismatch"
-        );
-
-        for i in 240..second_result.values.len() {
+        let second_result = coppock_with_kernel(&second_input, kernel)?;
+        assert_eq!(second_result.values.len(), first_result.values.len());
+        for i in 30..second_result.values.len() {
             assert!(
                 !second_result.values[i].is_nan(),
-                "Expected no NaN after index 30, found NaN at {}",
+                "[{}] Expected no NaN after index 30, found NaN at {}",
+                test_name,
                 i
             );
         }
+        Ok(())
     }
+    fn check_coppock_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = CoppockInput::from_candles(
+            &candles,
+            "close",
+            CoppockParams {
+                short_roc_period: Some(11),
+                long_roc_period: Some(14),
+                ma_period: Some(10),
+                ma_type: Some("wma".to_string()),
+            },
+        );
+        let res = coppock_with_kernel(&input, kernel)?;
+        assert_eq!(res.values.len(), candles.close.len());
+        if res.values.len() > 30 {
+            for (i, &val) in res.values[30..].iter().enumerate() {
+                assert!(
+                    !val.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test_name,
+                    30 + i
+                );
+            }
+        }
+        Ok(())
+    }
+    fn check_coppock_streaming(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let short = 11;
+        let long = 14;
+        let ma_period = 10;
+        let ma_type = "wma".to_string();
+        let input = CoppockInput::from_candles(
+            &candles,
+            "close",
+            CoppockParams {
+                short_roc_period: Some(short),
+                long_roc_period: Some(long),
+                ma_period: Some(ma_period),
+                ma_type: Some(ma_type.clone()),
+            },
+        );
+        let batch_output = coppock_with_kernel(&input, Kernel::Scalar)?.values;
+        let mut stream = CoppockStream::try_new(CoppockParams {
+            short_roc_period: Some(short),
+            long_roc_period: Some(long),
+            ma_period: Some(ma_period),
+            ma_type: Some(ma_type),
+        })?;
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for &price in &candles.close {
+            match stream.update(price) {
+                Some(v) => stream_values.push(v),
+                None => stream_values.push(f64::NAN),
+            }
+        }
+        assert_eq!(batch_output.len(), stream_values.len());
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+            let diff = (b - s).abs();
+            assert!(
+                diff < 1e-8,
+                "[{}] Coppock streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
+                test_name,
+                i,
+                b,
+                s,
+                diff
+            );
+        }
+        Ok(())
+    }
+    macro_rules! generate_all_coppock_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
+            }
+        }
+    }
+    generate_all_coppock_tests!(
+        check_coppock_partial_params,
+        check_coppock_accuracy,
+        check_coppock_default_candles,
+        check_coppock_zero_period,
+        check_coppock_period_exceeds_length,
+        check_coppock_very_small_dataset,
+        check_coppock_reinput,
+        check_coppock_nan_handling,
+        check_coppock_streaming
+    );
+        fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = CoppockBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = CoppockParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+
+        let expected = [
+            -1.4542764618985533,
+            -1.3795224034983653,
+            -1.614331648987457,
+            -1.9179048338714915,
+            -2.1096548435774625,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-7,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

@@ -23,6 +23,7 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -238,6 +239,7 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -278,7 +280,7 @@ pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
         }
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let n = data.len();
@@ -488,7 +490,9 @@ fn dema_batch_with_kernel(
         _ => return Err(DemaError::InvalidPeriod { period: 0 }),
     };
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
@@ -525,7 +529,9 @@ fn dema_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => dema_row_avx512(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => dema_row_avx2(data, first, period, out_row),
             _ => dema_row_scalar(data, first, period, out_row),
         }
@@ -552,12 +558,12 @@ fn dema_batch_inner(
 unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     dema_scalar(data, period, first, out)
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dema_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     dema_scalar(data, period, first, out)
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     dema_scalar(data, period, first, out)
@@ -567,10 +573,10 @@ unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_dema_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -592,7 +598,7 @@ mod tests {
     }
 
     fn check_dema_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -622,7 +628,7 @@ mod tests {
     }
 
     fn check_dema_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = DemaInput::with_default_candles(&candles);
@@ -637,7 +643,7 @@ mod tests {
     }
 
     fn check_dema_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = DemaParams { period: Some(0) };
         let input = DemaInput::from_slice(&input_data, params);
@@ -650,7 +656,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = DemaParams { period: Some(10) };
         let input = DemaInput::from_slice(&data_small, params);
@@ -663,7 +669,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = DemaParams { period: Some(9) };
         let input = DemaInput::from_slice(&single_point, params);
@@ -673,7 +679,7 @@ mod tests {
     }
 
     fn check_dema_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -695,7 +701,7 @@ mod tests {
     }
 
     fn check_dema_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let params = DemaParams { period: Some(30) };
@@ -710,7 +716,7 @@ mod tests {
     }
 
     fn check_dema_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -767,10 +773,12 @@ mod tests {
                     fn [<$test_fn _scalar_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -793,7 +801,7 @@ mod tests {
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -827,16 +835,22 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
+                #[test]
+                fn [<$fn_name _scalar>]() {
                     let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
-                #[test] fn [<$fn_name _avx2>]()        {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
-                #[test] fn [<$fn_name _avx512>]()      {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }
-                #[test] fn [<$fn_name _auto_detect>]() {
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
                     let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
                 }
             }

@@ -22,6 +22,7 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -219,11 +220,15 @@ pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput,
             Kernel::Scalar | Kernel::ScalarBatch => {
                 epma_scalar(data, period, offset, first, &mut out)
             }
-            Kernel::Avx2 | Kernel::Avx2Batch => epma_avx2(data, period, offset, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                epma_avx2(data, period, offset, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 epma_avx512(data, period, offset, first, &mut out)
             }
-            Kernel::Auto => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
@@ -277,6 +282,7 @@ fn build_weights_rev(period: usize, offset: usize) -> (Vec<f64>, f64) {
     (w, sum)
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn epma_avx2(
     data: &[f64],
@@ -324,7 +330,8 @@ pub unsafe fn epma_avx2(
     }
 }
 
-#[inline(always)]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub unsafe fn epma_avx512(
     data: &[f64],
     period: usize,
@@ -338,8 +345,9 @@ pub unsafe fn epma_avx512(
         epma_avx512_long(data, period, offset, first_valid, out)
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
+#[inline]
 unsafe fn epma_avx512_short(
     data: &[f64],
     period: usize,
@@ -383,7 +391,7 @@ unsafe fn epma_avx512_short(
         *out.get_unchecked_mut(j) = _mm512_reduce_add_pd(acc) * inv;
     }
 }
-
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn epma_avx512_long(
     data: &[f64],
@@ -642,11 +650,14 @@ pub fn epma_batch_with_kernel(
         }
     };
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
+
     epma_batch_par_slice(data, sweep, simd)
 }
 
@@ -700,7 +711,9 @@ fn epma_batch_inner(
         let period = combos[row].period.unwrap();
         let offset = combos[row].offset.unwrap();
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => epma_row_avx512(data, first, period, offset, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => epma_row_avx2(data, first, period, offset, out_row),
             _ => epma_row_scalar(data, first, period, offset, out_row),
         }
@@ -733,11 +746,13 @@ unsafe fn epma_row_scalar(
     epma_scalar(data, period, offset, first, out);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn epma_row_avx2(data: &[f64], first: usize, period: usize, offset: usize, out: &mut [f64]) {
     epma_avx2(data, period, offset, first, out);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn epma_row_avx512(
     data: &[f64],
@@ -753,13 +768,13 @@ unsafe fn epma_row_avx512(
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_epma_partial_params(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -776,7 +791,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let default_params = EpmaParams::default();
@@ -802,7 +817,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = EpmaInput::with_default_candles(&candles);
@@ -818,7 +833,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = EpmaParams {
             period: Some(0),
@@ -837,7 +852,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = EpmaParams {
             period: Some(10),
@@ -856,7 +871,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = EpmaParams {
             period: Some(9),
@@ -875,7 +890,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let first_params = EpmaParams {
@@ -897,7 +912,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let params = EpmaParams {
@@ -923,7 +938,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 11;
@@ -975,10 +990,12 @@ mod tests {
                     fn [<$test_fn _scalar_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -1003,7 +1020,7 @@ mod tests {
         test: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let output = EpmaBatchBuilder::new()
@@ -1026,10 +1043,24 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]() { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
-                #[test] fn [<$fn_name _avx2>]()   { let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); }
-                #[test] fn [<$fn_name _avx512>]() { let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); }
-                #[test] fn [<$fn_name _auto_detect>]() { let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); }
+                #[test]
+                fn [<$fn_name _scalar>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
             }
         };
     }
