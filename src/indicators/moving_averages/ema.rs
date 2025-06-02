@@ -202,13 +202,15 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
             Kernel::Scalar | Kernel::ScalarBatch => {
                 ema_scalar(data, period, first, &mut vec![f64::NAN; len])
             }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 ema_avx2(data, period, first, &mut vec![f64::NAN; len])
             }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 ema_avx512(data, period, first, &mut vec![f64::NAN; len])
             }
-            Kernel::Auto => unreachable!(),
+            _ => unreachable!(),
         }
     }
 }
@@ -242,6 +244,7 @@ pub unsafe fn ema_scalar(
     Ok(EmaOutput { values })
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ema_avx2(
     data: &[f64],
@@ -252,6 +255,7 @@ pub unsafe fn ema_avx2(
     ema_scalar(data, period, first_val, out)
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ema_avx512(
     data: &[f64],
@@ -485,10 +489,13 @@ fn ema_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => ema_row_avx512(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => ema_row_avx2(data, first, period, out_row),
             _ => ema_row_scalar(data, first, period, out_row),
         }
+
     };
 
     if parallel {
@@ -519,11 +526,13 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn ema_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     ema_row_scalar(data, first, period, out);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn ema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     ema_row_scalar(data, first, period, out);
@@ -533,13 +542,13 @@ unsafe fn ema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_ema_partial_params(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -554,7 +563,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -581,7 +590,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -599,7 +608,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = EmaParams { period: Some(0) };
         let input = EmaInput::from_slice(&input_data, params);
@@ -616,7 +625,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = EmaParams { period: Some(10) };
         let input = EmaInput::from_slice(&data_small, params);
@@ -633,7 +642,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = EmaParams { period: Some(9) };
         let input = EmaInput::from_slice(&single_point, params);
@@ -650,7 +659,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -680,7 +689,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -704,7 +713,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -764,11 +773,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
 
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
 
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -777,6 +788,7 @@ mod tests {
             }
         }
     }
+
 
     generate_all_ema_tests!(
         check_ema_partial_params,
@@ -794,7 +806,7 @@ mod tests {
         test: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -822,16 +834,22 @@ mod tests {
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
+                #[test]
+                fn [<$fn_name _scalar>]() {
                     let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
-                #[test] fn [<$fn_name _avx2>]()        {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
-                #[test] fn [<$fn_name _avx512>]()      {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }
-                #[test] fn [<$fn_name _auto_detect>]() {
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
                     let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
                 }
             }

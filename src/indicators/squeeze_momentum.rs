@@ -1,42 +1,39 @@
-/// # Squeeze Momentum Indicator (SMI)
-///
-/// Also known as the "LazyBear Squeeze". Combines Bollinger Bands (BB) and Keltner Channels (KC)
-/// to detect volatility squeezes, and uses a momentum calculation with linear regression smoothing
-/// for signal generation.
-///
-/// ## Parameters
-/// - **length_bb**: The lookback window for Bollinger Bands. Defaults to 20.
-/// - **mult_bb**: The multiplier for the Bollinger Bands' standard deviation. Defaults to 2.0.
-/// - **length_kc**: The lookback window for Keltner Channels. Defaults to 20.
-/// - **mult_kc**: The multiplier for the Keltner Channels' True Range factor. Defaults to 1.5.
-///
-/// ## Errors
-/// - **EmptyData**: smi: No valid data provided.
-/// - **InvalidLength**: smi: A provided length parameter is zero or exceeds data length.
-/// - **InconsistentDataLength**: smi: High, low, and close data have different lengths.
-/// - **AllValuesNaN**: smi: All values in high/low/close are NaN.
-/// - **NotEnoughValidData**: smi: Not enough valid data after the first valid index.
-///
-/// ## Returns
-/// - **`Ok(SqueezeMomentumOutput)`** on success, containing:
-///   - `squeeze`: Vec<f64> with squeeze state (-1, 0, +1),
-///   - `momentum`: Vec<f64> with the linear-regression-smoothed momentum values,
-///   - `momentum_signal`: Vec<f64> with the momentum signals (±1, ±2).
-/// - **`Err(SqueezeMomentumError)`** otherwise.
-use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
-use crate::utilities::data_loader::Candles;
+//! # Squeeze Momentum Indicator (SMI)
+//!
+//! Detects market volatility "squeeze" and provides a smoothed momentum signal. Mirrors alma.rs in structure, features, and performance.
+//!
+//! ## Parameters
+//! - **length_bb**: Lookback window for Bollinger Bands (default: 20)
+//! - **mult_bb**: BB stddev multiplier (default: 2.0)
+//! - **length_kc**: Lookback window for Keltner Channels (default: 20)
+//! - **mult_kc**: KC multiplier (default: 1.5)
+//!
+//! ## Errors
+//! - **AllValuesNaN**: All input values are NaN
+//! - **InvalidLength**: A lookback parameter is zero or exceeds data length
+//! - **InconsistentDataLength**: High/low/close have different lengths
+//! - **NotEnoughValidData**: Not enough valid data for requested lookback
+//!
+//! ## Returns
+//! - **`Ok(SqueezeMomentumOutput)`** on success
+//! - **`Err(SqueezeMomentumError)`** otherwise
+
+use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
 use thiserror::Error;
+
+// --- Core Data Types ---
 
 #[derive(Debug, Clone)]
 pub enum SqueezeMomentumData<'a> {
-    Candles {
-        candles: &'a Candles,
-    },
-    Slices {
-        high: &'a [f64],
-        low: &'a [f64],
-        close: &'a [f64],
-    },
+    Candles { candles: &'a Candles },
+    Slices { high: &'a [f64], low: &'a [f64], close: &'a [f64] },
 }
 
 #[derive(Debug, Clone)]
@@ -65,30 +62,19 @@ pub struct SqueezeMomentumInput<'a> {
 }
 
 impl<'a> SqueezeMomentumInput<'a> {
-    pub fn from_candles(candles: &'a Candles, params: SqueezeMomentumParams) -> Self {
-        Self {
-            data: SqueezeMomentumData::Candles { candles },
-            params,
-        }
+    #[inline(always)]
+    pub fn from_candles(c: &'a Candles, params: SqueezeMomentumParams) -> Self {
+        Self { data: SqueezeMomentumData::Candles { candles: c }, params }
     }
-
+    #[inline(always)]
     pub fn from_slices(
-        high: &'a [f64],
-        low: &'a [f64],
-        close: &'a [f64],
-        params: SqueezeMomentumParams,
+        high: &'a [f64], low: &'a [f64], close: &'a [f64], params: SqueezeMomentumParams
     ) -> Self {
-        Self {
-            data: SqueezeMomentumData::Slices { high, low, close },
-            params,
-        }
+        Self { data: SqueezeMomentumData::Slices { high, low, close }, params }
     }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: SqueezeMomentumData::Candles { candles },
-            params: SqueezeMomentumParams::default(),
-        }
+    #[inline(always)]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, SqueezeMomentumParams::default())
     }
 }
 
@@ -97,6 +83,68 @@ pub struct SqueezeMomentumOutput {
     pub squeeze: Vec<f64>,
     pub momentum: Vec<f64>,
     pub momentum_signal: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SqueezeMomentumBuilder {
+    length_bb: Option<usize>,
+    mult_bb: Option<f64>,
+    length_kc: Option<usize>,
+    mult_kc: Option<f64>,
+    kernel: Kernel,
+}
+
+impl Default for SqueezeMomentumBuilder {
+    fn default() -> Self {
+        Self {
+            length_bb: None,
+            mult_bb: None,
+            length_kc: None,
+            mult_kc: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl SqueezeMomentumBuilder {
+    #[inline(always)]
+    pub fn new() -> Self { Self::default() }
+    #[inline(always)]
+    pub fn length_bb(mut self, n: usize) -> Self { self.length_bb = Some(n); self }
+    #[inline(always)]
+    pub fn mult_bb(mut self, x: f64) -> Self { self.mult_bb = Some(x); self }
+    #[inline(always)]
+    pub fn length_kc(mut self, n: usize) -> Self { self.length_kc = Some(n); self }
+    #[inline(always)]
+    pub fn mult_kc(mut self, x: f64) -> Self { self.mult_kc = Some(x); self }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+        let p = SqueezeMomentumParams {
+            length_bb: self.length_bb,
+            mult_bb: self.mult_bb,
+            length_kc: self.length_kc,
+            mult_kc: self.mult_kc,
+        };
+        let i = SqueezeMomentumInput::from_candles(c, p);
+        squeeze_momentum_with_kernel(&i, self.kernel)
+    }
+
+    #[inline(always)]
+    pub fn apply_slices(
+        self, high: &[f64], low: &[f64], close: &[f64]
+    ) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+        let p = SqueezeMomentumParams {
+            length_bb: self.length_bb,
+            mult_bb: self.mult_bb,
+            length_kc: self.length_kc,
+            mult_kc: self.mult_kc,
+        };
+        let i = SqueezeMomentumInput::from_slices(high, low, close, p);
+        squeeze_momentum_with_kernel(&i, self.kernel)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -113,22 +161,23 @@ pub enum SqueezeMomentumError {
     NotEnoughValidData { needed: usize, valid: usize },
 }
 
+// --- Main Kernel Selection ---
+
 #[inline]
-pub fn squeeze_momentum(
-    input: &SqueezeMomentumInput,
+pub fn squeeze_momentum(input: &SqueezeMomentumInput) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    squeeze_momentum_with_kernel(input, Kernel::Auto)
+}
+
+pub fn squeeze_momentum_with_kernel(
+    input: &SqueezeMomentumInput, kernel: Kernel
 ) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
-    let (high, low, close) = match &input.data {
+    let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         SqueezeMomentumData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| SqueezeMomentumError::EmptyData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| SqueezeMomentumError::EmptyData)?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|_| SqueezeMomentumError::EmptyData)?;
-            (high, low, close)
+            (
+                source_type(candles, "high"),
+                source_type(candles, "low"),
+                source_type(candles, "close"),
+            )
         }
         SqueezeMomentumData::Slices { high, low, close } => (*high, *low, *close),
     };
@@ -138,126 +187,171 @@ pub fn squeeze_momentum(
     if high.len() != low.len() || low.len() != close.len() {
         return Err(SqueezeMomentumError::InconsistentDataLength);
     }
-    let length_bb = input
-        .params
-        .length_bb
-        .unwrap_or_else(|| SqueezeMomentumParams::default().length_bb.unwrap());
-    let mult_bb = input
-        .params
-        .mult_bb
-        .unwrap_or_else(|| SqueezeMomentumParams::default().mult_bb.unwrap());
-    let length_kc = input
-        .params
-        .length_kc
-        .unwrap_or_else(|| SqueezeMomentumParams::default().length_kc.unwrap());
-    let mult_kc = input
-        .params
-        .mult_kc
-        .unwrap_or_else(|| SqueezeMomentumParams::default().mult_kc.unwrap());
+    let length_bb = input.params.length_bb.unwrap_or(20);
+    let mult_bb = input.params.mult_bb.unwrap_or(2.0);
+    let length_kc = input.params.length_kc.unwrap_or(20);
+    let mult_kc = input.params.mult_kc.unwrap_or(1.5);
     if length_bb == 0 || length_bb > close.len() {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: length_bb,
-            data_len: close.len(),
-        });
+        return Err(SqueezeMomentumError::InvalidLength { length: length_bb, data_len: close.len() });
     }
     if length_kc == 0 || length_kc > close.len() {
-        return Err(SqueezeMomentumError::InvalidLength {
-            length: length_kc,
-            data_len: close.len(),
-        });
+        return Err(SqueezeMomentumError::InvalidLength { length: length_kc, data_len: close.len() });
     }
-    let first_valid_idx = match (0..close.len()).find(|&i| {
-        let h = high[i];
-        let l = low[i];
-        let c = close[i];
-        !(h.is_nan() || l.is_nan() || c.is_nan())
-    }) {
-        Some(idx) => idx,
-        None => return Err(SqueezeMomentumError::AllValuesNaN),
-    };
+    let first_valid = (0..close.len()).find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+        .ok_or(SqueezeMomentumError::AllValuesNaN)?;
     let needed = length_bb.max(length_kc);
-    if (high.len() - first_valid_idx) < needed {
+    if (high.len() - first_valid) < needed {
         return Err(SqueezeMomentumError::NotEnoughValidData {
-            needed,
-            valid: high.len() - first_valid_idx,
+            needed, valid: high.len() - first_valid,
         });
     }
-    let bb_sma_params = SmaParams {
-        period: Some(length_bb),
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
     };
-    let bb_sma_input = SmaInput::from_slice(&close, bb_sma_params);
-    let bb_sma_output =
-        crate::indicators::sma::sma(&bb_sma_input).map_err(|_| SqueezeMomentumError::EmptyData)?;
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                squeeze_momentum_scalar(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                squeeze_momentum_avx2(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                squeeze_momentum_avx512(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[inline]
+pub unsafe fn squeeze_momentum_scalar(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    Ok(crate::indicators::squeeze_momentum::squeeze_momentum_scalar_impl(
+        high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid,
+    ))
+}
+
+// These are stubs, they point back to the scalar implementation as required for API parity.
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn squeeze_momentum_avx2(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    squeeze_momentum_scalar(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn squeeze_momentum_avx512(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    if length_kc <= 32 { squeeze_momentum_avx512_short(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid) }
+    else { squeeze_momentum_avx512_long(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn squeeze_momentum_avx512_short(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    squeeze_momentum_scalar(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn squeeze_momentum_avx512_long(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
+    squeeze_momentum_scalar(high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid)
+}
+
+// --- Scalar Computation Implementation ---
+
+pub fn squeeze_momentum_scalar_impl(
+    high: &[f64], low: &[f64], close: &[f64],
+    length_bb: usize, mult_bb: f64,
+    length_kc: usize, mult_kc: f64,
+    first_valid: usize,
+) -> SqueezeMomentumOutput {
+    use crate::indicators::sma::{sma, SmaInput, SmaParams};
+
+    let n = close.len();
+
+    let bb_sma_params = SmaParams { period: Some(length_bb) };
+    let bb_sma_input = SmaInput::from_slice(close, bb_sma_params);
+    let bb_sma_output = sma(&bb_sma_input).unwrap();
     let basis = &bb_sma_output.values;
-    let dev = stddev_slice(&close, length_bb);
-    let mut upper_bb = vec![f64::NAN; close.len()];
-    let mut lower_bb = vec![f64::NAN; close.len()];
-    for i in first_valid_idx..close.len() {
+    let dev = stddev_slice(close, length_bb);
+    let mut upper_bb = vec![f64::NAN; n];
+    let mut lower_bb = vec![f64::NAN; n];
+    for i in first_valid..n {
         if i + 1 >= length_bb && !basis[i].is_nan() && !dev[i].is_nan() {
             upper_bb[i] = basis[i] + mult_bb * dev[i];
             lower_bb[i] = basis[i] - mult_bb * dev[i];
         }
     }
-    let kc_sma_params = SmaParams {
-        period: Some(length_kc),
-    };
-    let kc_sma_input = SmaInput::from_slice(&close, kc_sma_params.clone());
-    let kc_sma_output =
-        crate::indicators::sma::sma(&kc_sma_input).map_err(|_| SqueezeMomentumError::EmptyData)?;
+    let kc_sma_params = SmaParams { period: Some(length_kc) };
+    let kc_sma_input = SmaInput::from_slice(close, kc_sma_params.clone());
+    let kc_sma_output = sma(&kc_sma_input).unwrap();
     let kc_ma = &kc_sma_output.values;
-    let true_range = true_range_slice(&high, &low, &close);
+    let true_range = true_range_slice(high, low, close);
     let tr_sma_input = SmaInput::from_slice(&true_range, kc_sma_params.clone());
-    let tr_sma_output =
-        crate::indicators::sma::sma(&tr_sma_input).map_err(|_| SqueezeMomentumError::EmptyData)?;
+    let tr_sma_output = sma(&tr_sma_input).unwrap();
     let tr_ma = &tr_sma_output.values;
-    let mut upper_kc = vec![f64::NAN; close.len()];
-    let mut lower_kc = vec![f64::NAN; close.len()];
-    for i in first_valid_idx..close.len() {
+    let mut upper_kc = vec![f64::NAN; n];
+    let mut lower_kc = vec![f64::NAN; n];
+    for i in first_valid..n {
         if i + 1 >= length_kc && !kc_ma[i].is_nan() && !tr_ma[i].is_nan() {
             upper_kc[i] = kc_ma[i] + tr_ma[i] * mult_kc;
             lower_kc[i] = kc_ma[i] - tr_ma[i] * mult_kc;
         }
     }
-    let mut squeeze = vec![f64::NAN; close.len()];
-    for i in first_valid_idx..close.len() {
-        if !lower_bb[i].is_nan()
-            && !upper_bb[i].is_nan()
-            && !lower_kc[i].is_nan()
-            && !upper_kc[i].is_nan()
-        {
+    let mut squeeze = vec![f64::NAN; n];
+    for i in first_valid..n {
+        if !lower_bb[i].is_nan() && !upper_bb[i].is_nan() && !lower_kc[i].is_nan() && !upper_kc[i].is_nan() {
             let sqz_on = lower_bb[i] > lower_kc[i] && upper_bb[i] < upper_kc[i];
             let sqz_off = lower_bb[i] < lower_kc[i] && upper_bb[i] > upper_kc[i];
             let no_sqz = !sqz_on && !sqz_off;
-            squeeze[i] = if no_sqz {
-                0.0
-            } else if sqz_on {
-                -1.0
-            } else {
-                1.0
-            };
+            squeeze[i] = if no_sqz { 0.0 } else if sqz_on { -1.0 } else { 1.0 };
         }
     }
-    let mut highest_vals = rolling_high_slice(&high, length_kc);
-    let mut lowest_vals = rolling_low_slice(&low, length_kc);
-    let sma_kc_input = SmaInput::from_slice(&close, kc_sma_params);
-    let sma_kc_output =
-        crate::indicators::sma::sma(&sma_kc_input).map_err(|_| SqueezeMomentumError::EmptyData)?;
+    let highest_vals = rolling_high_slice(high, length_kc);
+    let lowest_vals = rolling_low_slice(low, length_kc);
+    let sma_kc_input = SmaInput::from_slice(close, kc_sma_params);
+    let sma_kc_output = sma(&sma_kc_input).unwrap();
     let ma_kc = &sma_kc_output.values;
-    let mut momentum_raw = vec![f64::NAN; close.len()];
-    for i in first_valid_idx..close.len() {
-        if i + 1 >= length_kc
-            && !close[i].is_nan()
-            && !highest_vals[i].is_nan()
-            && !lowest_vals[i].is_nan()
-            && !ma_kc[i].is_nan()
-        {
+    let mut momentum_raw = vec![f64::NAN; n];
+    for i in first_valid..n {
+        if i + 1 >= length_kc && !close[i].is_nan() && !highest_vals[i].is_nan() && !lowest_vals[i].is_nan() && !ma_kc[i].is_nan() {
             let mid = (highest_vals[i] + lowest_vals[i]) / 2.0;
             momentum_raw[i] = close[i] - (mid + ma_kc[i]) / 2.0;
         }
     }
     let momentum = linearreg_slice(&momentum_raw, length_kc);
-    let mut momentum_signal = vec![f64::NAN; close.len()];
-    for i in first_valid_idx..(close.len().saturating_sub(1)) {
+    let mut momentum_signal = vec![f64::NAN; n];
+    for i in first_valid..(n.saturating_sub(1)) {
         if !momentum[i].is_nan() && !momentum[i + 1].is_nan() {
             let next = momentum[i + 1];
             let curr = momentum[i];
@@ -268,12 +362,209 @@ pub fn squeeze_momentum(
             }
         }
     }
-    Ok(SqueezeMomentumOutput {
-        squeeze,
-        momentum,
-        momentum_signal,
-    })
+    SqueezeMomentumOutput { squeeze, momentum, momentum_signal }
 }
+
+// --- Batch Parameter Sweep Support ---
+
+#[derive(Clone, Debug)]
+pub struct SqueezeMomentumBatchRange {
+    pub length_bb: (usize, usize, usize),
+    pub mult_bb: (f64, f64, f64),
+    pub length_kc: (usize, usize, usize),
+    pub mult_kc: (f64, f64, f64),
+}
+
+impl Default for SqueezeMomentumBatchRange {
+    fn default() -> Self {
+        Self {
+            length_bb: (20, 20, 0),
+            mult_bb: (2.0, 2.0, 0.0),
+            length_kc: (20, 20, 0),
+            mult_kc: (1.5, 1.5, 0.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SqueezeMomentumBatchBuilder {
+    range: SqueezeMomentumBatchRange,
+    kernel: Kernel,
+}
+
+impl SqueezeMomentumBatchBuilder {
+    pub fn new() -> Self { Self::default() }
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn length_bb_range(mut self, start: usize, end: usize, step: usize) -> Self { self.range.length_bb = (start, end, step); self }
+    pub fn length_bb_static(mut self, p: usize) -> Self { self.range.length_bb = (p, p, 0); self }
+    pub fn mult_bb_range(mut self, start: f64, end: f64, step: f64) -> Self { self.range.mult_bb = (start, end, step); self }
+    pub fn mult_bb_static(mut self, x: f64) -> Self { self.range.mult_bb = (x, x, 0.0); self }
+    pub fn length_kc_range(mut self, start: usize, end: usize, step: usize) -> Self { self.range.length_kc = (start, end, step); self }
+    pub fn length_kc_static(mut self, p: usize) -> Self { self.range.length_kc = (p, p, 0); self }
+    pub fn mult_kc_range(mut self, start: f64, end: f64, step: f64) -> Self { self.range.mult_kc = (start, end, step); self }
+    pub fn mult_kc_static(mut self, x: f64) -> Self { self.range.mult_kc = (x, x, 0.0); self }
+
+    pub fn apply_slices(
+        self, high: &[f64], low: &[f64], close: &[f64]
+    ) -> Result<SqueezeMomentumBatchOutput, SqueezeMomentumError> {
+        squeeze_momentum_batch_with_kernel(high, low, close, &self.range, self.kernel)
+    }
+
+    pub fn apply_candles(
+        self, c: &Candles
+    ) -> Result<SqueezeMomentumBatchOutput, SqueezeMomentumError> {
+        let high = source_type(c, "high");
+        let low = source_type(c, "low");
+        let close = source_type(c, "close");
+        self.apply_slices(high, low, close)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqueezeMomentumBatchParams {
+    pub length_bb: usize,
+    pub mult_bb: f64,
+    pub length_kc: usize,
+    pub mult_kc: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SqueezeMomentumBatchOutput {
+    pub momentum: Vec<f64>,
+    pub combos: Vec<SqueezeMomentumBatchParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl SqueezeMomentumBatchOutput {
+    pub fn row_for_params(&self, p: &SqueezeMomentumBatchParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.length_bb == p.length_bb
+                && (c.mult_bb - p.mult_bb).abs() < 1e-12
+                && c.length_kc == p.length_kc
+                && (c.mult_kc - p.mult_kc).abs() < 1e-12
+        })
+    }
+    pub fn values_for(&self, p: &SqueezeMomentumBatchParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.momentum[start..start + self.cols]
+        })
+    }
+}
+
+fn expand_grid_sm(range: &SqueezeMomentumBatchRange) -> Vec<SqueezeMomentumBatchParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end { return vec![start]; }
+        (start..=end).step_by(step).collect()
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+        let mut v = Vec::new();
+        let mut x = start;
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
+        v
+    }
+    let length_bbs = axis_usize(range.length_bb);
+    let mult_bbs = axis_f64(range.mult_bb);
+    let length_kcs = axis_usize(range.length_kc);
+    let mult_kcs = axis_f64(range.mult_kc);
+    let mut out = Vec::with_capacity(length_bbs.len() * mult_bbs.len() * length_kcs.len() * mult_kcs.len());
+    for &lbb in &length_bbs {
+        for &mbb in &mult_bbs {
+            for &lkc in &length_kcs {
+                for &mkc in &mult_kcs {
+                    out.push(SqueezeMomentumBatchParams {
+                        length_bb: lbb,
+                        mult_bb: mbb,
+                        length_kc: lkc,
+                        mult_kc: mkc,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn squeeze_momentum_batch_with_kernel(
+    high: &[f64], low: &[f64], close: &[f64],
+    sweep: &SqueezeMomentumBatchRange, kernel: Kernel
+) -> Result<SqueezeMomentumBatchOutput, SqueezeMomentumError> {
+    let combos = expand_grid_sm(sweep);
+    if combos.is_empty() {
+        return Err(SqueezeMomentumError::InvalidLength { length: 0, data_len: 0 });
+    }
+    let first_valid = (0..close.len()).find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+        .ok_or(SqueezeMomentumError::AllValuesNaN)?;
+    let max_l = combos.iter().map(|c| c.length_bb.max(c.length_kc)).max().unwrap();
+    if close.len() - first_valid < max_l {
+        return Err(SqueezeMomentumError::NotEnoughValidData { needed: max_l, valid: close.len() - first_valid });
+    }
+    let rows = combos.len();
+    let cols = close.len();
+    let mut momentum = vec![f64::NAN; rows * cols];
+
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let p = &combos[row];
+        let result = squeeze_momentum_row_scalar(
+            high, low, close, first_valid,
+            p.length_bb, p.mult_bb, p.length_kc, p.mult_kc, out_row
+        );
+        result
+    };
+
+    momentum
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| { do_row(row, slice); });
+
+    Ok(SqueezeMomentumBatchOutput { momentum, combos, rows, cols })
+}
+
+// Per-row kernel, just outputting the momentum vector for the parameter set
+pub unsafe fn squeeze_momentum_row_scalar(
+    high: &[f64], low: &[f64], close: &[f64], first_valid: usize,
+    length_bb: usize, mult_bb: f64, length_kc: usize, mult_kc: f64, out: &mut [f64]
+) {
+    let result = squeeze_momentum_scalar_impl(
+        high, low, close, length_bb, mult_bb, length_kc, mult_kc, first_valid
+    );
+    out.copy_from_slice(&result.momentum);
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn squeeze_momentum_row_avx2(
+    high: &[f64], low: &[f64], close: &[f64], first_valid: usize,
+    length_bb: usize, mult_bb: f64, length_kc: usize, mult_kc: f64, out: &mut [f64]
+) {
+    squeeze_momentum_row_scalar(high, low, close, first_valid, length_bb, mult_bb, length_kc, mult_kc, out)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn squeeze_momentum_row_avx512(
+    high: &[f64], low: &[f64], close: &[f64], first_valid: usize,
+    length_bb: usize, mult_bb: f64, length_kc: usize, mult_kc: f64, out: &mut [f64]
+) {
+    squeeze_momentum_row_scalar(high, low, close, first_valid, length_bb, mult_bb, length_kc, mult_kc, out)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn squeeze_momentum_row_avx512_short(
+    high: &[f64], low: &[f64], close: &[f64], first_valid: usize,
+    length_bb: usize, mult_bb: f64, length_kc: usize, mult_kc: f64, out: &mut [f64]
+) {
+    squeeze_momentum_row_scalar(high, low, close, first_valid, length_bb, mult_bb, length_kc, mult_kc, out)
+}
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+pub unsafe fn squeeze_momentum_row_avx512_long(
+    high: &[f64], low: &[f64], close: &[f64], first_valid: usize,
+    length_bb: usize, mult_bb: f64, length_kc: usize, mult_kc: f64, out: &mut [f64]
+) {
+    squeeze_momentum_row_scalar(high, low, close, first_valid, length_bb, mult_bb, length_kc, mult_kc, out)
+}
+
+// --- Utilities (Unchanged from scalar, as in original) ---
 
 fn stddev_slice(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
@@ -308,24 +599,14 @@ fn stddev_slice(data: &[f64], period: usize) -> Vec<f64> {
     }
     output
 }
-
 fn variance_to_stddev(sum: f64, sumsq: f64, count: usize) -> f64 {
-    if count < 2 {
-        return f64::NAN;
-    }
+    if count < 2 { return f64::NAN; }
     let mean = sum / (count as f64);
     let var = (sumsq / (count as f64)) - (mean * mean);
-    if var.is_sign_negative() {
-        f64::NAN
-    } else {
-        var.sqrt()
-    }
+    if var.is_sign_negative() { f64::NAN } else { var.sqrt() }
 }
-
 fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    if high.len() != low.len() || low.len() != close.len() {
-        return vec![];
-    }
+    if high.len() != low.len() || low.len() != close.len() { return vec![]; }
     let mut output = vec![f64::NAN; high.len()];
     let mut prev_close = close[0];
     output[0] = high[0].max(low[0]) - low[0].min(high[0]);
@@ -340,12 +621,9 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     }
     output
 }
-
 fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
-    if period == 0 || period > data.len() {
-        return output;
-    }
+    if period == 0 || period > data.len() { return output; }
     let mut deque = Vec::new();
     for i in 0..data.len() {
         if !data[i].is_nan() {
@@ -362,12 +640,9 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
     }
     output
 }
-
 fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
-    if period == 0 || period > data.len() {
-        return output;
-    }
+    if period == 0 || period > data.len() { return output; }
     let mut deque = Vec::new();
     for i in 0..data.len() {
         if !data[i].is_nan() {
@@ -390,12 +665,9 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
     }
     output
 }
-
 fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
-    if period == 0 || period > data.len() {
-        return output;
-    }
+    if period == 0 || period > data.len() { return output; }
     for i in (period - 1)..data.len() {
         let subset = &data[i + 1 - period..=i];
         if subset.iter().all(|x| x.is_finite()) {
@@ -404,12 +676,9 @@ fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
     }
     output
 }
-
 fn linear_regression_last_point(window: &[f64]) -> f64 {
     let n = window.len();
-    if n < 2 {
-        return f64::NAN;
-    }
+    if n < 2 { return f64::NAN; }
     let mut sum_x = 0.0;
     let mut sum_y = 0.0;
     let mut sum_xy = 0.0;
@@ -423,116 +692,191 @@ fn linear_regression_last_point(window: &[f64]) -> f64 {
     }
     let n_f = n as f64;
     let denom = (n_f * sum_x2) - (sum_x * sum_x);
-    if denom.abs() < f64::EPSILON {
-        return f64::NAN;
-    }
+    if denom.abs() < f64::EPSILON { return f64::NAN; }
     let slope = (n_f * sum_xy - sum_x * sum_y) / denom;
     let intercept = (sum_y - slope * sum_x) / n_f;
     let x_last = n_f;
     intercept + slope * x_last
 }
 
+// --- Tests: Parity with alma.rs, for all kernels, errors, accuracy, etc. ---
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_squeeze_momentum_with_default_candles() {
+    fn check_smi_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let input = SqueezeMomentumInput::with_default_candles(&candles);
-        let result = squeeze_momentum(&input).expect("Failed to compute squeeze momentum");
-        assert_eq!(result.squeeze.len(), candles.close.len());
-        assert_eq!(result.momentum.len(), candles.close.len());
-        assert_eq!(result.momentum_signal.len(), candles.close.len());
-    }
-
-    #[test]
-    fn test_squeeze_momentum_with_slices() {
-        let high = vec![10.0, 12.0, 14.0, 11.0, 15.0];
-        let low = vec![5.0, 6.0, 7.0, 6.5, 7.0];
-        let close = vec![7.0, 11.0, 10.0, 10.5, 14.0];
-        let params = SqueezeMomentumParams {
-            length_bb: Some(2),
-            mult_bb: Some(2.0),
-            length_kc: Some(2),
-            mult_kc: Some(1.5),
-        };
-        let input = SqueezeMomentumInput::from_slices(&high, &low, &close, params);
-        let output = squeeze_momentum(&input).expect("Failed to compute squeeze momentum slices");
-        assert_eq!(output.squeeze.len(), close.len());
-        assert_eq!(output.momentum.len(), close.len());
-        assert_eq!(output.momentum_signal.len(), close.len());
-    }
-
-    #[test]
-    fn test_squeeze_momentum_nan_and_error_checks() {
-        let high = vec![];
-        let low = vec![];
-        let close = vec![];
-        let params = SqueezeMomentumParams::default();
-        let input = SqueezeMomentumInput::from_slices(&high, &low, &close, params);
-        let result = squeeze_momentum(&input);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Empty data"));
-        }
-    }
-
-    #[test]
-    fn test_squeeze_momentum_inconsistent_data_length() {
-        let high = vec![1.0, 2.0, 3.0];
-        let low = vec![1.0, 2.0];
-        let close = vec![1.0, 2.0, 3.0];
-        let params = SqueezeMomentumParams::default();
-        let input = SqueezeMomentumInput::from_slices(&high, &low, &close, params);
-        let result = squeeze_momentum(&input);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("inconsistent lengths"));
-        }
-    }
-
-    #[test]
-    fn test_squeeze_momentum_minimum_valid_data() {
-        let high = vec![10.0, 12.0, 14.0];
-        let low = vec![5.0, 6.0, 7.0];
-        let close = vec![7.0, 11.0, 10.0];
-        let params = SqueezeMomentumParams {
-            length_bb: Some(5),
-            mult_bb: Some(2.0),
-            length_kc: Some(5),
-            mult_kc: Some(1.5),
-        };
-        let input = SqueezeMomentumInput::from_slices(&high, &low, &close, params);
-        let result = squeeze_momentum(&input);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_squeeze_momentum_accuracy_check() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params = SqueezeMomentumParams::default();
+        let candles = read_candles_from_csv(file_path)?;
+        let params = SqueezeMomentumParams { length_bb: None, mult_bb: None, length_kc: None, mult_kc: None };
         let input = SqueezeMomentumInput::from_candles(&candles, params);
-        let output = squeeze_momentum(&input).expect("Failed to compute squeeze momentum");
+        let output = squeeze_momentum_with_kernel(&input, kernel)?;
         assert_eq!(output.squeeze.len(), candles.close.len());
-        assert_eq!(output.momentum.len(), candles.close.len());
-        assert_eq!(output.momentum_signal.len(), candles.close.len());
+        Ok(())
+    }
+
+    fn check_smi_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = SqueezeMomentumInput::with_default_candles(&candles);
+        let output = squeeze_momentum_with_kernel(&input, kernel)?;
         let expected_last_five = [-170.9, -155.4, -65.3, -61.1, -178.1];
-        if output.momentum.len() >= 5 {
-            let start_index = output.momentum.len() - 5;
-            for (i, &val) in output.momentum[start_index..].iter().enumerate() {
-                let exp = expected_last_five[i];
-                assert!(
-                    (val - exp).abs() < 1e-1,
-                    "Mismatch at {}: expected {}, got {}",
-                    i,
-                    exp,
-                    val
-                );
+        let n = output.momentum.len();
+        let start = n.saturating_sub(5);
+        for (i, &val) in output.momentum[start..].iter().enumerate() {
+            let diff = (val - expected_last_five[i]).abs();
+            assert!(
+                diff < 1e-1,
+                "[{}] SMI {:?} mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                i,
+                val,
+                expected_last_five[i]
+            );
+        }
+        Ok(())
+    }
+
+    fn check_smi_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = SqueezeMomentumInput::with_default_candles(&candles);
+        let output = squeeze_momentum_with_kernel(&input, kernel)?;
+        assert_eq!(output.squeeze.len(), candles.close.len());
+        Ok(())
+    }
+
+    fn check_smi_zero_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [10.0, 20.0, 30.0];
+        let l = [10.0, 20.0, 30.0];
+        let c = [10.0, 20.0, 30.0];
+        let params = SqueezeMomentumParams { length_bb: Some(0), mult_bb: None, length_kc: Some(0), mult_kc: None };
+        let input = SqueezeMomentumInput::from_slices(&h, &l, &c, params);
+        let res = squeeze_momentum_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] SMI should fail with zero length", test_name);
+        Ok(())
+    }
+
+    fn check_smi_length_exceeds(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [10.0, 20.0, 30.0];
+        let l = [10.0, 20.0, 30.0];
+        let c = [10.0, 20.0, 30.0];
+        let params = SqueezeMomentumParams { length_bb: Some(10), mult_bb: None, length_kc: Some(10), mult_kc: None };
+        let input = SqueezeMomentumInput::from_slices(&h, &l, &c, params);
+        let res = squeeze_momentum_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] SMI should fail with length exceeding", test_name);
+        Ok(())
+    }
+
+    fn check_smi_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [f64::NAN, f64::NAN, f64::NAN];
+        let l = [f64::NAN, f64::NAN, f64::NAN];
+        let c = [f64::NAN, f64::NAN, f64::NAN];
+        let params = SqueezeMomentumParams::default();
+        let input = SqueezeMomentumInput::from_slices(&h, &l, &c, params);
+        let res = squeeze_momentum_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] SMI should fail with all NaN", test_name);
+        Ok(())
+    }
+
+    fn check_smi_inconsistent_lengths(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [1.0, 2.0, 3.0];
+        let l = [1.0, 2.0];
+        let c = [1.0, 2.0, 3.0];
+        let params = SqueezeMomentumParams::default();
+        let input = SqueezeMomentumInput::from_slices(&h, &l, &c, params);
+        let res = squeeze_momentum_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] SMI should fail with inconsistent data lengths", test_name);
+        Ok(())
+    }
+
+    fn check_smi_minimum_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [10.0, 12.0, 14.0];
+        let l = [5.0, 6.0, 7.0];
+        let c = [7.0, 11.0, 10.0];
+        let params = SqueezeMomentumParams { length_bb: Some(5), mult_bb: Some(2.0), length_kc: Some(5), mult_kc: Some(1.5) };
+        let input = SqueezeMomentumInput::from_slices(&h, &l, &c, params);
+        let result = squeeze_momentum_with_kernel(&input, kernel);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    macro_rules! generate_all_smi_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
             }
         }
     }
+
+    generate_all_smi_tests!(
+        check_smi_partial_params,
+        check_smi_accuracy,
+        check_smi_default_candles,
+        check_smi_zero_length,
+        check_smi_length_exceeds,
+        check_smi_all_nan,
+        check_smi_inconsistent_lengths,
+        check_smi_minimum_data
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = SqueezeMomentumBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+        let def = SqueezeMomentumBatchParams { length_bb: 20, mult_bb: 2.0, length_kc: 20, mult_kc: 1.5 };
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

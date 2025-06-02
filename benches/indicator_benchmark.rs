@@ -94,7 +94,7 @@ use my_project::indicators::{
     mab::{mab as mab_raw, MabInput},
     macd::{macd as macd_raw, MacdInput},
     mama::{mama as mama_raw, MamaInput},
-    marketefi::{marketfi as marketfi_raw, MarketefiInput},
+    marketefi::{marketefi as marketfi_raw, MarketefiInput},
     mass::{mass as mass_raw, MassInput},
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
     medium_ad::{medium_ad as medium_ad_raw, MediumAdInput},

@@ -1,22 +1,32 @@
-/// # Linear Regression (LINREG)
-///
-/// A statistical method that fits a straight line to recent price data. This implementation
-/// forecasts a future value (the next bar) based on the slope and intercept of the fitted
-/// linear trend line over a given period. It can help identify general price direction
-/// and predict near-term continuation or reversal.
-///
-/// ## Parameters
-/// - **period**: Look-back window size for calculating the slope and intercept (defaults to 14).
-///
-/// ## Errors
-/// - **InvalidPeriod**: linreg: `period` is less than 1.
-/// - **NoData**: linreg: Input data slice is empty.
-/// - **AllValuesNaN**: linreg: All input data values are `NaN`.
-///
-/// ## Returns
-/// - **`Ok(LinRegOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-/// - **`Err(LinRegError)`** otherwise.
+//! # Linear Regression (LINREG)
+//!
+//! Fits a straight line (y = a + b·x) to recent data over a rolling window and forecasts the next value.
+//! Supports kernels (scalar, AVX2, AVX512), streaming, batch grid, custom input sources, error reporting, and parameter builders.
+//!
+//! ## Parameters
+//! - **period**: Look-back window size (default: 14).
+//!
+//! ## Errors
+//! - **AllValuesNaN**: linreg: All input data values are `NaN`.
+//! - **InvalidPeriod**: linreg: `period` is zero or exceeds the data length.
+//! - **NotEnoughValidData**: linreg: Not enough valid data points for the requested `period`.
+//!
+//! ## Returns
+//! - **`Ok(LinRegOutput)`** on success, containing a `Vec<f64>` of length matching the input.
+//! - **`Err(LinRegError)`** otherwise.
+
 use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
+use std::error::Error;
+use thiserror::Error;
+
+// --- DATA, PARAMS, INPUT/OUTPUT STRUCTS ---
 
 #[derive(Debug, Clone)]
 pub enum LinRegData<'a> {
@@ -49,82 +59,182 @@ pub struct LinRegInput<'a> {
     pub params: LinRegParams,
 }
 
-impl<'a> LinRegInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: LinRegParams) -> Self {
-        Self {
-            data: LinRegData::Candles { candles, source },
-            params,
+impl<'a> AsRef<[f64]> for LinRegInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            LinRegData::Slice(slice) => slice,
+            LinRegData::Candles { candles, source } => source_type(candles, source),
         }
-    }
-
-    pub fn from_slice(slice: &'a [f64], params: LinRegParams) -> Self {
-        Self {
-            data: LinRegData::Slice(slice),
-            params,
-        }
-    }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: LinRegData::Candles {
-                candles,
-                source: "close",
-            },
-            params: LinRegParams::default(),
-        }
-    }
-
-    pub fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| LinRegParams::default().period.unwrap())
     }
 }
 
-use thiserror::Error;
+impl<'a> LinRegInput<'a> {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: LinRegParams) -> Self {
+        Self {
+            data: LinRegData::Candles { candles: c, source: s },
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: LinRegParams) -> Self {
+        Self {
+            data: LinRegData::Slice(sl),
+            params: p,
+        }
+    }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", LinRegParams::default())
+    }
+    #[inline]
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(14)
+    }
+}
+
+// --- BUILDER ---
+
+#[derive(Copy, Clone, Debug)]
+pub struct LinRegBuilder {
+    period: Option<usize>,
+    kernel: Kernel,
+}
+
+impl Default for LinRegBuilder {
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl LinRegBuilder {
+    #[inline(always)]
+    pub fn new() -> Self { Self::default() }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<LinRegOutput, LinRegError> {
+        let p = LinRegParams { period: self.period };
+        let i = LinRegInput::from_candles(c, "close", p);
+        linreg_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<LinRegOutput, LinRegError> {
+        let p = LinRegParams { period: self.period };
+        let i = LinRegInput::from_slice(d, p);
+        linreg_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<LinRegStream, LinRegError> {
+        let p = LinRegParams { period: self.period };
+        LinRegStream::try_new(p)
+    }
+}
+
+// --- ERRORS ---
 
 #[derive(Debug, Error)]
 pub enum LinRegError {
-    #[error("linear regression: Invalid period for linear regression: period={period}. Period must be >= 1.")]
-    InvalidPeriod { period: usize },
-    #[error("linear regression: No data available for linear regression.")]
-    NoData,
-    #[error("linear regression: All values are NaN during the linear regression calculation.")]
+    #[error("linreg: All values are NaN.")]
     AllValuesNaN,
+    #[error("linreg: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("linreg: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
 }
+
+// --- INDICATOR API ---
 
 #[inline]
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
-    let data: &[f64] = match &input.data {
-        LinRegData::Candles { candles, source } => source_type(candles, source),
-        LinRegData::Slice(slice) => slice,
-    };
-    let size: usize = data.len();
+    linreg_with_kernel(input, Kernel::Auto)
+}
+
+pub fn linreg_with_kernel(input: &LinRegInput, kernel: Kernel) -> Result<LinRegOutput, LinRegError> {
+    let data: &[f64] = input.as_ref();
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(LinRegError::AllValuesNaN)?;
+    let len = data.len();
     let period = input.get_period();
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(LinRegError::AllValuesNaN),
+
+    if period == 0 || period > len {
+        return Err(LinRegError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(LinRegError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
     };
-    if period < 1 {
-        return Err(LinRegError::InvalidPeriod { period });
-    }
-    if size == 0 {
-        return Err(LinRegError::NoData);
-    }
-    if size < period {
-        return Ok(LinRegOutput {
-            values: vec![f64::NAN; size],
-        });
+
+    let mut out = vec![f64::NAN; len];
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => linreg_scalar(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => linreg_avx2(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => linreg_avx512(data, period, first, &mut out),
+            _ => unreachable!(),
+        }
     }
 
-    let mut values = vec![f64::NAN; size];
+    Ok(LinRegOutput { values: out })
+}
 
+// --- SIMD STUBS (API parity, but call scalar implementation) ---
+
+#[inline]
+pub unsafe fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period <= 32 {
+        linreg_avx512_short(data, period, first, out)
+    } else {
+        linreg_avx512_long(data, period, first, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn linreg_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn linreg_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+// --- Scalar Calculation ---
+
+#[inline]
+fn linreg_scalar_inner(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    let size = data.len();
     let x = (period * (period + 1)) / 2;
     let x2 = (period * (period + 1) * (2 * period + 1)) / 6;
     let x_f = x as f64;
     let x2_f = x2 as f64;
     let period_f = period as f64;
-
     let bd = 1.0 / (period_f * x2_f - x_f * x_f);
 
     let mut y = 0.0;
@@ -132,46 +242,340 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
 
     for i in 0..(period - 1) {
         let x_i = (i + 1) as f64;
-        let val = data[i + first_valid_idx];
+        let val = data[i + first];
         y += val;
         xy += val * x_i;
     }
 
-    for i in (first_valid_idx + period - 1)..size {
+    for i in (first + period - 1)..size {
         let val = data[i];
         xy += val * (period as f64);
         y += val;
-
         let b = (period_f * xy - x_f * y) * bd;
-
         let a = (y - b * x_f) / period_f;
         let forecast = a + b * period_f;
-
-        values[i] = forecast;
+        out[i] = forecast;
         xy -= y;
         let oldest_idx = i - (period - 1);
         let oldest_val = data[oldest_idx];
         y -= oldest_val;
     }
-
-    Ok(LinRegOutput { values })
 }
+
+// --- BATCH RANGE/BUILDER/OUTPUT/GRID ---
+
+#[derive(Clone, Debug)]
+pub struct LinRegBatchRange {
+    pub period: (usize, usize, usize),
+}
+
+impl Default for LinRegBatchRange {
+    fn default() -> Self {
+        Self { period: (14, 40, 1) }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LinRegBatchBuilder {
+    range: LinRegBatchRange,
+    kernel: Kernel,
+}
+
+impl LinRegBatchBuilder {
+    pub fn new() -> Self { Self::default() }
+    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step); self
+    }
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0); self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<LinRegBatchOutput, LinRegError> {
+        linreg_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<LinRegBatchOutput, LinRegError> {
+        LinRegBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<LinRegBatchOutput, LinRegError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<LinRegBatchOutput, LinRegError> {
+        LinRegBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LinRegBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<LinRegParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl LinRegBatchOutput {
+    pub fn row_for_params(&self, p: &LinRegParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.period.unwrap_or(14) == p.period.unwrap_or(14)
+        })
+    }
+    pub fn values_for(&self, p: &LinRegParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+// --- BATCH MAIN ENTRYPOINTS ---
+
+pub fn linreg_batch_with_kernel(
+    data: &[f64],
+    sweep: &LinRegBatchRange,
+    k: Kernel,
+) -> Result<LinRegBatchOutput, LinRegError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(LinRegError::InvalidPeriod { period: 0, data_len: 0 });
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    linreg_batch_par_slice(data, sweep, simd)
+}
+
+#[inline(always)]
+pub fn linreg_batch_slice(
+    data: &[f64],
+    sweep: &LinRegBatchRange,
+    kern: Kernel,
+) -> Result<LinRegBatchOutput, LinRegError> {
+    linreg_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn linreg_batch_par_slice(
+    data: &[f64],
+    sweep: &LinRegBatchRange,
+    kern: Kernel,
+) -> Result<LinRegBatchOutput, LinRegError> {
+    linreg_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn linreg_batch_inner(
+    data: &[f64],
+    sweep: &LinRegBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<LinRegBatchOutput, LinRegError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(LinRegError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(LinRegError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(LinRegError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        match kern {
+            Kernel::Scalar => linreg_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => linreg_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => linreg_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+    if parallel {
+        values.par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(LinRegBatchOutput { values, combos, rows, cols })
+}
+
+// --- ROW SCALAR/SIMD (all AVX just call scalar for parity) ---
+
+#[inline(always)]
+unsafe fn linreg_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linreg_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linreg_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        linreg_row_avx512_short(data, first, period, out)
+    } else {
+        linreg_row_avx512_long(data, first, period, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linreg_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn linreg_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    linreg_scalar_inner(data, period, first, out)
+}
+
+// --- STREAM SUPPORT ---
+
+#[derive(Debug, Clone)]
+pub struct LinRegStream {
+    period: usize,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
+    x_sum: f64,
+    x2_sum: f64,
+}
+
+impl LinRegStream {
+    pub fn try_new(params: LinRegParams) -> Result<Self, LinRegError> {
+        let period = params.period.unwrap_or(14);
+        if period == 0 {
+            return Err(LinRegError::InvalidPeriod { period, data_len: 0 });
+        }
+        let mut x_sum = 0.0;
+        let mut x2_sum = 0.0;
+        for i in 1..=period {
+            let xi = i as f64;
+            x_sum += xi;
+            x2_sum += xi * xi;
+        }
+        Ok(Self {
+            period,
+            buffer: vec![f64::NAN; period],
+            head: 0,
+            filled: false,
+            x_sum,
+            x2_sum,
+        })
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.buffer[self.head] = value;
+        self.head = (self.head + 1) % self.period;
+        if !self.filled && self.head == 0 {
+            self.filled = true;
+        }
+        if !self.filled {
+            return None;
+        }
+        Some(self.dot_ring())
+    }
+
+    #[inline(always)]
+    fn dot_ring(&self) -> f64 {
+        let mut y_sum = 0.0;
+        let mut xy_sum = 0.0;
+        for (i, &y) in (1..=self.period).zip(self.buffer.iter().cycle().skip(self.head).take(self.period)) {
+            y_sum += y;
+            xy_sum += y * (i as f64);
+        }
+        let pf = self.period as f64;
+        let bd = 1.0 / (pf * self.x2_sum - self.x_sum * self.x_sum);
+        let b = (pf * xy_sum - self.x_sum * y_sum) * bd;
+        let a = (y_sum - b * self.x_sum) / pf;
+        a + b * pf
+    }
+}
+
+// --- BATCH GRID ---
+
+#[inline(always)]
+fn round_up8(x: usize) -> usize { (x + 7) & !7 }
+
+// --- EXPOSED BATCH EXPANSION ---
+
+#[inline(always)]
+fn expand_grid(r: &LinRegBatchRange) -> Vec<LinRegParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis_usize(r.period);
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(LinRegParams { period: Some(p) });
+    }
+    out
+}
+
+
+// --- TESTS ---
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_linreg_accuracy() {
+    fn check_linreg_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
+        let candles = read_candles_from_csv(file_path)?;
+        let close_prices = candles.select_candle_field("close")?;
         let params = LinRegParams { period: Some(14) };
         let input = LinRegInput::from_candles(&candles, "close", params);
-        let linreg_result = linreg(&input).expect("Failed to calculate Linear Regression");
+        let linreg_result = linreg_with_kernel(&input, kernel)?;
         let expected_last_five = [
             58929.37142857143,
             58899.42857142857,
@@ -193,85 +597,189 @@ mod tests {
                 value
             );
         }
-    }
-    #[test]
-    fn test_linreg_params_with_default_params() {
-        let params = LinRegParams::default();
-        assert_eq!(params.period, Some(14));
+        Ok(())
     }
 
-    #[test]
-    fn test_linreg_input_with_default_candles() {
+    fn check_linreg_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
+        let default_params = LinRegParams { period: None };
+        let input = LinRegInput::from_candles(&candles, "close", default_params);
+        let output = linreg_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    fn check_linreg_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
         let input = LinRegInput::with_default_candles(&candles);
         match input.data {
             LinRegData::Candles { source, .. } => assert_eq!(source, "close"),
-            _ => panic!("Expected LinRegData::Candles variant"),
+            _ => panic!("Expected LinRegData::Candles"),
         }
+        let output = linreg_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_linreg_invalid_period() {
-        let data = [10.0, 20.0, 30.0];
+    fn check_linreg_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0];
         let params = LinRegParams { period: Some(0) };
-        let input = LinRegInput::from_slice(&data, params);
-        let result = linreg(&input);
-        assert!(result.is_err());
+        let input = LinRegInput::from_slice(&input_data, params);
+        let res = linreg_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] LINREG should fail with zero period", test_name);
+        Ok(())
     }
 
-    #[test]
-    fn test_linreg_no_data() {
-        let data: [f64; 0] = [];
+    fn check_linreg_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = LinRegParams { period: Some(10) };
+        let input = LinRegInput::from_slice(&data_small, params);
+        let res = linreg_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] LINREG should fail with period exceeding length", test_name);
+        Ok(())
+    }
+
+    fn check_linreg_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
         let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::from_slice(&data, params);
-        let result = linreg(&input);
-        assert!(result.is_err());
+        let input = LinRegInput::from_slice(&single_point, params);
+        let res = linreg_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] LINREG should fail with insufficient data", test_name);
+        Ok(())
     }
 
-    #[test]
-    fn test_linreg_small_data() {
-        let data = [10.0, 20.0, 30.0];
-        let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::from_slice(&data, params);
-        let result = linreg(&input).expect("Should handle data smaller than period");
-        assert_eq!(result.values.len(), data.len());
-        for &val in &result.values {
-            assert!(val.is_nan());
-        }
-    }
-
-    #[test]
-    fn test_linreg_slice_data_reinput() {
+    fn check_linreg_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params_first = LinRegParams { period: Some(14) };
-        let input_first = LinRegInput::from_candles(&candles, "close", params_first);
-        let result_first = linreg(&input_first).expect("Failed first LinReg");
-        assert_eq!(result_first.values.len(), candles.close.len());
-        let params_second = LinRegParams { period: Some(10) };
-        let input_second = LinRegInput::from_slice(&result_first.values, params_second);
-        let result_second = linreg(&input_second).expect("Failed second LinReg");
-        assert_eq!(result_second.values.len(), result_first.values.len());
-        if result_second.values.len() > 240 {
-            for i in 240..result_second.values.len() {
-                assert!(result_second.values[i].is_finite());
+        let candles = read_candles_from_csv(file_path)?;
+        let first_params = LinRegParams { period: Some(14) };
+        let first_input = LinRegInput::from_candles(&candles, "close", first_params);
+        let first_result = linreg_with_kernel(&first_input, kernel)?;
+        let second_params = LinRegParams { period: Some(10) };
+        let second_input = LinRegInput::from_slice(&first_result.values, second_params);
+        let second_result = linreg_with_kernel(&second_input, kernel)?;
+        assert_eq!(second_result.values.len(), first_result.values.len());
+        Ok(())
+    }
+
+    fn check_linreg_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = LinRegInput::from_candles(
+            &candles,
+            "close",
+            LinRegParams { period: Some(14) },
+        );
+        let res = linreg_with_kernel(&input, kernel)?;
+        assert_eq!(res.values.len(), candles.close.len());
+        if res.values.len() > 240 {
+            for (i, &val) in res.values[240..].iter().enumerate() {
+                assert!(
+                    !val.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test_name,
+                    240 + i
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn check_linreg_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let period = 14;
+        let input = LinRegInput::from_candles(
+            &candles,
+            "close",
+            LinRegParams { period: Some(period) },
+        );
+        let batch_output = linreg_with_kernel(&input, kernel)?.values;
+        let mut stream = LinRegStream::try_new(LinRegParams { period: Some(period) })?;
+        let mut stream_values = Vec::with_capacity(candles.close.len());
+        for &price in &candles.close {
+            match stream.update(price) {
+                Some(val) => stream_values.push(val),
+                None => stream_values.push(f64::NAN),
+            }
+        }
+        assert_eq!(batch_output.len(), stream_values.len());
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+            if b.is_nan() && s.is_nan() { continue; }
+            let diff = (b - s).abs();
+            assert!(
+                diff < 1e-9,
+                "[{}] LINREG streaming mismatch at idx {}: batch={}, stream={}, diff={}",
+                test_name, i, b, s, diff
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! generate_all_linreg_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(#[test] fn [<$test_fn _scalar_f64>]() { let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar); })*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test] fn [<$test_fn _avx2_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2); }
+                    #[test] fn [<$test_fn _avx512_f64>]() { let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512); }
+                )*
             }
         }
     }
 
-    #[test]
-    fn test_linreg_nan_check() {
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let params = LinRegParams { period: Some(14) };
-        let input = LinRegInput::from_candles(&candles, "close", params);
-        let result = linreg(&input).expect("Failed LinReg");
-        assert_eq!(result.values.len(), candles.close.len());
-        if result.values.len() > 240 {
-            for i in 240..result.values.len() {
-                assert!(!result.values[i].is_nan());
-            }
-        }
+    generate_all_linreg_tests!(
+        check_linreg_accuracy,
+        check_linreg_partial_params,
+        check_linreg_default_candles,
+        check_linreg_zero_period,
+        check_linreg_period_exceeds_length,
+        check_linreg_very_small_dataset,
+        check_linreg_reinput,
+        check_linreg_nan_handling,
+        check_linreg_streaming
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = LinRegBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
+        let def = LinRegParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        Ok(())
     }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

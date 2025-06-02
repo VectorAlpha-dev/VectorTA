@@ -1,5 +1,5 @@
 [build]
-rustc-wrapper = "sccache"          # ".exe" optional on Windows
+rustc-wrapper = "sccache"
 rustflags = [
   "-C", "target-cpu=native",
   "-C", "target-feature=+avx512f,+avx512dq,+avx512vl,+fma",
