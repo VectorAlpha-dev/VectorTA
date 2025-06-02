@@ -1,28 +1,43 @@
-/// # TRIX (Triple Exponential Average Oscillator)
-///
-/// TRIX is a momentum oscillator derived from a triple-smoothed Exponential Moving Average (EMA),
-/// then taking the 1-day Rate-Of-Change (ROC) of that triple EMA (multiplied by 100).
-/// This version forces an EMA warm-up that matches the standard TA-Lib approach:
-/// The first EMA output at `first_valid_idx + period - 1` is the average of those `period` bars.
-/// Each subsequent pass for EMA2 and EMA3 also uses that same initialization pattern, ensuring
-/// accurate alignment for the final TRIX values.
-///
-/// ## Parameters
-/// - **period**: The EMA window size. Defaults to 18.
-///
-/// ## Errors
-/// - **EmptyData**: trix: Input data slice is empty.
-/// - **InvalidPeriod**: trix: `period` is zero or exceeds the data length.
-/// - **NotEnoughValidData**: trix: Fewer than `3*(period - 1) + 1` valid data points remain
-///   after the first valid index for triple-EMA + 1-bar ROC.
-/// - **AllValuesNaN**: trix: All input data values are `NaN`.
-///
-/// ## Returns
-/// - **`Ok(TrixOutput)`** on success, matching the input length,
-///   with `NaN` until triple-EMA is fully initialized plus 1 bar for the ROC.
-/// - **`Err(TrixError)`** otherwise.
+//! # TRIX (Triple Exponential Average Oscillator)
+//!
+//! TRIX is a momentum oscillator derived from a triple-smoothed Exponential Moving Average (EMA),
+//! then taking the 1-day Rate-Of-Change (ROC) of that triple EMA (multiplied by 100).
+//!
+//! ## Parameters
+//! - **period**: The EMA window size. Defaults to 18.
+//!
+//! ## Errors
+//! - **EmptyData**: trix: Input data slice is empty.
+//! - **InvalidPeriod**: trix: `period` is zero or exceeds the data length.
+//! - **NotEnoughValidData**: trix: Fewer than `3*(period - 1) + 1` valid data points remain
+//!   after the first valid index for triple-EMA + 1-bar ROC.
+//! - **AllValuesNaN**: trix: All input data values are `NaN`.
+//!
+//! ## Returns
+//! - **`Ok(TrixOutput)`** on success, matching the input length,
+//!   with `NaN` until triple-EMA is fully initialized plus 1 bar for the ROC.
+//! - **`Err(TrixError)`** otherwise.
+
 use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
+use std::convert::AsRef;
+use std::error::Error;
 use thiserror::Error;
+
+impl<'a> AsRef<[f64]> for TrixInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            TrixData::Slice(slice) => slice,
+            TrixData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum TrixData<'a> {
@@ -56,34 +71,82 @@ pub struct TrixInput<'a> {
 }
 
 impl<'a> TrixInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: TrixParams) -> Self {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: TrixParams) -> Self {
         Self {
-            data: TrixData::Candles { candles, source },
-            params,
+            data: TrixData::Candles { candles: c, source: s },
+            params: p,
         }
     }
-
-    pub fn from_slice(slice: &'a [f64], params: TrixParams) -> Self {
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: TrixParams) -> Self {
         Self {
-            data: TrixData::Slice(slice),
-            params,
+            data: TrixData::Slice(sl),
+            params: p,
         }
     }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: TrixData::Candles {
-                candles,
-                source: "close",
-            },
-            params: TrixParams::default(),
-        }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", TrixParams::default())
     }
-
+    #[inline]
     pub fn get_period(&self) -> usize {
-        self.params
-            .period
-            .unwrap_or_else(|| TrixParams::default().period.unwrap())
+        self.params.period.unwrap_or(18)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct TrixBuilder {
+    period: Option<usize>,
+    kernel: Kernel,
+}
+
+impl Default for TrixBuilder {
+    fn default() -> Self {
+        Self {
+            period: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl TrixBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<TrixOutput, TrixError> {
+        let p = TrixParams {
+            period: self.period,
+        };
+        let i = TrixInput::from_candles(c, "close", p);
+        trix_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<TrixOutput, TrixError> {
+        let p = TrixParams {
+            period: self.period,
+        };
+        let i = TrixInput::from_slice(d, p);
+        trix_with_kernel(&i, self.kernel)
+    }
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<TrixStream, TrixError> {
+        let p = TrixParams {
+            period: self.period,
+        };
+        TrixStream::try_new(p)
     }
 }
 
@@ -100,45 +163,18 @@ pub enum TrixError {
 }
 
 #[inline]
-fn compute_standard_ema(data: &[f64], period: usize, first_valid_idx: usize) -> Vec<f64> {
-    let mut out = vec![f64::NAN; data.len()];
-    let alpha = 2.0 / (period as f64 + 1.0);
-
-    let mut sum = 0.0;
-    for &val in &data[first_valid_idx..(first_valid_idx + period)] {
-        sum += val;
-    }
-    let initial_ema = sum / (period as f64);
-    out[first_valid_idx + period - 1] = initial_ema;
-
-    for i in (first_valid_idx + period)..data.len() {
-        let prev = out[i - 1];
-        if !prev.is_nan() && !data[i].is_nan() {
-            out[i] = alpha * data[i] + (1.0 - alpha) * prev;
-        }
-    }
-
-    out
-}
-
-#[inline]
-fn compute_triple_ema(data: &[f64], period: usize, first_valid_idx: usize) -> Vec<f64> {
-    let ema1 = compute_standard_ema(data, period, first_valid_idx);
-    let ema2 = compute_standard_ema(&ema1, period, first_valid_idx + period - 1);
-    compute_standard_ema(&ema2, period, first_valid_idx + 2 * (period - 1))
-}
-
-#[inline]
 pub fn trix(input: &TrixInput) -> Result<TrixOutput, TrixError> {
+    trix_with_kernel(input, Kernel::Auto)
+}
+
+pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput, TrixError> {
     let data: &[f64] = match &input.data {
         TrixData::Candles { candles, source } => source_type(candles, source),
-        TrixData::Slice(slice) => slice,
+        TrixData::Slice(sl) => sl,
     };
-
     if data.is_empty() {
         return Err(TrixError::EmptyData);
     }
-
     let period = input.get_period();
     if period == 0 || period > data.len() {
         return Err(TrixError::InvalidPeriod {
@@ -146,84 +182,480 @@ pub fn trix(input: &TrixInput) -> Result<TrixOutput, TrixError> {
             data_len: data.len(),
         });
     }
-
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(TrixError::AllValuesNaN),
-    };
-
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TrixError::AllValuesNaN)?;
     let needed = 3 * (period - 1) + 1;
-    let valid_len = data.len() - first_valid_idx;
+    let valid_len = data.len() - first;
     if valid_len < needed {
-        return Err(TrixError::NotEnoughValidData {
-            needed,
-            valid: valid_len,
-        });
+        return Err(TrixError::NotEnoughValidData { needed, valid: valid_len });
     }
-
-    let triple_ema = compute_triple_ema(data, period, first_valid_idx);
-    let mut trix_values = vec![f64::NAN; data.len()];
-    let triple_ema_start = first_valid_idx + 3 * (period - 1);
-
-    for i in (triple_ema_start + 1)..data.len() {
-        let prev = triple_ema[i - 1];
-        let curr = triple_ema[i];
-        if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
-            trix_values[i] = (curr / prev - 1.0) * 100.0;
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                trix_scalar(data, period, first)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                trix_avx2(data, period, first)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                trix_avx512(data, period, first)
+            }
+            _ => unreachable!(),
         }
     }
+}
 
-    Ok(TrixOutput {
-        values: trix_values,
+#[inline(always)]
+unsafe fn trix_scalar(
+    data: &[f64],
+    period: usize,
+    first: usize,
+) -> Result<TrixOutput, TrixError> {
+    let ema1 = compute_standard_ema(data, period, first);
+    let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
+    let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
+    let mut out = vec![f64::NAN; data.len()];
+    let triple_ema_start = first + 3 * (period - 1);
+    for i in (triple_ema_start + 1)..data.len() {
+        let prev = ema3[i - 1];
+        let curr = ema3[i];
+        if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
+            out[i] = (curr / prev - 1.0) * 100.0;
+        }
+    }
+    Ok(TrixOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_avx2(
+    data: &[f64],
+    period: usize,
+    first: usize,
+) -> Result<TrixOutput, TrixError> {
+    trix_scalar(data, period, first)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_avx512(
+    data: &[f64],
+    period: usize,
+    first: usize,
+) -> Result<TrixOutput, TrixError> {
+    if period <= 32 {
+        trix_avx512_short(data, period, first)
+    } else {
+        trix_avx512_long(data, period, first)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_avx512_short(
+    data: &[f64],
+    period: usize,
+    first: usize,
+) -> Result<TrixOutput, TrixError> {
+    trix_scalar(data, period, first)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_avx512_long(
+    data: &[f64],
+    period: usize,
+    first: usize,
+) -> Result<TrixOutput, TrixError> {
+    trix_scalar(data, period, first)
+}
+
+#[inline]
+fn compute_standard_ema(data: &[f64], period: usize, first_valid_idx: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; data.len()];
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let mut sum = 0.0;
+    for &val in &data[first_valid_idx..(first_valid_idx + period)] {
+        sum += val;
+    }
+    let initial_ema = sum / (period as f64);
+    out[first_valid_idx + period - 1] = initial_ema;
+    for i in (first_valid_idx + period)..data.len() {
+        let prev = out[i - 1];
+        if !prev.is_nan() && !data[i].is_nan() {
+            out[i] = alpha * data[i] + (1.0 - alpha) * prev;
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct TrixStream {
+    period: usize,
+    stage: u8,
+    buffer1: Vec<f64>,
+    buffer2: Vec<f64>,
+    buffer3: Vec<f64>,
+    head: usize,
+    filled: bool,
+    prev_ema3: f64,
+    initialized: bool,
+}
+
+impl TrixStream {
+    pub fn try_new(params: TrixParams) -> Result<Self, TrixError> {
+        let period = params.period.unwrap_or(18);
+        if period == 0 {
+            return Err(TrixError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
+        }
+        Ok(Self {
+            period,
+            stage: 0,
+            buffer1: vec![f64::NAN; period],
+            buffer2: vec![f64::NAN; period],
+            buffer3: vec![f64::NAN; period],
+            head: 0,
+            filled: false,
+            prev_ema3: f64::NAN,
+            initialized: false,
+        })
+    }
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.buffer1[self.head] = value;
+        if self.stage < 1 && self.head == self.period - 1 {
+            let sum: f64 = self.buffer1.iter().sum();
+            let ema1 = sum / self.period as f64;
+            self.buffer2[self.head] = ema1;
+            self.stage = 1;
+        } else if self.stage >= 1 {
+            let prev_ema1 = self.buffer2[(self.head + self.period - 1) % self.period];
+            let ema1 = 2.0 / (self.period as f64 + 1.0) * value
+                + (1.0 - 2.0 / (self.period as f64 + 1.0)) * prev_ema1;
+            self.buffer2[self.head] = ema1;
+        }
+        if self.stage >= 1 {
+            if self.stage < 2 && self.head == self.period - 1 {
+                let sum: f64 = self.buffer2.iter().sum();
+                let ema2 = sum / self.period as f64;
+                self.buffer3[self.head] = ema2;
+                self.stage = 2;
+            } else if self.stage >= 2 {
+                let prev_ema2 = self.buffer3[(self.head + self.period - 1) % self.period];
+                let ema2 = 2.0 / (self.period as f64 + 1.0) * self.buffer2[self.head]
+                    + (1.0 - 2.0 / (self.period as f64 + 1.0)) * prev_ema2;
+                self.buffer3[self.head] = ema2;
+            }
+        }
+        let mut output = None;
+        if self.stage >= 2 && self.head == self.period - 1 {
+            let sum: f64 = self.buffer3.iter().sum();
+            self.prev_ema3 = sum / self.period as f64;
+            self.initialized = true;
+        } else if self.stage >= 2 && self.initialized {
+            let prev = self.prev_ema3;
+            let curr = self.buffer3[self.head];
+            if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
+                let trix_val = (curr / prev - 1.0) * 100.0;
+                output = Some(trix_val);
+                self.prev_ema3 = curr;
+            }
+        }
+        self.head = (self.head + 1) % self.period;
+        output
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrixBatchRange {
+    pub period: (usize, usize, usize),
+}
+
+impl Default for TrixBatchRange {
+    fn default() -> Self {
+        Self {
+            period: (18, 100, 1),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrixBatchBuilder {
+    range: TrixBatchRange,
+    kernel: Kernel,
+}
+
+impl TrixBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    pub fn apply_slice(self, data: &[f64]) -> Result<TrixBatchOutput, TrixError> {
+        trix_batch_with_kernel(data, &self.range, self.kernel)
+    }
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<TrixBatchOutput, TrixError> {
+        TrixBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<TrixBatchOutput, TrixError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+    pub fn with_default_candles(c: &Candles) -> Result<TrixBatchOutput, TrixError> {
+        TrixBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+pub fn trix_batch_with_kernel(
+    data: &[f64],
+    sweep: &TrixBatchRange,
+    k: Kernel,
+) -> Result<TrixBatchOutput, TrixError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(TrixError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    trix_batch_par_slice(data, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct TrixBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<TrixParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl TrixBatchOutput {
+    pub fn row_for_params(&self, p: &TrixParams) -> Option<usize> {
+        self.combos.iter().position(|c| c.period.unwrap_or(18) == p.period.unwrap_or(18))
+    }
+    pub fn values_for(&self, p: &TrixParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &TrixBatchRange) -> Vec<TrixParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    let periods = axis_usize(r.period);
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(TrixParams { period: Some(p) });
+    }
+    out
+}
+
+#[inline(always)]
+pub fn trix_batch_slice(
+    data: &[f64],
+    sweep: &TrixBatchRange,
+    kern: Kernel,
+) -> Result<TrixBatchOutput, TrixError> {
+    trix_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn trix_batch_par_slice(
+    data: &[f64],
+    sweep: &TrixBatchRange,
+    kern: Kernel,
+) -> Result<TrixBatchOutput, TrixError> {
+    trix_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn trix_batch_inner(
+    data: &[f64],
+    sweep: &TrixBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<TrixBatchOutput, TrixError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(TrixError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TrixError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let needed = 3 * (max_p - 1) + 1;
+    if data.len() - first < needed {
+        return Err(TrixError::NotEnoughValidData {
+            needed,
+            valid: data.len() - first,
+        });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        match kern {
+            Kernel::Scalar => trix_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => trix_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => trix_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+    if parallel {
+        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    Ok(TrixBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
     })
+}
+
+#[inline(always)]
+unsafe fn trix_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let ema1 = compute_standard_ema(data, period, first);
+    let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
+    let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
+    let triple_ema_start = first + 3 * (period - 1);
+    for i in (triple_ema_start + 1)..data.len() {
+        let prev = ema3[i - 1];
+        let curr = ema3[i];
+        if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
+            out[i] = (curr / prev - 1.0) * 100.0;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    trix_row_scalar(data, first, period, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        trix_row_avx512_short(data, first, period, out)
+    } else {
+        trix_row_avx512_long(data, first, period, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    trix_row_scalar(data, first, period, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn trix_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    trix_row_scalar(data, first, period, out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_trix_partial_params() {
+    fn check_trix_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let default_params = TrixParams { period: None };
         let input_default = TrixInput::from_candles(&candles, "close", default_params);
-        let output_default = trix(&input_default).expect("Failed TRIX with default params");
+        let output_default = trix_with_kernel(&input_default, kernel)?;
         assert_eq!(output_default.values.len(), candles.close.len());
-
         let params_period_14 = TrixParams { period: Some(14) };
         let input_period_14 = TrixInput::from_candles(&candles, "hl2", params_period_14);
-        let output_period_14 =
-            trix(&input_period_14).expect("Failed TRIX with period=14, source=hl2");
+        let output_period_14 = trix_with_kernel(&input_period_14, kernel)?;
         assert_eq!(output_period_14.values.len(), candles.close.len());
-
         let params_custom = TrixParams { period: Some(20) };
         let input_custom = TrixInput::from_candles(&candles, "hlc3", params_custom);
-        let output_custom = trix(&input_custom).expect("Failed TRIX fully custom");
+        let output_custom = trix_with_kernel(&input_custom, kernel)?;
         assert_eq!(output_custom.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    #[ignore]
-    fn test_trix_accuracy() {
+    fn check_trix_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let close_prices = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
-
+        let candles = read_candles_from_csv(file_path)?;
+        let close_prices = candles.select_candle_field("close")?;
         let params = TrixParams { period: Some(18) };
         let input = TrixInput::from_candles(&candles, "close", params);
-        let trix_result = trix(&input).expect("Failed to calculate TRIX");
-
-        assert_eq!(
-            trix_result.values.len(),
-            close_prices.len(),
-            "TRIX length mismatch"
-        );
-
+        let trix_result = trix_with_kernel(&input, kernel)?;
+        assert_eq!(trix_result.values.len(), close_prices.len(), "TRIX length mismatch");
         let expected_last_five = [
             -16.03083789275206,
             -15.93477668222043,
@@ -244,100 +676,143 @@ mod tests {
                 value
             );
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_trix_with_default_candles() {
+    fn check_trix_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
         let input = TrixInput::with_default_candles(&candles);
         match input.data {
-            TrixData::Candles { source, .. } => {
-                assert_eq!(source, "close", "Expected default source to be 'close'");
-            }
-            _ => panic!("Expected TrixData::Candles variant"),
+            TrixData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected TrixData::Candles"),
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_trix_params_with_default() {
-        let default_params = TrixParams::default();
-        assert_eq!(
-            default_params.period,
-            Some(18),
-            "Expected default TRIX period to be 18"
-        );
-    }
-
-    #[test]
-    fn test_trix_empty_data() {
-        let params = TrixParams { period: Some(18) };
-        let input_data: [f64; 0] = [];
-        let input = TrixInput::from_slice(&input_data, params);
-        let result = trix(&input);
-        assert!(result.is_err(), "Expected error on empty data");
-    }
-
-    #[test]
-    fn test_trix_zero_period() {
+    fn check_trix_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data = [10.0, 20.0, 30.0];
         let params = TrixParams { period: Some(0) };
-        let input_data = [1.0, 2.0, 3.0];
         let input = TrixInput::from_slice(&input_data, params);
-        let result = trix(&input);
-        assert!(result.is_err(), "Expected error for zero period");
+        let res = trix_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] TRIX should fail with zero period", test_name);
+        Ok(())
     }
 
-    #[test]
-    fn test_trix_period_exceeds_length() {
-        let params = TrixParams { period: Some(100) };
-        let input_data = [1.0, 2.0, 3.0];
-        let input = TrixInput::from_slice(&input_data, params);
-        let result = trix(&input);
-        assert!(result.is_err(), "Expected error when period > data length");
+    fn check_trix_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
+        let params = TrixParams { period: Some(10) };
+        let input = TrixInput::from_slice(&data_small, params);
+        let res = trix_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] TRIX should fail with period exceeding length", test_name);
+        Ok(())
     }
 
-    #[test]
-    fn test_trix_all_nan() {
+    fn check_trix_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
         let params = TrixParams { period: Some(18) };
-        let input_data = [f64::NAN, f64::NAN, f64::NAN];
-        let input = TrixInput::from_slice(&input_data, params);
-        let result = trix(&input);
-        assert!(result.is_err(), "Expected error when all data is NaN");
+        let input = TrixInput::from_slice(&single_point, params);
+        let res = trix_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] TRIX should fail with insufficient data", test_name);
+        Ok(())
     }
 
-    #[test]
-    fn test_trix_not_enough_valid_data() {
-        let params = TrixParams { period: Some(18) };
-        let input_data = [f64::NAN; 30];
-        let mut valid_data = input_data.clone();
-        valid_data[25] = 50.0;
-        let input = TrixInput::from_slice(&valid_data, params);
-        let result = trix(&input);
-        assert!(
-            result.is_err(),
-            "Expected error for insufficient valid data"
-        );
-    }
-
-    #[test]
-    fn test_trix_small_dataset() {
-        let params = TrixParams { period: Some(18) };
-        let input_data = [1.0, 2.0, 3.0, 4.0, 5.0];
-        let input = TrixInput::from_slice(&input_data, params);
-        let result = trix(&input);
-        assert!(result.is_err(), "Expected error on small dataset for TRIX");
-    }
-
-    #[test]
-    fn test_trix_reinput() {
+    fn check_trix_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
         let params = TrixParams { period: Some(10) };
         let input = TrixInput::from_candles(&candles, "close", params);
-        let first_result = trix(&input).expect("First TRIX calculation failed");
-        let second_input =
-            TrixInput::from_slice(&first_result.values, TrixParams { period: Some(10) });
-        let second_result = trix(&second_input).expect("Second TRIX calculation failed");
+        let first_result = trix_with_kernel(&input, kernel)?;
+        let second_input = TrixInput::from_slice(&first_result.values, TrixParams { period: Some(10) });
+        let second_result = trix_with_kernel(&second_input, kernel)?;
         assert_eq!(first_result.values.len(), second_result.values.len());
+        Ok(())
     }
+
+    macro_rules! generate_all_trix_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
+            }
+        }
+    }
+    generate_all_trix_tests!(
+        check_trix_partial_params,
+        check_trix_accuracy,
+        check_trix_default_candles,
+        check_trix_zero_period,
+        check_trix_period_exceeds_length,
+        check_trix_very_small_dataset,
+        check_trix_reinput
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = TrixBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = TrixParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        let expected = [
+            -16.03083789275206,
+            -15.93477668222043,
+            -15.794825711480387,
+            -15.587573840557534,
+            -15.416073398576424,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-6,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }

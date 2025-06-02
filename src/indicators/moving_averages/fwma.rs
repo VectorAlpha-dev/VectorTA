@@ -23,6 +23,7 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -222,11 +223,15 @@ pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput,
             Kernel::Scalar | Kernel::ScalarBatch => {
                 fwma_scalar(data, &fib, period, first, &mut out)
             }
-            Kernel::Avx2 | Kernel::Avx2Batch => fwma_avx2(data, &fib, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                fwma_avx2(data, &fib, period, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 fwma_avx512(data, &fib, period, first, &mut out)
             }
-            Kernel::Auto => unreachable!(),
+            _ => unreachable!(),
         }
     }
     Ok(FwmaOutput { values: out })
@@ -261,6 +266,7 @@ pub unsafe fn fwma_scalar(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn horizontal_sum_avx2(v: __m256d) -> f64 {
     let high_low = _mm256_hadd_pd(v, v);
@@ -271,6 +277,7 @@ unsafe fn horizontal_sum_avx2(v: __m256d) -> f64 {
     _mm_cvtsd_f64(result) * 0.5
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn fwma_avx512_short(
     data: &[f64],
@@ -340,6 +347,7 @@ unsafe fn fwma_avx512_short(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn fwma_avx512_long(
     data: &[f64],
@@ -348,73 +356,99 @@ unsafe fn fwma_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    const W: usize = 8;
-    let full = period / W;
-    let tail = period % W;
-    let tail_mask: __mmask8 = (1u8 << tail).wrapping_sub(1);
+    const STEP: usize = 8;
+    const UNROLL: usize = 4;
 
-    let mut aligned = AlignedVec::with_capacity(period + W);
-    let fib_aln = aligned.as_mut_slice();
-    fib_aln[..period].copy_from_slice(fib);
-    let wptr = fib_aln.as_ptr();
+    let chunks = period / STEP;
+    let tail_len = period % STEP;
 
-    let dptr = data.as_ptr();
-    let optr = out.as_mut_ptr();
+    let mut aligned_fib = AlignedVec::with_capacity(period + STEP);
+    let fib_buf = aligned_fib.as_mut_slice();
+    fib_buf[..period].copy_from_slice(fib);
+    let fib_ptr = fib_buf.as_ptr();
 
-    for i in (first + period - 1)..data.len() {
-        let base = dptr.add(i + 1 - period);
+    let mut weight_vecs = Vec::with_capacity(chunks);
+    for i in 0..chunks {
+        weight_vecs.push(_mm512_load_pd(fib_ptr.add(i * STEP)));
+    }
 
-        let mut acc0 = _mm512_setzero_pd();
-        let mut acc1 = _mm512_setzero_pd();
-        let mut acc2 = _mm512_setzero_pd();
-        let mut acc3 = _mm512_setzero_pd();
+    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
+    let w_tail = if tail_len > 0 {
+        Some(_mm512_maskz_load_pd(tmask, fib_ptr.add(chunks * STEP)))
+    } else {
+        None
+    };
 
-        let mut j = 0;
-        while j + 32 <= period {
-            _mm_prefetch(base.add(j + 64) as *const i8, _MM_HINT_T0);
+    let end = data.len();
+    let last_valid = end.saturating_sub(UNROLL - 1);
+    let mut i = first + period - 1;
 
-            let v0 = _mm512_loadu_pd(base.add(j));
-            let w0 = _mm512_load_pd(wptr.add(j));
-            acc0 = _mm512_fmadd_pd(v0, w0, acc0);
+    while i < last_valid {
+        let base0 = data.as_ptr().add(i + 1 - period);
+        let base1 = base0.add(1);
+        let base2 = base0.add(2);
+        let base3 = base0.add(3);
 
-            let v1 = _mm512_loadu_pd(base.add(j + 8));
-            let w1 = _mm512_load_pd(wptr.add(j + 8));
-            acc1 = _mm512_fmadd_pd(v1, w1, acc1);
+        let mut sum0 = _mm512_setzero_pd();
+        let mut sum1 = _mm512_setzero_pd();
+        let mut sum2 = _mm512_setzero_pd();
+        let mut sum3 = _mm512_setzero_pd();
 
-            let v2 = _mm512_loadu_pd(base.add(j + 16));
-            let w2 = _mm512_load_pd(wptr.add(j + 16));
-            acc2 = _mm512_fmadd_pd(v2, w2, acc2);
+        for (j, &w) in weight_vecs.iter().enumerate() {
+            let offset = j * STEP;
 
-            let v3 = _mm512_loadu_pd(base.add(j + 24));
-            let w3 = _mm512_load_pd(wptr.add(j + 24));
-            acc3 = _mm512_fmadd_pd(v3, w3, acc3);
+            let d0 = _mm512_loadu_pd(base0.add(offset));
+            let d1 = _mm512_loadu_pd(base1.add(offset));
+            let d2 = _mm512_loadu_pd(base2.add(offset));
+            let d3 = _mm512_loadu_pd(base3.add(offset));
 
-            j += 32;
+            sum0 = _mm512_fmadd_pd(d0, w, sum0);
+            sum1 = _mm512_fmadd_pd(d1, w, sum1);
+            sum2 = _mm512_fmadd_pd(d2, w, sum2);
+            sum3 = _mm512_fmadd_pd(d3, w, sum3);
         }
 
-        while j + 8 <= period {
-            let v = _mm512_loadu_pd(base.add(j));
-            let w = _mm512_load_pd(wptr.add(j));
-            acc0 = _mm512_fmadd_pd(v, w, acc0);
-            j += 8;
+        if let Some(wt) = w_tail {
+            let offset = chunks * STEP;
+            let d0 = _mm512_maskz_loadu_pd(tmask, base0.add(offset));
+            let d1 = _mm512_maskz_loadu_pd(tmask, base1.add(offset));
+            let d2 = _mm512_maskz_loadu_pd(tmask, base2.add(offset));
+            let d3 = _mm512_maskz_loadu_pd(tmask, base3.add(offset));
+
+            sum0 = _mm512_fmadd_pd(d0, wt, sum0);
+            sum1 = _mm512_fmadd_pd(d1, wt, sum1);
+            sum2 = _mm512_fmadd_pd(d2, wt, sum2);
+            sum3 = _mm512_fmadd_pd(d3, wt, sum3);
         }
 
-        acc0 = _mm512_add_pd(acc0, acc2);
-        acc1 = _mm512_add_pd(acc1, acc3);
-        let sum_vec = _mm512_add_pd(acc0, acc1);
+        out[i] = _mm512_reduce_add_pd(sum0);
+        out[i + 1] = _mm512_reduce_add_pd(sum1);
+        out[i + 2] = _mm512_reduce_add_pd(sum2);
+        out[i + 3] = _mm512_reduce_add_pd(sum3);
 
-        let mut sum = _mm512_reduce_add_pd(sum_vec);
+        i += UNROLL;
+    }
 
-        if tail > 0 {
-            let v_tail = _mm512_maskz_loadu_pd(tail_mask, base.add(full * W));
-            let w_tail = _mm512_maskz_load_pd(tail_mask, wptr.add(full * W));
-            sum += _mm512_reduce_add_pd(_mm512_mul_pd(v_tail, w_tail));
+    while i < end {
+        let base = data.as_ptr().add(i + 1 - period);
+        let mut sum = _mm512_setzero_pd();
+
+        for (j, &w) in weight_vecs.iter().enumerate() {
+            let d = _mm512_loadu_pd(base.add(j * STEP));
+            sum = _mm512_fmadd_pd(d, w, sum);
         }
 
-        *optr.add(i) = sum;
+        if let Some(wt) = w_tail {
+            let d = _mm512_maskz_loadu_pd(tmask, base.add(chunks * STEP));
+            sum = _mm512_fmadd_pd(d, wt, sum);
+        }
+
+        out[i] = _mm512_reduce_add_pd(sum);
+        i += 1;
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 pub unsafe fn fwma_avx512(data: &[f64], fib: &[f64], period: usize, first: usize, out: &mut [f64]) {
     if period <= 32 {
@@ -424,6 +458,7 @@ pub unsafe fn fwma_avx512(data: &[f64], fib: &[f64], period: usize, first: usize
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn fwma_avx2(
     data: &[f64],
@@ -613,9 +648,10 @@ pub fn fwma_batch_with_kernel(
             })
         }
     };
-
     let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
@@ -732,9 +768,10 @@ fn fwma_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let fib_ptr = flat_fib.as_ptr().add(row * max_p);
-
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => fwma_row_avx512(data, first, period, max_p, fib_ptr, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => fwma_row_avx2(data, first, period, max_p, fib_ptr, out_row),
             _ => fwma_row_scalar(data, first, period, max_p, fib_ptr, out_row),
         }
@@ -772,6 +809,7 @@ unsafe fn fwma_row_scalar(
     fwma_scalar(data, fib, period, first, out);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn fwma_row_avx2(
@@ -786,6 +824,7 @@ unsafe fn fwma_row_avx2(
     fwma_avx2(data, fib, period, first, out);
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 #[inline]
 unsafe fn fwma_row_avx512(
@@ -804,10 +843,10 @@ unsafe fn fwma_row_avx512(
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::utilities::helpers::skip_if_unsupported;
+    use crate::skip_if_unsupported;
 
     fn check_fwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -820,7 +859,7 @@ mod tests {
     }
 
     fn check_fwma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -850,7 +889,7 @@ mod tests {
     }
 
     fn check_fwma_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -866,7 +905,7 @@ mod tests {
     }
 
     fn check_fwma_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = FwmaParams { period: Some(0) };
         let input = FwmaInput::from_slice(&input_data, params);
@@ -883,7 +922,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = FwmaParams { period: Some(10) };
         let input = FwmaInput::from_slice(&data_small, params);
@@ -900,7 +939,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = FwmaParams { period: Some(5) };
         let input = FwmaInput::from_slice(&single_point, params);
@@ -914,7 +953,7 @@ mod tests {
     }
 
     fn check_fwma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -939,7 +978,7 @@ mod tests {
     }
 
     fn check_fwma_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -960,7 +999,7 @@ mod tests {
     }
 
     fn check_fwma_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test_name);
+        skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -1016,11 +1055,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
 
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx2_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
                     }
 
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
@@ -1043,7 +1084,7 @@ mod tests {
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported(kernel, test);
+        skip_if_unsupported!(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -1073,20 +1114,25 @@ mod tests {
         }
         Ok(())
     }
-
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
+                #[test]
+                fn [<$fn_name _scalar>]() {
                     let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
-                #[test] fn [<$fn_name _avx2>]()        {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx2>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
                 }
-                #[test] fn [<$fn_name _avx512>]()      {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test]
+                fn [<$fn_name _avx512>]() {
                     let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
                 }
-                #[test] fn [<$fn_name _auto_detect>]() {
+                #[test]
+                fn [<$fn_name _auto_detect>]() {
                     let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
                 }
             }

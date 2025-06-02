@@ -21,3 +21,7 @@ Cargo.lock
 #.idea/
 src/data/backup/
 profiling.ps1
+file_structure.py
+project_structure.txt
+AGENTS.md
+profile.ps1

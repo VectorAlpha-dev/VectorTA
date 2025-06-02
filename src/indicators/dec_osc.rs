@@ -1,28 +1,44 @@
-/// # Decycler Oscillator (DEC_OSC)
-///
-/// An oscillator that applies two sequential high-pass filters (2-pole) to remove
-/// cyclical components from the data (e.g., price). The residual is then scaled by
-/// `k` and expressed as a percentage of the original input series.
-///
-/// ## Parameters
-/// - **hp_period**: The period used for the primary high-pass filter. Defaults to 125.
-/// - **k**: Multiplier for the final oscillator values. Defaults to 1.0.
-///
-/// ## Errors
-/// - **EmptyData**: dec_osc: Input data slice is empty.
-/// - **InvalidPeriod**: dec_osc: `hp_period` is below 2 or exceeds the data length.
-/// - **NotEnoughValidData**: dec_osc: Fewer than 2 valid (non-`NaN`) data points remain
-///   after the first valid index.
-/// - **AllValuesNaN**: dec_osc: All input data values are `NaN`.
-/// - **InvalidK**: dec_osc: `k` is `NaN` or non-positive.
-///
-/// ## Returns
-/// - **`Ok(DecOscOutput)`** on success, containing a `Vec<f64>` matching the input length.
-///   The first few values will be `NaN` until enough points are available (2-pole filter).
-/// - **`Err(DecOscError)`** otherwise.
+//! # Decycler Oscillator (DEC_OSC)
+//!
+//! An oscillator that applies two sequential high-pass filters (2-pole) to remove
+//! cyclical components from the data. The residual is then scaled by `k` and expressed
+//! as a percentage of the original input series.
+//!
+//! ## Parameters
+//! - **hp_period**: The period used for the primary high-pass filter. Defaults to 125.
+//! - **k**: Multiplier for the final oscillator values. Defaults to 1.0.
+//!
+//! ## Errors
+//! - **AllValuesNaN**: dec_osc: All input data values are `NaN`.
+//! - **InvalidPeriod**: dec_osc: `hp_period` < 2 or exceeds the data length.
+//! - **NotEnoughValidData**: dec_osc: Fewer than 2 valid (non-`NaN`) data points remain.
+//! - **InvalidK**: dec_osc: `k` is `NaN` or non-positive.
+//!
+//! ## Returns
+//! - **`Ok(DecOscOutput)`** on success, containing a `Vec<f64>` matching the input length.
+//! - **`Err(DecOscError)`** otherwise.
+//!
+
 use crate::utilities::data_loader::{source_type, Candles};
-use std::f64::consts::PI;
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use rayon::prelude::*;
 use thiserror::Error;
+use std::convert::AsRef;
+use std::f64::consts::PI;
+
+impl<'a> AsRef<[f64]> for DecOscInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            DecOscData::Slice(slice) => slice,
+            DecOscData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DecOscData<'a> {
@@ -60,99 +76,204 @@ pub struct DecOscInput<'a> {
 }
 
 impl<'a> DecOscInput<'a> {
-    pub fn from_candles(candles: &'a Candles, source: &'a str, params: DecOscParams) -> Self {
+    #[inline]
+    pub fn from_candles(c: &'a Candles, s: &'a str, p: DecOscParams) -> Self {
         Self {
-            data: DecOscData::Candles { candles, source },
-            params,
+            data: DecOscData::Candles { candles: c, source: s },
+            params: p,
         }
     }
-
-    pub fn from_slice(slice: &'a [f64], params: DecOscParams) -> Self {
+    #[inline]
+    pub fn from_slice(sl: &'a [f64], p: DecOscParams) -> Self {
         Self {
-            data: DecOscData::Slice(slice),
-            params,
+            data: DecOscData::Slice(sl),
+            params: p,
         }
     }
-
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self {
-            data: DecOscData::Candles {
-                candles,
-                source: "close",
-            },
-            params: DecOscParams::default(),
-        }
+    #[inline]
+    pub fn with_default_candles(c: &'a Candles) -> Self {
+        Self::from_candles(c, "close", DecOscParams::default())
     }
-
+    #[inline]
     pub fn get_hp_period(&self) -> usize {
-        self.params
-            .hp_period
-            .unwrap_or_else(|| DecOscParams::default().hp_period.unwrap())
+        self.params.hp_period.unwrap_or(125)
+    }
+    #[inline]
+    pub fn get_k(&self) -> f64 {
+        self.params.k.unwrap_or(1.0)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DecOscBuilder {
+    hp_period: Option<usize>,
+    k: Option<f64>,
+    kernel: Kernel,
+}
+
+impl Default for DecOscBuilder {
+    fn default() -> Self {
+        Self {
+            hp_period: None,
+            k: None,
+            kernel: Kernel::Auto,
+        }
+    }
+}
+
+impl DecOscBuilder {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn hp_period(mut self, n: usize) -> Self {
+        self.hp_period = Some(n);
+        self
+    }
+    #[inline(always)]
+    pub fn k(mut self, v: f64) -> Self {
+        self.k = Some(v);
+        self
+    }
+    #[inline(always)]
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
     }
 
-    pub fn get_k(&self) -> f64 {
-        self.params
-            .k
-            .unwrap_or_else(|| DecOscParams::default().k.unwrap())
+    #[inline(always)]
+    pub fn apply(self, c: &Candles) -> Result<DecOscOutput, DecOscError> {
+        let p = DecOscParams {
+            hp_period: self.hp_period,
+            k: self.k,
+        };
+        let i = DecOscInput::from_candles(c, "close", p);
+        dec_osc_with_kernel(&i, self.kernel)
+    }
+
+    #[inline(always)]
+    pub fn apply_slice(self, d: &[f64]) -> Result<DecOscOutput, DecOscError> {
+        let p = DecOscParams {
+            hp_period: self.hp_period,
+            k: self.k,
+        };
+        let i = DecOscInput::from_slice(d, p);
+        dec_osc_with_kernel(&i, self.kernel)
+    }
+
+    #[inline(always)]
+    pub fn into_stream(self) -> Result<DecOscStream, DecOscError> {
+        let p = DecOscParams {
+            hp_period: self.hp_period,
+            k: self.k,
+        };
+        DecOscStream::try_new(p)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum DecOscError {
-    #[error("dec_osc: Empty data provided.")]
-    EmptyData,
     #[error("dec_osc: All values are NaN.")]
     AllValuesNaN,
+
     #[error("dec_osc: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
+
     #[error("dec_osc: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
     #[error("dec_osc: Invalid K: k = {k}")]
     InvalidK { k: f64 },
 }
 
 #[inline]
 pub fn dec_osc(input: &DecOscInput) -> Result<DecOscOutput, DecOscError> {
+    dec_osc_with_kernel(input, Kernel::Auto)
+}
+
+pub fn dec_osc_with_kernel(input: &DecOscInput, kernel: Kernel) -> Result<DecOscOutput, DecOscError> {
     let data: &[f64] = match &input.data {
         DecOscData::Candles { candles, source } => source_type(candles, source),
-        DecOscData::Slice(slice) => slice,
+        DecOscData::Slice(sl) => sl,
     };
+
     let len = data.len();
-
-    if len == 0 {
-        return Err(DecOscError::EmptyData);
-    }
-
-    let hp_period = input.get_hp_period();
+    let period = input.get_hp_period();
     let k_val = input.get_k();
 
-    if hp_period < 2 || hp_period > len {
-        return Err(DecOscError::InvalidPeriod {
-            period: hp_period,
-            data_len: len,
-        });
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(DecOscError::AllValuesNaN)?;
+
+    if period < 2 || period > len {
+        return Err(DecOscError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < 2 {
+        return Err(DecOscError::NotEnoughValidData { needed: 2, valid: len - first });
     }
     if k_val <= 0.0 || k_val.is_nan() {
         return Err(DecOscError::InvalidK { k: k_val });
     }
 
-    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
-        Some(idx) => idx,
-        None => return Err(DecOscError::AllValuesNaN),
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
     };
-
-    if (len - first_valid_idx) < 2 {
-        return Err(DecOscError::NotEnoughValidData {
-            needed: 2,
-            valid: len - first_valid_idx,
-        });
-    }
 
     let mut out = vec![f64::NAN; len];
 
-    let half_period = (hp_period as f64) * 0.5;
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                dec_osc_scalar(data, period, k_val, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                dec_osc_avx2(data, period, k_val, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                dec_osc_avx512(data, period, k_val, first, &mut out)
+            }
+            _ => unreachable!(),
+        }
+    }
 
-    let angle1 = 2.0 * PI * 0.707 / (hp_period as f64);
+    Ok(DecOscOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn dec_osc_avx512(
+    data: &[f64],
+    period: usize,
+    k_val: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        unsafe { dec_osc_avx512_short(data, period, k_val, first, out) }
+    } else {
+        unsafe { dec_osc_avx512_long(data, period, k_val, first, out) }
+    }
+}
+
+#[inline]
+pub fn dec_osc_scalar(
+    data: &[f64],
+    period: usize,
+    k_val: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    assert!(
+        out.len() >= data.len(),
+        "`out` must be at least as long as `data`"
+    );
+
+    let len = data.len();
+    let half_period = (period as f64) * 0.5;
+
+    let angle1 = 2.0 * PI * 0.707 / (period as f64);
     let sin1 = angle1.sin();
     let cos1 = angle1.cos();
     let alpha1 = 1.0 + ((sin1 - 1.0) / cos1);
@@ -174,17 +295,17 @@ pub fn dec_osc(input: &DecOscInput) -> Result<DecOscOutput, DecOscError> {
     let mut decosc_prev_1;
 
     {
-        let val0 = data[first_valid_idx];
-        out[first_valid_idx] = f64::NAN;
+        let val0 = data[first];
+        out[first] = f64::NAN;
         hp_prev_2 = val0;
         hp_prev_1 = val0;
         decosc_prev_2 = 0.0;
         decosc_prev_1 = 0.0;
     }
 
-    if first_valid_idx + 1 < len {
-        let val1 = data[first_valid_idx + 1];
-        out[first_valid_idx + 1] = f64::NAN;
+    if first + 1 < len {
+        let val1 = data[first + 1];
+        out[first + 1] = f64::NAN;
         hp_prev_2 = hp_prev_1;
         hp_prev_1 = val1;
 
@@ -192,9 +313,8 @@ pub fn dec_osc(input: &DecOscInput) -> Result<DecOscOutput, DecOscError> {
         decosc_prev_2 = decosc_prev_1;
         decosc_prev_1 = dec;
     }
-    for i in (first_valid_idx + 2)..len {
+    for i in (first + 2)..len {
         let d0 = data[i];
-
         let d1 = data[i - 1];
         let d2 = data[i - 2];
 
@@ -202,7 +322,6 @@ pub fn dec_osc(input: &DecOscInput) -> Result<DecOscOutput, DecOscError> {
             - one_minus_alpha1_sq * hp_prev_2;
 
         let dec = d0 - hp0;
-
         let d_dec1 = d1 - hp_prev_1;
         let d_dec2 = d2 - hp_prev_2;
 
@@ -217,68 +336,467 @@ pub fn dec_osc(input: &DecOscInput) -> Result<DecOscOutput, DecOscError> {
         decosc_prev_2 = decosc_prev_1;
         decosc_prev_1 = decosc0;
     }
+}
 
-    Ok(DecOscOutput { values: out })
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn dec_osc_avx2(
+    data: &[f64],
+    period: usize,
+    k_val: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    // AVX2 stub - call scalar.
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn dec_osc_avx512_short(
+    data: &[f64],
+    period: usize,
+    k_val: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    // AVX512 short stub - call scalar.
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn dec_osc_avx512_long(
+    data: &[f64],
+    period: usize,
+    k_val: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    // AVX512 long stub - call scalar.
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[inline(always)]
+pub fn dec_osc_batch_with_kernel(
+    data: &[f64],
+    sweep: &DecOscBatchRange,
+    k: Kernel,
+) -> Result<DecOscBatchOutput, DecOscError> {
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        _ => {
+            return Err(DecOscError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
+    };
+
+    let simd = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    dec_osc_batch_par_slice(data, sweep, simd)
+}
+
+#[derive(Clone, Debug)]
+pub struct DecOscBatchRange {
+    pub hp_period: (usize, usize, usize),
+    pub k: (f64, f64, f64),
+}
+
+impl Default for DecOscBatchRange {
+    fn default() -> Self {
+        Self {
+            hp_period: (125, 125, 0),
+            k: (1.0, 1.0, 0.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DecOscBatchBuilder {
+    range: DecOscBatchRange,
+    kernel: Kernel,
+}
+
+impl DecOscBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    #[inline]
+    pub fn hp_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.hp_period = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn hp_period_static(mut self, p: usize) -> Self {
+        self.range.hp_period = (p, p, 0);
+        self
+    }
+    #[inline]
+    pub fn k_range(mut self, start: f64, end: f64, step: f64) -> Self {
+        self.range.k = (start, end, step);
+        self
+    }
+    #[inline]
+    pub fn k_static(mut self, x: f64) -> Self {
+        self.range.k = (x, x, 0.0);
+        self
+    }
+
+    pub fn apply_slice(self, data: &[f64]) -> Result<DecOscBatchOutput, DecOscError> {
+        dec_osc_batch_with_kernel(data, &self.range, self.kernel)
+    }
+
+    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<DecOscBatchOutput, DecOscError> {
+        DecOscBatchBuilder::new().kernel(k).apply_slice(data)
+    }
+
+    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<DecOscBatchOutput, DecOscError> {
+        let slice = source_type(c, src);
+        self.apply_slice(slice)
+    }
+
+    pub fn with_default_candles(c: &Candles) -> Result<DecOscBatchOutput, DecOscError> {
+        DecOscBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DecOscBatchOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<DecOscParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+impl DecOscBatchOutput {
+    pub fn row_for_params(&self, p: &DecOscParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.hp_period.unwrap_or(125) == p.hp_period.unwrap_or(125)
+                && (c.k.unwrap_or(1.0) - p.k.unwrap_or(1.0)).abs() < 1e-12
+        })
+    }
+
+    pub fn values_for(&self, p: &DecOscParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
+#[inline(always)]
+fn expand_grid(r: &DecOscBatchRange) -> Vec<DecOscParams> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
+        v
+    }
+
+    let periods = axis_usize(r.hp_period);
+    let ks = axis_f64(r.k);
+
+    let mut out = Vec::with_capacity(periods.len() * ks.len());
+    for &p in &periods {
+        for &k in &ks {
+            out.push(DecOscParams {
+                hp_period: Some(p),
+                k: Some(k),
+            });
+        }
+    }
+    out
+}
+
+#[inline(always)]
+pub fn dec_osc_batch_slice(
+    data: &[f64],
+    sweep: &DecOscBatchRange,
+    kern: Kernel,
+) -> Result<DecOscBatchOutput, DecOscError> {
+    dec_osc_batch_inner(data, sweep, kern, false)
+}
+
+#[inline(always)]
+pub fn dec_osc_batch_par_slice(
+    data: &[f64],
+    sweep: &DecOscBatchRange,
+    kern: Kernel,
+) -> Result<DecOscBatchOutput, DecOscError> {
+    dec_osc_batch_inner(data, sweep, kern, true)
+}
+
+#[inline(always)]
+fn dec_osc_batch_inner(
+    data: &[f64],
+    sweep: &DecOscBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<DecOscBatchOutput, DecOscError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(DecOscError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(DecOscError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.hp_period.unwrap()).max().unwrap();
+    if data.len() - first < 2 {
+        return Err(DecOscError::NotEnoughValidData {
+            needed: 2,
+            valid: data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+
+    let mut values = vec![f64::NAN; rows * cols];
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].hp_period.unwrap();
+        let k_val = combos[row].k.unwrap();
+        match kern {
+            Kernel::Scalar => dec_osc_row_scalar(data, first, period, k_val, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => dec_osc_row_avx2(data, first, period, k_val, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => dec_osc_row_avx512(data, first, period, k_val, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    if parallel {
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(DecOscBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+unsafe fn dec_osc_row_scalar(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    k_val: f64,
+    out: &mut [f64],
+) {
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn dec_osc_row_avx2(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    k_val: f64,
+    out: &mut [f64],
+) {
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn dec_osc_row_avx512(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    k_val: f64,
+    out: &mut [f64],
+) {
+    if period <= 32 {
+        dec_osc_row_avx512_short(data, first, period, k_val, out)
+    } else {
+        dec_osc_row_avx512_long(data, first, period, k_val, out)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn dec_osc_row_avx512_short(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    k_val: f64,
+    out: &mut [f64],
+) {
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn dec_osc_row_avx512_long(
+    data: &[f64],
+    first: usize,
+    period: usize,
+    k_val: f64,
+    out: &mut [f64],
+) {
+    dec_osc_scalar(data, period, k_val, first, out)
+}
+
+#[derive(Debug, Clone)]
+pub struct DecOscStream {
+    period: usize,
+    k: f64,
+    hp_prev_2: f64,
+    hp_prev_1: f64,
+    decosc_prev_2: f64,
+    decosc_prev_1: f64,
+    index: usize,
+    filled: bool,
+}
+
+impl DecOscStream {
+    pub fn try_new(params: DecOscParams) -> Result<Self, DecOscError> {
+        let period = params.hp_period.unwrap_or(125);
+        if period < 2 {
+            return Err(DecOscError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
+        }
+        let k = params.k.unwrap_or(1.0);
+        if k <= 0.0 || k.is_nan() {
+            return Err(DecOscError::InvalidK { k });
+        }
+        Ok(Self {
+            period,
+            k,
+            hp_prev_2: f64::NAN,
+            hp_prev_1: f64::NAN,
+            decosc_prev_2: 0.0,
+            decosc_prev_1: 0.0,
+            index: 0,
+            filled: false,
+        })
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.index += 1;
+        if self.index == 1 {
+            self.hp_prev_2 = value;
+            self.hp_prev_1 = value;
+            return None;
+        }
+        if self.index == 2 {
+            self.hp_prev_2 = self.hp_prev_1;
+            self.hp_prev_1 = value;
+            let dec = value - self.hp_prev_1;
+            self.decosc_prev_2 = self.decosc_prev_1;
+            self.decosc_prev_1 = dec;
+            return None;
+        }
+
+        let period = self.period;
+        let k = self.k;
+        let half_period = (period as f64) * 0.5;
+
+        let angle1 = 2.0 * PI * 0.707 / (period as f64);
+        let sin1 = angle1.sin();
+        let cos1 = angle1.cos();
+        let alpha1 = 1.0 + ((sin1 - 1.0) / cos1);
+        let c1 = (1.0 - alpha1 / 2.0) * (1.0 - alpha1 / 2.0);
+        let one_minus_alpha1 = 1.0 - alpha1;
+        let one_minus_alpha1_sq = one_minus_alpha1 * one_minus_alpha1;
+
+        let angle2 = 2.0 * PI * 0.707 / half_period;
+        let sin2 = angle2.sin();
+        let cos2 = angle2.cos();
+        let alpha2 = 1.0 + ((sin2 - 1.0) / cos2);
+        let c2 = (1.0 - alpha2 / 2.0) * (1.0 - alpha2 / 2.0);
+        let one_minus_alpha2 = 1.0 - alpha2;
+        let one_minus_alpha2_sq = one_minus_alpha2 * one_minus_alpha2;
+
+        let hp0 = c1 * value - 2.0 * c1 * self.hp_prev_1 + c1 * self.hp_prev_2
+            + 2.0 * one_minus_alpha1 * self.hp_prev_1
+            - one_minus_alpha1_sq * self.hp_prev_2;
+
+        let dec = value - hp0;
+        let d_dec1 = self.hp_prev_1 - self.hp_prev_1;
+        let d_dec2 = self.hp_prev_2 - self.hp_prev_2;
+
+        let decosc0 =
+            c2 * dec - 2.0 * c2 * d_dec1 + c2 * d_dec2 + 2.0 * one_minus_alpha2 * self.decosc_prev_1
+                - one_minus_alpha2_sq * self.decosc_prev_2;
+
+        self.hp_prev_2 = self.hp_prev_1;
+        self.hp_prev_1 = hp0;
+        self.decosc_prev_2 = self.decosc_prev_1;
+        self.decosc_prev_1 = decosc0;
+        Some(100.0 * k * decosc0 / value)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::skip_if_unsupported;
 
-    #[test]
-    fn test_dec_osc_partial_params() {
+    fn check_dec_osc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
+        let candles = read_candles_from_csv(file_path)?;
 
         let default_params = DecOscParams {
             hp_period: None,
             k: None,
         };
-        let input_default = DecOscInput::from_candles(&candles, "close", default_params);
-        let output_default = dec_osc(&input_default).expect("Failed dec_osc with default params");
-        assert_eq!(output_default.values.len(), candles.close.len());
+        let input = DecOscInput::from_candles(&candles, "close", default_params);
+        let output = dec_osc_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
 
-        let params_period_50 = DecOscParams {
-            hp_period: Some(50),
-            k: Some(1.0),
-        };
-        let input_period_50 = DecOscInput::from_candles(&candles, "hl2", params_period_50.clone());
-        let output_period_50 =
-            dec_osc(&input_period_50).expect("Failed dec_osc with period=50, source=hl2");
-        assert_eq!(output_period_50.values.len(), candles.close.len());
-
-        let params_custom = DecOscParams {
-            hp_period: Some(100),
-            k: Some(2.0),
-        };
-        let input_custom = DecOscInput::from_candles(&candles, "hlc3", params_custom);
-        let output_custom = dec_osc(&input_custom).expect("Failed dec_osc fully custom");
-        assert_eq!(output_custom.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_accuracy() {
+    fn check_dec_osc_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-        let source_data = candles
-            .select_candle_field("close")
-            .expect("Failed to extract close prices");
+        let candles = read_candles_from_csv(file_path)?;
+        let input = DecOscInput::from_candles(&candles, "close", DecOscParams::default());
+        let result = dec_osc_with_kernel(&input, kernel)?;
 
-        let params = DecOscParams {
-            hp_period: Some(125),
-            k: Some(1.0),
-        };
-        let input = DecOscInput::from_candles(&candles, "close", params);
-        let dec_osc_result = dec_osc(&input).expect("Failed to calculate dec_osc");
-
-        assert_eq!(
-            dec_osc_result.values.len(),
-            source_data.len(),
-            "dec_osc length mismatch"
-        );
-
-        if dec_osc_result.values.len() > 5 {
+        if result.values.len() > 5 {
             let expected_last_five = [
                 -1.5036367540303395,
                 -1.4037875172207006,
@@ -286,129 +804,194 @@ mod tests {
                 -1.2245874070642693,
                 -1.1638422627265639,
             ];
-            let start_index = dec_osc_result.values.len() - 5;
-            let actual_last_five = &dec_osc_result.values[start_index..];
-            for (i, &value) in actual_last_five.iter().enumerate() {
-                let expected_value = expected_last_five[i];
-                let diff = (value - expected_value).abs();
+            let start = result.values.len().saturating_sub(5);
+            for (i, &val) in result.values[start..].iter().enumerate() {
+                let diff = (val - expected_last_five[i]).abs();
                 assert!(
                     diff < 1e-7,
-                    "DEC_OSC mismatch at index {}: expected {}, got {}",
+                    "[{}] DEC_OSC {:?} mismatch at idx {}: got {}, expected {}",
+                    test_name,
+                    kernel,
                     i,
-                    expected_value,
-                    value
+                    val,
+                    expected_last_five[i]
                 );
             }
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_params_with_default_params() {
-        let default_params = DecOscParams::default();
-        assert_eq!(
-            default_params.hp_period,
-            Some(125),
-            "Expected hp_period=125 in default parameters"
-        );
-        assert_eq!(
-            default_params.k,
-            Some(1.0),
-            "Expected k=1.0 in default parameters"
-        );
-    }
-
-    #[test]
-    fn test_dec_osc_input_with_default_candles() {
+    fn check_dec_osc_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let input = DecOscInput::with_default_candles(&candles);
         match input.data {
-            DecOscData::Candles { source, .. } => {
-                assert_eq!(source, "close", "Expected default source to be 'close'");
-            }
-            _ => panic!("Expected DecOscData::Candles variant"),
+            DecOscData::Candles { source, .. } => assert_eq!(source, "close"),
+            _ => panic!("Expected DecOscData::Candles"),
         }
+        let output = dec_osc_with_kernel(&input, kernel)?;
+        assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_with_zero_period() {
+    fn check_dec_osc_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = DecOscParams {
             hp_period: Some(0),
             k: Some(1.0),
         };
         let input = DecOscInput::from_slice(&input_data, params);
-
-        let result = dec_osc(&input);
-        assert!(result.is_err(), "Expected an error for zero period");
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Invalid period"),
-                "Expected 'Invalid period' error message, got: {}",
-                e
-            );
-        }
+        let res = dec_osc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] DEC_OSC should fail with zero period",
+            test_name
+        );
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_with_period_exceeding_data_length() {
-        let input_data = [10.0, 20.0, 30.0];
+    fn check_dec_osc_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data_small = [10.0, 20.0, 30.0];
         let params = DecOscParams {
             hp_period: Some(10),
             k: Some(1.0),
         };
-        let input = DecOscInput::from_slice(&input_data, params);
-
-        let result = dec_osc(&input);
-        assert!(result.is_err(), "Expected an error for period > data.len()");
+        let input = DecOscInput::from_slice(&data_small, params);
+        let res = dec_osc_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] DEC_OSC should fail with period exceeding length",
+            test_name
+        );
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_very_small_data_set() {
-        let input_data = [42.0];
+    fn check_dec_osc_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let single_point = [42.0];
         let params = DecOscParams {
             hp_period: Some(125),
             k: Some(1.0),
         };
-        let input = DecOscInput::from_slice(&input_data, params);
-
-        let result = dec_osc(&input);
+        let input = DecOscInput::from_slice(&single_point, params);
+        let res = dec_osc_with_kernel(&input, kernel);
         assert!(
-            result.is_err(),
-            "Expected error for data smaller than period or not enough points"
+            res.is_err(),
+            "[{}] DEC_OSC should fail with insufficient data",
+            test_name
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_dec_osc_with_slice_data_reinput() {
+    fn check_dec_osc_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path).expect("Failed to load test candles");
-
+        let candles = read_candles_from_csv(file_path)?;
         let first_params = DecOscParams {
             hp_period: Some(50),
             k: Some(1.0),
         };
         let first_input = DecOscInput::from_candles(&candles, "close", first_params);
-        let first_result = dec_osc(&first_input).expect("Failed to calculate first dec_osc");
-
-        assert_eq!(
-            first_result.values.len(),
-            candles.close.len(),
-            "First dec_osc output length mismatch"
-        );
-
+        let first_result = dec_osc_with_kernel(&first_input, kernel)?;
         let second_params = DecOscParams {
             hp_period: Some(50),
             k: Some(1.0),
         };
         let second_input = DecOscInput::from_slice(&first_result.values, second_params);
-        let second_result = dec_osc(&second_input).expect("Failed to calculate second dec_osc");
-
-        assert_eq!(
-            second_result.values.len(),
-            first_result.values.len(),
-            "Second dec_osc output length mismatch"
-        );
+        let second_result = dec_osc_with_kernel(&second_input, kernel)?;
+        assert_eq!(second_result.values.len(), first_result.values.len());
+        Ok(())
     }
+
+    macro_rules! generate_all_dec_osc_tests {
+        ($($test_fn:ident),*) => {
+            paste::paste! {
+                $(
+                    #[test]
+                    fn [<$test_fn _scalar_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+                    }
+                )*
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _avx2_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+                    }
+                    #[test]
+                    fn [<$test_fn _avx512_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
+            }
+        }
+    }
+
+    generate_all_dec_osc_tests!(
+        check_dec_osc_partial_params,
+        check_dec_osc_accuracy,
+        check_dec_osc_default_candles,
+        check_dec_osc_zero_period,
+        check_dec_osc_period_exceeds_length,
+        check_dec_osc_very_small_dataset,
+        check_dec_osc_reinput
+    );
+
+    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = DecOscBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = DecOscParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
+        let expected = [
+            -1.5036367540303395,
+            -1.4037875172207006,
+            -1.3174199471429475,
+            -1.2245874070642693,
+            -1.1638422627265639,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-7,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    gen_batch_tests!(check_batch_default_row);
 }
