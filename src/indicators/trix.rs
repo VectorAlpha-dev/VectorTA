@@ -216,18 +216,31 @@ unsafe fn trix_scalar(
     period: usize,
     first: usize,
 ) -> Result<TrixOutput, TrixError> {
-    let ema1 = compute_standard_ema(data, period, first);
+    // 1) Build a log‐series of `data`; NaNs propagate automatically.
+    let len = data.len();
+    let mut log_data = Vec::with_capacity(len);
+    for &x in data.iter() {
+        log_data.push(if x.is_nan() { f64::NAN } else { x.ln() });
+    }
+
+    // 2) triple‐EMA on log_data:
+    let ema1 = compute_standard_ema(&log_data, period, first);
     let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
     let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
-    let mut out = vec![f64::NAN; data.len()];
+
+    // 3) Build output array (NaN until (first + 3*(period−1) + 1)), then
+    //    out[i] = (ema3[i] − ema3[i−1]) * 10000.0.
+    let mut out = vec![f64::NAN; len];
     let triple_ema_start = first + 3 * (period - 1);
-    for i in (triple_ema_start + 1)..data.len() {
+
+    for i in (triple_ema_start + 1)..len {
         let prev = ema3[i - 1];
         let curr = ema3[i];
-        if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
-            out[i] = (curr / prev - 1.0) * 100.0;
+        if !prev.is_nan() && !curr.is_nan() {
+            out[i] = (curr - prev) * 10000.0;
         }
     }
+
     Ok(TrixOutput { values: out })
 }
 
@@ -330,45 +343,70 @@ impl TrixStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer1[self.head] = value;
+        // 1) Take ln(value) (or NaN if value was NaN)
+        let log_val = if value.is_nan() {
+            f64::NAN
+        } else {
+            value.ln()
+        };
+
+        // 2) Feed log_val into the first EMA buffer
+        self.buffer1[self.head] = log_val;
+
+        // Compute EMA1 stage:
         if self.stage < 1 && self.head == self.period - 1 {
-            let sum: f64 = self.buffer1.iter().sum();
-            let ema1 = sum / self.period as f64;
+            // We have exactly 'period' logs in buffer1 ⇒ initialize EMA1 with simple average
+            let sum1: f64 = self.buffer1.iter().sum();
+            let ema1 = sum1 / (self.period as f64);
             self.buffer2[self.head] = ema1;
             self.stage = 1;
         } else if self.stage >= 1 {
+            // Ongoing EMA1 update: EMA1[i] = α * log_val + (1−α) * prev_ema1
             let prev_ema1 = self.buffer2[(self.head + self.period - 1) % self.period];
-            let ema1 = 2.0 / (self.period as f64 + 1.0) * value
-                + (1.0 - 2.0 / (self.period as f64 + 1.0)) * prev_ema1;
+            let alpha = 2.0 / (self.period as f64 + 1.0);
+            let ema1 = alpha * log_val + (1.0 - alpha) * prev_ema1;
             self.buffer2[self.head] = ema1;
         }
+
+        // Compute EMA2 stage:
         if self.stage >= 1 {
             if self.stage < 2 && self.head == self.period - 1 {
-                let sum: f64 = self.buffer2.iter().sum();
-                let ema2 = sum / self.period as f64;
+                // Exactly 'period' EMAs in buffer2 ⇒ initialize EMA2 with simple average
+                let sum2: f64 = self.buffer2.iter().sum();
+                let ema2 = sum2 / (self.period as f64);
                 self.buffer3[self.head] = ema2;
                 self.stage = 2;
             } else if self.stage >= 2 {
+                // Ongoing EMA2 update: EMA2[i] = α * EMA1[i] + (1−α) * prev_ema2
                 let prev_ema2 = self.buffer3[(self.head + self.period - 1) % self.period];
-                let ema2 = 2.0 / (self.period as f64 + 1.0) * self.buffer2[self.head]
-                    + (1.0 - 2.0 / (self.period as f64 + 1.0)) * prev_ema2;
+                let alpha = 2.0 / (self.period as f64 + 1.0);
+                let ema2 = alpha * self.buffer2[self.head] + (1.0 - alpha) * prev_ema2;
                 self.buffer3[self.head] = ema2;
             }
         }
+
+        // Compute EMA3 stage:
         let mut output = None;
         if self.stage >= 2 && self.head == self.period - 1 {
-            let sum: f64 = self.buffer3.iter().sum();
-            self.prev_ema3 = sum / self.period as f64;
+            // Exactly 'period' EMAs in buffer3 ⇒ initialize EMA3
+            let sum3: f64 = self.buffer3.iter().sum();
+            self.prev_ema3 = sum3 / (self.period as f64);
             self.initialized = true;
         } else if self.stage >= 2 && self.initialized {
-            let prev = self.prev_ema3;
-            let curr = self.buffer3[self.head];
-            if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
-                let trix_val = (curr / prev - 1.0) * 100.0;
+            // Ongoing EMA3 update: EMA3[i] = α * EMA2[i] + (1−α) * prev_ema3
+            let prev_ema3 = self.prev_ema3;
+            let alpha = 2.0 / (self.period as f64 + 1.0);
+            let ema3 = alpha * self.buffer3[self.head] + (1.0 - alpha) * prev_ema3;
+
+            // 3) If prev_ema3 and ema3 are both valid, out = (ema3 − prev_ema3)*10000
+            if !prev_ema3.is_nan() && !ema3.is_nan() {
+                let trix_val = (ema3 - prev_ema3) * 10000.0;
                 output = Some(trix_val);
-                self.prev_ema3 = curr;
             }
+            self.prev_ema3 = ema3;
         }
+
+        // advance head
         self.head = (self.head + 1) % self.period;
         output
     }
@@ -561,18 +599,30 @@ unsafe fn trix_row_scalar(
     period: usize,
     out: &mut [f64],
 ) {
-    let ema1 = compute_standard_ema(data, period, first);
+    // 1) Build log‐series of data
+    let len = data.len();
+    let mut log_data = Vec::with_capacity(len);
+    for &x in data.iter() {
+        log_data.push(if x.is_nan() { f64::NAN } else { x.ln() });
+    }
+
+    // 2) triple‐EMA on the log series
+    let ema1 = compute_standard_ema(&log_data, period, first);
     let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
     let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
+
+    // 3) Δ(ema3) * 10000.0
     let triple_ema_start = first + 3 * (period - 1);
-    for i in (triple_ema_start + 1)..data.len() {
+    for i in (triple_ema_start + 1)..len {
         let prev = ema3[i - 1];
         let curr = ema3[i];
-        if !prev.is_nan() && !curr.is_nan() && prev != 0.0 {
-            out[i] = (curr / prev - 1.0) * 100.0;
+        if !prev.is_nan() && !curr.is_nan() {
+            out[i] = (curr - prev) * 10000.0;
         }
     }
 }
+
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -657,11 +707,11 @@ mod tests {
         let trix_result = trix_with_kernel(&input, kernel)?;
         assert_eq!(trix_result.values.len(), close_prices.len(), "TRIX length mismatch");
         let expected_last_five = [
-            -16.03083789275206,
-            -15.93477668222043,
-            -15.794825711480387,
-            -15.587573840557534,
-            -15.416073398576424,
+            -16.03736447,
+            -15.92084231,
+            -15.76171478,
+            -15.53571033,
+            -15.34967155,
         ];
         assert!(trix_result.values.len() >= 5, "TRIX length too short");
         let start_index = trix_result.values.len() - 5;
@@ -778,11 +828,11 @@ mod tests {
         let row = output.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
         let expected = [
-            -16.03083789275206,
-            -15.93477668222043,
-            -15.794825711480387,
-            -15.587573840557534,
-            -15.416073398576424,
+            -16.03736447,
+            -15.92084231,
+            -15.76171478,
+            -15.53571033,
+            -15.34967155,
         ];
         let start = row.len() - 5;
         for (i, &v) in row[start..].iter().enumerate() {

@@ -180,11 +180,14 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
             valid: len - first,
         });
     }
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    for i in 0..period {
+    // ─── BUILD EXACTLY (period - 1) WEIGHTS ───
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period - 1);
+    for i in 0..(period - 1) {
         weights.push((period as f64 - i as f64).powi(2));
     }
     let weight_sum: f64 = weights.iter().sum();
+    // ──────────────────────────────────────────
+
     let mut out = vec![f64::NAN; len];
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -209,29 +212,38 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
     Ok(SqwmaOutput { values: out })
 }
 
+
 #[inline]
 pub fn sqwma_scalar(
     data: &[f64],
-    weights: &[f64],
+    weights: &[f64],   // length = period - 1
     period: usize,
-    first: usize,
+    _first: usize,
     weight_sum: f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
+    let p_minus_1 = period - 1;
+    let p4 = p_minus_1 & !3;
+    let n = data.len();
+
+    for j in (period + 1)..n {
         let mut sum = 0.0;
-        for (d4, w4) in window[..p4].chunks_exact(4).zip(weights[..p4].chunks_exact(4)) {
-            sum += d4[0] * w4[0] + d4[1] * w4[1] + d4[2] * w4[2] + d4[3] * w4[3];
+        let mut k = 0;
+        while k < p4 {
+            sum += data[j - k] * weights[k];
+            sum += data[j - (k + 1)] * weights[k + 1];
+            sum += data[j - (k + 2)] * weights[k + 2];
+            sum += data[j - (k + 3)] * weights[k + 3];
+            k += 4;
         }
-        for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
-            sum += d * w;
+        while k < p_minus_1 {
+            sum += data[j - k] * weights[k];
+            k += 1;
         }
-        out[i] = sum / weight_sum;
+        out[j] = sum / weight_sum;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -286,14 +298,13 @@ pub unsafe fn sqwma_avx512_long(
     sqwma_scalar(data, weights, period, first, weight_sum, out)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SqwmaStream {
     period: usize,
-    weights: Vec<f64>,
+    weights: Vec<f64>,   // length = period - 1
     weight_sum: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    history: Vec<f64>,   // holds the last (period - 1) values, newest at index 0
+    count: usize,        // how many update(...) calls we’ve seen so far
 }
 
 impl SqwmaStream {
@@ -302,43 +313,60 @@ impl SqwmaStream {
         if period < 2 {
             return Err(SqwmaError::InvalidPeriod { period, data_len: 0 });
         }
-        let mut weights = Vec::with_capacity(period);
-        for i in 0..period {
+
+        // Build exactly (period - 1) weights: (period)^2 down to (2)^2
+        let mut weights = Vec::with_capacity(period - 1);
+        for i in 0..(period - 1) {
             weights.push((period as f64 - i as f64).powi(2));
         }
-        let weight_sum: f64 = weights.iter().sum();
+        let weight_sum = weights.iter().sum();
+
         Ok(Self {
             period,
             weights,
             weight_sum,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            history: Vec::with_capacity(period - 1),
+            count: 0,
         })
     }
+
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+        self.count += 1;
+
+        // (1) If we have not yet seen (period + 1) values, return None. 
+        //     This ensures our first streaming‐output occurs exactly at index j = period+1.
+        if self.count < (self.period + 2) {
+            // update history (push this new value onto the front, pop if necessary),
+            // but do NOT compute yet.
+            if self.history.len() == (self.period - 1) {
+                // remove the oldest
+                self.history.pop();
+            }
+            // push current onto front
+            self.history.insert(0, value);
             return None;
         }
-        Some(self.dot_ring())
-    }
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
-        let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+
+        // (2) Now that count >= (period + 2), we can compute exactly:
+        //     sum = weights[0]*value + weights[1]*history[0] + weights[2]*history[1] + … + weights[period-2]*history[period-3]
+        let mut sum_val = self.weights[0] * value;
+        for k in 1..self.weights.len() {
+            sum_val += self.weights[k] * self.history[k - 1];
         }
-        sum / self.weight_sum
+        let result = sum_val / self.weight_sum;
+
+        // (3) Finally, update history by pushing this new sense into the front,
+        //     and pop the oldest if we exceed (period-1).
+        if self.history.len() == (self.period - 1) {
+            self.history.pop();
+        }
+        self.history.insert(0, value);
+
+        Some(result)
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct SqwmaBatchRange {
@@ -490,31 +518,45 @@ fn sqwma_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    // ─── BUILD FLAT WEIGHTS ───
+    // Allocate a flat array of size rows * max_p, but each row uses only (period - 1) slots.
     let mut weight_sums = vec![0.0; rows];
     let cap = rows * max_p;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
+
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
-        for i in 0..period {
+        // Fill exactly period - 1 weights: (period)^2, ..., (2)^2
+        for i in 0..(period - 1) {
             flat_w[row * max_p + i] = (period as f64 - i as f64).powi(2);
         }
-        weight_sums[row] = flat_w[row * max_p..row * max_p + period].iter().sum();
+        // Sum only those period - 1 entries
+        let start = row * max_p;
+        let end = start + (period - 1);
+        weight_sums[row] = flat_w[start..end].iter().sum();
     }
+    // ──────────────────────────
+
     let mut values = vec![f64::NAN; rows * cols];
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
         let w_sum = *weight_sums.get_unchecked(row);
+
+        // Now pass p_minus_1 = period - 1
+        let p_minus_1 = period - 1;
         match kern {
-            Kernel::Scalar => sqwma_row_scalar(data, first, period, max_p, w_ptr, w_sum, out_row),
+            Kernel::Scalar => sqwma_row_scalar(data, first, period, p_minus_1, w_ptr, w_sum, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => sqwma_row_avx2(data, first, period, max_p, w_ptr, w_sum, out_row),
+            Kernel::Avx2 => sqwma_row_avx2(data, first, period, p_minus_1, w_ptr, w_sum, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => sqwma_row_avx512(data, first, period, max_p, w_ptr, w_sum, out_row),
+            Kernel::Avx512 => sqwma_row_avx512(data, first, period, p_minus_1, w_ptr, w_sum, out_row),
             _ => unreachable!(),
         }
     };
+
     if parallel {
         values
             .par_chunks_mut(cols)
@@ -525,6 +567,7 @@ fn sqwma_batch_inner(
             do_row(row, slice);
         }
     }
+    
     Ok(SqwmaBatchOutput {
         values,
         combos,
@@ -538,26 +581,34 @@ unsafe fn sqwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
-    w_ptr: *const f64,
+    p_minus_1: usize,   // = period - 1
+    w_ptr: *const f64,  // pointer to the first of the (period - 1) weights
     w_sum: f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
+    // Do exactly the same logic: start j = first + period + 1
+    let p4 = p_minus_1 & !3; // round down to multiple of 4
+    for j in (first + period + 1)..data.len() {
         let mut sum = 0.0;
-        for k in (0..p4).step_by(4) {
-            let w = std::slice::from_raw_parts(w_ptr.add(k), 4);
-            let d = &data[start + k..start + k + 4];
-            sum += d[0] * w[0] + d[1] * w[1] + d[2] * w[2] + d[3] * w[3];
+        // Unroll by 4
+        let mut k = 0;
+        while k < p4 {
+            let w_chunk = std::slice::from_raw_parts(w_ptr.add(k), 4);
+            sum += data[j - k]     * w_chunk[0];
+            sum += data[j - (k + 1)] * w_chunk[1];
+            sum += data[j - (k + 2)] * w_chunk[2];
+            sum += data[j - (k + 3)] * w_chunk[3];
+            k += 4;
         }
-        for k in p4..period {
-            sum += *data.get_unchecked(start + k) * *w_ptr.add(k);
+        // Any leftover
+        while k < p_minus_1 {
+            sum += *data.get_unchecked(j - k) * *w_ptr.add(k);
+            k += 1;
         }
-        out[i] = sum / w_sum;
+        out[j] = sum / w_sum;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]

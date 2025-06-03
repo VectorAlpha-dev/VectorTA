@@ -199,23 +199,34 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
 
 #[inline]
 pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+    // Precompute ∑ x and ∑ x² for x = 0..period-1
+    let sum_x     = (0..period).map(|x| x as f64).sum::<f64>();
     let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-    let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+    let divisor   = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
 
+    // We only start writing output once we have 'period' non‐NaN points
+    // at indices [first_val .. first_val + period - 2], so the first valid index is:
+    // i = first_val + period - 1
     for i in (first_val + period - 1)..data.len() {
         let mut sum_xy = 0.0;
-        let mut sum_y = 0.0;
+        let mut sum_y  = 0.0;
+
+        // --- CORRECTION HERE ---
+        // j = 0 should correspond to the oldest point in the window,
+        // i.e. data[i - (period - 1)].  When j = period - 1, that is data[i].
         for j in 0..period {
-            let val = data[i - j];
-            sum_y += val;
+            let idx = i - (period - 1) + j;
+            let val = data[idx];
+            sum_y  += val;
             sum_xy += (j as f64) * val;
         }
+
         let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
         let b = (sum_y - m * sum_x) / (period as f64);
         out[i] = b + m * (period as f64);
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -249,29 +260,35 @@ pub unsafe fn tsf_avx512_long(data: &[f64], period: usize, first_valid: usize, o
 
 #[derive(Debug, Clone)]
 pub struct TsfStream {
-    period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
-    sum_x: f64,
+    period:   usize,
+    buffer:   Vec<f64>,
+    head:     usize,
+    filled:   bool,
+    sum_x:    f64,
     sum_x_sqr: f64,
-    divisor: f64,
+    divisor:  f64,
 }
 
 impl TsfStream {
     pub fn try_new(params: TsfParams) -> Result<Self, TsfError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(TsfError::InvalidPeriod { period, data_len: 0 });
+            return Err(TsfError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
-        let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+
+        // Precompute ∑ x and ∑ x² for x = 0..period-1
+        let sum_x     = (0..period).map(|x| x as f64).sum::<f64>();
         let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-        let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+        let divisor   = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
+
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            buffer:   vec![f64::NAN; period],
+            head:     0,
+            filled:   false,
             sum_x,
             sum_x_sqr,
             divisor,
@@ -280,29 +297,40 @@ impl TsfStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Write the newest value at buffer[head], then advance head.
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
+        // Once head wraps to 0, we know the ring has filled at least once.
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
+
+        // Until we've filled 'period' values, we return None.
         if !self.filled {
             return None;
         }
+
+        // Once filled, compute the regression forecast via dot_ring()
         Some(self.dot_ring())
     }
 
     #[inline(always)]
     fn dot_ring(&self) -> f64 {
+        // This loop already uses the correct chronological order:
+        //   j = 0 → oldest (at index = head)
+        //   j = period-1 → newest (at index = head + period - 1 mod period)
         let mut sum_xy = 0.0;
-        let mut sum_y = 0.0;
-        let mut idx = self.head;
+        let mut sum_y  = 0.0;
+        let mut idx    = self.head; // head always points at the oldest element
+
         for j in 0..self.period {
             let val = self.buffer[idx];
-            sum_y += val;
+            sum_y  += val;
             sum_xy += (j as f64) * val;
             idx = (idx + 1) % self.period;
         }
+
         let m = ((self.period as f64) * sum_xy - self.sum_x * sum_y) / self.divisor;
         let b = (sum_y - m * self.sum_x) / (self.period as f64);
         b + m * (self.period as f64)
@@ -452,11 +480,15 @@ fn tsf_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TsfBatchOutput, TsfError> {
+    // Build the list of TsfParams to run over
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 });
     }
+
+    // Find first non‐NaN index
     let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
+    // Compute the maximum period required by any combo
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
         return Err(TsfError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
@@ -464,34 +496,37 @@ fn tsf_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut sum_xs = vec![0.0; rows];
-    let mut sum_x_sqrs = vec![0.0; rows];
+    let mut sum_xs   = vec![0.0; rows];
+    let mut sum_x_sq = vec![0.0; rows];
     let mut divisors = vec![0.0; rows];
 
+    // Precompute ∑x and (∑x²) and divisor for each “period = combos[row].period”
     for (row, prm) in combos.iter().enumerate() {
-        let period = prm.period.unwrap();
-        let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
-        let sum_x_sqr = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
-        let divisor = (period as f64 * sum_x_sqr) - (sum_x * sum_x);
-        sum_xs[row] = sum_x;
-        sum_x_sqrs[row] = sum_x_sqr;
+        let period   = prm.period.unwrap();
+        let sum_x    = (0..period).map(|x| x as f64).sum::<f64>();
+        let sum_x2   = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+        let divisor  = (period as f64 * sum_x2) - (sum_x * sum_x);
+        sum_xs[row]   = sum_x;
+        sum_x_sq[row] = sum_x2;
         divisors[row] = divisor;
     }
 
+    // Prepare a flat “rows × cols” output buffer, initialized to NaN
     let mut values = vec![f64::NAN; rows * cols];
 
+    // Closure that computes one row into out_row
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        let sum_x = sum_xs[row];
+        let period  = combos[row].period.unwrap();
+        let sum_x   = sum_xs[row];
         let divisor = divisors[row];
 
         match kern {
-            Kernel::Scalar => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
+            Kernel::Scalar      => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
+            Kernel::Avx2        => tsf_row_avx2     (data, first, period, sum_x, divisor, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
-            _ => unreachable!(),
+            Kernel::Avx512      => tsf_row_avx512   (data, first, period, sum_x, divisor, out_row),
+            _                  => unreachable!(),
         }
     };
 
@@ -514,6 +549,8 @@ fn tsf_batch_inner(
     })
 }
 
+
+// 2) tsf_row_scalar (fixed indexing so j=0→oldest, j=period−1→newest)
 #[inline(always)]
 unsafe fn tsf_row_scalar(
     data: &[f64],
@@ -523,19 +560,27 @@ unsafe fn tsf_row_scalar(
     divisor: f64,
     out: &mut [f64],
 ) {
+    // Loop i from (first + period − 1) .. end.  At i we compute a regression over
+    //   indices [i−(period−1) .. i], with x = 0 at data[i−(period−1)], x = period−1 at data[i].
     for i in (first + period - 1)..data.len() {
         let mut sum_xy = 0.0;
-        let mut sum_y = 0.0;
+        let mut sum_y  = 0.0;
+
+        // Correct order: “j = 0” hits data[i − (period − 1)] (oldest),
+        // “j = period − 1” hits data[i] (most recent).
         for j in 0..period {
-            let val = data[i - j];
-            sum_y += val;
+            let idx = i - (period - 1) + j;
+            let val = data[idx];
+            sum_y  += val;
             sum_xy += (j as f64) * val;
         }
+
         let m = ((period as f64) * sum_xy - sum_x * sum_y) / divisor;
         let b = (sum_y - m * sum_x) / (period as f64);
         out[i] = b + m * (period as f64);
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]

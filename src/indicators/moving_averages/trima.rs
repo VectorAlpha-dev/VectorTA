@@ -429,48 +429,102 @@ pub unsafe fn trima_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct TrimaStream {
+    // the overall TRIMA period
     period: usize,
-    buffer: Vec<f64>,
-    sum: f64,
-    head: usize,
-    filled: bool,
-    count: usize,
+    // the two intermediate SMA window‐sizes
+    m1: usize,
+    m2: usize,
+
+    // first SMA window
+    buffer1: Vec<f64>,
+    sum1:    f64,
+    head1:   usize,
+    filled1: bool,
+
+    // second SMA window
+    buffer2: Vec<f64>,
+    sum2:    f64,
+    head2:   usize,
+    filled2: bool,
 }
 
 impl TrimaStream {
     pub fn try_new(params: TrimaParams) -> Result<Self, TrimaError> {
-        let period = params.period.unwrap_or(14);
+        let period = params.period.unwrap_or(30);
         if period == 0 || period <= 3 {
             return Err(TrimaError::PeriodTooSmall { period });
         }
+        // compute m₁ and m₂ exactly as in the “two‐pass” formula:
+        //   m₁ = (period+1)/2,    m₂ = period−m₁+1
+        let m1 = (period + 1) / 2;
+        let m2 = period - m1 + 1;
+
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            sum: 0.0,
-            head: 0,
-            filled: false,
-            count: 0,
+            m1,
+            m2,
+            buffer1: vec![f64::NAN; m1],
+            sum1: 0.0,
+            head1: 0,
+            filled1: false,
+            buffer2: vec![f64::NAN; m2],
+            sum2: 0.0,
+            head2: 0,
+            filled2: false,
         })
     }
 
+    /// Feed a single new raw price into the TRIMA‐stream.
+    /// Returns `Some(trima_value)` only once enough data has been seen for both sub‐windows;
+    /// otherwise returns `None` (which the test harness will compare as NaN).
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        let old = self.buffer[self.head];
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+    pub fn update(&mut self, x: f64) -> Option<f64> {
+        // ──  STEP 1:  Update the m₁‐window (compute first‐stage SMA)  ──
+        let old1 = self.buffer1[self.head1];
+        self.buffer1[self.head1] = x;
+        self.head1 = (self.head1 + 1) % self.m1;
+        if !self.filled1 && self.head1 == 0 {
+            self.filled1 = true;
         }
-        if !self.filled {
-            return None;
+        // Adjust sum1, always ignoring NaNs:
+        if !old1.is_nan() {
+            self.sum1 -= old1;
         }
-        if !old.is_nan() {
-            self.sum -= old;
+        if !x.is_nan() {
+            self.sum1 += x;
         }
-        self.sum += value;
-        Some(self.sum / (self.period as f64))
+        // Once filled1 is true, we can compute SMA₁ = sum1 / m₁:
+        let sma1 = if self.filled1 {
+            Some(self.sum1 / (self.m1 as f64))
+        } else {
+            None
+        };
+
+        // ──  STEP 2:  Once we have an SMA₁, feed it into the m₂‐window (second pass)  ──
+        if let Some(s1) = sma1 {
+            let old2 = self.buffer2[self.head2];
+            self.buffer2[self.head2] = s1;
+            self.head2 = (self.head2 + 1) % self.m2;
+            if !self.filled2 && self.head2 == 0 {
+                self.filled2 = true;
+            }
+            if !old2.is_nan() {
+                self.sum2 -= old2;
+            }
+            if !s1.is_nan() {
+                self.sum2 += s1;
+            }
+            // Once filled2 == true, we can output TRIMA = sum2 / m₂
+            if self.filled2 {
+                return Some(self.sum2 / (self.m2 as f64));
+            }
+        }
+
+        None
     }
 }
+
+
 
 #[derive(Clone, Debug)]
 pub struct TrimaBatchRange {
@@ -700,7 +754,7 @@ mod tests {
         let output2 = trima_with_kernel(&input2, kernel)?;
         assert_eq!(output2.values.len(), candles.close.len());
 
-        let params_custom = TrimaParams { period: Some(30) };
+        let params_custom = TrimaParams { period: Some(14) };
         let input3 = TrimaInput::from_candles(&candles, "hlc3", params_custom);
         let output3 = trima_with_kernel(&input3, kernel)?;
         assert_eq!(output3.values.len(), candles.close.len());
@@ -713,7 +767,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_prices = &candles.close;
-        let params = TrimaParams { period: Some(30) };
+        let params = TrimaParams { period: Some(14) };
         let input = TrimaInput::from_candles(&candles, "close", params);
         let trima_result = trima_with_kernel(&input, kernel)?;
 
