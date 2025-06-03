@@ -578,14 +578,16 @@ pub struct KeltnerStream {
     period: usize,
     multiplier: f64,
     ma_type: String,
-    atr_stream: Vec<f64>,
-    ma_stream: Vec<f64>,
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    buffer_close: Vec<f64>,
-    buffer_source: Vec<f64>,
-    head: usize,
-    filled: bool,
+    ma_impl: MaImpl,
+    atr: f64,
+    count: usize,
+    prev_close: f64,
+}
+
+#[derive(Debug, Clone)]
+enum MaImpl {
+    Ema { alpha: f64, value: f64 },
+    Sma { buffer: Vec<f64>, sum: f64, idx: usize, filled: bool },
 }
 
 impl KeltnerStream {
@@ -596,55 +598,79 @@ impl KeltnerStream {
         if period == 0 {
             return Err(KeltnerError::KeltnerInvalidPeriod { period, data_len: 0 });
         }
+        let ma_impl = match ma_type.as_str() {
+            "sma" => MaImpl::Sma { buffer: vec![0.0; period], sum: 0.0, idx: 0, filled: false },
+            _ => MaImpl::Ema { alpha: 2.0 / (period as f64 + 1.0), value: 0.0 },
+        };
         Ok(Self {
             period,
             multiplier,
             ma_type,
-            atr_stream: vec![f64::NAN; period],
-            ma_stream: vec![f64::NAN; period],
-            buffer_high: vec![f64::NAN; period],
-            buffer_low: vec![f64::NAN; period],
-            buffer_close: vec![f64::NAN; period],
-            buffer_source: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            ma_impl,
+            atr: 0.0,
+            count: 0,
+            prev_close: f64::NAN,
         })
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, source: f64) -> Option<(f64, f64, f64)> {
-        let i = self.head;
-        self.buffer_high[i] = high;
-        self.buffer_low[i] = low;
-        self.buffer_close[i] = close;
-        self.buffer_source[i] = source;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 { self.filled = true; }
-        if !self.filled { return None; }
-        let mut tr = 0.0;
-        let prev = (i + self.period - 1) % self.period;
-        if self.head == 0 {
-            for j in 0..self.period {
-                let idx = (i + j) % self.period;
-                let h = self.buffer_high[idx];
-                let l = self.buffer_low[idx];
-                let c = self.buffer_close[prev];
-                tr += (h - l).max((h - c).abs()).max((l - c).abs());
-            }
-            self.atr_stream[i] = tr / (self.period as f64);
+        let tr = if self.count == 0 {
+            high - low
         } else {
-            let h = self.buffer_high[i];
-            let l = self.buffer_low[i];
-            let c = self.buffer_close[prev];
-            let tr_val = (h - l).max((h - c).abs()).max((l - c).abs());
-            let prev_rma = self.atr_stream[prev];
-            self.atr_stream[i] = prev_rma + (tr_val - prev_rma) / (self.period as f64);
+            let hl = high - low;
+            let hc = (high - self.prev_close).abs();
+            let lc = (low - self.prev_close).abs();
+            hl.max(hc).max(lc)
+        };
+        self.prev_close = close;
+        self.count += 1;
+
+        if self.count < self.period {
+            match &mut self.ma_impl {
+                MaImpl::Ema { alpha, value } => {
+                    if self.count == 1 {
+                        *value = source;
+                    } else {
+                        *value += (source - *value) * *alpha;
+                    }
+                }
+                MaImpl::Sma { buffer, sum, idx, filled } => {
+                    if *filled { *sum -= buffer[*idx]; }
+                    buffer[*idx] = source; *sum += source; *idx = (*idx + 1) % self.period; if !*filled && *idx == 0 { *filled = true; }
+                }
+            }
+            self.atr += tr;
+            return None;
         }
-        // For the middle (MA), just simple moving average for this stub:
-        let mean = self.buffer_source.iter().sum::<f64>() / (self.period as f64);
-        self.ma_stream[i] = mean;
-        let ma = self.ma_stream[i];
-        let atr = self.atr_stream[i];
-        Some((ma + self.multiplier * atr, ma, ma - self.multiplier * atr))
+
+        if self.count == self.period {
+            self.atr = (self.atr + tr) / self.period as f64;
+        } else {
+            self.atr += (tr - self.atr) / self.period as f64;
+        }
+
+        let ma_val = match &mut self.ma_impl {
+            MaImpl::Ema { alpha, value } => {
+                if self.count == 1 {
+                    *value = source;
+                } else {
+                    *value += (source - *value) * *alpha;
+                }
+                *value
+            }
+            MaImpl::Sma { buffer, sum, idx, filled } => {
+                if *filled { *sum -= buffer[*idx]; }
+                buffer[*idx] = source;
+                *sum += source;
+                *idx = (*idx + 1) % self.period;
+                if !*filled { *filled = *idx == 0; }
+                if *filled { *sum / self.period as f64 } else { f64::NAN }
+            }
+        };
+
+        let upper = ma_val + self.multiplier * self.atr;
+        let lower = ma_val - self.multiplier * self.atr;
+        Some((upper, ma_val, lower))
     }
 }
 

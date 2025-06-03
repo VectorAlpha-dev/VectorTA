@@ -320,6 +320,14 @@ impl ChandeStream {
             if self.buffer_filled == self.period {
                 self.atr /= self.period as f64;
                 self.filled = true;
+                let val = if self.direction == "long" {
+                    let m = self.high_buf.iter().cloned().fold(f64::MIN, f64::max);
+                    m - self.atr * self.mult
+                } else {
+                    let m = self.low_buf.iter().cloned().fold(f64::MAX, f64::min);
+                    m + self.atr * self.mult
+                };
+                return Some(val);
             }
             return None;
         }
