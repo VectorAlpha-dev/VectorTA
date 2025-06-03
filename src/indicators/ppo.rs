@@ -618,32 +618,42 @@ pub struct PpoStream {
     fast_period: usize,
     slow_period: usize,
     ma_type: String,
-    count: usize,
+    data: Vec<f64>,
 }
 
 impl PpoStream {
     pub fn try_new(params: PpoParams) -> Result<Self, PpoError> {
-        let fast = params.fast_period.unwrap_or(12);
-        let slow = params.slow_period.unwrap_or(26);
-        let ma_type = params
-            .ma_type
-            .clone()
-            .unwrap_or_else(|| "sma".to_string());
-
         Ok(Self {
-            fast_period: fast,
-            slow_period: slow,
-            ma_type,
-            count: 0,
+            fast_period: params.fast_period.unwrap_or(12),
+            slow_period: params.slow_period.unwrap_or(26),
+            ma_type: params
+                .ma_type
+                .clone()
+                .unwrap_or_else(|| "sma".to_string()),
+            data: Vec::new(),
         })
     }
 
+    /// Update the stream with a new value and return the latest PPO if available.
+    ///
+    /// Returns `None` until enough data has been supplied for the slow moving
+    /// average. Once both averages are ready, it returns `Some(ppo)` where
+    /// `ppo` is `100 * (fast_ma - slow_ma) / slow_ma`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.count += 1;
-        // TODO: Implement actual PPO streaming calculation
-        // Return None until enough data, then Some(value)
-        None
+        self.data.push(value);
+        if self.data.len() < self.slow_period {
+            return None;
+        }
+        let fast_ma = ma(&self.ma_type, MaData::Slice(&self.data), self.fast_period).ok()?;
+        let slow_ma = ma(&self.ma_type, MaData::Slice(&self.data), self.slow_period).ok()?;
+        let ff = *fast_ma.last()?;
+        let sf = *slow_ma.last()?;
+        if ff.is_nan() || sf.is_nan() || sf == 0.0 {
+            Some(f64::NAN)
+        } else {
+            Some(100.0 * (ff - sf) / sf)
+        }
     }
 }
 
