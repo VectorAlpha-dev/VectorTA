@@ -285,17 +285,14 @@ impl AtrStream {
         if !self.filled && self.idx == 0 {
             self.filled = true;
             self.rma = self.sum / self.length as f64;
+            return Some(self.rma);
         }
         if !self.filled {
             None
         } else {
             let alpha = 1.0 / self.length as f64;
-            if self.idx == 0 {
-                Some(self.rma)
-            } else {
-                self.rma += alpha * (tr - self.rma);
-                Some(self.rma)
-            }
+            self.rma += alpha * (tr - self.rma);
+            Some(self.rma)
         }
     }
 }

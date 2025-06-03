@@ -622,6 +622,7 @@ pub struct KvoStream {
     short_alpha: f64,
     long_alpha: f64,
     prev_hlc: f64,
+    prev_dm: f64,
     trend: i32,
     cm: f64,
     short_ema: f64,
@@ -643,6 +644,7 @@ impl KvoStream {
             short_alpha: 2.0 / (short_period as f64 + 1.0),
             long_alpha: 2.0 / (long_period as f64 + 1.0),
             prev_hlc: 0.0,
+            prev_dm: 0.0,
             trend: -1,
             cm: 0.0,
             short_ema: 0.0,
@@ -656,6 +658,7 @@ impl KvoStream {
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
         if self.first {
             self.prev_hlc = high + low + close;
+            self.prev_dm = high - low;
             self.first = false;
             return None;
         }
@@ -663,10 +666,10 @@ impl KvoStream {
         let dm = high - low;
         if hlc > self.prev_hlc && self.trend != 1 {
             self.trend = 1;
-            self.cm = high - low;
+            self.cm = self.prev_dm;
         } else if hlc < self.prev_hlc && self.trend != 0 {
             self.trend = 0;
-            self.cm = high - low;
+            self.cm = self.prev_dm;
         }
         self.cm += dm;
         let vf = volume * (dm / self.cm * 2.0 - 1.0).abs() * 100.0 * if self.trend == 1 { 1.0 } else { -1.0 };
@@ -679,6 +682,7 @@ impl KvoStream {
             self.long_ema = (vf - self.long_ema) * self.long_alpha + self.long_ema;
         }
         self.prev_hlc = hlc;
+        self.prev_dm = dm;
         Some(self.short_ema - self.long_ema)
     }
 }

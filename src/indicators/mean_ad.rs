@@ -799,7 +799,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let output = MeanAdBatchBuilder::new()
             .kernel(kernel)
-            .apply_candles(&c, "close")?;
+            .apply_candles(&c, "hl2")?;
 
         let def = MeanAdParams::default();
         let row = output.values_for(&def).expect("default row missing");
