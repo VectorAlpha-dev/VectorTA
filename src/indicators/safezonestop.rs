@@ -526,11 +526,21 @@ impl Default for SafeZoneStopBatchRange {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SafeZoneStopBatchBuilder {
     range: SafeZoneStopBatchRange,
     direction: &'static str,
     kernel: Kernel,
+}
+
+impl Default for SafeZoneStopBatchBuilder {
+    fn default() -> Self {
+        Self {
+            range: SafeZoneStopBatchRange::default(),
+            direction: "long",
+            kernel: Kernel::Auto,
+        }
+    }
 }
 
 impl SafeZoneStopBatchBuilder {

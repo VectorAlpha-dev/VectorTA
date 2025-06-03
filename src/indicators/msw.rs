@@ -372,11 +372,15 @@ impl MswStream {
     fn dot_ring(&self) -> (f64, f64) {
         let mut rp = 0.0;
         let mut ip = 0.0;
-        let mut idx = self.head;
+        // `self.head` always points to the next insertion position, which is
+        // the oldest sample in the ring buffer. The most recent value is the
+        // element just before `head`. The batch implementation processes data
+        // from newest to oldest, so mirror that ordering here.
+        let mut idx = (self.head + self.period - 1) % self.period;
         for j in 0..self.period {
             rp += self.cos_table[j] * self.buffer[idx];
             ip += self.sin_table[j] * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+            idx = if idx == 0 { self.period - 1 } else { idx - 1 };
         }
         let mut phase = if rp.abs() > 0.001 {
             atan(ip / rp)
