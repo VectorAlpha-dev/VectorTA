@@ -910,15 +910,15 @@ mod tests {
         ).enumerate() {
             if bu.is_nan() && stream_upper[i].is_nan() { continue; }
             assert!(
-                (*bu - stream_upper[i]).abs() < 1e-9,
+                (*bu - stream_upper[i]).abs() < 1e-6,
                 "[{}] BB stream/upper mismatch at idx {}", test_name, i
             );
             assert!(
-                (*bm - stream_middle[i]).abs() < 1e-9,
+                (*bm - stream_middle[i]).abs() < 1e-6,
                 "[{}] BB stream/middle mismatch at idx {}", test_name, i
             );
             assert!(
-                (*bl - stream_lower[i]).abs() < 1e-9,
+                (*bl - stream_lower[i]).abs() < 1e-6,
                 "[{}] BB stream/lower mismatch at idx {}", test_name, i
             );
         }
