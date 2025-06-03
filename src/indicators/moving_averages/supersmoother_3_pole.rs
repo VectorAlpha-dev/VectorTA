@@ -411,8 +411,8 @@ impl SuperSmoother3PoleStream {
             + self.coef_prev1 * self.buffer[(self.idx + 2) % 3]
             + self.coef_prev2 * self.buffer[(self.idx + 1) % 3]
             + self.coef_prev3 * self.buffer[self.idx % 3];
-        self.idx = (self.idx + 1) % 3;
         self.buffer[self.idx] = next;
+        self.idx = (self.idx + 1) % 3;
         next
     }
 }
