@@ -378,8 +378,10 @@ impl NatrStream {
         }
         Ok(Self {
             period,
-            tr_buffer: vec![f64::NAN; period],
-            close_buffer: vec![f64::NAN; period],
+            // initialize buffers with zeros to avoid propagating NaNs during
+            // the warm-up phase
+            tr_buffer: vec![0.0; period],
+            close_buffer: vec![0.0; period],
             sum_tr: 0.0,
             prev_atr: 0.0,
             head: 0,
@@ -404,15 +406,12 @@ impl NatrStream {
         self.close_buffer[self.head] = close;
         self.head = (self.head + 1) % self.period;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
         self.count += 1;
 
         if !self.filled {
             if self.count == self.period {
                 self.prev_atr = self.sum_tr / (self.period as f64);
+                self.filled = true;
                 if close.is_finite() && close != 0.0 {
                     return Some((self.prev_atr / close) * 100.0);
                 } else {

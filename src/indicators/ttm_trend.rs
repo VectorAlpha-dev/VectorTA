@@ -307,7 +307,7 @@ impl TtmTrendStream {
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
+            buffer: vec![0.0; period],
             sum: 0.0,
             head: 0,
             filled: false,
@@ -317,7 +317,11 @@ impl TtmTrendStream {
     pub fn update(&mut self, src_val: f64, close_val: f64) -> Option<bool> {
         let old = self.buffer[self.head];
         self.buffer[self.head] = src_val;
-        self.sum += src_val - old;
+        if self.filled {
+            self.sum += src_val - old;
+        } else {
+            self.sum += src_val;
+        }
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
             self.filled = true;

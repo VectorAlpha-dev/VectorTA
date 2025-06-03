@@ -311,9 +311,10 @@ pub unsafe fn ultosc_scalar(
     let mut sum2_b = 0.0;
     let mut sum3_a = 0.0;
     let mut sum3_b = 0.0;
-    let prime_range_1 = (first_valid + p1 - 1).saturating_sub(p1 - 1)..first_valid + p1 - 1;
-    let prime_range_2 = (first_valid + p2 - 1).saturating_sub(p2 - 1)..first_valid + p2 - 1;
-    let prime_range_3 = (first_valid + p3 - 1).saturating_sub(p3 - 1)..first_valid + p3 - 1;
+    let start_idx = first_valid + p1.max(p2).max(p3) - 1;
+    let prime_range_1 = start_idx.saturating_sub(p1 - 1)..start_idx;
+    let prime_range_2 = start_idx.saturating_sub(p2 - 1)..start_idx;
+    let prime_range_3 = start_idx.saturating_sub(p3 - 1)..start_idx;
     for i in prime_range_1 {
         if i < len && !cmtl[i].is_nan() && !tr[i].is_nan() {
             sum1_a += cmtl[i];
@@ -332,7 +333,7 @@ pub unsafe fn ultosc_scalar(
             sum3_b += tr[i];
         }
     }
-    let mut today = first_valid + p1.max(p2).max(p3) - 1;
+    let mut today = start_idx;
     while today < len {
         if !cmtl[today].is_nan() && !tr[today].is_nan() {
             sum1_a += cmtl[today];
