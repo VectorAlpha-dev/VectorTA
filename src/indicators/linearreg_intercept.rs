@@ -746,8 +746,20 @@ mod tests {
         let second_input = LinearRegInterceptInput::from_slice(&first_result.values, second_params);
         let second_result = linearreg_intercept_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), first_result.values.len());
-        for v in &second_result.values[20..] {
-            assert!(!v.is_nan());
+
+        let start = second_result
+            .values
+            .iter()
+            .position(|v| !v.is_nan())
+            .unwrap_or(second_result.values.len());
+
+        for (i, v) in second_result.values[start..].iter().enumerate() {
+            assert!(
+                !v.is_nan(),
+                "[{}] Unexpected NaN at index {} after reinput",
+                test_name,
+                start + i
+            );
         }
         Ok(())
     }

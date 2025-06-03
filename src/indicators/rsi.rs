@@ -617,7 +617,7 @@ impl RsiStream {
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period + 1],
+            buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
             avg_gain: 0.0,
@@ -636,7 +636,7 @@ impl RsiStream {
         let delta = value - self.prev;
         self.prev = value;
         self.buffer[self.head] = delta;
-        self.head = (self.head + 1) % (self.period + 1);
+        self.head = (self.head + 1) % self.period;
 
         if !self.filled && self.head == 0 {
             self.filled = true;

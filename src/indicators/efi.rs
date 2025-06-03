@@ -349,21 +349,27 @@ impl EfiStream {
             self.has_last = true;
             return None;
         }
-        let diff = if price.is_nan() || self.last_price.is_nan() || volume.is_nan() {
-            self.prev
+
+        let out = if price.is_nan() || self.last_price.is_nan() || volume.is_nan() {
+            if self.filled {
+                self.prev
+            } else {
+                f64::NAN
+            }
         } else {
-            (price - self.last_price) * volume
+            let diff = (price - self.last_price) * volume;
+            if !self.filled {
+                self.prev = diff;
+                self.filled = true;
+                diff
+            } else {
+                let ema = self.alpha * diff + (1.0 - self.alpha) * self.prev;
+                self.prev = ema;
+                ema
+            }
         };
         self.last_price = price;
-        if !self.filled {
-            self.prev = diff;
-            self.filled = true;
-            return Some(f64::NAN);
-        } else {
-            let ema = self.alpha * diff + (1.0 - self.alpha) * self.prev;
-            self.prev = ema;
-            Some(ema)
-        }
+        Some(out)
     }
 }
 
