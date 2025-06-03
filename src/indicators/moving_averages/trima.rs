@@ -16,7 +16,7 @@
 //! ## Returns
 //! - **`Ok(TrimaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(TrimaError)`** otherwise.
-
+use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
@@ -242,77 +242,35 @@ pub fn trima_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    // Original logic from trima
+    // ─── TWO-PASS SMA APPROACH ───
+    //
+    // Let m1 = (period+1)/2,  m2 = period − m1 + 1.
+    // First pass: compute the m1-period SMA of `data`.
+    // Second pass: compute the m2-period SMA of that first-pass result.
+    // That is exactly the standard definition of a “Triangular MA.”
+
     let n = data.len();
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
 
-    let sum_of_weights = if period % 2 == 1 {
-        let half = period / 2 + 1;
-        (half * half) as f64
-    } else {
-        let half_up = period / 2 + 1;
-        let half_down = period / 2;
-        (half_up * half_down) as f64
+    // FIRST PASS:  length-m1 SMA on `data`.
+    let sma1_in = SmaInput {
+        data: SmaData::Slice(data),
+        params: SmaParams { period: Some(m1) },
     };
-    let inv_weights = 1.0 / sum_of_weights;
+    // We know this cannot error, because `period <= n` and m1 > 0.
+    let pass1 = sma(&sma1_in).unwrap();
 
-    let lead_period = if period % 2 == 1 {
-        period / 2
-    } else {
-        (period / 2) - 1
+    // SECOND PASS: length-m2 SMA on the first-pass values.
+    let sma2_in = SmaInput {
+        data: SmaData::Slice(&pass1.values),
+        params: SmaParams { period: Some(m2) },
     };
-    let trail_period = lead_period + 1;
+    let pass2 = sma(&sma2_in).unwrap();
 
-    let mut weight_sum = 0.0;
-    let mut lead_sum = 0.0;
-    let mut trail_sum = 0.0;
-    let mut w = 1;
-
-    for i in 0..(period - 1) {
-        let idx = first + i;
-        let val = data[idx];
-        weight_sum += val * (w as f64);
-        if i + 1 > period - lead_period {
-            lead_sum += val;
-        }
-        if i < trail_period {
-            trail_sum += val;
-        }
-        if i + 1 < trail_period {
-            w += 1;
-        }
-        if i + 1 >= (period - lead_period) {
-            w -= 1;
-        }
-    }
-
-    let mut lsi = (period - 1) as isize - lead_period as isize + 1;
-    let mut tsi1 = (period - 1) as isize - period as isize + 1 + trail_period as isize;
-    let mut tsi2 = (period - 1) as isize - period as isize + 1;
-
-    for i in (first + (period - 1))..n {
-        let val = data[i];
-        weight_sum += val;
-
-        out[i] = weight_sum * inv_weights;
-
-        lead_sum += val;
-        weight_sum += lead_sum;
-        weight_sum -= trail_sum;
-
-        if lsi >= 0 {
-            lead_sum -= data[lsi as usize];
-        }
-        if tsi1 >= 0 {
-            trail_sum += data[tsi1 as usize];
-        }
-        if tsi2 >= 0 {
-            trail_sum -= data[tsi2 as usize];
-        }
-
-        lsi += 1;
-        tsi1 += 1;
-        tsi2 += 1;
-    }
+    // Copy the final “pass2” values straight into `out`.
+    // pass2.values is already length = n, with the appropriate NaN prefix.
+    out.copy_from_slice(&pass2.values);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -370,7 +328,7 @@ pub fn trima_row_scalar(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    trima_scalar(data, period, first, out)
+    trima_scalar(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
