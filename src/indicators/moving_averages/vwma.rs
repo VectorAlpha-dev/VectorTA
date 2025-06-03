@@ -698,7 +698,8 @@ mod tests {
         let input_second = VwmaInput::from_slice(&result_first.values, &candles.volume, params_second);
         let result_second = vwma_with_kernel(&input_second, kernel)?;
         assert_eq!(result_second.values.len(), result_first.values.len());
-        for i in 20..result_second.values.len() {
+        let start = input_first.get_period() + input_second.get_period() - 2;
+        for i in start..result_second.values.len() {
             assert!(!result_second.values[i].is_nan());
         }
         Ok(())

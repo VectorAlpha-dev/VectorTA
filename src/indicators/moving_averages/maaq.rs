@@ -420,21 +420,22 @@ impl MaaqStream {
         } else {
             value
         };
+        let old_value = self.buffer[self.head];
         let d = (value - prev).abs();
         self.buffer[self.head] = value;
         self.diff[self.head] = d;
         self.head = (self.head + 1) % self.period;
         self.count += 1;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
         if !self.filled {
             self.last = value;
-            return None;
+            if self.head == 0 {
+                self.filled = true;
+            }
+            return Some(value);
         }
         let sum: f64 = self.diff.iter().sum();
         let noise = sum;
-        let signal = (value - self.buffer[self.head]) .abs();
+        let signal = (value - old_value).abs();
         let fast_sc = 2.0 / (self.fast_period as f64 + 1.0);
         let slow_sc = 2.0 / (self.slow_period as f64 + 1.0);
         let ratio = if noise.abs() < f64::EPSILON {
