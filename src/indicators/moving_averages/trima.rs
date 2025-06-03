@@ -59,7 +59,7 @@ pub struct TrimaParams {
 
 impl Default for TrimaParams {
     fn default() -> Self {
-        Self { period: Some(14) }
+        Self { period: Some(30) }
     }
 }
 
@@ -725,7 +725,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_prices = &candles.close;
-        let params = TrimaParams { period: Some(14) };
+        let params = TrimaParams { period: Some(30) };
         let input = TrimaInput::from_candles(&candles, "close", params);
         let trima_result = trima_with_kernel(&input, kernel)?;
 

@@ -1005,10 +1005,10 @@ mod tests {
             factor: Some(factor),
         })?;
 
-        let mut wt1_stream = Vec::with_capacity(candles.close.len());
-        let mut wt2_stream = Vec::with_capacity(candles.close.len());
-        let mut diff_stream = Vec::with_capacity(candles.close.len());
-        for &price in &candles.close {
+        let mut wt1_stream = Vec::with_capacity(candles.hlc3.len());
+        let mut wt2_stream = Vec::with_capacity(candles.hlc3.len());
+        let mut diff_stream = Vec::with_capacity(candles.hlc3.len());
+        for &price in &candles.hlc3 {
             match stream.update(price) {
                 Some((wt1, wt2, diff)) => {
                     wt1_stream.push(wt1);
