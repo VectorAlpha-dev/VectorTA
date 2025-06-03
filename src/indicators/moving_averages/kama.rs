@@ -225,23 +225,28 @@ pub fn kama_scalar(
 
     let mut sum_roc1 = 0.0;
     let mut today = first_valid;
-    for i in 0..lookback {
+    for i in 0..=lookback {
         sum_roc1 += (data[today + i + 1] - data[today + i]).abs();
     }
-    let mut prev_kama = data[today + lookback];
-    out[today + lookback] = prev_kama;
+
+    let initial_idx = today + lookback + 1;
+    let mut prev_kama = data[initial_idx];
+    out[initial_idx] = prev_kama;
 
     let mut trailing_idx = today;
     let mut trailing_value = data[trailing_idx];
 
-    for i in today + lookback + 1..len {
+    for i in (initial_idx + 1)..len {
         let price = data[i];
-        let direction = (price - data[trailing_idx]).abs();
+
         sum_roc1 -= (data[trailing_idx + 1] - trailing_value).abs();
+
         sum_roc1 += (price - data[i - 1]).abs();
+
         trailing_value = data[trailing_idx + 1];
         trailing_idx += 1;
 
+        let direction = (price - data[trailing_idx]).abs();
         let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
         let sc = (er * const_diff + const_max).powi(2);
         prev_kama += (price - prev_kama) * sc;
@@ -293,19 +298,16 @@ pub fn kama_avx512_long(
     kama_scalar(data, period, first_valid, out)
 }
 
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone)]
 pub struct KamaStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    buffer: VecDeque<f64>,
     prev_kama: f64,
     sum_roc1: f64,
-    trailing_idx: usize,
-    trailing_value: f64,
     const_max: f64,
     const_diff: f64,
-    lookback: usize,
 }
 
 impl KamaStream {
@@ -316,52 +318,60 @@ impl KamaStream {
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            prev_kama: f64::NAN,
+            buffer: VecDeque::with_capacity(period + 1),
+            prev_kama: 0.0,
             sum_roc1: 0.0,
-            trailing_idx: 0,
-            trailing_value: 0.0,
             const_max: 2.0 / (30.0 + 1.0),
             const_diff: (2.0 / (2.0 + 1.0)) - (2.0 / (30.0 + 1.0)),
-            lookback: period.saturating_sub(1),
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if !self.filled && self.head < self.lookback {
-            self.buffer[self.head] = value;
-            self.head += 1;
+        if self.buffer.len() < self.period {
+            self.buffer.push_back(value);
             return None;
         }
-        if !self.filled && self.head == self.lookback {
-            self.buffer[self.head] = value;
-            for i in 0..self.lookback {
-                self.sum_roc1 += (self.buffer[i + 1] - self.buffer[i]).abs();
+
+        if self.buffer.len() == self.period {
+            self.sum_roc1 = 0.0;
+            for i in 0..(self.period - 1) {
+                let a = self.buffer[i];
+                let b = self.buffer[i + 1];
+                self.sum_roc1 += (b - a).abs();
             }
+            if let Some(&last) = self.buffer.back() {
+                self.sum_roc1 += (value - last).abs();
+            }
+
             self.prev_kama = value;
-            self.filled = true;
-            self.head = (self.head + 1) % self.period;
+            self.buffer.push_back(value);
             return Some(self.prev_kama);
         }
-        let trailing_value = self.buffer[self.head];
-        let prev_value = self.buffer[(self.head + self.period - 1) % self.period];
 
-        self.buffer[self.head] = value;
-        self.sum_roc1 -= (self.buffer[(self.head + 1) % self.period] - trailing_value).abs();
-        self.sum_roc1 += (value - prev_value).abs();
+        let old_front = self.buffer.pop_front().unwrap();
+        let new_front = *self.buffer.front().unwrap();
 
-        let direction = (value - self.buffer[(self.head + 1) % self.period]).abs();
-        let er = if self.sum_roc1 == 0.0 { 0.0 } else { direction / self.sum_roc1 };
+        self.sum_roc1 -= (new_front - old_front).abs();
+
+        let last = *self.buffer.back().unwrap();
+        self.sum_roc1 += (value - last).abs();
+
+        let direction = (value - new_front).abs();
+
+        let er = if self.sum_roc1 == 0.0 {
+            0.0
+        } else {
+            direction / self.sum_roc1
+        };
         let sc = (er * self.const_diff + self.const_max).powi(2);
         self.prev_kama += (value - self.prev_kama) * sc;
 
-        self.head = (self.head + 1) % self.period;
+        self.buffer.push_back(value);
         Some(self.prev_kama)
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct KamaBatchRange {

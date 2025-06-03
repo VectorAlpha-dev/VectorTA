@@ -166,7 +166,10 @@ pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, SrwmaError> {
     srwma_with_kernel(input, Kernel::Auto)
 }
 
-pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutput, SrwmaError> {
+pub fn srwma_with_kernel(
+    input: &SrwmaInput,
+    kernel: Kernel,
+) -> Result<SrwmaOutput, SrwmaError> {
     let data: &[f64] = match &input.data {
         SrwmaData::Candles { candles, source } => source_type(candles, source),
         SrwmaData::Slice(sl) => sl,
@@ -177,22 +180,20 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SrwmaError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
+        return Err(SrwmaError::InvalidPeriod { period, data_len: len });
     }
-    if (len - first) < period {
+    if (len - first) < period + 1 {
         return Err(SrwmaError::NotEnoughValidData {
-            needed: period,
+            needed: period + 1,
             valid: len - first,
         });
     }
 
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    weights.resize(period, 0.0);
+    let weight_len = period - 1;
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, weight_len);
+    weights.resize(weight_len, 0.0);
     let mut norm = 0.0;
-    for i in 0..period {
+    for i in 0..weight_len {
         let w = ((period - i) as f64).sqrt();
         weights[i] = w;
         norm += w;
@@ -252,33 +253,24 @@ pub fn srwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    assert_eq!(weights.len(), period, "weights.len() must equal `period`");
-    assert!(
-        out.len() >= data.len(),
-        "`out` must be at least as long as `data`"
-    );
+    assert_eq!(weights.len(), period - 1, "weights.len() must be period - 1");
+    assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
 
-    let p4 = period & !3;
+    let wlen = period - 1;
+    let start_idx = first_val + period + 1;
+    let len = data.len();
 
-    for i in (first_val + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
-
+    for i in start_idx..len {
         let mut sum = 0.0;
-        for (d4, w4) in window[..p4]
-            .chunks_exact(4)
-            .zip(weights[..p4].chunks_exact(4))
-        {
-            sum += d4[0] * w4[0] + d4[1] * w4[1] + d4[2] * w4[2] + d4[3] * w4[3];
-        }
-
-        for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
+        for k in 0..wlen {
+            let d = data[i - k];
+            let w = weights[k];
             sum += d * w;
         }
-
         out[i] = sum * inv_norm;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -476,51 +468,77 @@ fn srwma_batch_inner(
             data_len: 0,
         });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
-    if data.len() - first < max_p {
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SrwmaError::AllValuesNaN)?;
+    let len = data.len();
+
+    let max_wlen = combos.iter().map(|c| c.period.unwrap() - 1).max().unwrap();
+    let rows = combos.len();
+    let cols = len;
+
+    if combos
+        .iter()
+        .any(|c| (len - first) < (c.period.unwrap() + 1))
+    {
+        let needed = combos.iter().map(|c| c.period.unwrap() + 1).max().unwrap();
         return Err(SrwmaError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
+            needed,
+            valid: len - first,
         });
     }
-    let rows = combos.len();
-    let cols = data.len();
+
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows * max_p;
+    let cap = rows * max_wlen;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let flat_slice = flat_w.as_mut_slice();
 
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
+        let wlen = period - 1;
         let mut norm = 0.0;
-        for i in 0..period {
+        let base = row * max_wlen;
+        for i in 0..wlen {
             let w = ((period - i) as f64).sqrt();
-            flat_w[row * max_p + i] = w;
+            flat_slice[base + i] = w;
             norm += w;
         }
         inv_norms[row] = 1.0 / norm;
     }
 
     let mut values = vec![f64::NAN; rows * cols];
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr = flat_w.as_ptr().add(row * max_p);
-        let inv_n = *inv_norms.get_unchecked(row);
+        let wlen = period - 1;
+        let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
+        let inv_n = inv_norms[row];
+        let start_idx = first + period + 1;
 
         match kern {
-            Kernel::Scalar => srwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Scalar => {
+                srwma_row_scalar(data, first, period, max_wlen, w_ptr, inv_n, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => srwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2 => {
+                srwma_row_avx2(data, first, period, max_wlen, w_ptr, inv_n, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => srwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx512 => {
+                srwma_row_avx512(data, first, period, max_wlen, w_ptr, inv_n, out_row)
+            }
             _ => unreachable!(),
         }
     };
 
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -535,27 +553,26 @@ fn srwma_batch_inner(
     })
 }
 
+
+
 #[inline(always)]
 unsafe fn srwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize,
     w_ptr: *const f64,
     inv_n: f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
+    let wlen = period - 1;
+    let len = data.len();
+    let start_idx = first + period + 1;
+
+    for i in start_idx..len {
         let mut sum = 0.0;
-        for k in (0..p4).step_by(4) {
-            let w = std::slice::from_raw_parts(w_ptr.add(k), 4);
-            let d = &data[start + k..start + k + 4];
-            sum += d[0] * w[0] + d[1] * w[1] + d[2] * w[2] + d[3] * w[3];
-        }
-        for k in p4..period {
-            sum += *data.get_unchecked(start + k) * *w_ptr.add(k);
+        for k in 0..wlen {
+            sum += *data.get_unchecked(i - k) * *w_ptr.add(k);
         }
         out[i] = sum * inv_n;
     }
@@ -621,13 +638,12 @@ unsafe fn srwma_row_avx512_long(
     srwma_row_scalar(data, first, period, _stride, w_ptr, inv_n, out);
 }
 
+
 pub struct SrwmaStream {
     period: usize,
     weights: Vec<f64>,
-    inv_norm: f64,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    sum_weights: f64,
+    data_history: Vec<f64>,
 }
 
 impl SrwmaStream {
@@ -639,47 +655,39 @@ impl SrwmaStream {
                 data_len: 0,
             });
         }
-        let mut weights = Vec::with_capacity(period);
-        let mut norm = 0.0;
-        for i in 0..period {
+        let wlen = period - 1;
+        let mut weights = Vec::with_capacity(wlen);
+        let mut sumw = 0.0;
+        for i in 0..wlen {
             let w = ((period - i) as f64).sqrt();
             weights.push(w);
-            norm += w;
+            sumw += w;
         }
-        let inv_norm = 1.0 / norm;
 
         Ok(Self {
             period,
             weights,
-            inv_norm,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            sum_weights: sumw,
+            data_history: Vec::new(),
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+        self.data_history.push(value);
+        let idx = self.data_history.len() - 1;
+
+        if idx + 1 <= self.period + 1 {
             return None;
         }
-        Some(self.dot_ring())
-    }
 
-    #[inline(always)]
-    fn dot_ring(&self) -> f64 {
+        let wlen = self.period - 1;
         let mut sum = 0.0;
-        let mut idx = self.head;
-        for &w in &self.weights {
-            sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+        for k in 0..wlen {
+            let data_idx = idx - k;
+            sum += self.data_history[data_idx] * self.weights[k];
         }
-        sum * self.inv_norm
+        Some(sum / self.sum_weights)
     }
 }
 
