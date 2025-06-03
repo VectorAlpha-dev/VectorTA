@@ -454,36 +454,36 @@ impl VidyaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Remove oldest values if buffer is filled
+        // Oldest values before inserting the new one
         let long_tail = self.long_buf[self.head];
         let short_tail = self.short_buf[self.idx % self.short_period];
+
+        self.long_sum += value;
+        self.long_sum2 += value * value;
+        if self.idx >= self.long_period - self.short_period {
+            self.short_sum += value;
+            self.short_sum2 += value * value;
+        }
 
         if self.idx >= self.long_period {
             self.long_sum -= long_tail;
             self.long_sum2 -= long_tail * long_tail;
-        }
-        if self.idx >= self.short_period {
             self.short_sum -= short_tail;
             self.short_sum2 -= short_tail * short_tail;
         }
-
-        self.long_sum += value;
-        self.long_sum2 += value * value;
-        self.short_sum += value;
-        self.short_sum2 += value * value;
 
         self.long_buf[self.head] = value;
         self.short_buf[self.idx % self.short_period] = value;
         self.head = (self.head + 1) % self.long_period;
         self.idx += 1;
 
-        if self.idx < self.long_period {
+        if self.idx < self.long_period - 1 {
             self.val = value;
             return None;
         }
-        if !self.filled {
+        if self.idx == self.long_period - 1 {
             self.val = value;
-            self.filled = true;
+            return Some(self.val);
         }
 
         let sp = self.short_period as f64;
