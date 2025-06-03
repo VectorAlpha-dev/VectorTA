@@ -514,7 +514,7 @@ impl DpoStream {
             return None;
         }
         let back = self.period / 2 + 1;
-        let idx = (self.head + self.period - back) % self.period;
+        let idx = (self.head + self.period - back - 1) % self.period;
         Some(self.buf[idx] - (self.sum / self.period as f64))
     }
 }
