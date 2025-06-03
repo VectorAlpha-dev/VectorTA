@@ -412,10 +412,10 @@ impl CciStream {
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
+        self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
         if !self.filled {
             return None;
         }
-        self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
         self.last_sma = self.sum / self.period as f64;
         let mut sum_abs = 0.0;
         for &v in &self.buffer {
@@ -888,7 +888,7 @@ mod tests {
 
         let output = CciBatchBuilder::new()
             .kernel(kernel)
-            .apply_candles(&c, "close")?;
+            .apply_candles(&c, "hlc3")?;
 
         let def = CciParams::default();
         let row = output.values_for(&def).expect("default row missing");
