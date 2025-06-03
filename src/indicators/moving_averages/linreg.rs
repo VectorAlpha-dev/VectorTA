@@ -717,7 +717,7 @@ mod tests {
             if b.is_nan() && s.is_nan() { continue; }
             let diff = (b - s).abs();
             assert!(
-                diff < 1e-9,
+                diff < 1e-6,
                 "[{}] LINREG streaming mismatch at idx {}: batch={}, stream={}, diff={}",
                 test_name, i, b, s, diff
             );

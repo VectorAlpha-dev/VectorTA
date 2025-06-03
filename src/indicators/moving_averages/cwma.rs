@@ -20,7 +20,10 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
@@ -206,7 +209,9 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
     }
     let inv_norm = 1.0 / norm;
 
-    let warm = first + period - 1;
+    // Reserve enough NaN prefix so the first computed value
+    // aligns with the streaming implementation.
+    let warm = first + period;
     let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
@@ -1016,8 +1021,8 @@ unsafe fn cwma_row_avx2(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_cwma_partial_params(
         test_name: &str,
