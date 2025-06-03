@@ -185,7 +185,10 @@ pub fn stddev(input: &StdDevInput) -> Result<StdDevOutput, StdDevError> {
     stddev_with_kernel(input, Kernel::Auto)
 }
 
-pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevOutput, StdDevError> {
+pub fn stddev_with_kernel(
+    input: &StdDevInput,
+    kernel: Kernel,
+) -> Result<StdDevOutput, StdDevError> {
     let data: &[f64] = match &input.data {
         StdDevData::Candles { candles, source } => source_type(candles, source),
         StdDevData::Slice(sl) => sl,
@@ -226,9 +229,7 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
                 stddev_scalar(data, period, first, nbdev, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                stddev_avx2(data, period, first, nbdev, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => stddev_avx2(data, period, first, nbdev, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 stddev_avx512(data, period, first, nbdev, &mut out)
@@ -241,13 +242,7 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 }
 
 #[inline]
-pub fn stddev_scalar(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    nbdev: f64,
-    out: &mut [f64],
-) {
+pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
     for &val in &data[first..first + period] {
@@ -257,7 +252,11 @@ pub fn stddev_scalar(
     let mut compute = |sum: f64, sum_sqr: f64| {
         let mean = sum / period as f64;
         let var = (sum_sqr / period as f64) - (mean * mean);
-        if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev }
+        if var <= 0.0 {
+            0.0
+        } else {
+            var.sqrt() * nbdev
+        }
     };
     out[first + period - 1] = compute(sum, sum_sqr);
     for i in (first + period)..data.len() {
@@ -271,25 +270,13 @@ pub fn stddev_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn stddev_avx2(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    nbdev: f64,
-    out: &mut [f64],
-) {
+pub fn stddev_avx2(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
     stddev_scalar(data, period, first, nbdev, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn stddev_avx512(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    nbdev: f64,
-    out: &mut [f64],
-) {
+pub fn stddev_avx512(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
     if period <= 32 {
         unsafe { stddev_avx512_short(data, period, first, nbdev, out) }
     } else {
@@ -355,23 +342,31 @@ impl StdDevStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let old = self.buffer[self.head];
+        if self.filled {
+            let old = self.buffer[self.head];
+            self.sum += value - old;
+            self.sum_sqr += value * value - old * old;
+        } else {
+            self.sum += value;
+            self.sum_sqr += value * value;
+            if self.head + 1 == self.period {
+                self.filled = true;
+            }
+        }
+
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
         if !self.filled {
-            self.sum += value;
-            self.sum_sqr += value * value;
             return None;
         }
-        self.sum += value - old;
-        self.sum_sqr += value * value - old * old;
         let mean = self.sum / self.period as f64;
         let var = (self.sum_sqr / self.period as f64) - (mean * mean);
-        Some(if var <= 0.0 { 0.0 } else { var.sqrt() * self.nbdev })
+        Some(if var <= 0.0 {
+            0.0
+        } else {
+            var.sqrt() * self.nbdev
+        })
     }
 }
 
@@ -615,13 +610,7 @@ unsafe fn stddev_row_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn stddev_row_avx2(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    nbdev: f64,
-    out: &mut [f64],
-) {
+unsafe fn stddev_row_avx2(data: &[f64], first: usize, period: usize, nbdev: f64, out: &mut [f64]) {
     stddev_scalar(data, period, first, nbdev, out)
 }
 
@@ -673,8 +662,8 @@ pub fn expand_grid_stddev(r: &StdDevBatchRange) -> Vec<StdDevParams> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_stddev_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
