@@ -604,16 +604,18 @@ impl VarStream {
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
         if !self.filled {
             self.sum += value;
             self.sum_sq += value * value;
-            return None;
+            if self.head == 0 {
+                self.filled = true;
+            } else {
+                return None;
+            }
+        } else {
+            self.sum += value - old;
+            self.sum_sq += value * value - old * old;
         }
-        self.sum += value - old;
-        self.sum_sq += value * value - old * old;
         let inv_p = 1.0 / self.period as f64;
         let mean = self.sum * inv_p;
         let mean_sq = self.sum_sq * inv_p;
