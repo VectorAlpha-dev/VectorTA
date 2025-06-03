@@ -3,5 +3,6 @@
 rustflags = [
   "-C", "target-cpu=native",
   "-C", "target-feature=+avx512f,+avx512dq,+avx512vl,+fma",
-  "-C", "linker=lld-link",
+  # Use the system default linker for Linux builds
+  "-C", "linker=clang",
 ]
