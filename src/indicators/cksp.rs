@@ -561,17 +561,23 @@ pub unsafe fn cksp_row_avx512_long(
 
 // ========================= Stream API =========================
 
+use std::collections::VecDeque;
+use crate::indicators::atr::{AtrParams, AtrStream};
+
 #[derive(Debug, Clone)]
 pub struct CkspStream {
     p: usize,
     x: f64,
     q: usize,
-    atr_buffer: Vec<f64>,
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    close_buffer: Vec<f64>,
+    alpha: f64,
+    sum_tr: f64,
+    rma: f64,
+    prev_close: f64,
+    dq_h: VecDeque<(usize, f64)>,
+    dq_l: VecDeque<(usize, f64)>,
+    dq_ls0: VecDeque<(usize, f64)>,
+    dq_ss0: VecDeque<(usize, f64)>,
     i: usize,
-    filled: bool,
 }
 
 impl CkspStream {
@@ -589,43 +595,126 @@ impl CkspStream {
             p,
             x,
             q,
-            atr_buffer: vec![f64::NAN; p],
-            high_buffer: vec![f64::NAN; q],
-            low_buffer: vec![f64::NAN; q],
-            close_buffer: vec![f64::NAN; p],
+            alpha: 1.0 / p as f64,
+            sum_tr: 0.0,
+            rma: 0.0,
+            prev_close: f64::NAN,
+            dq_h: VecDeque::new(),
+            dq_l: VecDeque::new(),
+            dq_ls0: VecDeque::new(),
+            dq_ss0: VecDeque::new(),
             i: 0,
-            filled: false,
         })
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        self.high_buffer[self.i % self.q] = high;
-        self.low_buffer[self.i % self.q] = low;
-        self.close_buffer[self.i % self.p] = close;
+        let tr = if self.prev_close.is_nan() {
+            high - low
+        } else {
+            let hl = high - low;
+            let hc = (high - self.prev_close).abs();
+            let lc = (low - self.prev_close).abs();
+            hl.max(hc).max(lc)
+        };
+        self.prev_close = close;
+        let atr_opt = if self.i < self.p {
+            self.sum_tr += tr;
+            if self.i == self.p - 1 {
+                self.rma = self.sum_tr / self.p as f64;
+                Some(self.rma)
+            } else {
+                None
+            }
+        } else {
+            self.rma += self.alpha * (tr - self.rma);
+            Some(self.rma)
+        };
+
+        while let Some((_, v)) = self.dq_h.back() {
+            if *v <= high {
+                self.dq_h.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_h.push_back((self.i, high));
+        let start_h = self.i.saturating_sub(self.q - 1);
+        while let Some(&(idx, _)) = self.dq_h.front() {
+            if idx < start_h {
+                self.dq_h.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        while let Some((_, v)) = self.dq_l.back() {
+            if *v >= low {
+                self.dq_l.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_l.push_back((self.i, low));
+        let start_l = self.i.saturating_sub(self.q - 1);
+        while let Some(&(idx, _)) = self.dq_l.front() {
+            if idx < start_l {
+                self.dq_l.pop_front();
+            } else {
+                break;
+            }
+        }
+        let atr = match atr_opt {
+            Some(v) => v,
+            None => { self.i += 1; return None; }
+        };
+
+        let (mh, ml) = match (self.dq_h.front(), self.dq_l.front()) {
+            (Some(&(_, mh)), Some(&(_, ml))) => (mh, ml),
+            _ => {
+                self.i += 1;
+                return None;
+            }
+        };
+        let ls0_val = mh - self.x * atr;
+        let ss0_val = ml + self.x * atr;
+
+        while let Some((_, val)) = self.dq_ls0.back() {
+            if *val <= ls0_val {
+                self.dq_ls0.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_ls0.push_back((self.i, ls0_val));
+        let start_ls0 = self.i.saturating_sub(self.q - 1);
+        while let Some(&(idx, _)) = self.dq_ls0.front() {
+            if idx < start_ls0 {
+                self.dq_ls0.pop_front();
+            } else {
+                break;
+            }
+        }
+        let long = self.dq_ls0.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
+
+        while let Some((_, val)) = self.dq_ss0.back() {
+            if *val >= ss0_val {
+                self.dq_ss0.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_ss0.push_back((self.i, ss0_val));
+        let start_ss0 = self.i.saturating_sub(self.q - 1);
+        while let Some(&(idx, _)) = self.dq_ss0.front() {
+            if idx < start_ss0 {
+                self.dq_ss0.pop_front();
+            } else {
+                break;
+            }
+        }
+        let short = self.dq_ss0.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
+
         self.i += 1;
-        if !self.filled && self.i >= self.q.max(self.p) {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        // For streaming, provide most recent rolling windows only
-        let h_win = &self.high_buffer;
-        let l_win = &self.low_buffer;
-        let c_win = &self.close_buffer;
-        let (h_max, l_min) = (h_win.iter().cloned().fold(f64::NEG_INFINITY, f64::max), l_win.iter().cloned().fold(f64::INFINITY, f64::min));
-        let mut tr_sum = 0.0;
-        let mut prev_close = c_win[0];
-        for idx in 0..self.p {
-            let h = h_win[idx % self.q];
-            let l = l_win[idx % self.q];
-            let tr = (h - l).abs().max((h - prev_close).abs()).max((l - prev_close).abs());
-            tr_sum += tr;
-            prev_close = c_win[(idx + 1) % self.p];
-        }
-        let atr = tr_sum / (self.p as f64);
-        let long = h_max - self.x * atr;
-        let short = l_min + self.x * atr;
         Some((long, short))
     }
 }
