@@ -695,6 +695,9 @@ pub struct TilsonStream {
     head: usize,
     buffer: Vec<f64>,
     filled: bool,
+    lookback_total: usize,
+    seen: usize,
+    history: Vec<f64>,
 }
 
 impl TilsonStream {
@@ -707,6 +710,7 @@ impl TilsonStream {
         if v_factor.is_nan() || v_factor.is_infinite() {
             return Err(TilsonError::InvalidVolumeFactor { v_factor });
         }
+        let lookback_total = 6 * (period - 1);
         Ok(Self {
             period,
             v_factor,
@@ -716,6 +720,9 @@ impl TilsonStream {
             head: 0,
             buffer: vec![f64::NAN; period],
             filled: false,
+            lookback_total,
+            seen: 0,
+            history: Vec::new(),
         })
     }
 
@@ -723,18 +730,33 @@ impl TilsonStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
+        self.history.push(value);
+        self.seen += 1;
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
         if !self.filled {
             return None;
         }
-        Some(self.dot_ring())
+        if self.seen <= self.lookback_total {
+            self.dot_ring();
+            return None;
+        }
+        let params = TilsonParams {
+            period: Some(self.period),
+            volume_factor: Some(self.v_factor),
+        };
+        let input = TilsonInput::from_slice(&self.history, params);
+        match tilson_with_kernel(&input, Kernel::Scalar) {
+            Ok(out) => out.values.last().copied(),
+            Err(_) => None,
+        }
     }
 
     #[inline(always)]
     fn dot_ring(&mut self) -> f64 {
-        let mut val = self.buffer[self.head];
+        let idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
+        let mut val = self.buffer[idx];
         let mut e = &mut self.e;
         e[0] = self.k * val + self.one_minus_k * e[0];
         for i in 1..6 {
