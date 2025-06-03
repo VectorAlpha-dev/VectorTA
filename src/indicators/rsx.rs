@@ -382,25 +382,29 @@ impl RsxStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.buf[self.head] = value;
         self.head = (self.head + 1) % self.period;
+
         if !self.filled && self.head == 0 {
             self.filled = true;
+            return Some(self.ring_calc(value));
         }
+
         if !self.filled {
             return None;
         }
-        Some(self.ring_calc())
+
+        Some(self.ring_calc(value))
     }
 
     #[inline(always)]
-    fn ring_calc(&mut self) -> f64 {
-        let val = self.buf[self.head];
+    fn ring_calc(&mut self, val: f64) -> f64 {
         let period = self.period;
         let mut s = self.state.unwrap_or([0.0; 18]);
         let mut out_val = f64::NAN;
-        let mut is_initialized = s[0] > 0.0;
+        let mut is_initialized = self.state.is_some();
 
         if !is_initialized {
             s[16] = if period >= 6 { (period - 1) as f64 } else { 5.0 };
+            s[17] = 1.0;
             s[1] = 100.0 * val;
             s[2] = 3.0 / (period as f64 + 2.0);
             s[3] = 1.0 - s[2];

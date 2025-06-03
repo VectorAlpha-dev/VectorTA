@@ -341,6 +341,7 @@ pub struct TrendFlexStream {
     sum: f64,
     idx: usize,
     filled: bool,
+    last_raw: Option<f64>,
     a: f64,
     a_sq: f64,
     b: f64,
@@ -373,6 +374,7 @@ impl TrendFlexStream {
             sum: 0.0,
             idx: 0,
             filled: false,
+            last_raw: None,
             a, a_sq, b, c,
         })
     }
@@ -382,30 +384,42 @@ impl TrendFlexStream {
         let n = self.ssf.len();
         if n == 0 {
             self.ssf.push(value);
+            self.buffer[self.idx] = value;
+            self.sum += value;
+            self.idx = (self.idx + 1) % self.period;
+            self.last_raw = Some(value);
             return None;
         }
         if n == 1 {
             self.ssf.push(value);
+            self.buffer[self.idx] = value;
+            self.sum += value;
+            self.idx = (self.idx + 1) % self.period;
+            self.last_raw = Some(value);
             return None;
         }
+        let prev_raw = self.last_raw.unwrap();
         let prev1 = self.ssf[n - 1];
         let prev2 = self.ssf[n - 2];
-        let new_ssf = self.c * (value + prev1) + self.b * prev1 - self.a_sq * prev2;
+        let new_ssf = self.c * (value + prev_raw) + self.b * prev1 - self.a_sq * prev2;
         self.ssf.push(new_ssf);
-
+        
+        self.last_raw = Some(value);
         let p = self.period;
+        let old = self.buffer[self.idx];
+        let rolling_sum = self.sum;
+        let my_sum = (p as f64 * new_ssf - rolling_sum) / (p as f64);
+        self.sum = rolling_sum + new_ssf - old;
         self.buffer[self.idx] = new_ssf;
-        self.sum += new_ssf - self.buffer[(self.idx + 1) % p];
         self.idx = (self.idx + 1) % p;
 
-        if !self.filled && self.idx == 0 {
+        if !self.filled && self.ssf.len() > p {
             self.filled = true;
         }
         if !self.filled { return None; }
 
         let tp_f = p as f64;
         let inv_tp = 1.0 / tp_f;
-        let my_sum = (tp_f * new_ssf - self.sum) * inv_tp;
 
         let ms_current = 0.04 * my_sum * my_sum + 0.96 * self.ms_prev;
         self.ms_prev = ms_current;
