@@ -325,9 +325,10 @@ pub struct JmaStream {
     period: usize,
     phase: f64,
     power: u32,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    alpha: f64,
+    beta: f64,
+    phase_ratio: f64,
+    initialized: bool,
     e0: f64,
     e1: f64,
     e2: f64,
@@ -345,13 +346,27 @@ impl JmaStream {
             return Err(JmaError::InvalidPhase { phase });
         }
         let power = params.power.unwrap_or(2);
+        let phase_ratio = if phase < -100.0 {
+            0.5
+        } else if phase > 100.0 {
+            2.5
+        } else {
+            (phase / 100.0) + 1.5
+        };
+        let beta = {
+            let numerator = 0.45 * (period as f64 - 1.0);
+            let denominator = numerator + 2.0;
+            if denominator.abs() < f64::EPSILON { 0.0 } else { numerator / denominator }
+        };
+        let alpha = beta.powi(power as i32);
         Ok(Self {
             period,
             phase,
             power,
-            buffer: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
+            alpha,
+            beta,
+            phase_ratio,
+            initialized: false,
             e0: f64::NAN,
             e1: 0.0,
             e2: 0.0,
@@ -361,34 +376,22 @@ impl JmaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
+        if !self.initialized {
+            if value.is_nan() {
+                return None;
+            }
+            self.initialized = true;
             self.e0 = value;
+            self.e1 = 0.0;
+            self.e2 = 0.0;
             self.jma_prev = value;
-            return None;
+            return Some(value);
         }
-        let phase_ratio = if self.phase < -100.0 {
-            0.5
-        } else if self.phase > 100.0 {
-            2.5
-        } else {
-            (self.phase / 100.0) + 1.5
-        };
-        let beta = {
-            let numerator = 0.45 * (self.period as f64 - 1.0);
-            let denominator = numerator + 2.0;
-            if denominator.abs() < f64::EPSILON { 0.0 } else { numerator / denominator }
-        };
-        let alpha = beta.powi(self.power as i32);
         let src = value;
-        self.e0 = (1.0 - alpha) * src + alpha * self.e0;
-        self.e1 = (src - self.e0) * (1.0 - beta) + beta * self.e1;
-        let diff = self.e0 + phase_ratio * self.e1 - self.jma_prev;
-        self.e2 = diff * (1.0 - alpha).powi(2) + alpha.powi(2) * self.e2;
+        self.e0 = (1.0 - self.alpha) * src + self.alpha * self.e0;
+        self.e1 = (src - self.e0) * (1.0 - self.beta) + self.beta * self.e1;
+        let diff = self.e0 + self.phase_ratio * self.e1 - self.jma_prev;
+        self.e2 = diff * (1.0 - self.alpha).powi(2) + self.alpha.powi(2) * self.e2;
         self.jma_prev = self.e2 + self.jma_prev;
         Some(self.jma_prev)
     }
