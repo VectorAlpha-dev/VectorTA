@@ -478,7 +478,13 @@ impl VlmaStream {
             self.filled = true;
         }
         if !self.filled {
-            self.last_val = value;
+            if self.last_val.is_nan() {
+                self.last_val = value;
+                return Some(value);
+            }
+            let sc = 2.0 / (self.period + 1.0);
+            let new_val = value * sc + (1.0 - sc) * self.last_val;
+            self.last_val = new_val;
             return None;
         }
 
