@@ -20,6 +20,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 use crate::utilities::enums::Kernel;
 use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::helpers::detect_best_batch_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
@@ -242,7 +243,7 @@ pub fn deviation_batch_with_kernel(
     k: Kernel,
 ) -> Result<DeviationBatchOutput, DeviationError> {
     let kernel = match k {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
             return Err(DeviationError::InvalidPeriod { period: 0, data_len: 0 });
