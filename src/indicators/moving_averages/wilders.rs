@@ -194,13 +194,18 @@ pub fn wilders_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
+    // 1) Compute the simple moving average of the first `period` points:
     let mut sum = 0.0;
     for i in 0..period {
         sum += data[first_valid + i];
     }
+
+    // 2) Place that SMA at index = (first_valid + period - 1):
     let wma_start = first_valid + period - 1;
     let mut val = sum / (period as f64);
     out[wma_start] = val;
+
+    // 3) Recursively smooth each subsequent element:
     let alpha = 1.0 / (period as f64);
     for i in (wma_start + 1)..data.len() {
         val = (data[i] - val) * alpha + val;

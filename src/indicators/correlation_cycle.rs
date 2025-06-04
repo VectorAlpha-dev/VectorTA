@@ -247,15 +247,20 @@ pub fn correlation_cycle_scalar(
     angle: &mut [f64],
     state: &mut [f64],
 ) {
+    // same “two_pi” and “half_pi” as in the old version
     let two_pi = 4.0 * f64::asin(1.0);
     let half_pi = f64::asin(1.0);
+
+    // build cosine/sine tables of length = period
     let mut cos_table = vec![0.0; period];
     let mut sin_table = vec![0.0; period];
     for j in 0..period {
-        let a = two_pi * (j as f64 + 1.0) / period as f64;
+        let a = two_pi * (j as f64 + 1.0) / (period as f64);
         cos_table[j] = a.cos();
         sin_table[j] = -a.sin();
     }
+
+    // Step 1: compute real[i] and imag[i] for i ∈ [period..data.len())
     for i in period..data.len() {
         let mut rx = 0.0;
         let mut rxx = 0.0;
@@ -267,39 +272,51 @@ pub fn correlation_cycle_scalar(
         let mut ixy = 0.0;
         let mut iyy = 0.0;
         let mut iy = 0.0;
+
         for j in 0..period {
             let idx = i - (j + 1);
             let x = if data[idx].is_nan() { 0.0 } else { data[idx] };
             let yc = cos_table[j];
             let ys = sin_table[j];
+
+            // accumulate “real‐part” sums
             rx += x;
             rxx += x * x;
             rxy += x * yc;
             ryy += yc * yc;
             ry += yc;
+
+            // accumulate “imag‐part” sums
             ix += x;
             ixx += x * x;
             ixy += x * ys;
             iyy += ys * ys;
             iy += ys;
         }
-        let t1 = (period as f64) * rxx - rx * rx;
-        let t2 = (period as f64) * ryy - ry * ry;
+
+        let n = period as f64;
+        let t1 = n * rxx - rx * rx;
+        let t2 = n * ryy - ry * ry;
         if t1 > 0.0 && t2 > 0.0 {
-            real[i] = ((period as f64) * rxy - rx * ry) / (t1 * t2).sqrt();
+            real[i] = (n * rxy - rx * ry) / (t1 * t2).sqrt();
         }
-        let t3 = (period as f64) * ixx - ix * ix;
-        let t4 = (period as f64) * iyy - iy * iy;
+
+        let t3 = n * ixx - ix * ix;
+        let t4 = n * iyy - iy * iy;
         if t3 > 0.0 && t4 > 0.0 {
-            imag[i] = ((period as f64) * ixy - ix * iy) / (t3 * t4).sqrt();
+            imag[i] = (n * ixy - ix * iy) / (t3 * t4).sqrt();
         }
     }
+
+    // Step 2: compute “raw” angle exactly as in the old function
     for i in period..data.len() {
         let im = imag[i];
+
         if im == 0.0 {
             angle[i] = 0.0;
         } else {
-            let mut a = atan64(real[i] / im) + half_pi;
+            // a = atan64(real[i] / im) + half_pi, then to_degrees, then -180° if im > 0
+            let mut a = (real[i] / im).atan() + half_pi;
             a = a.to_degrees();
             if im > 0.0 {
                 a -= 180.0;
@@ -307,13 +324,9 @@ pub fn correlation_cycle_scalar(
             angle[i] = a;
         }
     }
-    for i in (period + 1)..data.len() {
-        let pa = angle[i - 1];
-        let ca = angle[i];
-        if !pa.is_nan() && !ca.is_nan() && pa > ca && (pa - ca) < 270.0 {
-            angle[i] = pa;
-        }
-    }
+
+
+    // Step 4: build the state array exactly as in the old function
     for i in (period + 1)..data.len() {
         let pa = angle[i - 1];
         let ca = angle[i];

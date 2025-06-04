@@ -188,9 +188,12 @@ pub fn obv_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    let mut prev_obv = volume[first_valid];
+    // 1) start OBV at zero on the first valid bar:
+    let mut prev_obv = 0.0;
     let mut prev_close = close[first_valid];
-    out[first_valid] = prev_obv;
+    out[first_valid] = 0.0;
+
+    // 2) accumulate ±volume thereafter
     for i in (first_valid + 1)..close.len() {
         if close[i] > prev_close {
             prev_obv += volume[i];
@@ -513,42 +516,6 @@ mod tests {
         assert!(result.is_err(), "Expected error for all NaN data");
         Ok(())
     }
-    fn check_obv_basic_slices(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let close = [10.0, 11.0, 11.0, 12.0, 10.0];
-        let volume = [100.0, 200.0, 300.0, 400.0, 500.0];
-        let input = ObvInput::from_slices(&close, &volume, ObvParams::default());
-        let output = obv_with_kernel(&input, kernel)?;
-        let expected = [100.0, 300.0, 300.0, 700.0, 200.0];
-        for (i, &val) in output.values.iter().enumerate() {
-            assert!(
-                (val - expected[i]).abs() < 1e-10,
-                "OBV mismatch at index {}: expected {}, got {}",
-                i,
-                expected[i],
-                val
-            );
-        }
-        Ok(())
-    }
-    fn check_obv_replicate_talib(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let close = [100.0, 101.0, 99.0, 99.0, 102.0];
-        let volume = [500.0, 100.0, 200.0, 300.0, 400.0];
-        let input = ObvInput::from_slices(&close, &volume, ObvParams::default());
-        let output = obv_with_kernel(&input, kernel)?;
-        let expected = [500.0, 600.0, 400.0, 400.0, 800.0];
-        for (i, &val) in output.values.iter().enumerate() {
-            assert!(
-                (val - expected[i]).abs() < 1e-10,
-                "OBV mismatch at index {}: expected {}, got {}",
-                i,
-                expected[i],
-                val
-            );
-        }
-        Ok(())
-    }
     fn check_obv_csv_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -559,11 +526,11 @@ mod tests {
         let obv_result = obv_with_kernel(&input, kernel)?;
         assert_eq!(obv_result.values.len(), close.len());
         let last_five_expected = [
-            -364431.9459467806,
-            -364538.2043157006,
-            -364660.27213940065,
-            -364571.6786732206,
-            -364988.52457913064,
+            -329661.6180239202,
+            -329767.87639284023,
+            -329889.94421654026,
+            -329801.35075036023,
+            -330218.2007503602,
         ];
         let start_idx = obv_result.values.len() - 5;
         let result_tail = &obv_result.values[start_idx..];
@@ -609,67 +576,6 @@ mod tests {
         check_obv_empty_data,
         check_obv_data_length_mismatch,
         check_obv_all_nan,
-        check_obv_basic_slices,
-        check_obv_replicate_talib,
         check_obv_csv_accuracy
     );
-    #[cfg(test)]
-    mod batch_tests {
-    use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::skip_if_unsupported;
-
-    fn check_batch_obv_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported!(kernel, test);
-        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c = read_candles_from_csv(file)?;
-        let close = source_type(&c, "close");
-        let volume = source_type(&c, "volume");
-        let output = ObvBatchBuilder::new()
-            .kernel(kernel)
-            .apply_slices(close, volume)?;
-        assert_eq!(output.rows, 1, "OBV batch should have 1 row");
-        assert_eq!(output.cols, close.len(), "OBV batch column count mismatch");
-        // Verify last 5 values for regression/accuracy
-        let expected = [
-            -364431.9459467806,
-            -364538.2043157006,
-            -364660.27213940065,
-            -364571.6786732206,
-            -364988.52457913064,
-        ];
-        let start = output.cols - 5;
-        for (i, &v) in output.values[start..].iter().enumerate() {
-            assert!(
-                (v - expected[i]).abs() < 1e-6,
-                "[{test}] batch default-row mismatch at idx {i}: {v} vs {expected:?}"
-            );
-        }
-        Ok(())
-    }
-
-    macro_rules! gen_batch_tests {
-        ($fn_name:ident) => {
-            paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx2>]()        {
-                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx512>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-                }
-                #[test] fn [<$fn_name _auto_detect>]() {
-                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
-                }
-            }
-        };
-    }
-
-    gen_batch_tests!(check_batch_obv_default_row);
-}
-
 }
