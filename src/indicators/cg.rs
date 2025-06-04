@@ -182,7 +182,9 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     if period == 0 || period > len {
         return Err(CgError::InvalidPeriod { period, data_len: len });
     }
-    if (len - first) < period + 1 {
+
+    // ==== Revert to requiring period + 1 valid points =====
+    if (len - first) < (period + 1) {
         return Err(CgError::NotEnoughValidData { needed: period + 1, valid: len - first });
     }
 
@@ -209,6 +211,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
             _ => unreachable!(),
         }
     }
+
     Ok(CgOutput { values: out })
 }
 
@@ -219,15 +222,23 @@ pub fn cg_scalar(
     first: usize,
     out: &mut [f64],
 ) {
+    // Start writing at i = first + period
     for i in (first + period)..data.len() {
         let mut num = 0.0;
         let mut denom = 0.0;
-        for count in 0..period {
+
+        // Sum exactly (period - 1) bars
+        for count in 0..(period - 1) {
             let price = data[i - count];
             num += (1.0 + count as f64) * price;
             denom += price;
         }
-        out[i] = if denom.abs() > f64::EPSILON { -num / denom } else { 0.0 };
+
+        out[i] = if denom.abs() > f64::EPSILON {
+            -num / denom
+        } else {
+            0.0
+        };
     }
 }
 
@@ -300,24 +311,36 @@ impl CgStream {
             filled: false,
         })
     }
+
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // 1) Insert the new value into the ring buffer at `head`
         self.buffer[self.head] = value;
+
+        // 2) Advance head; if we have just filled exactly `period` slots, mark `filled = true` but return None now
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
+            // We have just completed the first `period` writes—do not emit CG yet
             self.filled = true;
+            return None;
         }
+
+        // 3) If still not filled, return None
         if !self.filled {
             return None;
         }
+
+        // 4) Otherwise, compute and return the CG over the last (period - 1) bars
         Some(self.dot_ring())
     }
+
     #[inline(always)]
     fn dot_ring(&self) -> f64 {
         let mut num = 0.0;
         let mut denom = 0.0;
         let mut idx = self.head;
-        for k in 0..self.period {
+        // Sum exactly (period - 1) bars, matching cg_scalar’s inner loop
+        for k in 0..(self.period - 1) {
             idx = if idx == 0 { self.period - 1 } else { idx - 1 };
             let price = self.buffer[idx];
             num += (1.0 + k as f64) * price;

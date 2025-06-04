@@ -48,7 +48,7 @@ pub struct RocParams {
 
 impl Default for RocParams {
     fn default() -> Self {
-        Self { period: Some(9) }
+        Self { period: Some(10) }
     }
 }
 
@@ -89,7 +89,7 @@ impl<'a> RocInput<'a> {
     }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(9)
+        self.params.period.unwrap_or(10)
     }
 }
 

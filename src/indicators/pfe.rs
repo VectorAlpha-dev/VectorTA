@@ -240,31 +240,50 @@ pub fn pfe_scalar(
     data: &[f64],
     period: usize,
     smoothing: usize,
-    first_valid: usize,
+    _first_valid: usize,
     _out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-    let ln = period.saturating_sub(1);
-    let diff_len = data.len().saturating_sub(ln);
+    // 1. Use a full 'period'-bar gap (not period - 1)
+    let ln = period;
+    let len = data.len();
+    if period > len {
+        // (though upstream should already catch this)
+        return Err(PfeError::InvalidPeriod { period, data_len: len });
+    }
+
+    // diff_len = number of indices i for which i + period < data.len()
+    let diff_len = len.saturating_sub(period);
+
+    // 2. Build diff_array[i] = data[i+period] - data[i]
     let mut diff_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
-        diff_array[i] = data[i + ln] - data[i];
+        diff_array[i] = data[i + period] - data[i];
     }
+
+    // 3. Compute the "long leg" for each i: sqrt( ΔP² + (period)² )
     let mut a_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         let d = diff_array[i];
         a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
     }
+
+    // 4. Compute the "short leg" by summing 'period' single-bar distances
+    //    for j from i..i+period (exclusive of i+period), doing sqrt( (ΔP)² + 1 ).
     let mut b_array = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
-        let start = i;
-        let end = i + ln;
         let mut b_sum = 0.0;
-        for j in start..end {
+        let start = i;
+        // j runs from i..(i + period - 1), so that j+1 runs i+1..i+period
+        for j in start..(start + period) {
             let step_diff = data[j + 1] - data[j];
             b_sum += (1.0 + step_diff.powi(2)).sqrt();
         }
         b_array[i] = b_sum;
     }
+
+    // 5. Form raw PFE = 100 * (long_leg / short_leg)
+    //    If denom is zero (should never happen with real candles),
+    //    we set rawPFE = 0 to avoid division by zero.
     let mut pfe_tmp = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         if b_array[i].abs() < f64::EPSILON {
@@ -273,6 +292,8 @@ pub fn pfe_scalar(
             pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
         }
     }
+
+    // 6. Apply sign: if diff_array[i] < 0, then negate
     let mut signed_pfe = vec![f64::NAN; diff_len];
     for i in 0..diff_len {
         let d = diff_array[i];
@@ -284,6 +305,8 @@ pub fn pfe_scalar(
             signed_pfe[i] = -pfe_tmp[i];
         }
     }
+
+    // 7. EMA‐smooth the signed PFE (period = 'smoothing')
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let mut ema_array = vec![f64::NAN; diff_len];
     let mut started = false;
@@ -293,6 +316,7 @@ pub fn pfe_scalar(
         if val.is_nan() {
             ema_array[i] = f64::NAN;
         } else if !started {
+            // first non‐NaN seeds the EMA
             ema_val = val;
             ema_array[i] = val;
             started = true;
@@ -301,13 +325,16 @@ pub fn pfe_scalar(
             ema_array[i] = ema_val;
         }
     }
-    let mut pfe_values = vec![f64::NAN; data.len()];
+
+    // 8. Build final output vector of length = data.len(), with leading NaNs
+    let mut pfe_values = vec![f64::NAN; len];
     for (i, &val) in ema_array.iter().enumerate() {
-        let out_idx = i + ln;
+        let out_idx = i + ln;  // i + period
         if out_idx < pfe_values.len() {
             pfe_values[out_idx] = val;
         }
     }
+
     Ok(PfeOutput { values: pfe_values })
 }
 
@@ -580,34 +607,49 @@ fn pfe_batch_inner(
 #[inline(always)]
 unsafe fn pfe_row_scalar(
     data: &[f64],
-    first: usize,
+    _first_valid: usize,
     period: usize,
     smoothing: usize,
     out: &mut [f64],
 ) {
-    let ln = period.saturating_sub(1);
-    let diff_len = data.len().saturating_sub(ln);
-    let mut diff_array = vec![f64::NAN; diff_len];
+    // 1. Use a full 'period'-bar gap (not period - 1)
+    let ln = period;
+    let len = data.len();
+    let diff_len = len.saturating_sub(ln);
+
+    // 2. Build diff_array[i] = data[i + period] - data[i]
+    let mut diff_array = Vec::with_capacity(diff_len);
+    diff_array.set_len(diff_len);
     for i in 0..diff_len {
         diff_array[i] = data[i + ln] - data[i];
     }
-    let mut a_array = vec![f64::NAN; diff_len];
+
+    // 3. Compute the "long leg" for each i: sqrt( ΔP² + (period)² )
+    let mut a_array = Vec::with_capacity(diff_len);
+    a_array.set_len(diff_len);
     for i in 0..diff_len {
         let d = diff_array[i];
         a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
     }
-    let mut b_array = vec![f64::NAN; diff_len];
+
+    // 4. Compute the "short leg" by summing 'period' single-bar distances
+    //    for j in i..(i+period), summing sqrt(1 + (ΔP)²) over exactly 'period' intervals.
+    let mut b_array = Vec::with_capacity(diff_len);
+    b_array.set_len(diff_len);
     for i in 0..diff_len {
-        let start = i;
-        let end = i + ln;
         let mut b_sum = 0.0;
-        for j in start..end {
+        let start = i;
+        // j runs from i..(i + period - 1), so that j+1 runs i+1..i+period
+        for j in start..(start + ln) {
             let step_diff = data[j + 1] - data[j];
             b_sum += (1.0 + step_diff.powi(2)).sqrt();
         }
         b_array[i] = b_sum;
     }
-    let mut pfe_tmp = vec![f64::NAN; diff_len];
+
+    // 5. Form raw PFE = 100 * (long_leg / short_leg)
+    let mut pfe_tmp = Vec::with_capacity(diff_len);
+    pfe_tmp.set_len(diff_len);
     for i in 0..diff_len {
         if b_array[i].abs() < f64::EPSILON {
             pfe_tmp[i] = 0.0;
@@ -615,7 +657,10 @@ unsafe fn pfe_row_scalar(
             pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
         }
     }
-    let mut signed_pfe = vec![f64::NAN; diff_len];
+
+    // 6. Apply sign: if diff_array[i] < 0, then negate
+    let mut signed_pfe = Vec::with_capacity(diff_len);
+    signed_pfe.set_len(diff_len);
     for i in 0..diff_len {
         let d = diff_array[i];
         if d.is_nan() {
@@ -626,8 +671,11 @@ unsafe fn pfe_row_scalar(
             signed_pfe[i] = -pfe_tmp[i];
         }
     }
+
+    // 7. EMA‐smooth the signed PFE (period = 'smoothing')
     let alpha = 2.0 / (smoothing as f64 + 1.0);
-    let mut ema_array = vec![f64::NAN; diff_len];
+    let mut ema_array = Vec::with_capacity(diff_len);
+    ema_array.set_len(diff_len);
     let mut started = false;
     let mut ema_val = 0.0;
     for i in 0..diff_len {
@@ -643,6 +691,8 @@ unsafe fn pfe_row_scalar(
             ema_array[i] = ema_val;
         }
     }
+
+    // 8. Write results into `out`, offset by period
     for (i, &val) in ema_array.iter().enumerate() {
         let out_idx = i + ln;
         if out_idx < out.len() {
@@ -650,6 +700,7 @@ unsafe fn pfe_row_scalar(
         }
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -699,14 +750,18 @@ unsafe fn pfe_row_avx512_long(
     pfe_row_scalar(data, first, period, smoothing, out)
 }
 
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone)]
 pub struct PfeStream {
     period: usize,
     smoothing: usize,
-    buffer: Vec<f64>,
+    // We keep period+1 elements so that we can always refer to [0] = P_{t-period}
+    // and [period] = P_t.  When length < period+1, return None.
+    buffer: VecDeque<f64>,
+
+    // EMA state
     ema_val: f64,
-    head: usize,
-    filled: bool,
     started: bool,
 }
 
@@ -723,51 +778,84 @@ impl PfeStream {
         if smoothing == 0 {
             return Err(PfeError::InvalidSmoothing { smoothing });
         }
+
         Ok(Self {
             period,
             smoothing,
-            buffer: vec![f64::NAN; period],
+            buffer: VecDeque::with_capacity(period + 1),
             ema_val: 0.0,
-            head: 0,
-            filled: false,
             started: false,
         })
     }
-    #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+
+    /// Pushes one new price into the stream.  Returns `None` until we have
+    /// collected (period+1) values.  Once we have exactly period+1 values,
+    /// we compute:
+    ///   diff = P_t - P_{t-period},
+    ///   numerator = sqrt(diff² + period²),
+    ///   denominator = sum_{i=0..period-1} sqrt(1 + (ΔP)^2) over the sliding window,
+    ///   raw_pfe = 100 * (numerator / denominator) with correct sign,
+    ///   then EMA-smooth that raw value.
+    pub fn update(&mut self, price: f64) -> Option<f64> {
+        // 1) Push new price, and ensure we never keep more than (period + 1) elements.
+        self.buffer.push_back(price);
+        if self.buffer.len() > self.period + 1 {
+            self.buffer.pop_front();
         }
-        if !self.filled {
+
+        // 2) If we don’t yet have (period+1) points, return None
+        if self.buffer.len() < self.period + 1 {
             return None;
         }
-        let ln = self.period - 1;
-        let diff = self.buffer[(self.head + ln) % self.period] - self.buffer[self.head];
-        let a = (diff.powi(2) + (self.period as f64).powi(2)).sqrt();
-        let mut b_sum = 0.0;
-        for i in 0..ln {
-            let j = (self.head + i) % self.period;
-            let step_diff = self.buffer[(j + 1) % self.period] - self.buffer[j];
-            b_sum += (1.0 + step_diff.powi(2)).sqrt();
+
+        // 3) Now buffer.len() == period+1.  Let:
+        //      front = P_{t-period},   // buffer[0]
+        //      back  = P_t,            // buffer[period]
+        let front = self.buffer[0];
+        let back = *self.buffer.get(self.period).unwrap();
+
+        // 4) Compute diff = P_t - P_{t-period}
+        let diff = back - front;
+
+        // 5) Long leg = sqrt(diff² + period²)
+        let long_leg = (diff.powi(2) + (self.period as f64).powi(2)).sqrt();
+
+        // 6) Short leg = sum_{i=0..period-1} sqrt(1 + (window[i+1]-window[i])²)
+        let mut short_leg = 0.0;
+        for i in 0..self.period {
+            let p_i = self.buffer[i];
+            let p_next = self.buffer[i + 1];
+            let step_diff = p_next - p_i;
+            short_leg += (1.0 + step_diff.powi(2)).sqrt();
         }
-        let pfe_val = if b_sum.abs() < f64::EPSILON {
+
+        // 7) raw PFE = 100 * (long_leg / short_leg), or 0 if denominator ≈ 0
+        let raw_pfe = if short_leg.abs() < f64::EPSILON {
             0.0
         } else {
-            let sign = if diff > 0.0 { 1.0 } else { -1.0 };
-            sign * 100.0 * a / b_sum
+            100.0 * long_leg / short_leg
         };
+
+        // 8) Apply sign based on diff
+        let signed = if diff > 0.0 { raw_pfe } else { -raw_pfe };
+
+        // 9) EMA‐smooth using alpha = 2/(smoothing+1)
         let alpha = 2.0 / (self.smoothing as f64 + 1.0);
-        if !self.started {
-            self.ema_val = pfe_val;
+        let out_val = if !self.started {
+            // seed the EMA on the first available raw value
+            self.ema_val = signed;
             self.started = true;
+            signed
         } else {
-            self.ema_val = alpha * pfe_val + (1.0 - alpha) * self.ema_val;
-        }
-        Some(self.ema_val)
+            self.ema_val = alpha * signed + (1.0 - alpha) * self.ema_val;
+            self.ema_val
+        };
+
+        Some(out_val)
     }
 }
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,11 +894,11 @@ mod tests {
         assert_eq!(pfe_result.values.len(), close_prices.len());
 
         let expected_last_five_pfe = [
-            464.4835119128518,
-            -311.47775707009305,
-            63.47691006853603,
-            -122.09984956859148,
-            76.97379946575279,
+            -13.03562252,
+            -11.93979855,
+            -9.94609862,
+            -9.73372410,
+            -14.88374798,
         ];
         let start_index = pfe_result.values.len() - 5;
         let result_last_five_pfe = &pfe_result.values[start_index..];
@@ -1068,11 +1156,11 @@ mod tests {
         assert_eq!(row.len(), c.close.len());
 
         let expected = [
-            464.4835119128518,
-            -311.47775707009305,
-            63.47691006853603,
-            -122.09984956859148,
-            76.97379946575279,
+            -13.03562252,
+            -11.93979855,
+            -9.94609862,
+            -9.73372410,
+            -14.88374798,
         ];
         let start = row.len() - 5;
         for (i, &v) in row[start..].iter().enumerate() {

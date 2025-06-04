@@ -183,19 +183,56 @@ pub fn aroon_scalar(
     up: &mut [f64],
     down: &mut [f64],
 ) {
-    let inv_length = 1.0 / length as f64;
-    let window = length;
-    for i in (window - 1)..high.len() {
-        let start = i + 1 - window;
-        let (mut max_val, mut min_val, mut max_idx, mut min_idx) = (high[start], low[start], start, start);
+    let len = high.len();
+    assert!(
+        length >= 1 && length <= len,
+        "Invalid length: {} for data of size {}",
+        length,
+        len
+    );
+    assert!(
+        low.len() == len && up.len() == len && down.len() == len,
+        "Slice lengths must match"
+    );
+
+    let inv_length = 1.0 / (length as f64);
+
+    // 1) Fill first `length` entries with NaN
+    for i in 0..length {
+        up[i] = f64::NAN;
+        down[i] = f64::NAN;
+    }
+
+    // 2) For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
+    for i in length..len {
+        let start = i - length;
+        // Initialize with the first bar in [start..=i]
+        let mut max_val = high[start];
+        let mut min_val = low[start];
+        let mut max_idx = start;
+        let mut min_idx = start;
+
+        // Find indices of highest high / lowest low in [start..=i]
         for j in (start + 1)..=i {
-            if high[j] > max_val { max_val = high[j]; max_idx = j; }
-            if low[j] < min_val { min_val = low[j]; min_idx = j; }
+            let h = high[j];
+            if h > max_val {
+                max_val = h;
+                max_idx = j;
+            }
+            let l = low[j];
+            if l < min_val {
+                min_val = l;
+                min_idx = j;
+            }
         }
-        let offset_high = i - max_idx;
-        let offset_low = i - min_idx;
-        up[i] = (length as f64 - offset_high as f64) * inv_length * 100.0;
-        down[i] = (length as f64 - offset_low as f64) * inv_length * 100.0;
+
+        // periods_hi = how many bars ago the highest high was (0..=length)
+        let periods_hi = i - max_idx;
+        let periods_lo = i - min_idx;
+
+        // Aroon up/down = (length - periods)/length * 100
+        up[i] = (length as f64 - periods_hi as f64) * inv_length * 100.0;
+        down[i] = (length as f64 - periods_lo as f64) * inv_length * 100.0;
     }
 }
 
@@ -244,50 +281,102 @@ pub unsafe fn aroon_avx512_long(
     aroon_avx512(high, low, length, up, down)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AroonStream {
     length: usize,
+    buf_size: usize,      // = length + 1
     buffer_high: Vec<f64>,
     buffer_low: Vec<f64>,
-    head: usize,
-    filled: bool,
+    head: usize,          // next write position in [0..buf_size)
+    count: usize,         // how many total bars have been pushed
 }
+
 impl AroonStream {
+    /// Create a new streaming Aroon from `params`.  Extracts `length = params.length.unwrap_or(14)`.
+    /// Fails if `length == 0`.  Allocates two Vecs of size `length + 1`, each pre‐filled with NaN.
     pub fn try_new(params: AroonParams) -> Result<Self, AroonError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonError::InvalidLength { length, data_len: 0 });
+            return Err(AroonError::InvalidLength {
+                length: 0,
+                data_len: 0,
+            });
         }
-        Ok(Self {
+        let buf_size = length + 1;
+        Ok(AroonStream {
             length,
-            buffer_high: vec![f64::NAN; length],
-            buffer_low: vec![f64::NAN; length],
+            buf_size,
+            buffer_high: vec![f64::NAN; buf_size],
+            buffer_low: vec![f64::NAN; buf_size],
             head: 0,
-            filled: false,
+            count: 0,
         })
     }
+
+    /// Push a new (high, low).  Until we have seen at least `length+1` bars, this returns `None`.
+    /// Once `count >= length+1`, each call returns `Some((aroon_up, aroon_down))`.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
+        // 1) Overwrite the “head” slot
         self.buffer_high[self.head] = high;
         self.buffer_low[self.head] = low;
-        self.head = (self.head + 1) % self.length;
-        if !self.filled && self.head == 0 { self.filled = true; }
-        if !self.filled { return None; }
-        let mut max_val = self.buffer_high[0];
-        let mut min_val = self.buffer_low[0];
-        let mut max_idx = 0;
-        let mut min_idx = 0;
-        for i in 1..self.length {
-            let idx = (self.head + i) % self.length;
-            if self.buffer_high[idx] > max_val { max_val = self.buffer_high[idx]; max_idx = i; }
-            if self.buffer_low[idx] < min_val { min_val = self.buffer_low[idx]; min_idx = i; }
+
+        // 2) Advance head mod buf_size
+        self.head = (self.head + 1) % self.buf_size;
+
+        // 3) Increment count until we reach buf_size
+        if self.count < self.buf_size {
+            self.count += 1;
         }
-        let inv_length = 1.0 / self.length as f64;
-        let up = (self.length as f64 - (self.length - 1 - max_idx) as f64) * inv_length * 100.0;
-        let down = (self.length as f64 - (self.length - 1 - min_idx) as f64) * inv_length * 100.0;
+
+        // 4) If we haven’t yet filled `length+1` bars, return None
+        if self.count < self.buf_size {
+            return None;
+        }
+
+        // 5) Compute “current index” = the slot we just wrote was (head + buf_size − 1) % buf_size
+        let cur_idx = (self.head + self.buf_size - 1) % self.buf_size;
+
+        // 6) Scan exactly the last (length+1) bars in chronological order:
+        //    - “oldest_idx” is (cur_idx - length) mod buf_size  ≡  (cur_idx + 1) % buf_size
+        let oldest_idx = (cur_idx + 1) % self.buf_size;
+        // Initialize to the oldest bar in the window:
+        let mut max_idx = oldest_idx;
+        let mut min_idx = oldest_idx;
+        let mut max_h = self.buffer_high[oldest_idx];
+        let mut min_l = self.buffer_low[oldest_idx];
+        // Walk forward k = 1..=length (so that:
+        //    (oldest_idx + length) % buf_size == cur_idx,
+        // covering every bar from oldest → current in order)
+        for k in 1..=self.length {
+            let idx = (oldest_idx + k) % self.buf_size;
+            let hv = self.buffer_high[idx];
+            if hv > max_h {
+                max_h = hv;
+                max_idx = idx;
+            }
+            let lv = self.buffer_low[idx];
+            if lv < min_l {
+                min_l = lv;
+                min_idx = idx;
+            }
+        }
+
+        // 7) “Bars ago” for that max:  dist_hi = (cur_idx − max_idx) mod buf_size
+        let dist_hi = ((cur_idx as isize - max_idx as isize)
+            .rem_euclid(self.buf_size as isize)) as usize;
+        let dist_lo = ((cur_idx as isize - min_idx as isize)
+            .rem_euclid(self.buf_size as isize)) as usize;
+
+        // 8) Aroon formula: up = (length − dist_hi)/length * 100
+        let inv_len = 1.0 / (self.length as f64);
+        let up = (self.length as f64 - dist_hi as f64) * inv_len * 100.0;
+        let down = (self.length as f64 - dist_lo as f64) * inv_len * 100.0;
+
         Some((up, down))
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct AroonBatchRange {

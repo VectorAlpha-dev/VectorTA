@@ -286,7 +286,13 @@ pub fn coppock_with_kernel(input: &CoppockInput, kernel: Kernel) -> Result<Coppo
 }
 
 #[inline]
-pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
+pub fn coppock_scalar(
+    data: &[f64],
+    short: usize,
+    long: usize,
+    first: usize,
+    out: &mut [f64],
+) {
     let largest = short.max(long);
     let start_idx = first + largest;
     for i in start_idx..data.len() {
@@ -298,6 +304,7 @@ pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out
         out[i] = short_val + long_val;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
@@ -323,6 +330,7 @@ pub unsafe fn coppock_avx512_long(data: &[f64], short: usize, long: usize, first
     coppock_scalar(data, short, long, first, out)
 }
 
+
 #[derive(Debug, Clone)]
 pub struct CoppockStream {
     short: usize,
@@ -345,9 +353,13 @@ impl CoppockStream {
         let ma_type = params.ma_type.unwrap_or_else(|| "wma".to_string());
         if short == 0 || long == 0 || ma_period == 0 {
             return Err(CoppockError::InvalidPeriod {
-                short, long, ma: ma_period, data_len: 0,
+                short,
+                long,
+                ma: ma_period,
+                data_len: 0,
             });
         }
+        // buffer needs to hold the entire window for “short” and “long”
         Ok(Self {
             short,
             long,
@@ -365,46 +377,63 @@ impl CoppockStream {
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let n = self.buffer.len();
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % n;
+        // 1) Write new price into “write_idx”
+        let write_idx = self.head;
+        self.buffer[write_idx] = value;
+        // 2) Advance head to next slot
+        self.head = (write_idx + 1) % n;
+        // 3) Once this ring buffer has wrapped once, “filled” = true
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
         if !self.filled {
+            // We haven’t yet seen “long.max(short)+1” prices => cannot compute ROC
             return None;
         }
-        let idx = self.head;
+
+        // 4) “idx” is the location we just wrote into
+        let idx = write_idx;
         let cur = self.buffer[idx];
         let prev_short = self.buffer[(idx + n - self.short) % n];
         let prev_long = self.buffer[(idx + n - self.long) % n];
         if prev_short.is_nan() || prev_long.is_nan() || cur.is_nan() {
             return None;
         }
+        // 5) Compute the two ROCs (short and long)
         let short_val = ((cur / prev_short) - 1.0) * 100.0;
         let long_val = ((cur / prev_long) - 1.0) * 100.0;
         let sum_roc = short_val + long_val;
+
+        // 6) Push into the MA circular buffer
         let ma_n = self.ma_buf.len();
-        self.ma_buf[self.ma_head] = sum_roc;
-        self.ma_head = (self.ma_head + 1) % ma_n;
+        let write_ma = self.ma_head;
+        self.ma_buf[write_ma] = sum_roc;
+        self.ma_head = (write_ma + 1) % ma_n;
         if !self.ma_filled && self.ma_head == 0 {
             self.ma_filled = true;
         }
         if !self.ma_filled {
+            // haven’t yet seen “ma_period” values => return None
             return None;
         }
+
+        // 7) Perform WMA or SMA over the last “ma_period” entries
         let mut smoothed = 0.0;
         if self.ma_type == "wma" {
+            // denom = 1 + 2 + ⋯ + ma_n = ma_n * (ma_n + 1) / 2
             let denom = (ma_n * (ma_n + 1) / 2) as f64;
             for i in 0..ma_n {
-                let idx = (self.ma_head + i) % ma_n;
-                smoothed += self.ma_buf[idx] * (i + 1) as f64;
+                // “idx_in_window” = (ma_head + i) % ma_n
+                // When i = ma_n - 1 => (ma_head + ma_n - 1) % ma_n is the “newest” sum_roc
+                let idx2 = (self.ma_head + i) % ma_n;
+                smoothed += self.ma_buf[idx2] * (i + 1) as f64;
             }
             smoothed /= denom;
         } else if self.ma_type == "sma" {
             let mut count = 0;
             for i in 0..ma_n {
-                let idx = (self.ma_head + i) % ma_n;
-                let v = self.ma_buf[idx];
+                let idx2 = (self.ma_head + i) % ma_n;
+                let v = self.ma_buf[idx2];
                 if !v.is_nan() {
                     smoothed += v;
                     count += 1;
@@ -414,12 +443,13 @@ impl CoppockStream {
                 smoothed /= count as f64;
             }
         } else {
+            // only "wma" and "sma" supported in streaming
             return None;
         }
+
         Some(smoothed)
     }
 }
-
 #[derive(Clone, Debug)]
 pub struct CoppockBatchRange {
     pub short: (usize, usize, usize),
@@ -593,6 +623,7 @@ pub fn coppock_batch_par_slice(
     coppock_batch_inner(data, sweep, kern, true)
 }
 
+
 #[inline(always)]
 fn coppock_batch_inner(
     data: &[f64],
@@ -602,34 +633,67 @@ fn coppock_batch_inner(
 ) -> Result<CoppockBatchOutput, CoppockError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(CoppockError::InvalidPeriod { short: 0, long: 0, ma: 0, data_len: 0 });
+        return Err(CoppockError::InvalidPeriod {
+            short: 0,
+            long: 0,
+            ma: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CoppockError::AllValuesNaN)?;
-    let max_roc = combos.iter().map(|c| c.short_roc_period.unwrap().max(c.long_roc_period.unwrap())).max().unwrap();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CoppockError::AllValuesNaN)?;
+    let max_roc = combos
+        .iter()
+        .map(|c| c.short_roc_period.unwrap().max(c.long_roc_period.unwrap()))
+        .max()
+        .unwrap();
     if data.len() - first < max_roc {
-        return Err(CoppockError::NotEnoughValidData { needed: max_roc, valid: data.len() - first });
+        return Err(CoppockError::NotEnoughValidData {
+            needed: max_roc,
+            valid: data.len() - first,
+        });
     }
 
     let rows = combos.len();
     let cols = data.len();
     let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+    // A single closure that (for a given row) computes:
+    // 1) raw “sum_roc” into a temporary Vec<f64>
+    // 2) applies ma(...) to that temp
+    // 3) writes the smoothed result into out_row
+    let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
         let short = c.short_roc_period.unwrap();
         let long = c.long_roc_period.unwrap();
+        let ma_p = c.ma_period.unwrap();
+        let ma_type = c.ma_type.clone().unwrap_or_else(|| "wma".to_string());
         let largest = short.max(long);
-        for i in 0..cols {
-            out_row[i] = f64::NAN;
-        }
+
+        // Prepare a “sum_roc” buffer, initially all NaN
+        let mut sum_roc = vec![f64::NAN; cols];
+
+        // Fill sum_roc[i] = ROC_short + ROC_long for i >= first + largest
         for i in (first + largest)..cols {
             let current = data[i];
             let prev_short = data[i - short];
             let short_val = ((current / prev_short) - 1.0) * 100.0;
             let prev_long = data[i - long];
             let long_val = ((current / prev_long) - 1.0) * 100.0;
-            out_row[i] = short_val + long_val;
+            sum_roc[i] = short_val + long_val;
         }
+
+        // Now smooth “sum_roc” with MA
+        // (We unwrap because these parameters should always be valid here.)
+        let smoothed =
+            ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
+
+        // Copy the smoothed vector into this row’s slice
+        out_row.copy_from_slice(&smoothed);
     };
+
     if parallel {
         values
             .par_chunks_mut(cols)
@@ -640,7 +704,13 @@ fn coppock_batch_inner(
             do_row(row, slice);
         }
     }
-    Ok(CoppockBatchOutput { values, combos, rows, cols })
+
+    Ok(CoppockBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
@@ -664,6 +734,7 @@ pub fn coppock_row_scalar(
         out[i] = short_val + long_val;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn coppock_row_avx2(
@@ -843,27 +914,46 @@ mod tests {
     }
     fn check_coppock_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let first_input = CoppockInput::with_default_candles(&candles);
+        let default_params = CoppockParams::default(); // short=11, long=14, ma=10, ma_type="wma"
+        let first_input = CoppockInput::from_candles(&candles, "close", default_params.clone());
         let first_result = coppock_with_kernel(&first_input, kernel)?;
+
         let second_params = CoppockParams {
             short_roc_period: Some(5),
             long_roc_period: Some(8),
             ma_period: Some(3),
             ma_type: Some("sma".to_string()),
         };
-        let second_input = CoppockInput::from_slice(&first_result.values, second_params);
+        let second_input = CoppockInput::from_slice(&first_result.values, second_params.clone());
         let second_result = coppock_with_kernel(&second_input, kernel)?;
+
         assert_eq!(second_result.values.len(), first_result.values.len());
-        for i in 30..second_result.values.len() {
+
+        let short1 = default_params.short_roc_period.unwrap();
+        let long1  = default_params.long_roc_period.unwrap();
+        let ma1    = default_params.ma_period.unwrap();
+        let largest1 = short1.max(long1);
+        let first_valid1 = largest1 + (ma1 - 1);
+
+        let short2 = second_params.short_roc_period.unwrap();
+        let long2  = second_params.long_roc_period.unwrap();
+        let ma2    = second_params.ma_period.unwrap();
+        let largest2 = short2.max(long2);
+        let first_valid2 = first_valid1 + largest2 + (ma2 - 1);
+
+        for i in first_valid2..second_result.values.len() {
             assert!(
                 !second_result.values[i].is_nan(),
-                "[{}] Expected no NaN after index 30, found NaN at {}",
+                "[{}] Expected no NaN after index {}, found NaN at {}",
                 test_name,
+                first_valid2,
                 i
             );
         }
+
         Ok(())
     }
     fn check_coppock_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

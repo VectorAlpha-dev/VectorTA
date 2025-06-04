@@ -237,7 +237,7 @@ pub fn correlation_cycle_with_kernel(input: &CorrelationCycleInput, kernel: Kern
     Ok(CorrelationCycleOutput { real, imag, angle, state })
 }
 
-#[inline(always)]
+#[inline]
 pub fn correlation_cycle_scalar(
     data: &[f64],
     period: usize,
@@ -324,6 +324,7 @@ pub fn correlation_cycle_scalar(
         }
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -458,6 +459,9 @@ pub struct CorrelationCycleStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+    /// Holds the (real, imag, angle, state) computed for the “previous” window,
+    /// so that we emit it one tick later.  
+    last: Option<(f64, f64, f64, f64)>,
 }
 
 impl CorrelationCycleStream {
@@ -470,50 +474,125 @@ impl CorrelationCycleStream {
             });
         }
         let threshold = params.threshold.unwrap_or(9.0);
+
         Ok(Self {
             period,
             threshold,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            last: None,
         })
     }
 
+    /// Insert `value` into the circular buffer.  Returns `None` until we have
+    /// computed at least one full‐window.  After that, each
+    /// `update(...)` call returns exactly the (real, imag, angle, state) that
+    /// matches the batch result “one tick” earlier.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
+        // 1) Write into circular buffer and advance head
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
+
+        // 2) If this is the very first time head wrapped to 0, we have inserted
+        //    exactly `period` items.  Compute that first-window’s output, stash it
+        //    in `self.last`, and return None so that index=period-1 still yields None.
         if !self.filled && self.head == 0 {
             self.filled = true;
+
+            // Build a slice of length = period+1
+            // ‣ first `period` entries = chronological window of the last `period` values
+            // ‣ extra slot at index `period` can be any dummy (we won't actually use it in sums)
+            let mut small = Vec::with_capacity(self.period + 1);
+            for k in 0..self.period {
+                let idx = (self.head + k) % self.period;
+                small.push(self.buffer[idx]);
+            }
+            // Push one dummy at the end (to make length = period+1)
+            small.push(0.0);
+
+            // Prepare tiny result arrays of length = period+1
+            let mut real_arr = vec![f64::NAN; self.period + 1];
+            let mut imag_arr = vec![f64::NAN; self.period + 1];
+            let mut angle_arr = vec![f64::NAN; self.period + 1];
+            let mut state_arr = vec![0.0; self.period + 1];
+
+            // Call the scalar routine on small[0..(period+1)]
+            // — it will compute at index i = period exactly once, using indices [0..(period-1)]
+            unsafe {
+                correlation_cycle_scalar(
+                    &small,
+                    self.period,
+                    self.threshold,
+                    &mut real_arr,
+                    &mut imag_arr,
+                    &mut angle_arr,
+                    &mut state_arr,
+                );
+            }
+
+            // The “batch‐aligned” result is stored at index = period
+            let first_r = real_arr[self.period];
+            let first_i = imag_arr[self.period];
+            let first_a = angle_arr[self.period];
+            let first_s = state_arr[self.period];
+
+            self.last = Some((first_r, first_i, first_a, first_s));
+            return None;
         }
+
+        // 3) If we still haven't filled one full window, keep returning None
         if !self.filled {
             return None;
         }
-        let mut real = 0.0;
-        let mut imag = 0.0;
-        let mut angle = 0.0;
-        let mut state = 0.0;
-        let data = &self.buffer;
-        let mut real_arr = vec![f64::NAN; self.period];
-        let mut imag_arr = vec![f64::NAN; self.period];
-        let mut angle_arr = vec![f64::NAN; self.period];
-        let mut state_arr = vec![0.0; self.period];
-        correlation_cycle_scalar(
-            data,
-            self.period,
-            self.threshold,
-            &mut real_arr,
-            &mut imag_arr,
-            &mut angle_arr,
-            &mut state_arr,
-        );
-        real = *real_arr.last().unwrap();
-        imag = *imag_arr.last().unwrap();
-        angle = *angle_arr.last().unwrap();
-        state = *state_arr.last().unwrap();
-        Some((real, imag, angle, state))
+
+        // 4) Otherwise—every tick from now on—we already have `self.last` from the previous
+        //    window.  So:
+        //    a) pull out `to_emit = self.last.unwrap()`
+        //    b) build the next (period+1)-slice
+        //    c) call correlation_cycle_scalar(...) on that slice, stash into self.last
+        //    d) return `to_emit`
+
+        // a) Grab the previously‐computed tuple:
+        let to_emit = self.last.take().unwrap();
+
+        // b) Build the next (period+1)-long slice
+        let mut small = Vec::with_capacity(self.period + 1);
+        for k in 0..self.period {
+            let idx = (self.head + k) % self.period;
+            small.push(self.buffer[idx]);
+        }
+        // Add one dummy at index = period
+        small.push(0.0);
+
+        // c) Compute correlation_cycle_scalar on that length=(period+1) slice
+        let mut real_arr = vec![f64::NAN; self.period + 1];
+        let mut imag_arr = vec![f64::NAN; self.period + 1];
+        let mut angle_arr = vec![f64::NAN; self.period + 1];
+        let mut state_arr = vec![0.0; self.period + 1];
+        unsafe {
+            correlation_cycle_scalar(
+                &small,
+                self.period,
+                self.threshold,
+                &mut real_arr,
+                &mut imag_arr,
+                &mut angle_arr,
+                &mut state_arr,
+            );
+        }
+        let next_r = real_arr[self.period];
+        let next_i = imag_arr[self.period];
+        let next_a = angle_arr[self.period];
+        let next_s = state_arr[self.period];
+        self.last = Some((next_r, next_i, next_a, next_s));
+
+        // d) Return the “previous‐window” result:
+        Some(to_emit)
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct CorrelationCycleBatchRange {
