@@ -58,7 +58,7 @@ pub struct RocrParams {
 
 impl Default for RocrParams {
     fn default() -> Self {
-        Self { period: Some(9) }
+        Self { period: Some(10) }
     }
 }
 
@@ -852,6 +852,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let output = RocrBatchBuilder::new()
+            .period_static(10)
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 

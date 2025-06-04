@@ -1,9 +1,7 @@
 [build]
 # rustc-wrapper = "sccache"
-# Configure for host CPU and AVX-512 instructions. Use the system linker
-# to avoid `lld-link` issues on Linux.
 rustflags = [
   "-C", "target-cpu=native",
-  "-C", "target-feature=+avx512f,+avx512dq,+avx512vl,+fma"
+  "-C", "target-feature=+avx512f,+avx512dq,+avx512vl,+fma",
+#  "-C", "linker=lld-link",
 ]
-

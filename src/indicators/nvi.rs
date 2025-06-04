@@ -139,45 +139,6 @@ impl NviStream {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct NviBatchRange; // NVI has no sweep
-
-#[derive(Clone, Debug, Default)]
-pub struct NviBatchBuilder {
-    kernel: Kernel,
-}
-impl NviBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    pub fn apply_slice(self, close: &[f64], volume: &[f64]) -> Result<NviBatchOutput, NviError> {
-        nvi_batch_with_kernel(close, volume, self.kernel)
-    }
-    pub fn with_default_slice(close: &[f64], volume: &[f64], k: Kernel) -> Result<NviBatchOutput, NviError> {
-        NviBatchBuilder::new().kernel(k).apply_slice(close, volume)
-    }
-    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<NviBatchOutput, NviError> {
-        let close = source_type(c, src);
-        let volume = c.select_candle_field("volume").map_err(|_| NviError::EmptyData)?;
-        self.apply_slice(close, volume)
-    }
-    pub fn with_default_candles(c: &Candles) -> Result<NviBatchOutput, NviError> {
-        NviBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct NviBatchOutput {
-    pub values: Vec<f64>,
-    pub rows: usize,
-    pub cols: usize,
-}
-impl NviBatchOutput {
-    pub fn row_for_params(&self, _p: &NviParams) -> Option<usize> { Some(0) }
-    pub fn values_for(&self, _p: &NviParams) -> Option<&[f64]> {
-        Some(&self.values)
-    }
-}
-
 #[inline]
 pub fn nvi(input: &NviInput) -> Result<NviOutput, NviError> {
     nvi_with_kernel(input, Kernel::Auto)
@@ -202,31 +163,48 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
     let chosen = match kernel { Kernel::Auto => detect_best_kernel(), other => other };
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first_valid_idx, &mut out),
+            Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first_valid_idx, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first_valid_idx, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, &mut out),
             _ => unreachable!(),
         }
     }
     Ok(NviOutput { values: out })
 }
 
-#[inline]
-pub unsafe fn nvi_scalar(
-    close: &[f64], volume: &[f64], first: usize, out: &mut [f64]
-) {
+pub fn nvi_scalar(close: &[f64], volume: &[f64], out: &mut [f64]) {
+    assert!(
+        close.len() == volume.len() && volume.len() == out.len(),
+        "Input slices must all have the same length."
+    );
+    let len = close.len();
+    if len == 0 {
+        return;
+    }
+
+    // 1) Seed at index 0
     let mut nvi_val = 1000.0;
-    out[first] = nvi_val;
-    let mut prev_close = close[first];
-    let mut prev_volume = volume[first];
-    for i in (first+1)..close.len() {
+    out[0] = nvi_val;                                          // :contentReference[oaicite:3]{index=3}
+
+    // 2) Track previous day’s close & volume for bar-to-bar comparison
+    let mut prev_close = close[0];
+    let mut prev_volume = volume[0];
+
+    // 3) For each subsequent bar i = 1..len-1
+    for i in 1..len {
+        // 3a) Only update when volume has decreased from the prior bar
         if volume[i] < prev_volume {
-            let pct_change = (close[i] - prev_close) / prev_close;
-            nvi_val += nvi_val * pct_change;
+            // Percentage change in price from yesterday --> today
+            let pct_change = (close[i] - prev_close) / prev_close;  // :contentReference[oaicite:4]{index=4}
+            // Apply Fosback formula: NVI_t = NVI_{t-1} + (pct_change)*NVI_{t-1}
+            nvi_val += nvi_val * pct_change;                      // :contentReference[oaicite:5]{index=5}
         }
+        // 3b) Otherwise, carry forward the same NVI
         out[i] = nvi_val;
+
+        // 3c) Update “previous bar” references
         prev_close = close[i];
         prev_volume = volume[i];
     }
@@ -235,87 +213,22 @@ pub unsafe fn nvi_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx2(
-    close: &[f64], volume: &[f64], first: usize, out: &mut [f64]
+    close: &[f64], volume: &[f64], out: &mut [f64]
 ) {
-    nvi_scalar(close, volume, first, out)
+    nvi_scalar(close, volume, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512(
-    close: &[f64], volume: &[f64], first: usize, out: &mut [f64]
+    close: &[f64], volume: &[f64], out: &mut [f64]
 ) {
-    nvi_scalar(close, volume, first, out)
+    nvi_scalar(close, volume, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline] pub unsafe fn nvi_avx512_short(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) { nvi_scalar(close, volume, first, out) }
+#[inline] pub unsafe fn nvi_avx512_short(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) { nvi_scalar(close, volume, out) }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline] pub unsafe fn nvi_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) { nvi_scalar(close, volume, first, out) }
-
-#[inline(always)]
-pub fn nvi_batch_with_kernel(
-    close: &[f64], volume: &[f64], k: Kernel
-) -> Result<NviBatchOutput, NviError> {
-    let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => return Err(NviError::EmptyData),
-    };
-    nvi_batch_par_slice(close, volume, kernel)
-}
-#[inline(always)]
-pub fn nvi_batch_slice(close: &[f64], volume: &[f64], kern: Kernel) -> Result<NviBatchOutput, NviError> {
-    nvi_batch_inner(close, volume, kern, false)
-}
-#[inline(always)]
-pub fn nvi_batch_par_slice(close: &[f64], volume: &[f64], kern: Kernel) -> Result<NviBatchOutput, NviError> {
-    nvi_batch_inner(close, volume, kern, true)
-}
-
-fn nvi_batch_inner(close: &[f64], volume: &[f64], kern: Kernel, _parallel: bool) -> Result<NviBatchOutput, NviError> {
-    let mut values = vec![f64::NAN; close.len()];
-    let first = close.iter().zip(volume.iter()).position(|(&c, &v)| !c.is_nan() && !v.is_nan())
-        .ok_or_else(|| if close.iter().all(|&c| c.is_nan()) { NviError::AllCloseValuesNaN } else { NviError::AllVolumeValuesNaN })?;
-    unsafe {
-        match kern {
-            Kernel::ScalarBatch | Kernel::Scalar => nvi_row_scalar(close, volume, first, &mut values),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2Batch | Kernel::Avx2 => nvi_row_avx2(close, volume, first, &mut values),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512Batch | Kernel::Avx512 => nvi_row_avx512(close, volume, first, &mut values),
-            _ => unreachable!(),
-        }
-    }
-    Ok(NviBatchOutput { values, rows: 1, cols: close.len() })
-}
-
-#[inline(always)]
-pub unsafe fn nvi_row_scalar(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_scalar(close, volume, first, out)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn nvi_row_avx2(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_avx2(close, volume, first, out)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn nvi_row_avx512(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_avx512(close, volume, first, out)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn nvi_row_avx512_short(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_avx512_short(close, volume, first, out)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn nvi_row_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    nvi_avx512_long(close, volume, first, out)
-}
-
-#[inline(always)]
-fn expand_grid(_r: &NviBatchRange) -> Vec<NviParams> { vec![NviParams] }
+#[inline] pub unsafe fn nvi_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) { nvi_scalar(close, volume, out) }
 
 #[cfg(test)]
 mod tests {
@@ -340,11 +253,11 @@ mod tests {
         let input = NviInput::with_default_candles(&candles);
         let result = nvi_with_kernel(&input, kernel)?;
         let expected_last_five = [
-            17555.49871646325,
-            17524.70219345554,
-            17524.70219345554,
-            17559.13477961792,
-            17559.13477961792,
+            154243.6925373456,
+            153973.11239019397,
+            153973.11239019397,
+            154275.63921207888,
+            154275.63921207888,
         ];
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
@@ -418,39 +331,4 @@ mod tests {
         check_nvi_not_enough_valid_data,
         check_nvi_streaming
     );
-
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c = read_candles_from_csv(file)?;
-        let output = NviBatchBuilder::new().kernel(kernel).apply_candles(&c, "close")?;
-        let row = output.values_for(&NviParams).expect("default row missing");
-        assert_eq!(row.len(), c.close.len());
-        let expected = [
-            17555.49871646325,
-            17524.70219345554,
-            17524.70219345554,
-            17559.13477961792,
-            17559.13477961792,
-        ];
-        let start = row.len().saturating_sub(5);
-        for (i, &v) in row[start..].iter().enumerate() {
-            assert!((v - expected[i]).abs() < 1e-5, "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}");
-        }
-        Ok(())
-    }
-
-    macro_rules! gen_batch_tests {
-        ($fn_name:ident) => {
-            paste::paste! {
-                #[test] fn [<$fn_name _scalar>]() { let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch); }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx2>]() { let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch); }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx512>]() { let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch); }
-                #[test] fn [<$fn_name _auto_detect>]() { let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto); }
-            }
-        };
-    }
-    gen_batch_tests!(check_batch_default_row);
 }

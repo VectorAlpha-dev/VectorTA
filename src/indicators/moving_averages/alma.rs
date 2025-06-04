@@ -21,6 +21,18 @@
 //! - **`Ok(AlmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(AlmaError)`** otherwise.
 //!
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyList;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{PyArray1, IntoPyArray};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
@@ -1602,4 +1614,53 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn alma<'py>(py: Python<'py>,
+                     input: &'py PyArray1<f64>,
+                     period: usize,
+                     offset: f64,
+                     sigma: f64) -> PyResult<&'py PyArray1<f64>> {
+    let slice: &[f64] = unsafe {
+        input.as_slice().map_err(|_| {
+            PyValueError::new_err("Input must be a contiguous 1-D numpy.ndarray[float64]")
+        })?
+    };
+    let params = AlmaParams {
+        period: Some(period),
+        offset: Some(offset),
+        sigma: Some(sigma),
+    };
+    let alma_input = AlmaInput::from_slice(slice, params);
+    let values: Vec<f64> = py.allow_threads(|| {
+        let AlmaOutput { values } = alma_with_kernel(&alma_input, Default::default())
+            .expect("ALMA computation failed");
+        values
+    });
+    Ok(values.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn my_project(py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(alma, m)?)?;
+    Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
+    let params = AlmaParams {
+        period: Some(period),
+        offset: Some(offset),
+        sigma: Some(sigma),
+    };
+    let input = AlmaInput::from_slice(data, params);
+
+    let AlmaOutput { values } = alma_with_kernel(&input, Default::default())
+        .expect("ALMA computation failed");
+
+    values
 }

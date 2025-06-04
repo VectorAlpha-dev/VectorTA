@@ -22,3 +22,13 @@ mod _rayon_one_big_stack {
             .build_global();
     }
 }
+
+#[cfg(feature = "wasm")]
+pub mod bindings {
+    pub mod wasm;
+}
+
+#[cfg(feature = "python")]
+pub mod bindings {
+    pub mod python;
+}

@@ -63,7 +63,7 @@ pub struct RocpParams {
 
 impl Default for RocpParams {
     fn default() -> Self {
-        Self { period: Some(9) }
+        Self { period: Some(10) }
     }
 }
 
@@ -97,7 +97,7 @@ impl<'a> RocpInput<'a> {
     }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(9)
+        self.params.period.unwrap_or(10)
     }
 }
 
@@ -873,6 +873,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let output = RocpBatchBuilder::new()
+            .period_static(10)
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
