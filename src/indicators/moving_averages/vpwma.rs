@@ -186,8 +186,10 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
         VpwmaData::Slice(sl) => sl,
     };
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(VpwmaError::AllValuesNaN)?;
-
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(VpwmaError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
     let power = input.get_power();
@@ -202,16 +204,21 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
         return Err(VpwmaError::InvalidPower { power });
     }
 
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    weights.resize(period, 0.0);
+    // Build exactly (period - 1) weights
+    let win_len = period - 1;
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, win_len);
+    weights.resize(win_len, 0.0);
+
     let mut norm = 0.0;
-    for i in 0..period {
-        let w = (period as f64 - i as f64).powf(power);
-        weights[i] = w;
+    for k in 0..win_len {
+        let w = (period as f64 - k as f64).powf(power);
+        weights[k] = w;
         norm += w;
     }
     let inv_norm = 1.0 / norm;
-    let mut out = data.to_vec();
+
+    // Initialize all outputs to NaN; we only overwrite from index (first + win_len) onward
+    let mut out = vec![f64::NAN; len];
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -234,33 +241,41 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
             _ => unreachable!(),
         }
     }
+
     Ok(VpwmaOutput { values: out })
 }
-
 #[inline]
 pub fn vpwma_scalar(
     data: &[f64],
-    weights: &[f64],
+    weights: &[f64], // length = (period - 1)
     period: usize,
     first_val: usize,
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first_val + period - 1)..data.len() {
-        let start = i + 1 - period;
-        let window = &data[start..start + period];
+    let win_len = period - 1;           // number of weights
+    let p4 = win_len & !3;              // largest multiple of 4 <= win_len
+
+    // We start computing at i = first_val + win_len
+    for i in (first_val + win_len)..data.len() {
         let mut sum = 0.0;
-        for (d4, w4) in window[..p4].chunks_exact(4).zip(weights[..p4].chunks_exact(4)) {
-            sum += d4[0] * w4[0] + d4[1] * w4[1] + d4[2] * w4[2] + d4[3] * w4[3];
+
+        // Process in chunks of 4
+        for k in (0..p4).step_by(4) {
+            sum += data[i - k]         * weights[k]
+                 + data[i - (k + 1)]   * weights[k + 1]
+                 + data[i - (k + 2)]   * weights[k + 2]
+                 + data[i - (k + 3)]   * weights[k + 3];
         }
-        for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
-            sum += d * w;
+
+        // Process any remainder
+        for k in p4..win_len {
+            sum += data[i - k] * weights[k];
         }
+
         out[i] = sum * inv_norm;
     }
 }
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn vpwma_avx512(
@@ -317,12 +332,13 @@ unsafe fn vpwma_avx512_long(
     vpwma_scalar(data, weights, period, first_valid, inv_norm, out);
 }
 
+// ------- 3) VpwmaStream (streaming “online” version) -------
 #[derive(Debug, Clone)]
 pub struct VpwmaStream {
     period: usize,
-    weights: Vec<f64>,
+    weights: Vec<f64>,   // length = (period - 1)
     inv_norm: f64,
-    buffer: Vec<f64>,
+    buffer: Vec<f64>,    // length = period
     head: usize,
     filled: bool,
 }
@@ -337,14 +353,18 @@ impl VpwmaStream {
         if power.is_nan() || power.is_infinite() {
             return Err(VpwmaError::InvalidPower { power });
         }
-        let mut weights = Vec::with_capacity(period);
+
+        // Build exactly (period - 1) weights
+        let win_len = period - 1;
+        let mut weights = Vec::with_capacity(win_len);
         let mut norm = 0.0;
-        for i in 0..period {
-            let w = (period as f64 - i as f64).powf(power);
+        for k in 0..win_len {
+            let w = (period as f64 - k as f64).powf(power);
             weights.push(w);
             norm += w;
         }
         let inv_norm = 1.0 / norm;
+
         Ok(Self {
             period,
             weights,
@@ -359,6 +379,7 @@ impl VpwmaStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
+
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
@@ -367,13 +388,18 @@ impl VpwmaStream {
         }
         Some(self.dot_ring())
     }
+
     #[inline(always)]
     fn dot_ring(&self) -> f64 {
         let mut sum = 0.0;
-        let mut idx = self.head;
+        // The most-recently written price is at index (head + period - 1) % period
+        let mut idx = (self.head + self.period - 1) % self.period;
+        let win_len = self.weights.len(); // = period - 1
+
         for &w in &self.weights {
             sum += w * self.buffer[idx];
-            idx = (idx + 1) % self.period;
+            // Move one step "backwards" in the circular buffer
+            idx = (idx + self.period - 1) % self.period;
         }
         sum * self.inv_norm
     }
@@ -556,11 +582,16 @@ fn vpwma_batch_inner(
     if combos.is_empty() {
         return Err(VpwmaError::InvalidPeriod { period: 0, data_len: 0 });
     }
+
     let first = data.iter().position(|x| !x.is_nan()).ok_or(VpwmaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
     if data.len() - first < max_p {
-        return Err(VpwmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(VpwmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
+
     let rows = combos.len();
     let cols = data.len();
     let mut inv_norms = vec![0.0; rows];
@@ -568,24 +599,28 @@ fn vpwma_batch_inner(
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
+    // Build, for each combo, exactly (period - 1) weights
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let power = prm.power.unwrap();
         if power.is_nan() || power.is_infinite() {
             return Err(VpwmaError::InvalidPower { power });
         }
+        let win_len = period - 1;
         let mut norm = 0.0;
-        for i in 0..period {
-            let w = (period as f64 - i as f64).powf(power);
-            flat_w[row * max_p + i] = w;
+        for k in 0..win_len {
+            let w = (period as f64 - k as f64).powf(power);
+            flat_w[row * max_p + k] = w;
             norm += w;
         }
         inv_norms[row] = 1.0 / norm;
     }
 
     let mut values = vec![f64::NAN; rows * cols];
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
+        let win_len = period - 1;
         let w_ptr = flat_w.as_ptr().add(row * max_p);
         let inv_n = *inv_norms.get_unchecked(row);
         match kern {
@@ -597,6 +632,7 @@ fn vpwma_batch_inner(
             _ => unreachable!(),
         }
     };
+
     if parallel {
         values
             .par_chunks_mut(cols)
@@ -607,6 +643,7 @@ fn vpwma_batch_inner(
             do_row(row, slice);
         }
     }
+
     Ok(VpwmaBatchOutput {
         values,
         combos,
@@ -620,23 +657,31 @@ unsafe fn vpwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
-    w_ptr: *const f64,
+    _stride: usize,    // (unused beyond satisfying signature)
+    w_ptr: *const f64, // pointer to weights[0..(period-1)]
     inv_n: f64,
     out: &mut [f64],
 ) {
-    let p4 = period & !3;
-    for i in (first + period - 1)..data.len() {
-        let start = i + 1 - period;
+    let win_len = period - 1;
+    let p4 = win_len & !3;
+
+    // Compute from i = first + win_len onward
+    for i in (first + win_len)..data.len() {
         let mut sum = 0.0;
+
+        // Process k = 0..(p4-1) in blocks of 4
         for k in (0..p4).step_by(4) {
-            let w = std::slice::from_raw_parts(w_ptr.add(k), 4);
-            let d = &data[start + k..start + k + 4];
-            sum += d[0] * w[0] + d[1] * w[1] + d[2] * w[2] + d[3] * w[3];
+            sum += *data.get_unchecked(i - k)         * *w_ptr.add(k)
+                 + *data.get_unchecked(i - (k + 1))   * *w_ptr.add(k + 1)
+                 + *data.get_unchecked(i - (k + 2))   * *w_ptr.add(k + 2)
+                 + *data.get_unchecked(i - (k + 3))   * *w_ptr.add(k + 3);
         }
-        for k in p4..period {
-            sum += *data.get_unchecked(start + k) * *w_ptr.add(k);
+
+        // Process remainder k = p4..(win_len-1)
+        for k in p4..win_len {
+            sum += *data.get_unchecked(i - k) * *w_ptr.add(k);
         }
+
         out[i] = sum * inv_n;
     }
 }
