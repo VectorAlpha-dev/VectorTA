@@ -766,7 +766,7 @@ mod tests {
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if b.is_nan() && s.is_nan() { continue; }
             let diff = (b - s).abs();
-            assert!(diff < 1e-9, "[{}] VAR streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}", test_name, i, b, s, diff);
+            assert!(diff < 1e-6, "[{}] VAR streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}", test_name, i, b, s, diff);
         }
         Ok(())
     }

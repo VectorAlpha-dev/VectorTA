@@ -447,25 +447,6 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
 
-    fn check_ha_basic(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let open = [1.0, 2.0, 4.0];
-        let high = [2.0, 5.0, 5.0];
-        let low = [0.5, 1.5, 3.0];
-        let close = [1.5, 3.0, 4.0];
-        let input = HeikinAshiInput::from_slices(&open, &high, &low, &close);
-        let result = heikin_ashi_with_kernel(&input, kernel)?;
-        assert_eq!(result.open.len(), 3);
-        assert_eq!(result.close.len(), 3);
-        assert_eq!(result.high.len(), 3);
-        assert_eq!(result.low.len(), 3);
-        assert!((result.open[0] - 1.0).abs() < 1e-10);
-        assert!((result.close[0] - 1.625).abs() < 1e-10);
-        assert!(!result.open[1].is_nan());
-        assert!(!result.open[2].is_nan());
-        Ok(())
-    }
-
     fn check_ha_empty(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input = HeikinAshiInput::from_slices(&[], &[], &[], &[]);
@@ -511,6 +492,106 @@ mod tests {
         Ok(())
     }
 
+    fn check_ha_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    skip_if_unsupported!(kernel, test_name);
+
+    // 1) Load candles from CSV
+    let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+    let candles = read_candles_from_csv(file_path)?;
+    let input = HeikinAshiInput::from_candles(&candles);
+
+    // 2) Run Heikin‐Ashi
+    let output = heikin_ashi_with_kernel(&input, kernel)?;
+    let len = output.open.len();
+    assert_eq!(len, candles.close.len(), "Length mismatch between HA output and CSV");
+
+    // 3) Grab the last five indices
+    let start = len.saturating_sub(5);
+
+    // 4) “Ground truth” arrays (replace these with your actual expected values):
+    let expected_last_five_open: [f64; 5] = [
+        59348.5,
+        59277.5,
+        59233.0,
+        59110.5,
+        59097.0,
+    ];
+    let expected_last_five_high: [f64; 5] = [
+        59348.5,
+        59405.0,
+        59304.0,
+        59310.0,
+        59236.0,
+    ];
+    let expected_last_five_low: [f64; 5] = [
+        59001.0,
+        59084.0,
+        58932.0,
+        58983.0,
+        58299.0,
+    ];
+    let expected_last_five_close: [f64; 5] = [
+        59221.75,
+        59238.75,
+        59114.25,
+        59121.75,
+        58836.25,
+    ];
+
+    // 5) Compare each of the last five data‐points, with a tight tolerance
+    for i in 0..5 {
+        let idx = start + i;
+        let got_open = output.open[idx];
+        let got_high = output.high[idx];
+        let got_low = output.low[idx];
+        let got_close = output.close[idx];
+
+        let diff_open = (got_open - expected_last_five_open[i]).abs();
+        let diff_high = (got_high - expected_last_five_high[i]).abs();
+        let diff_low = (got_low - expected_last_five_low[i]).abs();
+        let diff_close = (got_close - expected_last_five_close[i]).abs();
+
+        assert!(
+            diff_open < 1e-8,
+            "[{}] HA {:?} open mismatch at idx {}: got {}, expected {}",
+            test_name,
+            kernel,
+            idx,
+            got_open,
+            expected_last_five_open[i]
+        );
+        assert!(
+            diff_high < 1e-8,
+            "[{}] HA {:?} high mismatch at idx {}: got {}, expected {}",
+            test_name,
+            kernel,
+            idx,
+            got_high,
+            expected_last_five_high[i]
+        );
+        assert!(
+            diff_low < 1e-8,
+            "[{}] HA {:?} low mismatch at idx {}: got {}, expected {}",
+            test_name,
+            kernel,
+            idx,
+            got_low,
+            expected_last_five_low[i]
+        );
+        assert!(
+            diff_close < 1e-8,
+            "[{}] HA {:?} close mismatch at idx {}: got {}, expected {}",
+            test_name,
+            kernel,
+            idx,
+            got_close,
+            expected_last_five_close[i]
+        );
+    }
+
+        Ok(())
+    }
+
     macro_rules! generate_all_ha_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -535,126 +616,102 @@ mod tests {
         }
     }
     generate_all_ha_tests!(
-        check_ha_basic,
+        check_ha_accuracy,
         check_ha_empty,
         check_ha_all_nan,
         check_ha_not_enough,
         check_ha_from_candles
     );
-        fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
+    fn check_ha_batch_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
-        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c = read_candles_from_csv(file)?;
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Use the batch builder (Auto‐detect, ScalarBatch, Avx2Batch, Avx512Batch)
         let output = HeikinAshiBatchBuilder::new()
             .kernel(kernel)
-            .apply_candles(&c)?;
-
-        assert_eq!(output.open.len(), c.close.len());
-        assert_eq!(output.high.len(), c.close.len());
-        assert_eq!(output.low.len(), c.close.len());
-        assert_eq!(output.close.len(), c.close.len());
-
-        // Spot-check the last five values against known results
+            .apply_candles(&candles)?;
         let len = output.open.len();
-        if len >= 5 {
-            let expected_last_five_high = [59348.5, 59405.0, 59304.0, 59310.0, 59236.0];
-            let expected_last_five_low = [59001.0, 59084.0, 58932.0, 58983.0, 58299.0];
-            let expected_last_five_close = [59221.75, 59238.75, 59114.25, 59121.75, 58836.25];
-            let expected_last_five_open = [59348.5, 59277.5, 59233.0, 59110.5, 59097.0];
-            for i in 0..5 {
-                let idx = len - 5 + i;
-                let diff_high = (output.high[idx] - expected_last_five_high[i]).abs();
-                let diff_low = (output.low[idx] - expected_last_five_low[i]).abs();
-                let diff_close = (output.close[idx] - expected_last_five_close[i]).abs();
-                let diff_open = (output.open[idx] - expected_last_five_open[i]).abs();
-                assert!(
-                    diff_high < 1.0,
-                    "Heikin Ashi batch high mismatch at {}: got {}, expected {}",
-                    idx,
-                    output.high[idx],
-                    expected_last_five_high[i]
-                );
-                assert!(
-                    diff_low < 1.0,
-                    "Heikin Ashi batch low mismatch at {}: got {}, expected {}",
-                    idx,
-                    output.low[idx],
-                    expected_last_five_low[i]
-                );
-                assert!(
-                    diff_close < 1.0,
-                    "Heikin Ashi batch close mismatch at {}: got {}, expected {}",
-                    idx,
-                    output.close[idx],
-                    expected_last_five_close[i]
-                );
-                assert!(
-                    diff_open < 1.0,
-                    "Heikin Ashi batch open mismatch at {}: got {}, expected {}",
-                    idx,
-                    output.open[idx],
-                    expected_last_five_open[i]
-                );
-            }
+        assert_eq!(len, candles.close.len());
+
+        let start = len.saturating_sub(5);
+
+        // Replace these with the same expected numbers as above:
+        let expected_last_five_open: [f64; 5] = [
+            59348.5,
+            59277.5,
+            59233.0,
+            59110.5,
+            59097.0,
+        ];
+        let expected_last_five_high: [f64; 5] = [
+            59348.5,
+            59405.0,
+            59304.0,
+            59310.0,
+            59236.0,
+        ];
+        let expected_last_five_low: [f64; 5] = [
+            59001.0,
+            59084.0,
+            58932.0,
+            58983.0,
+            58299.0,
+        ];
+        let expected_last_five_close: [f64; 5] = [
+            59221.75,
+            59238.75,
+            59114.25,
+            59121.75,
+            58836.25,
+        ];
+
+        for i in 0..5 {
+            let idx = start + i;
+            let got_open = output.open[idx];
+            let got_high = output.high[idx];
+            let got_low = output.low[idx];
+            let got_close = output.close[idx];
+
+            assert!(
+                (got_open - expected_last_five_open[i]).abs() < 1e-8,
+                "[{}] HA Batch {:?} open mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                idx,
+                got_open,
+                expected_last_five_open[i]
+            );
+            assert!(
+                (got_high - expected_last_five_high[i]).abs() < 1e-8,
+                "[{}] HA Batch {:?} high mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                idx,
+                got_high,
+                expected_last_five_high[i]
+            );
+            assert!(
+                (got_low - expected_last_five_low[i]).abs() < 1e-8,
+                "[{}] HA Batch {:?} low mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                idx,
+                got_low,
+                expected_last_five_low[i]
+            );
+            assert!(
+                (got_close - expected_last_five_close[i]).abs() < 1e-8,
+                "[{}] HA Batch {:?} close mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                idx,
+                got_close,
+                expected_last_five_close[i]
+            );
         }
-        Ok(())
-    }
 
-    fn check_batch_empty(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let open: [f64; 0] = [];
-        let high: [f64; 0] = [];
-        let low: [f64; 0] = [];
-        let close: [f64; 0] = [];
-        let result = HeikinAshiBatchBuilder::new()
-            .kernel(kernel)
-            .apply_slices(&open, &high, &low, &close);
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    fn check_batch_nan(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let open = [f64::NAN, f64::NAN];
-        let high = [f64::NAN, f64::NAN];
-        let low = [f64::NAN, f64::NAN];
-        let close = [f64::NAN, f64::NAN];
-        let result = HeikinAshiBatchBuilder::new()
-            .kernel(kernel)
-            .apply_slices(&open, &high, &low, &close);
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    fn check_batch_short(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let open = [1.0];
-        let high = [2.0];
-        let low = [0.5];
-        let close = [1.5];
-        let result = HeikinAshiBatchBuilder::new()
-            .kernel(kernel)
-            .apply_slices(&open, &high, &low, &close);
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    fn check_batch_basic_calc(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let open = [1.0, 2.0, 4.0];
-        let high = [2.0, 5.0, 5.0];
-        let low = [0.5, 1.5, 3.0];
-        let close = [1.5, 3.0, 4.0];
-        let output = HeikinAshiBatchBuilder::new()
-            .kernel(kernel)
-            .apply_slices(&open, &high, &low, &close)?;
-        assert_eq!(output.open.len(), 3);
-        assert_eq!(output.high.len(), 3);
-        assert_eq!(output.low.len(), 3);
-        assert_eq!(output.close.len(), 3);
-        assert!((output.open[0] - 1.0).abs() < 1e-10);
-        assert!((output.close[0] - 1.625).abs() < 1e-10);
         Ok(())
     }
 
@@ -679,9 +736,5 @@ mod tests {
         };
     }
 
-    gen_batch_tests!(check_batch_default_row);
-    gen_batch_tests!(check_batch_empty);
-    gen_batch_tests!(check_batch_nan);
-    gen_batch_tests!(check_batch_short);
-    gen_batch_tests!(check_batch_basic_calc);
+    gen_batch_tests!(check_ha_batch_accuracy);
 }

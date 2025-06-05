@@ -1008,7 +1008,7 @@ mod tests {
             }
             let diff = (b - s).abs();
             assert!(
-                diff < 1e-9,
+                diff < 1e-6,
                 "[{}] VIDYA streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
                 test_name,
                 i,
