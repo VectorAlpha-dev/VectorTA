@@ -297,12 +297,30 @@ pub unsafe fn reflex_avx512_long(data: &[f64], period: usize, first: usize, out:
 #[derive(Debug, Clone)]
 pub struct ReflexStream {
     period: usize,
-    buffer: Vec<f64>,
-    ssf: Vec<f64>,
-    ms: Vec<f64>,
-    sums: Vec<f64>,
-    pos: usize,
-    filled: bool,
+
+    // coefficients (all constant after construction)
+    a:    f64,
+    a_sq: f64,
+    b:    f64,
+    c:    f64,
+
+    // we keep a circular buffer of length (period + 1) for all past ssf[]
+    ssf_buf: Vec<f64>,
+
+    // running sum of “last period” ssf values:
+    //   at time t (just before computing output if t >= period),
+    //   `ssf_sum` = Σ_{k = t - period .. t - 1} ssf[k].
+    ssf_sum:  f64,
+
+    // we need the raw price from one step ago, so we can compute
+    //   ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
+    last_data: Option<f64>,
+
+    // keep a single “ms[t-1]” so that ms[t] = 0.04·my_sum² + 0.96·ms[t-1]
+    last_ms: f64,
+
+    // how many values have been fed in so far (this is “t” in the batch code)
+    count:   usize,
 }
 
 impl ReflexStream {
@@ -311,40 +329,122 @@ impl ReflexStream {
         if period < 2 {
             return Err(ReflexError::InvalidPeriod { period });
         }
+
+        // exactly the same coefficients that `reflex_scalar` uses:
+        //
+        //     let half_period = (period / 2).max(1);
+        //     let a      = exp(-1.414 * π / half_period);
+        //     let a_sq   = a * a;
+        //     let b      = 2.0 * a * cos(1.414 * π / half_period);
+        //     let c      = (1.0 + a_sq - b) * 0.5;
+        //
+        // we compute `half_period` as f64 because that’s how the scalar version does it.
+        let half_period = (period / 2).max(1) as f64;
+        let a          = (-1.414_f64 * std::f64::consts::PI / half_period).exp();
+        let a_sq       = a * a;
+        let b          = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period).cos();
+        let c          = (1.0 + a_sq - b) * 0.5;
+
         Ok(Self {
             period,
-            buffer: vec![0.0; period],
-            ssf: Vec::new(),
-            ms: vec![0.0; period],
-            sums: vec![0.0; period],
-            pos: 0,
-            filled: false,
+
+            a,
+            a_sq,
+            b,
+            c,
+
+            // buffer for ssf[ t mod (period+1) ], so we can index ssf[t-1], ssf[t-2], ssf[t-period]
+            ssf_buf: vec![0.0; period + 1],
+
+            // at the very start, we have no ssf history => sum = 0
+            ssf_sum: 0.0,
+
+            last_data: None,
+            last_ms:   0.0,
+            count:     0,
         })
     }
 
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let len = self.buffer.len();
-        self.buffer[self.pos] = value;
-        self.pos = (self.pos + 1) % len;
-        if !self.filled && self.pos == 0 {
-            self.filled = true;
-        }
-        if !self.filled {
-            return None;
-        }
-        let mut tmp_buf;
-        let buf: &[f64] = if self.pos == 0 {
-            &self.buffer[..]
+        let t = self.count;
+        let period = self.period;
+
+        // 1) compute ssf[t] exactly as in `reflex_scalar`:
+        let ssf_t: f64 = if t == 0 {
+            // at t = 0: ssf[0] = data[0]
+            value
+        } else if t == 1 {
+            // at t = 1: ssf[1] = data[1]
+            value
         } else {
-            tmp_buf = self.buffer[self.pos..].to_vec();
-            tmp_buf.extend_from_slice(&self.buffer[..self.pos]);
-            &tmp_buf
+            // for t >= 2: ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
+            let prev_data = self.last_data.unwrap();
+            let idx1 = (t - 1) % (period + 1);
+            let idx2 = (t - 2) % (period + 1);
+            let ssf_t1 = self.ssf_buf[idx1];
+            let ssf_t2 = self.ssf_buf[idx2];
+            self.c * (value + prev_data) + self.b * ssf_t1 - self.a_sq * ssf_t2
         };
-        let mut out = vec![0.0; len];
-        reflex_scalar(buf, self.period, 0, &mut out);
-        Some(out[len - 1])
+
+        // 2) if t >= period, compute the normalized “Reflex” exactly as in batch:
+        let mut out_val = 0.0;
+        if t >= period {
+            // ssf[t - period]:
+            let idx_period = (t - period) % (period + 1);
+            let ssf_t_period = self.ssf_buf[idx_period];
+
+            let period_f = period as f64;
+            let my_sum = ssf_t
+                + ((ssf_t_period - ssf_t) * (period_f + 1.0) / (2.0 * period_f))
+                - (self.ssf_sum / period_f);
+
+            let my_sum_sq = my_sum * my_sum;
+            let ms_t = 0.04 * my_sum_sq + 0.96 * self.last_ms;
+            self.last_ms = ms_t;
+
+            if ms_t > 0.0 {
+                out_val = my_sum / ms_t.sqrt();
+            } else {
+                out_val = 0.0;
+            }
+        }
+
+        // 3) update the rolling sum of ssf for the “next” step:
+        //
+        //    If t < period, we haven’t reached a full window yet, so we simply
+        //    add this ssf[t] to `ssf_sum`.  At the moment t == period, that
+        //    means `ssf_sum = Σ_{i=0..period-1} ssf[i]`, which is exactly what
+        //    the batch code wants before computing “my_sum” at i == period.
+        //
+        //    Once t >= period, we must subtract off ssf[t - period] and add
+        //    ssf[t], so that `ssf_sum = Σ_{i = (t - period + 1) .. t}` for the
+        //    next iteration.
+        if t < period {
+            self.ssf_sum += ssf_t;
+        } else {
+            let idx_remove = (t - period) % (period + 1);
+            let remove_ssf = self.ssf_buf[idx_remove];
+            self.ssf_sum = self.ssf_sum - remove_ssf + ssf_t;
+        }
+
+        // 4) store the new ssf[t] into our circular buffer:
+        self.ssf_buf[t % (period + 1)] = ssf_t;
+
+        // 5) remember this raw price so the *next* call can use data[t-1]:
+        self.last_data = Some(value);
+
+        // 6) advance the counter:
+        self.count += 1;
+
+        // 7) return `Some(out_val)` only once t >= period; otherwise return None
+        if t >= period {
+            Some(out_val)
+        } else {
+            None
+        }
     }
 }
+
 
 // --- Batch/grid API ---
 

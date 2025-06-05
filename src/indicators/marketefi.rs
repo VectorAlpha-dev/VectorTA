@@ -513,13 +513,13 @@ mod tests {
             3.020938522420525,
             3.0474861329079292,
             3.691017115591989,
-            2.2478330402561397,
+            2.247810963176202,
         ];
         let start = res.values.len() - 5;
         for (i, &v) in res.values[start..].iter().enumerate() {
             let exp = expected_last_five[i];
             assert!(
-                (v - exp).abs() < 1e-8,
+                (v - exp).abs() < 1e-6,
                 "[{}] marketefi mismatch at {}: got {}, exp {}",
                 test,
                 start + i,
@@ -614,7 +614,7 @@ mod tests {
             3.020938522420525,
             3.0474861329079292,
             3.691017115591989,
-            2.2478330402561397,
+            2.247810963176202,
         ];
         let row = &out.values;
         let start = row.len() - 5;

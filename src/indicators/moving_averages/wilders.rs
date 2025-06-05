@@ -58,7 +58,7 @@ pub struct WildersParams {
 
 impl Default for WildersParams {
     fn default() -> Self {
-        Self { period: Some(14) }
+        Self { period: Some(5) }
     }
 }
 
@@ -83,7 +83,7 @@ impl<'a> WildersInput<'a> {
     }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
+        self.params.period.unwrap_or(5)
     }
 }
 
@@ -194,18 +194,13 @@ pub fn wilders_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // 1) Compute the simple moving average of the first `period` points:
     let mut sum = 0.0;
     for i in 0..period {
         sum += data[first_valid + i];
     }
-
-    // 2) Place that SMA at index = (first_valid + period - 1):
     let wma_start = first_valid + period - 1;
     let mut val = sum / (period as f64);
     out[wma_start] = val;
-
-    // 3) Recursively smooth each subsequent element:
     let alpha = 1.0 / (period as f64);
     for i in (wma_start + 1)..data.len() {
         val = (data[i] - val) * alpha + val;
@@ -277,7 +272,7 @@ pub struct WildersStream {
 
 impl WildersStream {
     pub fn try_new(params: WildersParams) -> Result<Self, WildersError> {
-        let period = params.period.unwrap_or(14);
+        let period = params.period.unwrap_or(5);
         if period == 0 {
             return Err(WildersError::InvalidPeriod { period, data_len: 0 });
         }
@@ -317,7 +312,7 @@ pub struct WildersBatchRange {
 
 impl Default for WildersBatchRange {
     fn default() -> Self {
-        Self { period: (7, 24, 1) }
+        Self { period: (5, 24, 1) }
     }
 }
 
@@ -381,7 +376,7 @@ pub struct WildersBatchOutput {
 }
 impl WildersBatchOutput {
     pub fn row_for_params(&self, p: &WildersParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
+        self.combos.iter().position(|c| c.period.unwrap_or(5) == p.period.unwrap_or(5))
     }
     pub fn values_for(&self, p: &WildersParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -549,14 +544,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let input = WildersInput::from_candles(&candles, "close", WildersParams { period: Some(14) });
+        let input = WildersInput::from_candles(&candles, "close", WildersParams { period: Some(5) });
         let result = wilders_with_kernel(&input, kernel)?;
         let expected_last_five = [
-            59281.4066127606,
-            59277.7210240106,
-            59268.2870360084,
-            59253.0612421217,
-            59229.0523781676,
+            59302.18156619092,
+            59277.94525295273,
+            59230.15620236219,
+            59215.12496188975,
+            59103.0999695118,
         ];
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
@@ -616,7 +611,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let first_params = WildersParams { period: Some(14) };
+        let first_params = WildersParams { period: Some(5) };
         let first_input = WildersInput::from_candles(&candles, "close", first_params);
         let first_result = wilders_with_kernel(&first_input, kernel)?;
 
@@ -633,7 +628,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let input = WildersInput::from_candles(&candles, "close", WildersParams { period: Some(14) });
+        let input = WildersInput::from_candles(&candles, "close", WildersParams { period: Some(5) });
         let res = wilders_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
         if res.values.len() > 240 {
@@ -649,7 +644,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let period = 14;
+        let period = 5;
         let input = WildersInput::from_candles(&candles, "close", WildersParams { period: Some(period) });
         let batch_output = wilders_with_kernel(&input, kernel)?.values;
 
@@ -707,16 +702,42 @@ mod tests {
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
+
         let output = WildersBatchBuilder::new()
             .kernel(kernel)
             .apply_candles(&c, "close")?;
+
         let def = WildersParams::default();
         let row = output.values_for(&def).expect("default row missing");
+
         assert_eq!(row.len(), c.close.len());
+
+        // Last five expected Wilder’s values for period = 5
+        let expected = [
+            59302.18156619092,
+            59277.94525295273,
+            59230.15620236219,
+            59215.12496188975,
+            59103.0999695118,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-8,
+                "[{}] default-row mismatch at idx {}: {} vs {:?}",
+                test,
+                i,
+                v,
+                expected
+            );
+        }
+
         Ok(())
     }
+
 
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
