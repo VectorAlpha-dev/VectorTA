@@ -27,7 +27,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyDict};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1618,36 +1618,129 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction]
-fn alma<'py>(py: Python<'py>,
-                     input: &'py PyArray1<f64>,
-                     period: usize,
-                     offset: f64,
-                     sigma: f64) -> PyResult<&'py PyArray1<f64>> {
-    let slice: &[f64] = unsafe {
-        input.as_slice().map_err(|_| {
-            PyValueError::new_err("Input must be a contiguous 1-D numpy.ndarray[float64]")
-        })?
-    };
-    let params = AlmaParams {
+fn alma<'py>(
+    py: Python<'py>,
+    input: &'py PyArray1<f64>,
+    period: usize,
+    offset: f64,
+    sigma: f64,
+) -> PyResult<&'py PyArray1<f64>> {
+    // 1. safe view of the NumPy buffer
+    let slice = unsafe { input.as_slice()? };
+
+    // 2. Build regular Rust input
+    let params = AlmaParams {                         // all Some(_) by design
         period: Some(period),
         offset: Some(offset),
-        sigma: Some(sigma),
+        sigma:  Some(sigma),
     };
     let alma_input = AlmaInput::from_slice(slice, params);
-    let values: Vec<f64> = py.allow_threads(|| {
-        let AlmaOutput { values } = alma_with_kernel(&alma_input, Default::default())
-            .expect("ALMA computation failed");
-        values
-    });
-    Ok(values.into_pyarray(py))
+
+    // 3. Run ALMA without the GIL
+    let AlmaOutput { values } = py
+        .allow_threads(|| alma_with_kernel(&alma_input, Kernel::Auto))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;   // map AlmaError → PyErr
+
+    // 4. Back in the GIL → build NumPy array
+    Ok(values.into_pyarray(py))                     // :contentReference[oaicite:1]{index=1}
+}
+
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AlmaStream")]
+struct AlmaStreamPy {
+    stream: AlmaStream,
 }
 
 #[cfg(feature = "python")]
+#[pymethods]
+impl AlmaStreamPy {
+    #[new]
+    fn new(period: usize, offset: f64, sigma: f64) -> PyResult<Self> {
+        let params = AlmaParams {
+            period: Some(period),
+            offset: Some(offset),
+            sigma: Some(sigma),
+        };
+        let stream = AlmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AlmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated ALMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn alma_batch<'py>(
+    py: Python<'py>,
+    data: &'py PyArray1<f64>,
+    period_range: (usize, usize, usize),
+    offset_range: (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
+) -> PyResult<PyObject> {
+    use pyo3::types::PyDict;                    // new
+
+    let slice = unsafe { data.as_slice()? };
+
+    let sweep = AlmaBatchRange {
+        period: period_range,
+        offset: offset_range,
+        sigma:  sigma_range,
+    };
+
+    // heavy work without the GIL
+    let output = py
+        .allow_threads(|| alma_batch_par_slice(slice, &sweep, Kernel::Auto))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;   // single ?
+
+    // build Python structures with the GIL
+    let dict = PyDict::new(py);
+
+    let values = output.values
+        .into_pyarray(py)
+        .reshape((output.rows, output.cols))?;                 // keeps ownership
+
+    dict.set_item("values",  values)?;
+    dict.set_item("periods", output.combos.iter()
+                       .map(|p| p.period.unwrap_or_default() as u64)
+                       .collect::<Vec<_>>()
+                       .into_pyarray(py))?;
+    dict.set_item("offsets", output.combos.iter()
+                       .map(|p| p.offset.unwrap_or_default())
+                       .collect::<Vec<_>>()
+                       .into_pyarray(py))?;
+    dict.set_item("sigmas",  output.combos.iter()
+                       .map(|p| p.sigma.unwrap_or_default())
+                       .collect::<Vec<_>>()
+                       .into_pyarray(py))?;
+
+    Ok(dict.into())
+}
+
+
+#[cfg(feature = "python")]
 #[pymodule]
-fn my_project(py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn ta_indicators(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(alma, m)?)?;
+    m.add_function(wrap_pyfunction!(alma_batch, m)?)?;
+    m.add_class::<AlmaStreamPy>()?;
     Ok(())
 }
+
+
+
+
+
+
+
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
