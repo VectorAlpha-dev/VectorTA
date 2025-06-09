@@ -737,38 +737,43 @@ fn cwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let mut values = vec![f64::NAN; rows * cols];
+    let mut raw = make_uninit_matrix(rows, cols);
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    let mut values: Vec<f64> = unsafe {
+        let p   = raw.as_mut_ptr() as *mut f64;
+        let cap = raw.capacity();
+        std::mem::forget(raw);
+        Vec::from_raw_parts(p, rows * cols, cap)
+    };
+
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr = flat_w.as_ptr().add(row * max_p);
-        let inv_n = *inv_norms.get_unchecked(row);
+        let w_ptr  = flat_w.as_ptr().add(row * max_p);
+        let inv_n  = *inv_norms.get_unchecked(row);
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => cwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => cwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
-            _ => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2   => cwma_row_avx2  (data, first, period, max_p, w_ptr, inv_n, out_row),
+            _              => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
         }
     };
 
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        values.par_chunks_mut(cols)
+              .enumerate()
+              .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(CwmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    // ---------- 5. package result ----------
+    Ok(CwmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]

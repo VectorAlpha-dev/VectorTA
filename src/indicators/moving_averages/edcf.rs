@@ -19,7 +19,7 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
@@ -200,8 +200,8 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
         return Err(EdcfError::NaNFound);
     }
 
-    let mut out = vec![f64::NAN; len];
-
+    let warm = first + 2 * period;
+    let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -566,18 +566,20 @@ impl EdcfBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
+    let (start, end, step) = r.period;
+
+    // Build the list of periods
+    let periods: Vec<usize> = if step == 0 || start == end {
+        vec![start]                          // static single value
+    } else {
         (start..=end).step_by(step).collect()
-    }
-    let periods = axis_usize(r.period);
-    let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
-        out.push(EdcfParams { period: Some(p) });
-    }
-    out
+    };
+
+    // Map periods → EdcfParams
+    periods
+        .into_iter()
+        .map(|p| EdcfParams { period: Some(p) })
+        .collect()
 }
 
 #[inline(always)]
@@ -625,7 +627,24 @@ fn edcf_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+
+    // 1️⃣  allocate an uninitialised flat matrix
+    let mut raw = make_uninit_matrix(rows, cols);
+
+    // 2️⃣  pre-seed NaNs up to each row’s warm-up boundary
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + 2 * c.period.unwrap())  // first computable index per row
+        .collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // 3️⃣  turn it into a `Vec<f64>`
+    let mut values: Vec<f64> = unsafe {
+        let ptr = raw.as_mut_ptr() as *mut f64;
+        let cap = raw.capacity();
+        std::mem::forget(raw);
+        Vec::from_raw_parts(ptr, rows * cols, cap)
+    };
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
