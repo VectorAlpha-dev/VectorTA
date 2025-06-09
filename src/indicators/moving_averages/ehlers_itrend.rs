@@ -20,7 +20,7 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
@@ -149,7 +149,8 @@ pub fn ehlers_itrend_with_kernel(
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + warmup_bars;          
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => unsafe {
@@ -809,7 +810,24 @@ fn ehlers_itrend_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+        let mut raw = make_uninit_matrix(rows, cols);          // step ❶
+
+        // --- prepare a per-row warm-up prefix ------------------------------------
+        let warm: Vec<usize> = combos                      // step ❷
+            .iter()
+            .map(|c| first + c.warmup_bars.unwrap())
+            .collect();
+
+        // SAFETY:  we’re filling only the NaN prefixes row-by-row.
+        unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };   // step ❸
+
+        // --- turn the uninit buffer into a Vec<f64> -------------------------------
+        let mut values: Vec<f64> = unsafe {                // step ❹
+            let ptr = raw.as_mut_ptr() as *mut f64;
+            let cap = raw.capacity();
+            std::mem::forget(raw);
+            Vec::from_raw_parts(ptr, rows * cols, cap)
+        };
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let p = &combos[row];
