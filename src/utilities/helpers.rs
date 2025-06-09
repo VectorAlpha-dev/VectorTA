@@ -95,17 +95,21 @@ macro_rules! skip_if_unsupported {
     }};
 }
 
+#[inline(always)]
 pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
+    use std::{mem::MaybeUninit, ptr};
     let mut v: Vec<MaybeUninit<f64>> = Vec::with_capacity(len);
     unsafe { v.set_len(len); }
-    let prefix = &mut v[..warm] as *mut [MaybeUninit<f64>] as *mut f64;
-    unsafe { ptr::write_bytes(prefix, 0xFF, warm); }
-    let p = v.as_mut_ptr() as *mut f64;
+    let prefix_bytes = (warm * std::mem::size_of::<f64>()) as isize;
+    let dst = v.as_mut_ptr().cast::<u8>();
+    unsafe { ptr::write_bytes(dst, 0xFF, prefix_bytes as usize); }
+    let p   = v.as_mut_ptr() as *mut f64;
     let cap = v.capacity();
     std::mem::forget(v);
     unsafe { Vec::from_raw_parts(p, len, cap) }
 }
 
+#[inline(always)]
 pub unsafe fn init_matrix_prefixes(
     buf: &mut [MaybeUninit<f64>],
     cols: usize,

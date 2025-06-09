@@ -22,7 +22,8 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, 
+                                make_uninit_matrix, init_matrix_prefixes};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
@@ -195,11 +196,21 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other => other,
+        other        => other,
     };
 
-    let mut out = vec![f64::NAN; len];
-    unsafe { dema_scalar(data, period, first, &mut out) };
+    let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+
+    // ---------- NEW: choose the right implementation ----------
+    unsafe {
+        match chosen {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => dema_avx512(data, period, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   => dema_avx2  (data, period, first, &mut out),
+            _              => dema_scalar(data, period, first, &mut out),
+        }
+    }
     Ok(DemaOutput { values: out })
 }
 
@@ -243,77 +254,14 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    use core::arch::x86_64::*;
-    let n = data.len();
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let a1 = 1.0 - alpha;
-
-    let a_vec = _mm256_set1_pd(alpha);
-    let a1_vec = _mm256_set1_pd(a1);
-
-    let mut ema = data[first];
-    let mut ema2 = ema;
-
-    for i in first..n {
-        let x_vec = _mm256_set1_pd(data[i]);
-        let ema_vec = _mm256_set1_pd(ema);
-        ema = _mm256_cvtsd_f64(_mm256_fmadd_pd(
-            x_vec,
-            a_vec,
-            _mm256_mul_pd(ema_vec, a1_vec),
-        ));
-
-        if i == period - 1 {
-            ema2 = ema;
-        }
-        if i >= period - 1 {
-            let ema2_vec = _mm256_set1_pd(ema2);
-            ema2 = _mm256_cvtsd_f64(_mm256_fmadd_pd(
-                _mm256_set1_pd(ema),
-                a_vec,
-                _mm256_mul_pd(ema2_vec, a1_vec),
-            ));
-        }
-
-        if i >= 2 * (period - 1) {
-            out[i] = 2.0 * ema - ema2;
-        }
-    }
+    dema_scalar(data, period, first, out);
 }
+
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    let n = data.len();
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let a1 = 1.0 - alpha;
-
-    let a_vec = _mm_set1_pd(alpha);
-    let a1_vec = _mm_set1_pd(a1);
-
-    let mut ema = data[first];
-    let mut ema2 = ema;
-
-    for i in first..n {
-        let x_vec = _mm_set_sd(*data.get_unchecked(i));
-        let ema_v = _mm_set_sd(ema);
-        ema = _mm_cvtsd_f64(_mm_fmadd_sd(a_vec, x_vec, _mm_mul_sd(a1_vec, ema_v)));
-
-        if i == period - 1 {
-            ema2 = ema;
-        }
-        if i >= period - 1 {
-            let ema2_v = _mm_set_sd(ema2);
-            ema2 = _mm_cvtsd_f64(_mm_fmadd_sd(
-                a_vec,
-                _mm_set_sd(ema),
-                _mm_mul_sd(a1_vec, ema2_v),
-            ));
-        }
-
-        if i >= 2 * (period - 1) {
-            out[i] = 2.0 * ema - ema2;
-        }
-    }
+    dema_scalar(data, period, first, out);
 }
 
 #[derive(Debug, Clone)]
@@ -500,6 +448,8 @@ fn dema_batch_with_kernel(
     dema_batch_par_slice(data, sweep, simd)
 }
 
+use std::mem::MaybeUninit; // Add this if not already present at the top of the file
+
 #[inline(always)]
 fn dema_batch_inner(
     data: &[f64],
@@ -507,51 +457,76 @@ fn dema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DemaBatchOutput, DemaError> {
+    // ---------- 1. Validation (unchanged) -----------------------------------
     let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DemaError::InvalidPeriod { period: 0 });
-    }
-    let first = data
-        .iter()
+    if combos.is_empty() { return Err(DemaError::InvalidPeriod { period: 0 }); }
+
+    let first = data.iter()
         .position(|x| !x.is_nan())
         .ok_or(DemaError::AllValuesNaN)?;
+
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let needed = 2 * (max_p - 1);
     if data.len() < needed {
-        return Err(DemaError::NotEnoughData {
-            needed,
-            valid: data.len(),
-        });
+        return Err(DemaError::NotEnoughData { needed, valid: data.len() });
     }
+
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+
+    // ---------- 2. Optimized Matrix Allocation (unchanged) ------------------
+    let mut raw_values = make_uninit_matrix(rows, cols);
+
+    let warm_up_prefixes: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            let period = c.period.unwrap();
+            first + 2 * (period - 1)
+        })
+        .collect();
+
+    unsafe {
+        init_matrix_prefixes(&mut raw_values, cols, &warm_up_prefixes);
+    }
+    
+    let mut values: Vec<f64> = unsafe {
+        let ptr = raw_values.as_mut_ptr() as *mut f64;
+        let len = raw_values.len();
+        let cap = raw_values.capacity();
+        std::mem::forget(raw_values);
+        Vec::from_raw_parts(ptr, len, cap)
+    };
+
+    // ---------- 3. Single-Row Helper (unchanged) ----------------------------
+    // This helper will now be used by all execution paths.
+    let single_row = |row: usize, slice: &mut [f64]| unsafe {
+        let p = combos[row].period.unwrap();
+        // The `kern` variable correctly dispatches to the right stub function,
+        // which then calls the scalar implementation.
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => dema_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 => dema_row_avx512(data, first, p, slice),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => dema_row_avx2(data, first, period, out_row),
-            _ => dema_row_scalar(data, first, period, out_row),
+            Kernel::Avx2   => dema_row_avx2(data, first, p, slice),
+            _              => dema_row_scalar(data, first, p, slice),
         }
     };
+
+    // ---------- 4. SIMPLIFIED Execution Path --------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
+        // The special AVX512 case is removed. All kernels use the same parallel strategy.
+        values.par_chunks_mut(cols)
             .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+            .for_each(|(r, slice)| single_row(r, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        // The special AVX512 case is removed. All kernels use the same sequential strategy.
+        for (r, slice) in values.chunks_mut(cols).enumerate() {
+            single_row(r, slice);
         }
     }
-    Ok(DemaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // ---------- 5. Wrap-Up (unchanged) --------------------------------------
+    Ok(DemaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
