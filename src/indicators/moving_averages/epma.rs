@@ -21,13 +21,13 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel,alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
-
+use std::mem::MaybeUninit;
 impl<'a> AsRef<[f64]> for EpmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -213,7 +213,8 @@ pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput,
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = data.to_vec();
+    let warm = first + period + offset + 1;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     unsafe {
         match chosen {
@@ -486,7 +487,7 @@ impl EpmaStream {
         Ok(Self {
             period,
             offset,
-            buffer: vec![f64::NAN; period],
+            buffer: alloc_with_nan_prefix(period, period),
             head: 0,
             filled: false,
             seen: 0,
@@ -706,28 +707,54 @@ fn epma_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+
+    let mut raw = make_uninit_matrix(rows, cols);
+
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() + c.offset.unwrap() + 1)
+        .collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------------------------------------------------------------------------
+    // 2. helper that computes **one** row into a &mut [MaybeUninit<f64>]
+    // ---------------------------------------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let offset = combos[row].offset.unwrap();
+
+        // cast this slice only; we know the kernel will overwrite every cell
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => epma_row_avx512(data, first, period, offset, out_row),
+            Kernel::Avx512 => epma_row_avx512(data, first, period, offset, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => epma_row_avx2(data, first, period, offset, out_row),
-            _ => epma_row_scalar(data, first, period, offset, out_row),
+            Kernel::Avx2   => epma_row_avx2  (data, first, period, offset, dst),
+            _              => epma_row_scalar(data, first, period, offset, dst),
         }
     };
+
+    // ---------------------------------------------------------------------------
+    // 3. run all rows (parallel or serial) on the MaybeUninit buffer
+    // ---------------------------------------------------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // 4. transmute the now-initialised matrix to Vec<f64>
+    // ---------------------------------------------------------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(EpmaBatchOutput {
         values,
         combos,
@@ -964,7 +991,7 @@ mod tests {
             }
         }
         assert_eq!(batch_output.len(), stream_values.len());
-        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
+        for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate().skip(period + offset + 1) {
             if b.is_nan() && s.is_nan() {
                 continue;
             }

@@ -19,10 +19,12 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, 
+                                make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
     #[inline(always)]
@@ -196,20 +198,17 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-
+    let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                ema_scalar(data, period, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Scalar | Kernel::ScalarBatch =>
+                ema_scalar (data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                ema_avx2(data, period, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Avx2   | Kernel::Avx2Batch   =>
+                ema_avx2   (data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                ema_avx512(data, period, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch =>
+                ema_avx512 (data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -459,63 +458,70 @@ pub fn ema_batch_par_slice(
 fn ema_batch_inner(
     data: &[f64],
     sweep: &EmaBatchRange,
-    kern: Kernel,
+    kern:  Kernel,
     parallel: bool,
 ) -> Result<EmaBatchOutput, EmaError> {
+
+    // ------------ boiler-plate unchanged -----------------------------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EmaError::InvalidPeriod { period: 0, data_len: 0 });
     }
 
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(EmaError::AllValuesNaN)?;
+    let first = data.iter()
+                    .position(|x| !x.is_nan())
+                    .ok_or(EmaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
         return Err(EmaError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
+            needed: max_p, valid: data.len() - first
         });
     }
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ------------ 1. allocate & warm-up prefixes ---------------------------
+    let mut raw = make_uninit_matrix(rows, cols);
+    let warm: Vec<usize> = vec![first; rows];          // same warm-up for every row
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ------------ 2. row-kernel closure on MaybeUninit rows ---------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
+
+        // cast *this* row slice to &mut [f64] for the kernel
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ema_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 => ema_row_avx512(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ema_row_avx2(data, first, period, out_row),
-            _ => ema_row_scalar(data, first, period, out_row),
+            Kernel::Avx2   => ema_row_avx2  (data, first, period, dst),
+            _              => ema_row_scalar(data, first, period, dst),
         }
-
     };
 
+    // ------------ 3. run rows in parallel or serial ------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(EmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    // ------------ 4. soundly transmute to Vec<f64> -------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(EmaBatchOutput { values, combos, rows, cols })
 }
+
 
 #[inline(always)]
 unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {

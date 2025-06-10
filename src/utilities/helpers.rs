@@ -109,30 +109,46 @@ pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
     unsafe { Vec::from_raw_parts(p, len, cap) }
 }
 
-#[inline(always)]
-pub unsafe fn init_matrix_prefixes(
+
+#[inline]
+pub fn init_matrix_prefixes(
     buf: &mut [MaybeUninit<f64>],
     cols: usize,
     warm_prefixes: &[usize],
 ) {
-    let nan = f64::NAN.to_bits();
-    let nan_bytes = nan.to_ne_bytes();
+    assert!(
+        cols != 0 && buf.len() % cols == 0,
+        "`buf` length must be a multiple of `cols`"
+    );
+    let rows = buf.len() / cols;
+    assert_eq!(
+        rows,
+        warm_prefixes.len(),
+        "`warm_prefixes` length must equal number of rows"
+    );
 
-    for (row, &warm) in warm_prefixes.iter().enumerate() {
-        let start = row * cols;
-        let dst   = buf[start..start + warm].as_mut_ptr() as *mut u8;
-        for i in 0..warm {
-            ptr::copy_nonoverlapping(
-                nan_bytes.as_ptr(),
-                dst.add(i * 8),
-                8,
-            );
+    for (row_idx, &warm) in warm_prefixes.iter().enumerate() {
+        debug_assert!(
+            warm <= cols,
+            "prefix length ({warm}) exceeds number of columns ({cols})"
+        );
+
+        let start = row_idx * cols;
+        for cell in &mut buf[start..start + warm] {
+            cell.write(f64::NAN);
         }
     }
 }
 
+/// ---------------------------------------------------------------------------
+/// 3.  Allocate `rows × cols` uninitialised elements with overflow checking.
+/// ---------------------------------------------------------------------------
+#[inline]
 pub fn make_uninit_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<f64>> {
-    let mut v: Vec<MaybeUninit<f64>> = Vec::with_capacity(rows * cols);
-    unsafe { v.set_len(rows * cols); }
+    let total = rows
+        .checked_mul(cols)
+        .expect("rows * cols overflowed usize");
+    let mut v = Vec::<MaybeUninit<f64>>::with_capacity(total);
+    unsafe { v.set_len(total) };
     v
 }

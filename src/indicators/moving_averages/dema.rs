@@ -452,20 +452,24 @@ use std::mem::MaybeUninit; // Add this if not already present at the top of the 
 
 #[inline(always)]
 fn dema_batch_inner(
-    data: &[f64],
-    sweep: &DemaBatchRange,
-    kern: Kernel,
+    data:     &[f64],
+    sweep:    &DemaBatchRange,
+    kern:     Kernel,
     parallel: bool,
 ) -> Result<DemaBatchOutput, DemaError> {
-    // ---------- 1. Validation (unchanged) -----------------------------------
-    let combos = expand_grid(sweep);
-    if combos.is_empty() { return Err(DemaError::InvalidPeriod { period: 0 }); }
 
-    let first = data.iter()
+    // ── 1. validation ──────────────────────────────────────────────────────
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(DemaError::InvalidPeriod { period: 0 });
+    }
+
+    let first = data
+        .iter()
         .position(|x| !x.is_nan())
         .ok_or(DemaError::AllValuesNaN)?;
 
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let max_p  = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let needed = 2 * (max_p - 1);
     if data.len() < needed {
         return Err(DemaError::NotEnoughData { needed, valid: data.len() });
@@ -474,61 +478,51 @@ fn dema_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // ---------- 2. Optimized Matrix Allocation (unchanged) ------------------
-    let mut raw_values = make_uninit_matrix(rows, cols);
+    // ── 2. allocate uninitialised matrix + NaN warm-ups ────────────────────
+    let mut raw = make_uninit_matrix(rows, cols);
 
-    let warm_up_prefixes: Vec<usize> = combos
+    let warm: Vec<usize> = combos
         .iter()
-        .map(|c| {
-            let period = c.period.unwrap();
-            first + 2 * (period - 1)
-        })
+        .map(|c| first + 2 * (c.period.unwrap() - 1))
         .collect();
 
-    unsafe {
-        init_matrix_prefixes(&mut raw_values, cols, &warm_up_prefixes);
-    }
-    
-    let mut values: Vec<f64> = unsafe {
-        let ptr = raw_values.as_mut_ptr() as *mut f64;
-        let len = raw_values.len();
-        let cap = raw_values.capacity();
-        std::mem::forget(raw_values);
-        Vec::from_raw_parts(ptr, len, cap)
-    };
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // ---------- 3. Single-Row Helper (unchanged) ----------------------------
-    // This helper will now be used by all execution paths.
-    let single_row = |row: usize, slice: &mut [f64]| unsafe {
+    // ── 3. per-row kernel closure; *dst_mu* is &mut [MaybeUninit<f64>] ─────
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let p = combos[row].period.unwrap();
-        // The `kern` variable correctly dispatches to the right stub function,
-        // which then calls the scalar implementation.
+
+        // Cast just this slice to &mut [f64]
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => dema_row_avx512(data, first, p, slice),
+            Kernel::Avx512 => dema_row_avx512(data, first, p, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => dema_row_avx2(data, first, p, slice),
-            _              => dema_row_scalar(data, first, p, slice),
+            Kernel::Avx2   => dema_row_avx2  (data, first, p, dst),
+            _              => dema_row_scalar(data, first, p, dst),
         }
     };
 
-    // ---------- 4. SIMPLIFIED Execution Path --------------------------------
+    // ── 4. run every row kernel, parallel or sequential ────────────────────
     if parallel {
-        // The special AVX512 case is removed. All kernels use the same parallel strategy.
-        values.par_chunks_mut(cols)
+        raw.par_chunks_mut(cols)
             .enumerate()
-            .for_each(|(r, slice)| single_row(r, slice));
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        // The special AVX512 case is removed. All kernels use the same sequential strategy.
-        for (r, slice) in values.chunks_mut(cols).enumerate() {
-            single_row(r, slice);
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
         }
     }
 
-    // ---------- 5. Wrap-Up (unchanged) --------------------------------------
+    // ── 5. all rows are initialised → safe to transmute to Vec<f64> ───────
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
     Ok(DemaBatchOutput { values, combos, rows, cols })
 }
-
 #[inline(always)]
 unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     dema_scalar(data, period, first, out)

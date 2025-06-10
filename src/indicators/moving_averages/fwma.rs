@@ -22,13 +22,14 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for FwmaInput<'a> {
     #[inline(always)]
@@ -211,8 +212,8 @@ pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput,
     for w in &mut fib {
         *w /= fib_sum;
     }
-    let mut out = vec![f64::NAN; len];
-
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -764,29 +765,47 @@ fn fwma_batch_inner(
         }
     }
 
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    // 1. allocate uninitialised matrix and write NaN prefixes
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // 2. per-row closure works on &mut [MaybeUninit<f64>]
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
         let fib_ptr = flat_fib.as_ptr().add(row * max_p);
+
+        // Cast *just this slice* to &mut [f64] – we’re about to fully initialise it.
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => fwma_row_avx512(data, first, period, max_p, fib_ptr, out_row),
+            Kernel::Avx512 => fwma_row_avx512(data, first, period, max_p, fib_ptr, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => fwma_row_avx2(data, first, period, max_p, fib_ptr, out_row),
-            _ => fwma_row_scalar(data, first, period, max_p, fib_ptr, out_row),
+            Kernel::Avx2   => fwma_row_avx2  (data, first, period, max_p, fib_ptr, dst),
+            _              => fwma_row_scalar(data, first, period, max_p, fib_ptr, dst),
         }
     };
 
+    // 3. run every row kernel – no element is read before it is written
     if parallel {
-        values
-            .par_chunks_mut(cols)
+        raw.par_chunks_mut(cols)
             .enumerate()
             .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // 4. now the whole matrix is initialised – transmute once, soundly
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(FwmaBatchOutput {
         values,
