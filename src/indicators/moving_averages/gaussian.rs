@@ -26,6 +26,247 @@ use crate::utilities::helpers::{
 use rayon::prelude::*;
 use std::f64::consts::PI;
 use thiserror::Error;
+use std::mem::MaybeUninit;  
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+use std::arch::x86_64::*;
+
+const LANES_AVX512: usize = 8;
+const LANES_AVX2  : usize = 4;  
+
+#[inline(always)]
+fn alpha_from(period: usize, poles: usize) -> f64 {
+    let beta = {
+        let numerator = 1.0 - (2.0 * PI / period as f64).cos();
+        let denominator = (2.0_f64).powf(1.0 / poles as f64) - 1.0;
+        numerator / denominator
+    };
+    let tmp = beta * beta + 2.0 * beta;
+    -beta + tmp.sqrt()
+}
+
+impl<'a> AsRef<[f64]> for GaussianInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            GaussianData::Slice(slice) => slice,
+            GaussianData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+unsafe fn gaussian_rows8_avx512(
+    data:   &[f64],
+    params: &[GaussianParams],
+    out_rows: &mut [f64],
+    cols:  usize,
+) {
+    debug_assert_eq!(params.len(), LANES_AVX512);
+    debug_assert_eq!(out_rows.len(), LANES_AVX512 * cols);
+
+    // ---- per-lane α and pole-count ----------------------------------------
+    let mut alpha_arr = [0.0f64; LANES_AVX512];
+    let mut pole_arr  = [0u32 ; LANES_AVX512];
+    for (lane, prm) in params.iter().enumerate() {
+        let p = prm.period.unwrap_or(14);
+        let k = prm.poles .unwrap_or(4);
+        alpha_arr[lane] = alpha_from(p, k);
+        pole_arr [lane] = k as u32;
+    }
+
+    let alpha_v     = _mm512_loadu_pd(alpha_arr.as_ptr());
+    let one_minus_v = _mm512_sub_pd(_mm512_set1_pd(1.0), alpha_v);
+
+    // stage-masks: lane bit = 1 when that stage is **present**
+    let mask_for = |stage: u32| -> __mmask8 {
+        let mut m: u8 = 0;
+        for lane in 0..LANES_AVX512 {
+            if pole_arr[lane] > stage { m |= 1 << lane; }
+        }
+        m as __mmask8
+    };
+    let m0 = mask_for(0);
+    let m1 = mask_for(1);
+    let m2 = mask_for(2);
+    let m3 = mask_for(3);
+
+    // state per pole
+    let mut st0 = _mm512_setzero_pd();
+    let mut st1 = _mm512_setzero_pd();
+    let mut st2 = _mm512_setzero_pd();
+    let mut st3 = _mm512_setzero_pd();
+
+    // ---- main time loop ----------------------------------------------------
+    for (t, &x_n) in data.iter().enumerate() {
+        let x_vec = _mm512_set1_pd(x_n);
+
+        // stage 0  : y = α x + (1-α) st
+        let y0  = _mm512_fmadd_pd(alpha_v, x_vec, _mm512_mul_pd(one_minus_v, st0));
+        st0     = _mm512_mask_mov_pd(st0, m0, y0);
+
+        // stage 1
+        let y1  = _mm512_fmadd_pd(alpha_v, st0,  _mm512_mul_pd(one_minus_v, st1));
+        st1     = _mm512_mask_mov_pd(st1, m1, y1);
+
+        // stage 2
+        let y2  = _mm512_fmadd_pd(alpha_v, st1,  _mm512_mul_pd(one_minus_v, st2));
+        st2     = _mm512_mask_mov_pd(st2, m2, y2);
+
+        // stage 3
+        let y3  = _mm512_fmadd_pd(alpha_v, st2,  _mm512_mul_pd(one_minus_v, st3));
+        st3     = _mm512_mask_mov_pd(st3, m3, y3);
+
+        let mut y = st0;
+        y = _mm512_mask_mov_pd(y, m1, st1);
+        y = _mm512_mask_mov_pd(y, m2, st2);
+        y = _mm512_mask_mov_pd(y, m3, st3);
+
+        // scatter → row-major
+        let mut tmp = [0.0f64; LANES_AVX512];
+        _mm512_storeu_pd(tmp.as_mut_ptr(), y);
+        for lane in 0..LANES_AVX512 {
+            out_rows[lane * cols + t] = tmp[lane];
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+unsafe fn gaussian_batch_tile_avx2(
+    data:    &[f64],
+    combos:  &[GaussianParams],
+    out_mu:  &mut [core::mem::MaybeUninit<f64>],
+    cols:    usize,
+) {
+    // view as &[f64] for the SIMD helpers
+    let out = core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64,
+                                              out_mu.len());
+
+    let mut row = 0;
+    while row + LANES_AVX2 <= combos.len() {
+        gaussian_rows4_avx2(
+            data,
+            &combos[row..row + LANES_AVX2],
+            &mut out[row * cols..(row + LANES_AVX2) * cols],
+            cols,
+        );
+        row += LANES_AVX2;
+    }
+    for r in row..combos.len() {
+        gaussian_row_scalar(
+            data,
+            &combos[r],
+            &mut out[r * cols..(r + 1) * cols],
+        );
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline(always)]
+unsafe fn gaussian_rows4_avx2(
+    data:    &[f64],
+    params:  &[GaussianParams],
+    out_rows:&mut [f64],
+    cols:    usize,
+) {
+    debug_assert_eq!(params.len(), LANES_AVX2);
+    debug_assert_eq!(out_rows.len(), LANES_AVX2 * cols);
+
+    // lane-specific α and pole-count
+    let mut alpha_arr = [0.0f64; LANES_AVX2];
+    let mut pole_arr  = [0u32 ; LANES_AVX2];
+    for (l, prm) in params.iter().enumerate() {
+        alpha_arr[l] = alpha_from(prm.period.unwrap_or(14),
+                                  prm.poles .unwrap_or(4));
+        pole_arr [l] = prm.poles.unwrap_or(4) as u32;
+    }
+    let alpha_v     = _mm256_loadu_pd(alpha_arr.as_ptr());
+    let one_minus_v = _mm256_sub_pd(_mm256_set1_pd(1.0), alpha_v);
+
+    // state per pole
+    let mut st0 = _mm256_setzero_pd();
+    let mut st1 = _mm256_setzero_pd();
+    let mut st2 = _mm256_setzero_pd();
+    let mut st3 = _mm256_setzero_pd();
+
+    // scratch arrays to pick lane-wise final value
+    let mut y0a = [0.0; LANES_AVX2];
+    let mut y1a = [0.0; LANES_AVX2];
+    let mut y2a = [0.0; LANES_AVX2];
+    let mut y3a = [0.0; LANES_AVX2];
+
+    for (t, &x_n) in data.iter().enumerate() {
+        let x_v = _mm256_set1_pd(x_n);
+
+        // stage-0 … stage-3
+        let y0_v = _mm256_fmadd_pd(alpha_v, x_v,  _mm256_mul_pd(one_minus_v, st0));
+        st0      = y0_v;
+
+        let y1_v = _mm256_fmadd_pd(alpha_v, st0,  _mm256_mul_pd(one_minus_v, st1));
+        st1      = y1_v;
+
+        let y2_v = _mm256_fmadd_pd(alpha_v, st1,  _mm256_mul_pd(one_minus_v, st2));
+        st2      = y2_v;
+
+        let y3_v = _mm256_fmadd_pd(alpha_v, st2,  _mm256_mul_pd(one_minus_v, st3));
+        st3      = y3_v;
+
+        // store to scratch ­- (compilers fold these back-to-back stores nicely)
+        _mm256_storeu_pd(y0a.as_mut_ptr(), y0_v);
+        _mm256_storeu_pd(y1a.as_mut_ptr(), y1_v);
+        _mm256_storeu_pd(y2a.as_mut_ptr(), y2_v);
+        _mm256_storeu_pd(y3a.as_mut_ptr(), y3_v);
+
+        // choose per-lane final output and scatter
+        for lane in 0..LANES_AVX2 {
+            let final_y = match pole_arr[lane] {
+                1 => y0a[lane],
+                2 => y1a[lane],
+                3 => y2a[lane],
+                _ => y3a[lane],          // 4
+            };
+            out_rows[lane * cols + t] = final_y;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+unsafe fn gaussian_batch_tile_avx512(
+    data:   &[f64],
+    combos: &[GaussianParams],
+    out_mu: &mut [core::mem::MaybeUninit<f64>],   // <-- changed
+    cols:   usize,
+) {
+    // temporary view as &mut [f64]
+    let out = core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64,
+                                              out_mu.len());
+
+    let mut row = 0;
+    while row + LANES_AVX512 <= combos.len() {
+        gaussian_rows8_avx512(
+            data,
+            &combos[row..row + LANES_AVX512],
+            &mut out[row * cols..(row + LANES_AVX512) * cols],
+            cols,
+        );
+        row += LANES_AVX512;
+    }
+    // tail rows (≤7) – scalar
+    for r in row..combos.len() {
+        gaussian_row_scalar(
+            data,
+            &combos[r],
+            &mut out[r * cols..(r + 1) * cols],
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum GaussianData<'a> {
@@ -41,7 +282,7 @@ pub struct GaussianOutput {
     pub values: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct GaussianParams {
     pub period: Option<usize>,
     pub poles: Option<usize>,
@@ -195,7 +436,11 @@ pub fn gaussian_with_kernel(
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(len);
+    let warm        = first_valid + period;
+
+    let mut out = alloc_with_nan_prefix(len, warm);
+
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => gaussian_scalar(data, period, poles, &mut out),
@@ -362,7 +607,7 @@ pub struct GaussianBatchRange {
 impl Default for GaussianBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 30, 1),
+            period: (14, 60, 1),
             poles: (1, 4, 1),
         }
     }
@@ -515,29 +760,94 @@ fn gaussian_batch_inner(
     if combos.is_empty() {
         return Err(GaussianError::NoData);
     }
-    let len = data.len();
+    let len  = data.len();
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let prm = &combos[row];
+    // ---------------------------------------------------------------------------
+    // 1.  Determine warm-up prefix for every row
+    // ---------------------------------------------------------------------------
+    let first_valid = data.iter().position(|x| !x.is_nan())
+        .ok_or(GaussianError::NoData)?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first_valid + c.period.unwrap_or(14))
+        .collect();
+
+    // ---------------------------------------------------------------------------
+    // 2.  Allocate an un-initialised matrix and write the NaN prefixes
+    // ---------------------------------------------------------------------------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------------------------------------------------------------------------
+    // 3.  Closure that fills ONE row  (gets &mut [MaybeUninit<f64>])
+    // ---------------------------------------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
+        let prm     = &combos[row];
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
         match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => gaussian_row_avx512(data, prm, out_row),
-            Kernel::Avx2 => gaussian_row_avx2(data, prm, out_row),
-            _ => gaussian_row_scalar(data, prm, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   => gaussian_row_avx2  (data, prm, out_row),
+            _              => gaussian_row_scalar(data, prm, out_row),
         }
     };
+
+    // ---------------------------------------------------------------------------
+    // 4.  Run every row (parallel or serial) directly into `raw`
+    // ---------------------------------------------------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        match kern {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 if is_x86_feature_detected!("avx512f") => {
+                // Rayon over 8-row tiles keeps the work-chunks large
+                let chunks = raw.par_chunks_mut(cols * LANES_AVX512)
+                    .zip(combos.par_chunks(LANES_AVX512));
+                chunks.for_each(|(out_blk, prm_blk)| unsafe {
+                    gaussian_batch_tile_avx512(data, prm_blk, out_blk, cols)
+                });
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   if is_x86_feature_detected!("avx2")     => {
+            raw.par_chunks_mut(cols * LANES_AVX2)
+               .zip(combos.par_chunks(LANES_AVX2))
+               .for_each(|(out_blk, prm_blk)| unsafe {
+                   gaussian_batch_tile_avx2(data, prm_blk, out_blk, cols)
+               });
+            }
+            _ => {
+                raw.par_chunks_mut(cols)
+                      .enumerate()
+                      .for_each(|(row, slice)| do_row(row, slice));
+            }
+        }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        match kern {
+          #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 if is_x86_feature_detected!("avx512f") => unsafe {
+                gaussian_batch_tile_avx512(data, &combos, &mut raw, cols);
+            },
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 if is_x86_feature_detected!("avx2") => unsafe {
+                gaussian_batch_tile_avx2(data, &combos, &mut raw, cols);
+          },
+            _ => {
+                for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+                }
+            }
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // 5.  All elements are now initialised – transmute to Vec<f64>
+    // ---------------------------------------------------------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(GaussianBatchOutput {
         values,
         combos,
@@ -550,13 +860,32 @@ fn gaussian_batch_inner(
 pub unsafe fn gaussian_row_scalar(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {
     gaussian_scalar(data, prm.period.unwrap_or(14), prm.poles.unwrap_or(4), out);
 }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn gaussian_row_avx2(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {
-    gaussian_avx2(data, prm.period.unwrap_or(14), prm.poles.unwrap_or(4), out);
+pub unsafe fn gaussian_row_avx2(
+    data: &[f64],
+    prm:  &GaussianParams,
+    out:  &mut [f64],
+) {
+    let mut combos = [prm.clone(); LANES_AVX2];
+    let mut buf    = vec![0.0f64; LANES_AVX2 * data.len()];
+    gaussian_rows4_avx2(data, &combos, &mut buf, data.len());
+    out.copy_from_slice(&buf[..data.len()]);
 }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn gaussian_row_avx512(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {
-    gaussian_avx512(data, prm.period.unwrap_or(14), prm.poles.unwrap_or(4), out);
+pub unsafe fn gaussian_row_avx512(
+    data: &[f64],
+    prm: &GaussianParams,
+    out: &mut [f64],
+) {
+    // fast path: 1-row “batch” using the SIMD core
+    let mut combos = [prm.clone(); LANES_AVX512];
+    let mut buf    = vec![0.0f64; LANES_AVX512 * data.len()];
+    gaussian_rows8_avx512(data, &combos, &mut buf, data.len());
+    out.copy_from_slice(&buf[..data.len()]);
 }
 
 // =================== Macro-Based Unit Tests ====================
