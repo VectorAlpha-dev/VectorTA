@@ -22,7 +22,7 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -31,6 +31,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::{swap, MaybeUninit};
+
 
 impl<'a> AsRef<[f64]> for FramaInput<'a> {
     #[inline(always)]
@@ -286,9 +288,6 @@ pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutp
     }
 }
 
-use core::mem::swap;
-use core::mem::MaybeUninit;
-
 #[derive(Copy, Clone)]
 struct MonoDeque<const CAP: usize> {
     buf: [usize; CAP],
@@ -516,7 +515,9 @@ pub fn frama_scalar(
     first: usize,
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
-    let mut out = vec![f64::NAN; len];
+    let warm = first + window;
+    let mut out = alloc_with_nan_prefix(len, warm);
+
 
     let mut win = window;
     if win & 1 == 1 {
@@ -876,7 +877,8 @@ pub fn frama_avx2(
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
     if window <= 32 && window & 1 == 0 {
-        let mut out = vec![f64::NAN; len];
+    let warm = first + window;              // first index that gets a real value
+    let mut out = alloc_with_nan_prefix(len, warm);
         unsafe {
             seed_sma(close, first, window, &mut out);
             match window {
@@ -906,7 +908,8 @@ pub fn frama_avx512(
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
     if window <= 32 && window & 1 == 0 {
-        let mut out = vec![f64::NAN; len];
+        let warm = first + window;              // first index that gets a real value
+        let mut out = alloc_with_nan_prefix(len, warm);
         unsafe {
             seed_sma(close, first, window, &mut out);
             match window {
@@ -1095,67 +1098,93 @@ pub fn frama_batch_par_slice(
 ) -> Result<FramaBatchOutput, FramaError> {
     frama_batch_inner(high, low, close, sweep, kern, true)
 }
+
 #[inline(always)]
 fn frama_batch_inner(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    sweep: &FramaBatchRange,
-    kern: Kernel,
+    high:   &[f64],
+    low:    &[f64],
+    close:  &[f64],
+    sweep:  &FramaBatchRange,
+    kern:   Kernel,
     parallel: bool,
 ) -> Result<FramaBatchOutput, FramaError> {
+
+    // ---- parameter checking (unchanged) -----------------------------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(FramaError::InvalidWindow {
-            window: 0,
-            data_len: 0,
-        });
+        return Err(FramaError::InvalidWindow { window: 0, data_len: 0 });
     }
-    let len = high.len();
+
+    let len   = high.len();
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(FramaError::AllValuesNaN)?;
+
     let max_w = combos.iter().map(|c| c.window.unwrap()).max().unwrap();
     if len - first < max_w {
-        return Err(FramaError::NotEnoughValidData {
-            needed: max_w,
-            valid: len - first,
-        });
+        return Err(FramaError::NotEnoughValidData { needed: max_w, valid: len - first });
     }
+
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let p = &combos[row];
+
+    // -----------------------------------------------------------------------
+    // 1. allocate uninitialised matrix and write the per-row NaN prefixes
+    // -----------------------------------------------------------------------
+    let mut raw = make_uninit_matrix(rows, cols);
+
+    let warm: Vec<usize> = combos.iter()
+                                 .map(|p| first + p.window.unwrap() - 1)
+                                 .collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // -----------------------------------------------------------------------
+    // 2. closure that fills ONE row; gets &mut [MaybeUninit<f64>]
+    //    and casts that slice to &mut [f64] for the kernel
+    // -----------------------------------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let p      = &combos[row];
         let window = p.window.unwrap();
-        let sc = p.sc.unwrap();
-        let fc = p.fc.unwrap();
+        let sc     = p.sc.unwrap();
+        let fc     = p.fc.unwrap();
+
+        // safe because dst_mu is the exclusive slice for this row
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => frama_row_avx512(high, low, close, first, window, out_row, sc, fc),
+            Kernel::Avx512 =>
+                frama_row_avx512(high, low, close, first, window, dst, sc, fc),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => frama_row_avx2(high, low, close, first, window, out_row, sc, fc),
-            _ => frama_row_scalar(high, low, close, first, window, out_row, sc, fc),
+            Kernel::Avx2   =>
+                frama_row_avx2  (high, low, close, first, window, dst, sc, fc),
+            _ =>
+                frama_row_scalar(high, low, close, first, window, dst, sc, fc),
         }
-
     };
+
+    // -----------------------------------------------------------------------
+    // 3. run every row kernel without exposing uninitialised data
+    // -----------------------------------------------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(FramaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // -----------------------------------------------------------------------
+    // 4. now that ALL elements are initialised, transmute once
+    // -----------------------------------------------------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(FramaBatchOutput { values, combos, rows, cols })
 }
 
 #[derive(Debug, Clone)]

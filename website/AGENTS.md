@@ -1,3 +1,0 @@
-AGENT INSTRUCTIONS (plain text)
-
-The goal is to create a demo/documentation website which uses WASM bindings from the Main Rust TA library. Each indicator will have its own page with a description, usage examples, and interactive TradingView Lightweight Charts. The main landing page will include a description of the project.The sidebar will have links to each indicator page, and the footer will include links to the GitHub repository and other relevant resources like my full name "Daniel Liszka". For now, focus on creating the website with the individual indicator pages. Use placeholders for the actual WASM indicator usage and lightweigtht charrts.

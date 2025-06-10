@@ -21,7 +21,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    detect_best_batch_kernel, detect_best_kernel
+    detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix
 };
 use rayon::prelude::*;
 use std::f64::consts::PI;

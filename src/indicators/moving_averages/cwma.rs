@@ -29,6 +29,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for CwmaInput<'a> {
     #[inline(always)]
@@ -737,21 +738,23 @@ fn cwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let mut raw = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // 1. allocate the big matrix as MaybeUninit and write the NaN prefixes
+    let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    let mut values: Vec<f64> = unsafe {
-        let p   = raw.as_mut_ptr() as *mut f64;
-        let cap = raw.capacity();
-        std::mem::forget(raw);
-        Vec::from_raw_parts(p, rows * cols, cap)
-    };
-
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // 2. closure that fills one row; takes &mut [MaybeUninit<f64>]
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr  = flat_w.as_ptr().add(row * max_p);
         let inv_n  = *inv_norms.get_unchecked(row);
+
+        // cast just this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -762,15 +765,19 @@ fn cwma_batch_inner(
         }
     };
 
+    // 3. run every row, writing directly into `raw`
     if parallel {
-        values.par_chunks_mut(cols)
-              .enumerate()
-              .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // 4. now that every element is written, transmute to Vec<f64>
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     // ---------- 5. package result ----------
     Ok(CwmaBatchOutput { values, combos, rows, cols })

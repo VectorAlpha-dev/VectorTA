@@ -27,6 +27,7 @@ use rayon::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for EhlersITrendInput<'a> {
     fn as_ref(&self) -> &[f64] {
@@ -792,66 +793,88 @@ fn ehlers_itrend_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EhlersITrendBatchOutput, EhlersITrendError> {
+
+    // ────────────────────────────────────────────────────────────────────
+    // unchanged validity checks
+    // ────────────────────────────────────────────────────────────────────
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(EhlersITrendError::EmptyInputData);
     }
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(EhlersITrendError::AllValuesNaN)?;
-    let max_warmup = combos.iter().map(|c| c.warmup_bars.unwrap()).max().unwrap();
+    let first = data.iter()
+                    .position(|x| !x.is_nan())
+                    .ok_or(EhlersITrendError::AllValuesNaN)?;
+    let max_warmup = combos.iter()
+                           .map(|c| c.warmup_bars.unwrap())
+                           .max()
+                           .unwrap();
     if data.len() - first < max_warmup {
         return Err(EhlersITrendError::NotEnoughDataForWarmup {
             warmup_bars: max_warmup,
-            length: data.len() - first,
+            length:      data.len() - first,
         });
     }
 
+    // ────────────────────────────────────────────────────────────────────
+    // ❶ allocate rows × cols as MaybeUninit
+    // ────────────────────────────────────────────────────────────────────
     let rows = combos.len();
     let cols = data.len();
-        let mut raw = make_uninit_matrix(rows, cols);          // step ❶
+    let mut raw = make_uninit_matrix(rows, cols);
 
-        // --- prepare a per-row warm-up prefix ------------------------------------
-        let warm: Vec<usize> = combos                      // step ❷
-            .iter()
-            .map(|c| first + c.warmup_bars.unwrap())
-            .collect();
+    // ────────────────────────────────────────────────────────────────────
+    // ❷ fill per-row NaN prefixes
+    // ────────────────────────────────────────────────────────────────────
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.warmup_bars.unwrap())
+        .collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-        // SAFETY:  we’re filling only the NaN prefixes row-by-row.
-        unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };   // step ❸
+    // ────────────────────────────────────────────────────────────────────
+    // ❸ closure that writes one row; receives &mut [MaybeUninit<f64>]
+    //     and casts that slice to &mut [f64] for the kernel call
+    // ────────────────────────────────────────────────────────────────────
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let p        = &combos[row];
+        let warmup   = p.warmup_bars.unwrap();
+        let max_dc   = p.max_dc_period.unwrap();
 
-        // --- turn the uninit buffer into a Vec<f64> -------------------------------
-        let mut values: Vec<f64> = unsafe {                // step ❹
-            let ptr = raw.as_mut_ptr() as *mut f64;
-            let cap = raw.capacity();
-            std::mem::forget(raw);
-            Vec::from_raw_parts(ptr, rows * cols, cap)
-        };
+        // safe to cast because we will write every element
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
-    let do_row = |row: usize, out_row: &mut [f64]| {
-        let p = &combos[row];
-        let warmup_bars = p.warmup_bars.unwrap();
-        let max_dc = p.max_dc_period.unwrap();
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => ehlers_itrend_row_avx512(data, warmup_bars, max_dc, first, out_row),
+            Kernel::Avx512 =>
+                ehlers_itrend_row_avx512(data, warmup, max_dc, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => ehlers_itrend_row_avx2(data, warmup_bars, max_dc, first, out_row),
-            _ => ehlers_itrend_row_scalar(data, warmup_bars, max_dc, first, out_row),
+            Kernel::Avx2   =>
+                ehlers_itrend_row_avx2  (data, warmup, max_dc, first, dst),
+            _ =>
+                ehlers_itrend_row_scalar(data, warmup, max_dc, first, dst),
         }
     };
 
+    // ────────────────────────────────────────────────────────────────────
+    // ❹ run the kernels row-by-row (parallel or serial)
+    // ────────────────────────────────────────────────────────────────────
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // ❺ now every element is initialised → transmute once to Vec<f64>
+    // ────────────────────────────────────────────────────────────────────
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(EhlersITrendBatchOutput {
         values,
@@ -860,6 +883,7 @@ fn ehlers_itrend_batch_inner(
         cols,
     })
 }
+
 
 #[derive(Clone, Debug)]
 pub struct EhlersITrendBatchOutput {

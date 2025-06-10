@@ -25,6 +25,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 #[derive(Debug, Clone)]
 pub enum EdcfData<'a> {
@@ -607,70 +608,67 @@ fn edcf_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
+    // ─────────────────── guards unchanged ───────────────────
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EdcfError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EdcfError::InvalidPeriod { period: 0, data_len: 0 });
     }
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(EdcfError::AllValuesNaN)?;
+
+    let first = data.iter().position(|x| !x.is_nan())
+                    .ok_or(EdcfError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < 2 * max_p {
         return Err(EdcfError::NotEnoughValidData {
             needed: 2 * max_p,
-            valid: data.len() - first,
+            valid:  data.len() - first,
         });
     }
+
     let rows = combos.len();
     let cols = data.len();
 
-    // 1️⃣  allocate an uninitialised flat matrix
+    // ─────────────────── 1️⃣ allocate as MaybeUninit ───────────────────
     let mut raw = make_uninit_matrix(rows, cols);
 
-    // 2️⃣  pre-seed NaNs up to each row’s warm-up boundary
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + 2 * c.period.unwrap())  // first computable index per row
+    // ─────────────────── 2️⃣ seed NaN prefixes ────────────────────────
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + 2 * c.period.unwrap())
         .collect();
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // 3️⃣  turn it into a `Vec<f64>`
-    let mut values: Vec<f64> = unsafe {
-        let ptr = raw.as_mut_ptr() as *mut f64;
-        let cap = raw.capacity();
-        std::mem::forget(raw);
-        Vec::from_raw_parts(ptr, rows * cols, cap)
-    };
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ─────────────────── 3️⃣ per-row kernel writes into MaybeUninit ───
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
+
+        // Cast this single row to &mut [f64] for the kernel call
+        let dst = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => edcf_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 => edcf_row_avx512(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => edcf_row_avx2(data, first, period, out_row),
-            _ => edcf_row_scalar(data, first, period, out_row),
+            Kernel::Avx2   => edcf_row_avx2  (data, first, period, dst),
+            _              => edcf_row_scalar(data, first, period, dst),
         }
     };
+
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(EdcfBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // ─────────────────── 4️⃣ now every element is initialised ──────────
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(EdcfBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
