@@ -1642,7 +1642,6 @@ mod tests {
         }
     }
 
-
     generate_all_alma_tests!(
         check_alma_partial_params,
         check_alma_accuracy,
@@ -1715,38 +1714,33 @@ mod tests {
 #[pyfunction]
 fn alma<'py>(
     py: Python<'py>,
-    arr_in: &'py PyArray1<f64>,
+    arr_in: PyReadonlyArray1<'py, f64>,
     period: usize,
     offset: f64,
     sigma:  f64,
 ) -> PyResult<&'py PyArray1<f64>> {
 
-    let slice_in = unsafe { arr_in.as_slice()? };
+    let slice_in = arr_in.as_slice()?;           // zero-copy, read-only view
 
-    // Build input struct
-    let params = AlmaParams {
-        period: Some(period), offset: Some(offset), sigma: Some(sigma)
-    };
+    // ---------- build input struct -------------------------------------------------
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
-    // ---------- allocate NumPy output buffer ----------
-    let out_arr = PyArray1::<f64>::new(py, [slice_in.len()], false);
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // ---------- allocate NumPy output buffer ---------------------------------------
+    let out_arr   = PyArray1::<f64>::new(py, [slice_in.len()], false);
+    let slice_out = unsafe { out_arr.as_slice_mut()? };  // safe: we own the array
 
-    // ---------- heavy lifting without the GIL ----------
-    py.allow_threads(|| {
-        let (data, weights, period, first, inv_n, chosen) =
-            alma_prepare(&alma_in, Kernel::Auto)?;
-        // initialise prefix with NaNs once
-        slice_out[..first + period - 1].fill(f64::NAN);
-        alma_compute_into(data, &weights, period, first, inv_n,
-                          chosen, slice_out);
-        Ok::<_, AlmaError>(())
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), AlmaError> {
+        let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, Kernel::Auto)?;
+        // prefix initialise exactly once
+        slice_out[..first + per - 1].fill(f64::NAN);
+        alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
+        Ok(())
+    }).map_err(|e| PyValueError::new_err(e.to_string()))?;   // unify error type
 
     Ok(out_arr)
 }
-
 
 #[cfg(feature = "python")]
 #[pyclass(name = "AlmaStream")]
@@ -1826,7 +1820,6 @@ fn alma_batch<'py>(
     Ok(dict.into())
 }
 
-
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(py: Python<'_>, m: &PyModule) -> PyResult<()> {
@@ -1836,28 +1829,19 @@ fn ta_indicators(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     Ok(())
 }
 
-
-
-
-
-
-
-
-
-
-
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
-    let params = AlmaParams {
-        period: Some(period),
-        offset: Some(offset),
-        sigma: Some(sigma),
-    };
-    let input = AlmaInput::from_slice(data, params);
+pub fn alma_js(
+    data: &[f64],
+    period: usize,
+    offset: f64,
+    sigma:  f64,
+) -> Result<Vec<f64>, JsValue> {
 
-    let AlmaOutput { values } = alma_with_kernel(&input, Default::default())
-        .expect("ALMA computation failed");
+    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+    let input  = AlmaInput::from_slice(data, params);
 
-    values
+    alma_with_kernel(&input, Kernel::Auto)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }

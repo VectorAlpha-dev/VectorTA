@@ -386,7 +386,7 @@ fn bench_one<F, In>(
 
     group.measurement_time(Duration::from_millis(900));
     group.warm_up_time(Duration::from_millis(150));
-    group.sample_size(100);
+    group.sample_size(10);
 }
 
 macro_rules! bench_scalars {
