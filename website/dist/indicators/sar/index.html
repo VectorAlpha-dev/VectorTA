@@ -1,0 +1,455 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="UTF-8"><meta name="description" content="Stop and reverse trend following system"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>Parabolic SAR - Rust-Backtester</title><link rel="stylesheet" href="/_astro/index.WWohv8kt.css">
+<link rel="stylesheet" href="/_astro/_slug_.B-RBQ8h2.css"></head> <body>  <div class="indicator-page" data-astro-cid-vydt5orr> <div class="container" data-astro-cid-vydt5orr> <div class="indicator-header" data-astro-cid-vydt5orr> <h1 data-astro-cid-vydt5orr>Parabolic SAR</h1> <p class="indicator-category" data-astro-cid-vydt5orr>Category: trend</p> <p class="indicator-description" data-astro-cid-vydt5orr>Stop and reverse trend following system</p> </div> <div class="content-grid" data-astro-cid-vydt5orr> <section class="description-section" data-astro-cid-vydt5orr> <h2 data-astro-cid-vydt5orr>Description</h2> <div class="description-content" data-astro-cid-vydt5orr>The Parabolic SAR (Stop and Reverse), developed by J. Welles Wilder Jr., is a trend-following indicator that provides potential entry and exit points. The SAR appears as dots placed above or below price bars, with the position indicating the current trend direction. When price crosses the SAR, it signals a potential trend reversal and provides new stop-loss levels.</div> </section> <section class="parameters-section" data-astro-cid-vydt5orr> <h2 data-astro-cid-vydt5orr>Parameters</h2> <div class="parameters-list" data-astro-cid-vydt5orr> <div class="parameter-item" data-astro-cid-vydt5orr> <strong data-astro-cid-vydt5orr>start</strong> (number)
+<span class="default-value" data-astro-cid-vydt5orr>Default: 0.02</span> <p data-astro-cid-vydt5orr>Starting acceleration</p> </div><div class="parameter-item" data-astro-cid-vydt5orr> <strong data-astro-cid-vydt5orr>increment</strong> (number)
+<span class="default-value" data-astro-cid-vydt5orr>Default: 0.02</span> <p data-astro-cid-vydt5orr>Acceleration increment</p> </div><div class="parameter-item" data-astro-cid-vydt5orr> <strong data-astro-cid-vydt5orr>maximum</strong> (number)
+<span class="default-value" data-astro-cid-vydt5orr>Default: 0.2</span> <p data-astro-cid-vydt5orr>Maximum acceleration</p> </div> </div> </section> <section class="usage-section" data-astro-cid-vydt5orr> <h2 data-astro-cid-vydt5orr>Usage Example</h2> <div class="code-block" data-astro-cid-vydt5orr> <pre data-astro-cid-vydt5orr><code data-astro-cid-vydt5orr># Import the Python bindings
+import rust_backtester as rb
+import numpy as np
+
+def calculate_sar_example():
+    &quot;&quot;&quot;
+    Example usage of SAR indicator using Python bindings.
+    
+    The Rust-Backtester library provides high-performance implementations
+    of technical analysis indicators with Python bindings for easy integration.
+    &quot;&quot;&quot;
+    
+    # Prepare your market data
+    # # Note: Check documentation for specific parameter requirements
+    prices = np.array([/* your price data */])
+    
+    # Calculate SAR with appropriate parameters
+    result = rb.calculate_sar(prices, **parameters)
+    
+    print(&quot;SAR Values:&quot;, result)
+    return result
+
+# Installation
+# pip install rust-backtester
+
+# Example usage
+if __name__ == &quot;__main__&quot;:
+    sar_result = calculate_sar_example()
+    
+    # Optional: Use with pandas for easier data handling
+    import pandas as pd
+    
+    df = pd.DataFrame({
+        &#39;price&#39;: prices,
+        &#39;sar&#39;: sar_result
+    })
+    print(df.head())</code></pre> </div> </section> <section class="chart-section" data-astro-cid-vydt5orr> <h2 data-astro-cid-vydt5orr>Interactive Chart</h2> <div class="trading-chart-container" data-astro-cid-ufj64f2c> <div class="chart-header" data-astro-cid-ufj64f2c> <div class="chart-title" data-astro-cid-ufj64f2c> <h3 data-astro-cid-ufj64f2c>SAR Analysis</h3> <div class="chart-status" data-astro-cid-ufj64f2c> <span class="status-indicator" id="status-indicator" data-astro-cid-ufj64f2c>●</span> <span class="status-text" id="status-text" data-astro-cid-ufj64f2c>Loading...</span> </div> </div> <div class="chart-controls" data-astro-cid-ufj64f2c> <div class="control-group" data-astro-cid-ufj64f2c> <label for="param-start" data-astro-cid-ufj64f2c>start:</label> <input type="number" id="param-start" data-param-name="start" value="0.02" min="1" max="10" step="0.01" class="param-input" data-astro-cid-ufj64f2c> </div><div class="control-group" data-astro-cid-ufj64f2c> <label for="param-increment" data-astro-cid-ufj64f2c>increment:</label> <input type="number" id="param-increment" data-param-name="increment" value="0.02" min="1" max="10" step="0.01" class="param-input" data-astro-cid-ufj64f2c> </div><div class="control-group" data-astro-cid-ufj64f2c> <label for="param-maximum" data-astro-cid-ufj64f2c>maximum:</label> <input type="number" id="param-maximum" data-param-name="maximum" value="0.2" min="1" max="10" step="0.01" class="param-input" data-astro-cid-ufj64f2c> </div> <button id="update-chart-btn" class="btn btn-primary" data-astro-cid-ufj64f2c> <span class="btn-text" data-astro-cid-ufj64f2c>Update Chart</span> <span class="btn-loading" style="display: none;" data-astro-cid-ufj64f2c> <svg class="spinner" width="16" height="16" viewBox="0 0 24 24" data-astro-cid-ufj64f2c> <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="32" stroke-dashoffset="32" data-astro-cid-ufj64f2c> <animate attributeName="stroke-dashoffset" values="32;0" dur="1s" repeatCount="indefinite" data-astro-cid-ufj64f2c></animate> </circle> </svg> </span> </button> </div> </div> <div class="chart-wrapper" data-astro-cid-ufj64f2c> <div id="main-chart" class="main-chart" data-astro-cid-ufj64f2c></div> <div id="indicator-chart" class="indicator-chart" data-astro-cid-ufj64f2c></div> </div> <div class="chart-footer" data-astro-cid-ufj64f2c> <div class="chart-legend" id="chart-legend" data-astro-cid-ufj64f2c></div> <div class="chart-info" data-astro-cid-ufj64f2c> <span class="data-points" id="data-points" data-astro-cid-ufj64f2c>Data points: 0</span> <span class="last-update" id="last-update" data-astro-cid-ufj64f2c>Last update: Never</span> </div> </div> </div> <script>(function(){const indicatorId = "sar";
+
+	import { createChart, ColorType, LineStyle, CrosshairMode } from 'lightweight-charts';
+	import { parseCsvData, convertToCandlestickData, convertToVolumeData, getIndicatorData } from '../chartData.ts';
+	import { loadWasmModule, extractPriceArrays } from '../wasm.ts';
+
+	class TradingChartManager {
+		constructor(indicatorId) {
+			this.indicatorId = indicatorId;
+			this.mainChart = null;
+			this.indicatorChart = null;
+			this.candlestickSeries = null;
+			this.volumeSeries = null;
+			this.indicatorSeries = [];
+			this.rawData = [];
+			this.wasmModule = null;
+			this.isLoading = false;
+			
+			this.init();
+		}
+
+		async init() {
+			try {
+				this.updateStatus('loading', 'Initializing charts...');
+				await this.setupCharts();
+				await this.loadData();
+				await this.loadWasm();
+				this.setupEventListeners();
+				this.updateStatus('success', 'Charts ready');
+			} catch (error) {
+				console.error('Chart initialization failed:', error);
+				this.updateStatus('error', 'Failed to initialize charts');
+			}
+		}
+
+		setupCharts() {
+			const mainChartElement = document.getElementById('main-chart');
+			const indicatorChartElement = document.getElementById('indicator-chart');
+
+			// Main chart configuration
+			this.mainChart = createChart(mainChartElement, {
+				width: mainChartElement.clientWidth,
+				height: 400,
+				layout: {
+					backgroundColor: '#ffffff',
+					textColor: '#333333',
+					fontSize: 12,
+					fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+				},
+				grid: {
+					vertLines: { color: '#f0f0f0' },
+					horzLines: { color: '#f0f0f0' }
+				},
+				crosshair: {
+					mode: CrosshairMode.Normal,
+					vertLine: { color: '#758696', width: 1, style: LineStyle.Dashed },
+					horzLine: { color: '#758696', width: 1, style: LineStyle.Dashed }
+				},
+				rightPriceScale: {
+					borderColor: '#d6dcde',
+					scaleMargins: { top: 0.1, bottom: 0.1 }
+				},
+				timeScale: {
+					borderColor: '#d6dcde',
+					timeVisible: true,
+					secondsVisible: false
+				}
+			});
+
+			// Indicator chart configuration
+			this.indicatorChart = createChart(indicatorChartElement, {
+				width: indicatorChartElement.clientWidth,
+				height: 200,
+				layout: {
+					backgroundColor: '#ffffff',
+					textColor: '#333333',
+					fontSize: 12,
+					fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+				},
+				grid: {
+					vertLines: { color: '#f0f0f0' },
+					horzLines: { color: '#f0f0f0' }
+				},
+				crosshair: {
+					mode: CrosshairMode.Normal,
+					vertLine: { color: '#758696', width: 1, style: LineStyle.Dashed },
+					horzLine: { color: '#758696', width: 1, style: LineStyle.Dashed }
+				},
+				rightPriceScale: {
+					borderColor: '#d6dcde',
+					scaleMargins: { top: 0.15, bottom: 0.15 }
+				},
+				timeScale: {
+					borderColor: '#d6dcde',
+					timeVisible: true,
+					secondsVisible: false
+				}
+			});
+
+			// Handle resize
+			window.addEventListener('resize', () => this.handleResize());
+		}
+
+		async loadData() {
+			this.updateStatus('loading', 'Loading market data...');
+			try {
+				this.rawData = await parseCsvData();
+				const candlestickData = convertToCandlestickData(this.rawData);
+				const volumeData = convertToVolumeData(this.rawData);
+
+				// Add candlestick series
+				this.candlestickSeries = this.mainChart.addCandlestickSeries({
+					upColor: '#26a69a',
+					downColor: '#ef5350',
+					borderVisible: false,
+					wickUpColor: '#26a69a',
+					wickDownColor: '#ef5350'
+				});
+
+				// Add volume series
+				this.volumeSeries = this.mainChart.addHistogramSeries({
+					priceFormat: { type: 'volume' },
+					priceScaleId: 'volume',
+					scaleMargins: { top: 0.8, bottom: 0 }
+				});
+
+				// Set data
+				this.candlestickSeries.setData(candlestickData);
+				this.volumeSeries.setData(volumeData);
+
+				// Update data points counter
+				document.getElementById('data-points').textContent = `Data points: ${this.rawData.length}`;
+				
+				// Load initial indicator
+				await this.updateIndicator();
+			} catch (error) {
+				console.error('Data loading failed:', error);
+				this.updateStatus('error', 'Failed to load data');
+			}
+		}
+
+		async loadWasm() {
+			try {
+				this.updateStatus('loading', 'Loading WASM module...');
+				this.wasmModule = await loadWasmModule();
+				if (this.wasmModule) {
+					this.updateStatus('success', 'WASM module loaded');
+				} else {
+					this.updateStatus('warning', 'Using fallback calculations');
+				}
+			} catch (error) {
+				console.error('WASM loading failed:', error);
+				this.updateStatus('warning', 'Using fallback calculations');
+			}
+		}
+
+		async updateIndicator() {
+			if (this.isLoading || !this.rawData.length) return;
+
+			this.isLoading = true;
+			this.updateStatus('loading', 'Calculating indicator...');
+
+			try {
+				// Clear existing indicator series
+				this.indicatorSeries.forEach(series => {
+					this.indicatorChart.removeSeries(series.series);
+				});
+				this.indicatorSeries = [];
+
+				// Get parameters from inputs
+				const params = this.getParameterValues();
+
+				let indicatorData;
+				
+				// Use WASM if available, otherwise fallback to JavaScript
+				if (this.wasmModule && this.wasmModule[`calculate_${this.indicatorId}`]) {
+					indicatorData = await this.calculateWithWasm(params);
+				} else {
+					indicatorData = getIndicatorData(this.indicatorId, this.rawData);
+				}
+
+				// Add indicator series
+				this.addIndicatorSeries(indicatorData);
+
+				// Update legend
+				this.updateLegend(indicatorData);
+
+				// Update last update time
+				document.getElementById('last-update').textContent = 
+					`Last update: ${new Date().toLocaleTimeString()}`;
+
+				this.updateStatus('success', 'Indicator updated');
+			} catch (error) {
+				console.error('Indicator calculation failed:', error);
+				this.updateStatus('error', 'Calculation failed');
+			} finally {
+				this.isLoading = false;
+			}
+		}
+
+		async calculateWithWasm(params) {
+			const priceArrays = extractPriceArrays(this.rawData);
+			const wasmFunction = this.wasmModule[`calculate_${this.indicatorId}`];
+
+			let result;
+			
+			switch (this.indicatorId) {
+				case 'rsi':
+					result = wasmFunction(priceArrays.close, params.period || 14);
+					return [{
+						name: `RSI (${params.period || 14})`,
+						data: this.convertWasmResult(result),
+						color: '#9C27B0',
+						lineWidth: 2
+					}];
+
+				case 'sma':
+					result = wasmFunction(priceArrays.close, params.period || 20);
+					return [{
+						name: `SMA (${params.period || 20})`,
+						data: this.convertWasmResult(result),
+						color: '#2962FF',
+						lineWidth: 2
+					}];
+
+				case 'ema':
+					result = wasmFunction(priceArrays.close, params.period || 20);
+					return [{
+						name: `EMA (${params.period || 20})`,
+						data: this.convertWasmResult(result),
+						color: '#FF6D00',
+						lineWidth: 2
+					}];
+
+				case 'macd':
+					result = wasmFunction(
+						priceArrays.close, 
+						params.fast_period || 12, 
+						params.slow_period || 26, 
+						params.signal_period || 9
+					);
+					return [
+						{
+							name: 'MACD',
+							data: this.convertWasmResult(result.macd),
+							color: '#00E676',
+							lineWidth: 2
+						},
+						{
+							name: 'Signal',
+							data: this.convertWasmResult(result.signal),
+							color: '#FF1744',
+							lineWidth: 2
+						}
+					];
+
+				case 'bollinger_bands':
+					result = wasmFunction(
+						priceArrays.close, 
+						params.period || 20, 
+						params.std_dev || 2
+					);
+					return [
+						{
+							name: 'BB Upper',
+							data: this.convertWasmResult(result.upper),
+							color: '#FF5722',
+							lineWidth: 1
+						},
+						{
+							name: 'BB Middle',
+							data: this.convertWasmResult(result.middle),
+							color: '#607D8B',
+							lineWidth: 2
+						},
+						{
+							name: 'BB Lower',
+							data: this.convertWasmResult(result.lower),
+							color: '#FF5722',
+							lineWidth: 1
+						}
+					];
+
+				case 'atr':
+					result = wasmFunction(
+						priceArrays.high, 
+						priceArrays.low, 
+						priceArrays.close, 
+						params.period || 14
+					);
+					return [{
+						name: `ATR (${params.period || 14})`,
+						data: this.convertWasmResult(result),
+						color: '#795548',
+						lineWidth: 2
+					}];
+
+				default:
+					throw new Error(`WASM function not implemented for ${this.indicatorId}`);
+			}
+		}
+
+		convertWasmResult(wasmArray) {
+			const result = [];
+			for (let i = 0; i < wasmArray.length; i++) {
+				if (wasmArray[i] !== 0) { // Skip zero values (usually initial periods)
+					result.push({
+						time: (this.rawData[i].timestamp / 1000),
+						value: wasmArray[i]
+					});
+				}
+			}
+			return result;
+		}
+
+		addIndicatorSeries(indicatorData) {
+			indicatorData.forEach(indicator => {
+				const seriesOptions = {
+					color: indicator.color,
+					lineWidth: indicator.lineWidth || 2,
+					lineStyle: indicator.lineStyle || LineStyle.Solid,
+					priceScaleId: indicator.priceScaleId || 'right'
+				};
+
+				// Determine which chart to use
+				const chart = this.shouldUseMainChart(this.indicatorId) ? this.mainChart : this.indicatorChart;
+				const series = chart.addLineSeries(seriesOptions);
+				series.setData(indicator.data);
+
+				this.indicatorSeries.push({
+					series,
+					name: indicator.name,
+					color: indicator.color
+				});
+			});
+		}
+
+		shouldUseMainChart(indicatorId) {
+			// These indicators should be overlaid on the main price chart
+			const overlayIndicators = ['sma', 'ema', 'wma', 'bollinger_bands', 'keltner', 'donchian'];
+			return overlayIndicators.includes(indicatorId);
+		}
+
+		getParameterValues() {
+			const params = {};
+			const inputs = document.querySelectorAll('.param-input');
+			inputs.forEach(input => {
+				const paramName = input.dataset.paramName;
+				params[paramName] = parseFloat(input.value) || input.value;
+			});
+			return params;
+		}
+
+		setupEventListeners() {
+			document.getElementById('update-chart-btn').addEventListener('click', () => {
+				this.updateIndicator();
+			});
+
+			// Auto-update on parameter change (debounced)
+			let updateTimeout;
+			document.querySelectorAll('.param-input').forEach(input => {
+				input.addEventListener('input', () => {
+					clearTimeout(updateTimeout);
+					updateTimeout = setTimeout(() => this.updateIndicator(), 500);
+				});
+			});
+		}
+
+		updateStatus(type, message) {
+			const indicator = document.getElementById('status-indicator');
+			const text = document.getElementById('status-text');
+			
+			indicator.className = `status-indicator ${type}`;
+			text.textContent = message;
+		}
+
+		updateLegend(indicatorData) {
+			const legend = document.getElementById('chart-legend');
+			legend.innerHTML = '';
+			
+			indicatorData.forEach(indicator => {
+				const legendItem = document.createElement('span');
+				legendItem.className = 'legend-item';
+				legendItem.innerHTML = `
+					<span class="legend-color" style="background-color: ${indicator.color}"></span>
+					<span class="legend-name">${indicator.name}</span>
+				`;
+				legend.appendChild(legendItem);
+			});
+		}
+
+		handleResize() {
+			if (this.mainChart && this.indicatorChart) {
+				const mainChartElement = document.getElementById('main-chart');
+				const indicatorChartElement = document.getElementById('indicator-chart');
+				
+				this.mainChart.applyOptions({ 
+					width: mainChartElement.clientWidth 
+				});
+				this.indicatorChart.applyOptions({ 
+					width: indicatorChartElement.clientWidth 
+				});
+			}
+		}
+	}
+
+	// Initialize chart when DOM is ready
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', () => {
+			new TradingChartManager(indicatorId);
+		});
+	} else {
+		new TradingChartManager(indicatorId);
+	}
+})();</script>  </section> </div> </div> </div>  </body></html> 

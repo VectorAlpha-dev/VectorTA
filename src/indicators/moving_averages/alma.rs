@@ -1366,6 +1366,7 @@ mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use proptest::prelude::*;
 
     fn check_alma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1617,7 +1618,38 @@ mod tests {
         }
         Ok(())
     }
+    fn check_alma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
 
+        let strat = (
+            proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                                    30..200),
+            3usize..30,
+        );
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = AlmaParams { period: Some(period), offset: None, sigma: None };
+                let input  = AlmaInput::from_slice(&data, params);
+                let AlmaOutput { values: out } = alma_with_kernel(&input, kernel).unwrap();
+
+                for i in (period - 1)..data.len() {
+                    let window = &data[i + 1 - period ..= i];
+                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let y  = out[i];
+
+                    prop_assert!(
+                        y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                        "idx {i}: {y} not in [{lo}, {hi}]",
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        Ok(())
+    }
     macro_rules! generate_all_alma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1651,7 +1683,8 @@ mod tests {
         check_alma_very_small_dataset,
         check_alma_reinput,
         check_alma_nan_handling,
-        check_alma_streaming
+        check_alma_streaming,
+        check_alma_property
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

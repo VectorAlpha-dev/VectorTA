@@ -4,7 +4,6 @@ import type {
 	CandlestickData, 
 	LineData, 
 	HistogramData,
-	Time,
 	UTCTimestamp 
 } from 'lightweight-charts';
 
