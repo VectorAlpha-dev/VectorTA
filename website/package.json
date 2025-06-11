@@ -1,5 +1,5 @@
 {
-  "name": "irregular-ice",
+  "name": "website",
   "type": "module",
   "version": "0.0.1",
   "scripts": {
@@ -9,6 +9,11 @@
     "astro": "astro"
   },
   "dependencies": {
-    "astro": "^5.9.2"
+    "@astrojs/check": "^0.9.4",
+    "astro": "^5.9.2",
+    "lightweight-charts": "^5.0.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
   }
 }

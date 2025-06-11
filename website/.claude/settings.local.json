@@ -12,7 +12,12 @@
       "Bash(rmdir:*)",
       "Bash(cp:*)",
       "Bash(rm:*)",
-      "Bash(true)"
+      "Bash(true)",
+      "Bash(ls:*)",
+      "Bash(npm install)",
+      "Bash(timeout 10 npm run dev)",
+      "Bash(npx astro:*)",
+      "Bash(npm install:*)"
     ],
     "deny": []
   }

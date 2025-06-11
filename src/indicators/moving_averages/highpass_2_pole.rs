@@ -18,7 +18,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -220,28 +220,27 @@ pub fn highpass_2_pole_with_kernel(
         other => other,
     };
 
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
+
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                let mut out = vec![f64::NAN; len];
                 highpass_2_pole_scalar(data, period, k, first, &mut out);
-                Ok(HighPass2Output { values: out })
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                let mut out = vec![f64::NAN; len];
                 highpass_2_pole_avx2(data, period, k, first, &mut out);
-                Ok(HighPass2Output { values: out })
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                let mut out = vec![f64::NAN; len];
                 highpass_2_pole_avx512(data, period, k, first, &mut out);
-                Ok(HighPass2Output { values: out })
             }
             _ => unreachable!(),
         }
     }
+
+    Ok(HighPass2Output { values: out })
 }
 
 #[inline(always)]
@@ -536,36 +535,52 @@ fn highpass_2_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ---------- per-row warm-up lengths ----------
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+
+    // ---------- 1. allocate rows×cols buffer & seed NaN prefixes ----------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 2. worker that fills one row ----------
+    let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let k = combos[row].k.unwrap();
+        let k      = combos[row].k.unwrap();
+
+        // Re-interpret this row as &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => highpass_2_pole_row_avx512(data, first, period, k, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => highpass_2_pole_row_avx2(data, first, period, k, out_row),
-            _ => highpass_2_pole_row_scalar(data, first, period, k, out_row),
+            Kernel::Avx2   => highpass_2_pole_row_avx2  (data, first, period, k, out_row),
+            _              => highpass_2_pole_row_scalar(data, first, period, k, out_row),
         }
     };
 
+    // ---------- 3. run every row directly into `raw` ----------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(HighPass2BatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // ---------- 4. transmute to a Vec<f64> now that it is fully initialised ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(HighPass2BatchOutput { values, combos, rows, cols })
+
 }
 
 #[inline(always)]

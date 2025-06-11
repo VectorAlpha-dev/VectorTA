@@ -1,0 +1,690 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { indicatorCategories } from '../lib/astro-stores';
+
+// Count total indicators
+const totalIndicators = Object.values(indicatorCategories).reduce((total: number, indicators: any) => total + indicators.length, 0);
+---
+
+<Layout title="Rust-Backtester - Technical Analysis Library">
+	<div class="page-wrapper">
+		<header class="hero-section">
+			<div class="hero-content">
+				<div class="hero-badge">
+					<span class="badge-text">Professional Grade</span>
+				</div>
+				<h1 class="hero-title">
+					<span class="title-primary">Rust-Backtester</span>
+					<span class="title-secondary">Technical Analysis Library</span>
+				</h1>
+				<p class="hero-subtitle">High-performance technical indicators implemented in Rust with WASM bindings for modern financial analysis</p>
+				<div class="hero-stats">
+					<div class="stat-item">
+						<span class="stat-number">{totalIndicators}+</span>
+						<span class="stat-label">Indicators</span>
+					</div>
+					<div class="stat-item">
+						<span class="stat-number">100%</span>
+						<span class="stat-label">Rust Powered</span>
+					</div>
+					<div class="stat-item">
+						<span class="stat-number">⚡</span>
+						<span class="stat-label">WASM Ready</span>
+					</div>
+				</div>
+				<div class="hero-actions">
+					<a href="/indicators/rsi" class="btn btn-primary">
+						<span>Explore RSI</span>
+						<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M5 12h14M12 5l7 7-7 7"/>
+						</svg>
+					</a>
+					<a href="/indicators/macd" class="btn btn-secondary">
+						<span>View MACD</span>
+					</a>
+				</div>
+			</div>
+			<div class="hero-visual">
+				<div class="chart-preview">
+					<div class="chart-lines">
+						<div class="chart-line" style="animation-delay: 0s;"></div>
+						<div class="chart-line" style="animation-delay: 0.5s;"></div>
+						<div class="chart-line" style="animation-delay: 1s;"></div>
+					</div>
+				</div>
+			</div>
+		</header>
+
+		<section class="features-section">
+			<div class="container">
+				<div class="section-header">
+					<h2>Why Choose Rust-Backtester?</h2>
+					<p>Built for performance, designed for professionals</p>
+				</div>
+				<div class="features-grid">
+					<div class="feature-card">
+						<div class="feature-icon">
+							<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M13 2L3 14H12L11 22L21 10H12L13 2Z"/>
+							</svg>
+						</div>
+						<h3>Blazing Fast Performance</h3>
+						<p>Built in Rust for maximum performance and memory safety. Optimized algorithms deliver calculations 10x faster than traditional implementations.</p>
+						<div class="feature-metrics">
+							<span class="metric">10x Faster</span>
+							<span class="metric">Zero-Copy</span>
+						</div>
+					</div>
+					
+					<div class="feature-card">
+						<div class="feature-icon">
+							<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M9 19C9 20.1046 7.65685 21 6 21C4.34315 21 3 20.1046 3 19C3 17.8954 4.34315 17 6 17C7.65685 17 9 17.8954 9 19Z"/>
+								<path d="M21 8C21 9.10457 19.6569 10 18 10C16.3431 10 15 9.10457 15 8C15 6.89543 16.3431 6 18 6C19.6569 6 21 6.89543 21 8Z"/>
+								<path d="M15 14L9 14"/>
+								<path d="M8 14L21 3"/>
+							</svg>
+						</div>
+						<h3>Comprehensive Indicator Suite</h3>
+						<p>Over {totalIndicators} professional-grade technical indicators covering momentum, trend, volatility, and volume analysis with mathematical precision.</p>
+						<div class="feature-metrics">
+							<span class="metric">{totalIndicators}+ Indicators</span>
+							<span class="metric">Battle-Tested</span>
+						</div>
+					</div>
+					
+					<div class="feature-card">
+						<div class="feature-icon">
+							<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M21.54 15.15L20.24 15.89L18.94 16.63C18.1816 17.0302 17.3113 17.1793 16.46 17.06L12 16.24L7.54 17.06C6.6887 17.1793 5.8184 17.0302 5.06 16.63L3.76 15.89L2.46 15.15"/>
+								<path d="M21.54 8.85L20.24 9.59L18.94 10.33C18.1816 10.7302 17.3113 10.8793 16.46 10.76L12 9.94L7.54 10.76C6.6887 10.8793 5.8184 10.7302 5.06 10.33L3.76 9.59L2.46 8.85"/>
+								<path d="M21.54 2.55L20.24 3.29L18.94 4.03C18.1816 4.43024 17.3113 4.57929 16.46 4.46L12 3.64L7.54 4.46C6.6887 4.57929 5.8184 4.43024 5.06 4.03L3.76 3.29L2.46 2.55"/>
+							</svg>
+						</div>
+						<h3>WebAssembly Ready</h3>
+						<p>Seamless integration in web applications and JavaScript environments with near-native performance through WebAssembly bindings.</p>
+						<div class="feature-metrics">
+							<span class="metric">WASM</span>
+							<span class="metric">Universal</span>
+						</div>
+					</div>
+					
+					<div class="feature-card">
+						<div class="feature-icon">
+							<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M18 20V10M12 20V4M6 20V14"/>
+							</svg>
+						</div>
+						<h3>Interactive Visualizations</h3>
+						<p>Professional TradingView charts with real-time calculations, parameter adjustment, and comprehensive data analysis tools.</p>
+						<div class="feature-metrics">
+							<span class="metric">Real-time</span>
+							<span class="metric">Professional</span>
+						</div>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="quickstart-section">
+			<div class="container">
+				<div class="quickstart-content">
+					<div class="quickstart-text">
+						<h2>Get Started in Minutes</h2>
+						<p>Explore our comprehensive collection of technical indicators. Each indicator includes detailed documentation, parameter explanations, and interactive charts.</p>
+						<ul class="feature-list">
+							<li>
+								<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<path d="M20 6L9 17l-5-5"/>
+								</svg>
+								Mathematical definitions and trading applications
+							</li>
+							<li>
+								<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<path d="M20 6L9 17l-5-5"/>
+								</svg>
+								Configurable parameters with real-time updates
+							</li>
+							<li>
+								<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<path d="M20 6L9 17l-5-5"/>
+								</svg>
+								WASM integration code examples
+							</li>
+							<li>
+								<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<path d="M20 6L9 17l-5-5"/>
+								</svg>
+								Interactive charts with sample market data
+							</li>
+						</ul>
+					</div>
+					<div class="quickstart-demo">
+						<div class="demo-window">
+							<div class="demo-header">
+								<div class="demo-dots">
+									<span></span>
+									<span></span>
+									<span></span>
+								</div>
+								<span class="demo-title">RSI Calculator</span>
+							</div>
+							<div class="demo-content">
+								<div class="demo-code">
+									<span class="code-comment">// Calculate RSI with WASM</span>
+									<span class="code-keyword">import</span> <span class="code-string">rust_backtester</span> <span class="code-keyword">as</span> <span class="code-variable">rb</span>
+									<br><br>
+									<span class="code-variable">rsi_values</span> = <span class="code-variable">rb</span>.<span class="code-function">calculate_rsi</span>(
+									<br>&nbsp;&nbsp;<span class="code-variable">prices</span>, <span class="code-property">period</span>=<span class="code-number">14</span>
+									<br>)
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="categories-section">
+			<div class="container">
+				<div class="section-header">
+					<h2>Indicator Categories</h2>
+					<p>Professional-grade indicators organized by analysis type</p>
+				</div>
+				<div class="categories-grid">
+					{Object.entries(indicatorCategories).map(([categoryKey, indicators]) => (
+						<div class="category-card">
+							<div class="category-header">
+								<div class="category-icon">
+									{categoryKey === 'moving-averages' ? '📈' : 
+									 categoryKey === 'momentum' ? '⚡' :
+									 categoryKey === 'volatility' ? '📊' :
+									 categoryKey === 'volume' ? '📦' :
+									 categoryKey === 'trend' ? '🎯' : '📋'}
+								</div>
+								<h3>
+									{categoryKey === 'moving-averages' ? 'Moving Averages' : 
+									 categoryKey === 'momentum' ? 'Momentum Indicators' :
+									 categoryKey === 'volatility' ? 'Volatility Indicators' :
+									 categoryKey === 'volume' ? 'Volume Indicators' :
+									 categoryKey === 'trend' ? 'Trend Indicators' : categoryKey}
+								</h3>
+							</div>
+							<p class="category-description">
+								{categoryKey === 'moving-averages' ? 'Various moving average algorithms including SMA, EMA, and adaptive variants for trend smoothing and signal generation.' :
+								 categoryKey === 'momentum' ? 'Oscillators and momentum-based indicators for measuring trend strength, overbought/oversold conditions, and price velocity.' :
+								 categoryKey === 'volatility' ? 'Volatility measures including Bollinger Bands, ATR, and channel indicators for risk assessment and market conditions.' :
+								 categoryKey === 'volume' ? 'Volume-based analysis tools for understanding market participation, money flow, and institutional activity.' :
+								 categoryKey === 'trend' ? 'Directional indicators for identifying, confirming, and measuring the strength of market trends.' : 'Advanced analysis tools for comprehensive market evaluation.'}
+							</p>
+							<div class="category-footer">
+								<span class="indicator-count">{indicators.length} indicators</span>
+								<a href={`/indicators/${indicators[0]?.id || 'sma'}`} class="category-link">
+									Explore →
+								</a>
+							</div>
+						</div>
+					))}
+				</div>
+			</div>
+		</section>
+	</div>
+</Layout>
+
+<style>
+	.page-wrapper {
+		background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+		min-height: 100vh;
+	}
+
+	.hero-section {
+		padding: 4rem 2rem;
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4rem;
+		align-items: center;
+		max-width: 1200px;
+		margin: 0 auto;
+		min-height: 80vh;
+	}
+
+	.hero-content {
+		color: white;
+	}
+
+	.hero-badge {
+		display: inline-block;
+		background: rgba(255, 255, 255, 0.2);
+		padding: 0.5rem 1rem;
+		border-radius: 25px;
+		font-size: 0.9rem;
+		font-weight: 600;
+		margin-bottom: 2rem;
+		backdrop-filter: blur(10px);
+		border: 1px solid rgba(255, 255, 255, 0.3);
+	}
+
+	.hero-title {
+		font-size: 4rem;
+		font-weight: 800;
+		line-height: 1.1;
+		margin-bottom: 1.5rem;
+	}
+
+	.title-primary {
+		display: block;
+		color: white;
+	}
+
+	.title-secondary {
+		display: block;
+		color: rgba(255, 255, 255, 0.8);
+		font-size: 2.5rem;
+		font-weight: 600;
+	}
+
+	.hero-subtitle {
+		font-size: 1.3rem;
+		line-height: 1.6;
+		color: rgba(255, 255, 255, 0.9);
+		margin-bottom: 3rem;
+		max-width: 500px;
+	}
+
+	.hero-stats {
+		display: flex;
+		gap: 2rem;
+		margin-bottom: 3rem;
+	}
+
+	.stat-item {
+		text-align: center;
+	}
+
+	.stat-number {
+		display: block;
+		font-size: 2.5rem;
+		font-weight: 800;
+		color: white;
+	}
+
+	.stat-label {
+		display: block;
+		font-size: 0.9rem;
+		color: rgba(255, 255, 255, 0.8);
+		font-weight: 500;
+	}
+
+	.hero-actions {
+		display: flex;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.btn {
+		padding: 1rem 2rem;
+		border-radius: 12px;
+		text-decoration: none;
+		font-weight: 600;
+		transition: all 0.3s ease;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 1.1rem;
+	}
+
+	.btn-primary {
+		background: white;
+		color: #667eea;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+	}
+
+	.btn-primary:hover {
+		transform: translateY(-2px);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+	}
+
+	.btn-secondary {
+		background: rgba(255, 255, 255, 0.2);
+		color: white;
+		border: 2px solid rgba(255, 255, 255, 0.3);
+		backdrop-filter: blur(10px);
+	}
+
+	.btn-secondary:hover {
+		background: rgba(255, 255, 255, 0.3);
+		transform: translateY(-2px);
+	}
+
+	.hero-visual {
+		display: flex;
+		justify-content: center;
+		align-items: center;
+	}
+
+	.chart-preview {
+		width: 400px;
+		height: 300px;
+		background: rgba(255, 255, 255, 0.1);
+		border-radius: 20px;
+		padding: 2rem;
+		backdrop-filter: blur(20px);
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		position: relative;
+		overflow: hidden;
+	}
+
+	.chart-lines {
+		height: 100%;
+		display: flex;
+		align-items: end;
+		gap: 8px;
+	}
+
+	.chart-line {
+		flex: 1;
+		background: linear-gradient(to top, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.2));
+		border-radius: 4px 4px 0 0;
+		animation: chartPulse 2s ease-in-out infinite;
+	}
+
+	.chart-line:nth-child(1) { height: 60%; }
+	.chart-line:nth-child(2) { height: 80%; }
+	.chart-line:nth-child(3) { height: 45%; }
+
+	@keyframes chartPulse {
+		0%, 100% { opacity: 0.6; transform: scaleY(1); }
+		50% { opacity: 1; transform: scaleY(1.1); }
+	}
+
+	.features-section {
+		background: white;
+		padding: 6rem 2rem;
+	}
+
+	.container {
+		max-width: 1200px;
+		margin: 0 auto;
+	}
+
+	.section-header {
+		text-align: center;
+		margin-bottom: 4rem;
+	}
+
+	.section-header h2 {
+		font-size: 3rem;
+		font-weight: 700;
+		color: #2d3748;
+		margin-bottom: 1rem;
+	}
+
+	.section-header p {
+		font-size: 1.2rem;
+		color: #718096;
+	}
+
+	.features-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+		gap: 2rem;
+	}
+
+	.feature-card {
+		background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
+		padding: 2.5rem;
+		border-radius: 20px;
+		text-align: center;
+		transition: transform 0.3s ease, box-shadow 0.3s ease;
+		border: 1px solid rgba(0, 0, 0, 0.05);
+	}
+
+	.feature-card:hover {
+		transform: translateY(-8px);
+		box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+	}
+
+	.feature-icon {
+		background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+		color: white;
+		width: 80px;
+		height: 80px;
+		border-radius: 20px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		margin: 0 auto 1.5rem;
+	}
+
+	.feature-card h3 {
+		font-size: 1.5rem;
+		font-weight: 700;
+		color: #2d3748;
+		margin-bottom: 1rem;
+	}
+
+	.feature-card p {
+		color: #718096;
+		line-height: 1.6;
+		margin-bottom: 1.5rem;
+	}
+
+	.feature-metrics {
+		display: flex;
+		gap: 1rem;
+		justify-content: center;
+	}
+
+	.metric {
+		background: #667eea;
+		color: white;
+		padding: 0.4rem 0.8rem;
+		border-radius: 20px;
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+
+	.quickstart-section {
+		background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
+		padding: 6rem 2rem;
+	}
+
+	.quickstart-content {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4rem;
+		align-items: center;
+	}
+
+	.quickstart-text h2 {
+		font-size: 2.5rem;
+		font-weight: 700;
+		color: #2d3748;
+		margin-bottom: 1.5rem;
+	}
+
+	.quickstart-text p {
+		font-size: 1.2rem;
+		color: #718096;
+		line-height: 1.6;
+		margin-bottom: 2rem;
+	}
+
+	.feature-list {
+		list-style: none;
+		padding: 0;
+	}
+
+	.feature-list li {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		margin-bottom: 1rem;
+		color: #4a5568;
+		font-weight: 500;
+	}
+
+	.feature-list svg {
+		color: #667eea;
+	}
+
+	.demo-window {
+		background: #2d3748;
+		border-radius: 12px;
+		overflow: hidden;
+		box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+	}
+
+	.demo-header {
+		background: #4a5568;
+		padding: 1rem;
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+	}
+
+	.demo-dots {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.demo-dots span {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: #718096;
+	}
+
+	.demo-dots span:nth-child(1) { background: #ff5f56; }
+	.demo-dots span:nth-child(2) { background: #ffbd2e; }
+	.demo-dots span:nth-child(3) { background: #27ca3f; }
+
+	.demo-title {
+		color: #e2e8f0;
+		font-weight: 600;
+	}
+
+	.demo-content {
+		padding: 2rem;
+	}
+
+	.demo-code {
+		font-family: 'JetBrains Mono', 'Fira Code', monospace;
+		font-size: 1rem;
+		line-height: 1.6;
+		color: #e2e8f0;
+	}
+
+	.code-comment { color: #718096; }
+	.code-keyword { color: #9f7aea; }
+	.code-string { color: #68d391; }
+	.code-variable { color: #63b3ed; }
+	.code-function { color: #fbb6ce; }
+	.code-property { color: #fbd38d; }
+	.code-number { color: #fc8181; }
+
+	.categories-section {
+		background: white;
+		padding: 6rem 2rem;
+	}
+
+	.categories-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+		gap: 2rem;
+	}
+
+	.category-card {
+		background: linear-gradient(135deg, #ffffff 0%, #f7fafc 100%);
+		border: 2px solid #e2e8f0;
+		border-radius: 20px;
+		padding: 2rem;
+		transition: all 0.3s ease;
+	}
+
+	.category-card:hover {
+		border-color: #667eea;
+		transform: translateY(-4px);
+		box-shadow: 0 12px 24px rgba(102, 126, 234, 0.15);
+	}
+
+	.category-header {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+
+	.category-icon {
+		font-size: 2rem;
+	}
+
+	.category-card h3 {
+		font-size: 1.4rem;
+		font-weight: 700;
+		color: #2d3748;
+		margin: 0;
+	}
+
+	.category-description {
+		color: #718096;
+		line-height: 1.6;
+		margin-bottom: 1.5rem;
+	}
+
+	.category-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.indicator-count {
+		color: #667eea;
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+
+	.category-link {
+		color: #667eea;
+		text-decoration: none;
+		font-weight: 600;
+		transition: color 0.2s ease;
+	}
+
+	.category-link:hover {
+		color: #764ba2;
+	}
+
+	@media (max-width: 768px) {
+		.hero-section {
+			grid-template-columns: 1fr;
+			text-align: center;
+			padding: 2rem 1rem;
+		}
+
+		.hero-title {
+			font-size: 3rem;
+		}
+
+		.title-secondary {
+			font-size: 2rem;
+		}
+
+		.chart-preview {
+			width: 300px;
+			height: 200px;
+		}
+
+		.quickstart-content {
+			grid-template-columns: 1fr;
+		}
+
+		.categories-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.hero-stats {
+			justify-content: center;
+		}
+	}
+</style>
