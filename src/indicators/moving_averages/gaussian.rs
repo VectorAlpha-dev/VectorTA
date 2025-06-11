@@ -607,7 +607,7 @@ pub struct GaussianBatchRange {
 impl Default for GaussianBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 60, 1),
+            period: (14, 120, 1),
             poles: (1, 4, 1),
         }
     }
@@ -756,86 +756,162 @@ fn gaussian_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<GaussianBatchOutput, GaussianError> {
+    use rayon::prelude::*;
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(GaussianError::NoData);
     }
+
     let len  = data.len();
     let rows = combos.len();
     let cols = len;
 
-    // ---------------------------------------------------------------------------
-    // 1.  Determine warm-up prefix for every row
-    // ---------------------------------------------------------------------------
-    let first_valid = data.iter().position(|x| !x.is_nan())
+    // -----------------------------------------------------------------------
+    // 1.  Warm‑up lengths  (clamped)
+    // -----------------------------------------------------------------------
+    let first_valid = data
+        .iter()
+        .position(|x| !x.is_nan())
         .ok_or(GaussianError::NoData)?;
+
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first_valid + c.period.unwrap_or(14))
+        .map(|c| {
+            let w = first_valid + c.period.unwrap_or(14);
+            core::cmp::min(w, cols)          // ← clamp
+        })
         .collect();
 
-    // ---------------------------------------------------------------------------
-    // 2.  Allocate an un-initialised matrix and write the NaN prefixes
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 2.  Allocate & write NaN prefixes
+    // -----------------------------------------------------------------------
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // ---------------------------------------------------------------------------
-    // 3.  Closure that fills ONE row  (gets &mut [MaybeUninit<f64>])
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 3.  Row runner (one row per call)
+    // -----------------------------------------------------------------------
     let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
-        let prm     = &combos[row];
-        let out_row = core::slice::from_raw_parts_mut(
+        let prm      = &combos[row];
+        let out_row  = core::slice::from_raw_parts_mut(
             dst_mu.as_mut_ptr() as *mut f64,
             dst_mu.len(),
         );
         match kern {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
             Kernel::Avx512 => gaussian_row_avx512(data, prm, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
             Kernel::Avx2   => gaussian_row_avx2  (data, prm, out_row),
             _              => gaussian_row_scalar(data, prm, out_row),
         }
     };
 
-    // ---------------------------------------------------------------------------
-    // 4.  Run every row (parallel or serial) directly into `raw`
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 4.  Compute rows (parallel or serial)
+    // -----------------------------------------------------------------------
     if parallel {
         match kern {
+            // ==============================================================
+            // AVX‑512  (8‑row tiles)  – PARALLEL
+            // ==============================================================
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 if is_x86_feature_detected!("avx512f") => {
-                // Rayon over 8-row tiles keeps the work-chunks large
-                let chunks = raw.par_chunks_mut(cols * LANES_AVX512)
-                    .zip(combos.par_chunks(LANES_AVX512));
-                chunks.for_each(|(out_blk, prm_blk)| unsafe {
-                    gaussian_batch_tile_avx512(data, prm_blk, out_blk, cols)
-                });
+                let tiles = rows / LANES_AVX512;
+                // ---- full tiles in parallel --------------------------------
+                raw[..tiles * cols * LANES_AVX512]
+                    .par_chunks_mut(cols * LANES_AVX512)
+                    .zip(combos[..tiles * LANES_AVX512]
+                         .par_chunks(LANES_AVX512))
+                    .for_each(|(out_blk, prm_blk)| unsafe {
+                        gaussian_batch_tile_avx512(data, prm_blk, out_blk, cols);
+                    });
+
+                // ---- tail rows *serial*  (at most 7) -----------------------
+                for (i, slice) in raw[tiles * cols * LANES_AVX512..]
+                    .chunks_mut(cols)
+                    .enumerate()
+                {
+                    let row = tiles * LANES_AVX512 + i;
+                    do_row(row, slice);          // scalar/AVX2/AVX512 – compiler chooses
+                }
             }
+
+            // ==============================================================
+            // AVX‑2  (4‑row tiles)  – PARALLEL
+            // ==============================================================
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   if is_x86_feature_detected!("avx2")     => {
-            raw.par_chunks_mut(cols * LANES_AVX2)
-               .zip(combos.par_chunks(LANES_AVX2))
-               .for_each(|(out_blk, prm_blk)| unsafe {
-                   gaussian_batch_tile_avx2(data, prm_blk, out_blk, cols)
-               });
+            Kernel::Avx2 if is_x86_feature_detected!("avx2") => {
+                let tiles = rows / LANES_AVX2;
+                raw[..tiles * cols * LANES_AVX2]
+                    .par_chunks_mut(cols * LANES_AVX2)
+                    .zip(combos[..tiles * LANES_AVX2]
+                         .par_chunks(LANES_AVX2))
+                    .for_each(|(out_blk, prm_blk)| unsafe {
+                        gaussian_batch_tile_avx2(data, prm_blk, out_blk, cols);
+                    });
+
+                for (i, slice) in raw[tiles * cols * LANES_AVX2..]
+                    .chunks_mut(cols)
+                    .enumerate()
+                {
+                    let row = tiles * LANES_AVX2 + i;
+                    do_row(row, slice);
+                }
             }
+
+            // ===== Scalar fallback ==========================================
             _ => {
                 raw.par_chunks_mut(cols)
-                      .enumerate()
-                      .for_each(|(row, slice)| do_row(row, slice));
+                    .enumerate()
+                    .for_each(|(row, slice)| do_row(row, slice));
             }
         }
     } else {
         match kern {
-          #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 if is_x86_feature_detected!("avx512f") => unsafe {
-                gaussian_batch_tile_avx512(data, &combos, &mut raw, cols);
-            },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 if is_x86_feature_detected!("avx2") => unsafe {
-                gaussian_batch_tile_avx2(data, &combos, &mut raw, cols);
-          },
+            // ===== AVX‑512 serial ===========================================
+            #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+            Kernel::Avx512 if is_x86_feature_detected!("avx512f") => {
+                let tiles = rows / LANES_AVX512;
+                unsafe {
+                    gaussian_batch_tile_avx512(
+                        data,
+                        &combos[..tiles * LANES_AVX512],
+                        &mut raw[..tiles * cols * LANES_AVX512],
+                        cols,
+                    );
+                }
+                for (i, slice) in raw[tiles * cols * LANES_AVX512..]
+                    .chunks_mut(cols)
+                    .enumerate()
+                {
+                    let row = tiles * LANES_AVX512 + i;
+                    do_row(row, slice);
+                }
+            }
+
+            // ===== AVX‑2 serial =============================================
+            #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+            Kernel::Avx2 if is_x86_feature_detected!("avx2") => {
+                let tiles = rows / LANES_AVX2;
+                unsafe {
+                    gaussian_batch_tile_avx2(
+                        data,
+                        &combos[..tiles * LANES_AVX2],
+                        &mut raw[..tiles * cols * LANES_AVX2],
+                        cols,
+                    );
+                }
+                for (i, slice) in raw[tiles * cols * LANES_AVX2..]
+                    .chunks_mut(cols)
+                    .enumerate()
+                {
+                    let row = tiles * LANES_AVX2 + i;
+                    do_row(row, slice);
+                }
+            }
+
+            // ===== Scalar serial ============================================
             _ => {
                 for (row, slice) in raw.chunks_mut(cols).enumerate() {
                     do_row(row, slice);
@@ -844,17 +920,13 @@ fn gaussian_batch_inner(
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // 5.  All elements are now initialised – transmute to Vec<f64>
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 5.  All cells are now initialised – transmute is sound
+    // -----------------------------------------------------------------------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-    Ok(GaussianBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(GaussianBatchOutput { values, combos, rows, cols })
 }
+
 
 #[inline(always)]
 pub unsafe fn gaussian_row_scalar(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {

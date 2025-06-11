@@ -94,20 +94,28 @@ macro_rules! skip_if_unsupported {
         }
     }};
 }
-
 #[inline(always)]
 pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
-    use std::{mem::MaybeUninit, ptr};
-    let mut v: Vec<MaybeUninit<f64>> = Vec::with_capacity(len);
-    unsafe { v.set_len(len); }
-    let prefix_bytes = (warm * std::mem::size_of::<f64>()) as isize;
-    let dst = v.as_mut_ptr().cast::<u8>();
-    unsafe { ptr::write_bytes(dst, 0xFF, prefix_bytes as usize); }
-    let p   = v.as_mut_ptr() as *mut f64;
-    let cap = v.capacity();
-    std::mem::forget(v);
-    unsafe { Vec::from_raw_parts(p, len, cap) }
+    use std::mem::{self, MaybeUninit};
+
+    let warm = warm.min(len);
+
+    // 1. allocate uninitialised
+    let mut buf: Vec<MaybeUninit<f64>> = Vec::with_capacity(len);
+    unsafe { buf.set_len(len); }
+
+    // 2. fill the prefix with a canonical quiet NaN
+    for slot in &mut buf[..warm] {
+        slot.write(f64::NAN);
+    }
+
+    // 3. turn it into Vec<f64>
+    let ptr = buf.as_mut_ptr() as *mut f64;
+    let cap = buf.capacity();
+    mem::forget(buf);                    // no double-free
+    unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
+
 
 
 #[inline]
@@ -116,39 +124,36 @@ pub fn init_matrix_prefixes(
     cols: usize,
     warm_prefixes: &[usize],
 ) {
-    assert!(
-        cols != 0 && buf.len() % cols == 0,
-        "`buf` length must be a multiple of `cols`"
-    );
+    assert!(cols != 0 && buf.len() % cols == 0,
+            "`buf` length must be a multiple of `cols`");
     let rows = buf.len() / cols;
-    assert_eq!(
-        rows,
-        warm_prefixes.len(),
-        "`warm_prefixes` length must equal number of rows"
-    );
+    assert_eq!(rows, warm_prefixes.len(),
+        "`warm_prefixes` length must equal number of rows");
 
-    for (row_idx, &warm) in warm_prefixes.iter().enumerate() {
-        debug_assert!(
-            warm <= cols,
-            "prefix length ({warm}) exceeds number of columns ({cols})"
-        );
-
-        let start = row_idx * cols;
-        for cell in &mut buf[start..start + warm] {
-            cell.write(f64::NAN);
-        }
-    }
+    buf.chunks_exact_mut(cols)
+        .zip(warm_prefixes)
+        .for_each(|(row, &warm)| {
+            assert!(warm <= cols, "warm prefix exceeds row width");
+            for cell in &mut row[..warm] {
+                cell.write(f64::from_bits(0x7ff8_0000_0000_0000));
+            }
+        });
 }
 
-/// ---------------------------------------------------------------------------
-/// 3.  Allocate `rows × cols` uninitialised elements with overflow checking.
-/// ---------------------------------------------------------------------------
+/// Allocate `rows × cols` uninitialised `f64` without UB or silent overflow.
 #[inline]
-pub fn make_uninit_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<f64>> {
-    let total = rows
-        .checked_mul(cols)
+pub fn make_uninit_matrix(rows: usize, cols: usize)
+    -> Vec<MaybeUninit<f64>>
+{
+    let total = rows.checked_mul(cols)
         .expect("rows * cols overflowed usize");
-    let mut v = Vec::<MaybeUninit<f64>>::with_capacity(total);
-    unsafe { v.set_len(total) };
+
+    // try_reserve_exact lets us bail out gracefully instead of aborting/BSOD
+    let mut v: Vec<MaybeUninit<f64>> = Vec::new();
+    v.try_reserve_exact(total)
+        .expect("OOM in make_uninit_matrix");
+
+    // SAFETY: length is set to capacity, which is fully allocated.
+    unsafe { v.set_len(total); }
     v
 }

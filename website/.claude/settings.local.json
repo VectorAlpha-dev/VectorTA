@@ -6,7 +6,13 @@
       "Bash(npm run dev:*)",
       "Bash(npm run build:*)",
       "Bash(grep:*)",
-      "Bash(npm run preview:*)"
+      "Bash(npm run preview:*)",
+      "Bash(npm create:*)",
+      "Bash(mv:*)",
+      "Bash(rmdir:*)",
+      "Bash(cp:*)",
+      "Bash(rm:*)",
+      "Bash(true)"
     ],
     "deny": []
   }
