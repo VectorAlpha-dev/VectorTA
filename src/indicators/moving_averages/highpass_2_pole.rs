@@ -245,11 +245,13 @@ pub fn highpass_2_pole_with_kernel(
 
 #[inline(always)]
 pub fn highpass_2_pole_scalar(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
-    unsafe { highpass_2_pole_scalar_unsafe(data, period, k, first, out) }
+    unsafe {
+        highpass_2_pole_scalar_(data, period, k, first, out);
+    }
 }
 
 #[inline(always)]
-pub unsafe fn highpass_2_pole_scalar_unsafe(
+pub unsafe fn highpass_2_pole_scalar_(
     data: &[f64],
     period: usize,
     k: f64,
@@ -285,39 +287,91 @@ pub unsafe fn highpass_2_pole_scalar_unsafe(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn highpass_2_pole_avx2(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
-    unsafe { highpass_2_pole_scalar_unsafe(data, period, k, first, out) }
+#[inline]
+pub unsafe fn highpass_2_pole_avx2(
+    data: &[f64],
+    period: usize,
+    k: f64,
+    _first: usize,
+    out: &mut [f64],
+) {
+    use core::f64::consts::PI;
+
+    let n = data.len();
+    if n == 0 { return; }
+
+    /* ---- pre-compute coefficients (unchanged) ---- */
+    let theta      = 2.0 * PI * k / period as f64;
+    let alpha      = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+    let c          = (1.0 - 0.5 * alpha).powi(2);
+    let cm2        = -2.0 * c;
+    let two_1m     =  2.0 * (1.0 - alpha);
+    let neg_oma_sq = -(1.0 - alpha).powi(2);
+
+    /* ---- seed ---- */
+    out[0] = data[0];
+    if n == 1 { return; }
+    out[1] = data[1];
+    if n == 2 { return; }
+
+    /* ---- pointer iteration, but count-controlled ---- */
+    let mut rem   = n - 2;                           // how many samples left
+    let mut src   = data.as_ptr().add(2);
+    let mut dst   = out .as_mut_ptr().add(2);
+
+    // state registers
+    let mut x_im2 = data[0];
+    let mut x_im1 = data[1];
+    let mut y_im2 = out[0];
+    let mut y_im1 = out[1];
+
+    while rem >= 2 {
+        /* y[i] */
+        let x_i  = *src;
+        let t0   = cm2.mul_add(x_im1, c * x_i);
+        let t1   = c.mul_add(x_im2,   t0);
+        let y_i  = two_1m.mul_add(y_im1,
+                     neg_oma_sq.mul_add(y_im2, t1));
+        *dst = y_i;
+
+        /* y[i+1] */
+        let x_ip1  = *src.add(1);
+        let t0b    = cm2.mul_add(x_i,  c * x_ip1);
+        let t1b    = c.mul_add(x_im1,  t0b);
+        let y_ip1  = two_1m.mul_add(y_i,
+                       neg_oma_sq.mul_add(y_im1, t1b));
+        *dst.add(1) = y_ip1;
+
+        /* rotate */
+        x_im2 = x_i;   x_im1 = x_ip1;
+        y_im2 = y_i;   y_im1 = y_ip1;
+
+        src = src.add(2);
+        dst = dst.add(2);
+        rem -= 2;
+    }
+
+    if rem == 1 {
+        /* one final sample */
+        let x_i = *src;
+        let y_i = two_1m.mul_add(
+            y_im1,
+            neg_oma_sq.mul_add(
+                y_im2,
+                c.mul_add(
+                    x_im2,
+                    cm2.mul_add(x_im1, c * x_i)
+                )
+            ),
+        );
+        *dst = y_i;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
-    unsafe { highpass_2_pole_scalar_unsafe(data, period, k, first, out) }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn highpass_2_pole_avx512_short(
-    data: &[f64],
-    period: usize,
-    k: f64,
-    first: usize,
-    out: &mut [f64],
-) {
-    highpass_2_pole_avx512(data, period, k, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn highpass_2_pole_avx512_long(
-    data: &[f64],
-    period: usize,
-    k: f64,
-    first: usize,
-    out: &mut [f64],
-) {
-    highpass_2_pole_avx512(data, period, k, first, out)
+    unsafe { highpass_2_pole_avx2(data, period, k, first, out) }
 }
 
 #[inline(always)]
@@ -350,7 +404,7 @@ pub struct HighPass2BatchRange {
 impl Default for HighPass2BatchRange {
     fn default() -> Self {
         Self {
-            period: (48, 48, 0),
+            period: (48, 120, 0),
             k: (0.707, 0.707, 0.0),
         }
     }
@@ -565,7 +619,6 @@ fn highpass_2_pole_batch_inner(
         }
     };
 
-    // ---------- 3. run every row directly into `raw` ----------
     if parallel {
         raw.par_chunks_mut(cols)
         .enumerate()
@@ -576,7 +629,6 @@ fn highpass_2_pole_batch_inner(
         }
     }
 
-    // ---------- 4. transmute to a Vec<f64> now that it is fully initialised ----------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(HighPass2BatchOutput { values, combos, rows, cols })
@@ -591,19 +643,19 @@ pub unsafe fn highpass_2_pole_row_scalar(
     k: f64,
     out: &mut [f64],
 ) {
-    highpass_2_pole_scalar_unsafe(data, period, k, first, out);
+    highpass_2_pole_scalar(data, period, k, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn highpass_2_pole_row_avx2(
-    data: &[f64],
-    first: usize,
+    data:   &[f64],
+    first:  usize,
     period: usize,
-    k: f64,
-    out: &mut [f64],
+    k:      f64,
+    out:    &mut [f64],
 ) {
-    highpass_2_pole_row_scalar(data, first, period, k, out);
+    highpass_2_pole_avx2(data, period, k, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -615,35 +667,7 @@ pub unsafe fn highpass_2_pole_row_avx512(
     k: f64,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        highpass_2_pole_row_avx512_short(data, first, period, k, out);
-    } else {
-        highpass_2_pole_row_avx512_long(data, first, period, k, out);
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn highpass_2_pole_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    k: f64,
-    out: &mut [f64],
-) {
-    highpass_2_pole_row_scalar(data, first, period, k, out);
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn highpass_2_pole_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    k: f64,
-    out: &mut [f64],
-) {
-    highpass_2_pole_row_scalar(data, first, period, k, out);
+    highpass_2_pole_row_avx2(data, first, period, k, out);
 }
 
 #[inline(always)]
