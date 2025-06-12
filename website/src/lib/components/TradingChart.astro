@@ -64,8 +64,8 @@ const { indicatorId, parameters } = Astro.props;
 	</div>
 </div>
 
-<script define:vars={{ indicatorId }}>
-	import { createChart, ColorType, LineStyle, CrosshairMode } from 'lightweight-charts';
+<script define:vars={{ indicatorId }} is:inline>
+        import { createChart, LineStyle, CrosshairMode } from 'lightweight-charts';
 	import { parseCsvData, convertToCandlestickData, convertToVolumeData, getIndicatorData } from '../chartData.ts';
 	import { loadWasmModule, extractPriceArrays } from '../wasm.ts';
 
@@ -87,7 +87,7 @@ const { indicatorId, parameters } = Astro.props;
 		async init() {
 			try {
 				this.updateStatus('loading', 'Initializing charts...');
-				await this.setupCharts();
+                                this.setupCharts();
 				await this.loadData();
 				await this.loadWasm();
 				this.setupEventListeners();
