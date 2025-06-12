@@ -18,13 +18,14 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;   // add near the other use lines
 
 #[derive(Debug, Clone)]
 pub enum HighPassData<'a> {
@@ -153,7 +154,8 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -176,7 +178,7 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
 
 // Scalar implementation
 #[inline]
-pub fn highpass_scalar(
+pub unsafe fn highpass_scalar(
     data: &[f64],
     period: usize,
     first: usize,
@@ -210,8 +212,55 @@ pub unsafe fn highpass_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    highpass_scalar(data, period, first, out)
+    use core::f64::consts::PI;
+
+    let n = data.len();
+    if n == 0 { return; }
+
+    /* --- pre-compute coefficients --------------------------------------- */
+    let k        = 1.0;
+    let theta    = 2.0 * PI * k / period as f64;
+    let alpha    = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+    let c        = 1.0 - 0.5 * alpha;        // (1-α/2)
+    let oma      = 1.0 - alpha;              // (1-α)
+
+    /* --- seed ----------------------------------------------------------- */
+    out[0] = data[0];
+    if n == 1 { return; }
+
+    /* --- pointer loop, 2× unrolled ------------------------------------- */
+    let mut src  = data.as_ptr().add(1);
+    let mut dst  = out .as_mut_ptr().add(1);
+    let mut y_im1 = out[0];
+    let mut x_im1 = data[0];
+    let mut rem   = n - 1;
+
+    while rem >= 2 {
+        // y[i]
+        let x_i   = *src;
+        let y_i   = oma.mul_add(y_im1, c * (x_i - x_im1));
+        *dst = y_i;
+
+        // y[i+1]
+        let x_ip1 = *src.add(1);
+        let y_ip1 = oma.mul_add(y_i,   c * (x_ip1 - x_i));
+        *dst.add(1) = y_ip1;
+
+        /* rotate state */
+        x_im1 = x_ip1;
+        y_im1 = y_ip1;
+        src   = src.add(2);
+        dst   = dst.add(2);
+        rem  -= 2;
+    }
+
+    if rem == 1 {
+        let x_i = *src;
+        *dst = oma.mul_add(y_im1, c * (x_i - x_im1));
+    }
 }
+
+
 
 // AVX512 stub and long/short variants
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -222,33 +271,7 @@ pub unsafe fn highpass_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        highpass_avx512_short(data, period, first, out);
-    } else {
-        highpass_avx512_long(data, period, first, out);
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn highpass_avx512_short(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
-    highpass_scalar(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn highpass_avx512_long(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
-    highpass_scalar(data, period, first, out)
+    highpass_avx2(data, period, first, out)
 }
 
 // Batch/Range types and functions
@@ -381,36 +404,58 @@ fn highpass_batch_inner(
         return Err(HighPassError::InvalidPeriod { period: max_p, data_len: data.len() });
     }
 
+
+    // ------------------------------------------------------------------
+    // after the usual validation checks …
+
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+
+    /* ---------- 1.  NaN prefixes per-row ---------- */
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+
+    /* ---------- 2.  allocate big matrix ---------- */
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    /* ---------- 3.  row worker ---------- */
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // reinterpret just this row as &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => highpass_row_scalar(data, first, period, out_row),
+            Kernel::Scalar => highpass_row_scalar (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => highpass_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => highpass_row_avx2    (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => highpass_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+            Kernel::Avx512 => highpass_row_avx512  (data, first, period, out_row),
+            _               => unreachable!(),
         }
     };
+
+    /* ---------- 4.  run every row ---------- */
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(HighPassBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    /* ---------- 5.  transmute to Vec<f64> ---------- */
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(HighPassBatchOutput { values, combos, rows, cols })
 }
 
 // Row functions, all variants just call scalar
@@ -432,7 +477,7 @@ pub unsafe fn highpass_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    highpass_row_scalar(data, first, period, out)
+    highpass_avx2(data, period, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -442,31 +487,7 @@ pub unsafe fn highpass_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        highpass_row_avx512_short(data, first, period, out)
-    } else {
-        highpass_row_avx512_long(data, first, period, out)
-    }
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn highpass_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    highpass_row_scalar(data, first, period, out)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn highpass_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    highpass_row_scalar(data, first, period, out)
+    highpass_row_avx2(data, first, period, out)
 }
 
 // Streaming
