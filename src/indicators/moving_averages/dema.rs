@@ -22,8 +22,10 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, 
-                                make_uninit_matrix, init_matrix_prefixes};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
@@ -158,6 +160,8 @@ impl DemaBuilder {
 
 #[derive(Debug, Error)]
 pub enum DemaError {
+    #[error("dema: Input data slice is empty.")]
+    EmptyInputData,
     #[error("dema: All values are NaN.")]
     AllValuesNaN,
 
@@ -166,6 +170,9 @@ pub enum DemaError {
 
     #[error("dema: Not enough data: needed = {needed}, valid = {valid}")]
     NotEnoughData { needed: usize, valid: usize },
+
+    #[error("dema: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
 }
 
 #[inline]
@@ -179,11 +186,16 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
         DemaData::Slice(sl) => sl,
     };
 
+    let len = data.len();
+    if len == 0 {
+        return Err(DemaError::EmptyInputData);
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(DemaError::AllValuesNaN)?;
-    let len = data.len();
+
     let period = input.get_period();
 
     if period < 1 || period > len {
@@ -193,10 +205,14 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
     if len < needed {
         return Err(DemaError::NotEnoughData { needed, valid: len });
     }
+    let valid = len - first;
+    if valid < needed {
+        return Err(DemaError::NotEnoughValidData { needed, valid });
+    }
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other        => other,
+        other => other,
     };
 
     let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
@@ -207,8 +223,8 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => dema_avx512(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => dema_avx2  (data, period, first, &mut out),
-            _              => dema_scalar(data, period, first, &mut out),
+            Kernel::Avx2 => dema_avx2(data, period, first, &mut out),
+            _ => dema_scalar(data, period, first, &mut out),
         }
     }
     Ok(DemaOutput { values: out })
@@ -256,7 +272,6 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
 pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     dema_scalar(data, period, first, out);
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
@@ -452,16 +467,19 @@ use std::mem::MaybeUninit; // Add this if not already present at the top of the 
 
 #[inline(always)]
 fn dema_batch_inner(
-    data:     &[f64],
-    sweep:    &DemaBatchRange,
-    kern:     Kernel,
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    kern: Kernel,
     parallel: bool,
 ) -> Result<DemaBatchOutput, DemaError> {
-
     // ── 1. validation ──────────────────────────────────────────────────────
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(DemaError::InvalidPeriod { period: 0 });
+    }
+
+    if data.is_empty() {
+        return Err(DemaError::EmptyInputData);
     }
 
     let first = data
@@ -469,10 +487,17 @@ fn dema_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(DemaError::AllValuesNaN)?;
 
-    let max_p  = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let needed = 2 * (max_p - 1);
     if data.len() < needed {
-        return Err(DemaError::NotEnoughData { needed, valid: data.len() });
+        return Err(DemaError::NotEnoughData {
+            needed,
+            valid: data.len(),
+        });
+    }
+    let valid = data.len() - first;
+    if valid < needed {
+        return Err(DemaError::NotEnoughValidData { needed, valid });
     }
 
     let rows = combos.len();
@@ -493,17 +518,14 @@ fn dema_batch_inner(
         let p = combos[row].period.unwrap();
 
         // Cast just this slice to &mut [f64]
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => dema_row_avx512(data, first, p, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => dema_row_avx2  (data, first, p, dst),
-            _              => dema_row_scalar(data, first, p, dst),
+            Kernel::Avx2 => dema_row_avx2(data, first, p, dst),
+            _ => dema_row_scalar(data, first, p, dst),
         }
     };
 
@@ -521,7 +543,12 @@ fn dema_batch_inner(
     // ── 5. all rows are initialised → safe to transmute to Vec<f64> ───────
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(DemaBatchOutput { values, combos, rows, cols })
+    Ok(DemaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 #[inline(always)]
 unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -541,8 +568,9 @@ unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
 
     fn check_dema_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -684,6 +712,62 @@ mod tests {
         Ok(())
     }
 
+    fn check_dema_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = DemaInput::from_slice(&empty, DemaParams::default());
+        let res = dema_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(DemaError::EmptyInputData)));
+        Ok(())
+    }
+
+    fn check_dema_not_enough_valid(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [f64::NAN, f64::NAN, 1.0, 2.0];
+        let params = DemaParams { period: Some(3) };
+        let input = DemaInput::from_slice(&data, params);
+        let res = dema_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(DemaError::NotEnoughValidData { .. })));
+        Ok(())
+    }
+
+    fn check_dema_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let strat = (
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                30..200,
+            ),
+            3usize..30,
+        );
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = DemaParams {
+                    period: Some(period),
+                };
+                let input = DemaInput::from_slice(&data, params);
+                let DemaOutput { values: out } = dema_with_kernel(&input, kernel).unwrap();
+
+                for i in (period * 2 - 2)..data.len() {
+                    let window = &data[i + 1 - period..=i];
+                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let y = out[i];
+
+                    prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        Ok(())
+    }
+
     fn check_dema_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -764,9 +848,12 @@ mod tests {
         check_dema_zero_period,
         check_dema_period_exceeds_length,
         check_dema_very_small_dataset,
+        check_dema_empty_input,
+        check_dema_not_enough_valid,
         check_dema_reinput,
         check_dema_nan_handling,
-        check_dema_streaming
+        check_dema_streaming,
+        check_dema_property
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
