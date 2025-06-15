@@ -76,7 +76,7 @@ use my_project::indicators::{
     ht_dcperiod::{ht_dcperiod as ht_dcperiod_raw, HtDcPeriodInput},
     hwma::{hwma_with_kernel, HwmaBatchBuilder, HwmaData, HwmaInput},
     ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
-    jma::{jma as jma_raw, JmaInput},
+    jma::{jma_with_kernel, JmaBatchBuilder, JmaData, JmaInput},
     jsa::{jsa as jsa_raw, JsaInput},
     kama::{kama as kama_raw, KamaInput},
     kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
@@ -679,7 +679,6 @@ bench_wrappers! {
     (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
     (ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
     (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
-    (jma_bench, jma_raw, JmaInputS),
     (jsa_bench, jsa_raw, JsaInputS),
     (kama_bench, kama_raw, KamaInputS),
     (kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
@@ -821,7 +820,6 @@ bench_scalars!(
     heikin_ashi_candles_bench => HeikinAshiInputS,
     ht_dcperiod_bench => HtDcPeriodInputS,
     ift_rsi_bench     => IftRsiInputS,
-    jma_bench         => JmaInputS,
     jsa_bench         => JsaInputS,
     kama_bench        => KamaInputS,
     kaufmanstop_bench => KaufmanstopInputS,
@@ -928,6 +926,7 @@ make_kernel_wrappers!(highpass_2_pole, highpass_2_pole_with_kernel, HighPass2Inp
 make_kernel_wrappers!(highpass, highpass_with_kernel, HighPassInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(hma, hma_with_kernel, HmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(hwma, hwma_with_kernel, HwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(jma, jma_with_kernel, JmaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -983,6 +982,7 @@ make_batch_wrappers!(highpass_2_pole_batch, HighPass2BatchBuilder, HighPass2Inpu
 make_batch_wrappers!(highpass_batch, HighPassBatchBuilder, HighPassInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(hma_batch, HmaBatchBuilder, HmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(hwma_batch, HwmaBatchBuilder, HwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(jma_batch, JmaBatchBuilder, JmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1083,6 +1083,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    jma_batch => JmaInputS; Some(227);
+    jma_batch_scalarbatch,
+    jma_batch_avx2batch,
+    jma_batch_avx512batch,
+);
+
+bench_variants!(
     alma => AlmaInputS; None;
     alma_scalar,
     alma_avx2,
@@ -1180,6 +1187,13 @@ bench_variants!(
     hwma_avx512,
 );
 
+bench_variants!(
+    jma => JmaInputS; None;
+    jma_scalar,
+    jma_avx2,
+    jma_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1209,5 +1223,7 @@ criterion_main!(
     benches_hma,
     benches_hma_batch,
     benches_hwma,
-    benches_hwma_batch
+    benches_hwma_batch,
+    benches_jma,
+    benches_jma_batch
 );
