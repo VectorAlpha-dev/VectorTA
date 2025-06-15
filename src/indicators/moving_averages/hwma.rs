@@ -232,8 +232,57 @@ pub fn hwma_scalar(
     na: f64,
     nb: f64,
     nc: f64,
-    first: usize,
+    first_valid: usize,
     out: &mut [f64],
+) {
+    debug_assert_eq!(data.len(), out.len());
+    if first_valid >= data.len() { return }
+
+    // Pre-compute complements once.
+    let one_m_na = 1.0 - na;
+    let one_m_nb = 1.0 - nb;
+    let one_m_nc = 1.0 - nc;
+
+    // State registers
+    let mut f = data[first_valid];   // level
+    let mut v = 0.0;                 // velocity / trend
+    let mut a = 0.0;                 // acceleration
+
+    // Main pass
+    for i in first_valid..data.len() {
+        // SAFETY: bounds checked by loop guard.
+        let price = unsafe { *data.get_unchecked(i) };
+
+        // f = na·price + (1-na)·(f + v + 0.5 a)
+        let fv_sum  = f + v + 0.5 * a;
+        let f_new   = na.mul_add(price, one_m_na * fv_sum);
+
+        // v = nb·(f_new - f) + (1-nb)·(v + a)
+        let v_new   = nb.mul_add(f_new - f, one_m_nb * (v + a));
+
+        // a = nc·(v_new - v) + (1-nc)·a
+        let a_new   = nc.mul_add(v_new - v, one_m_nc * a);
+
+        // Output HWMA = f + v + 0.5 a
+        out[i] = f_new + v_new + 0.5 * a_new;
+
+        // Roll state
+        f = f_new;
+        v = v_new;
+        a = a_new;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub unsafe fn hwma_avx2(
+    data:   &[f64],
+    na:     f64,
+    nb:     f64,
+    nc:     f64,
+    first:  usize,
+    out:    &mut [f64],
 ) {
     debug_assert_eq!(data.len(), out.len());
     if first >= data.len() { return; }
@@ -278,85 +327,6 @@ pub fn hwma_scalar(
     }
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2,fma")]
-#[inline]
-pub unsafe fn hwma_avx2(
-    data: &[f64],
-    na: f64,
-    nb: f64,
-    nc: f64,
-    first: usize,
-    out: &mut [f64],
-) {
-    use core::arch::x86_64::*;
-    debug_assert_eq!(data.len(), out.len());
-    if first >= data.len() { return; }
-
-    // ---- broadcast constants once ---------------------------------------
-    let na_v     = _mm_set_sd(na);
-    let one_na_v = _mm_set_sd(1.0 - na);
-    let nb_v     = _mm_set_sd(nb);
-    let one_nb_v = _mm_set_sd(1.0 - nb);
-    let nc_v     = _mm_set_sd(nc);
-    let one_nc_v = _mm_set_sd(1.0 - nc);
-    let half_v   = _mm_set_sd(0.5);
-
-    // ---- state registers -------------------------------------------------
-    let mut f_v = _mm_set_sd(*data.get_unchecked(first));
-    let mut v_v = _mm_setzero_pd();      // v = 0
-    let mut a_v = _mm_setzero_pd();      // a = 0
-
-    // ---- software‑pipelined main loop (4‑way unroll) --------------------
-    let mut i = first;
-    let n = data.len();
-    while i + 3 < n {
-        macro_rules! step {
-            ($idx:expr) => {{
-                let price_v = _mm_set_sd(*data.get_unchecked($idx));
-
-                // tmp = f + v + 0.5·a
-                let tmp  = _mm_fmadd_sd(half_v, a_v, _mm_add_sd(f_v, v_v));
-
-                // f_new = (1‑na)*tmp + na*price
-                let f_new = _mm_fmadd_sd(na_v, price_v, _mm_mul_sd(one_na_v, tmp));
-
-                // v_new = (1‑nb)*(v+a) + nb*(f_new‑f)
-                let vpa   = _mm_add_sd(v_v, a_v);
-                let diff_f= _mm_sub_sd(f_new, f_v);
-                let v_new = _mm_fmadd_sd(nb_v, diff_f, _mm_mul_sd(one_nb_v, vpa));
-
-                // a_new = (1‑nc)*a + nc*(v_new‑v)
-                let diff_v= _mm_sub_sd(v_new, v_v);
-                let a_new = _mm_fmadd_sd(nc_v, diff_v, _mm_mul_sd(one_nc_v, a_v));
-
-                // out = f_new + v_new + 0.5·a_new
-                let out_v = _mm_fmadd_sd(half_v, a_new, _mm_add_sd(f_new, v_new));
-                _mm_store_sd(out.as_mut_ptr().add($idx), out_v);
-
-                // roll state
-                f_v = f_new;  v_v = v_new;  a_v = a_new;
-            }};
-        }
-        step!(i);     step!(i + 1);  step!(i + 2);  step!(i + 3);
-        i += 4;
-    }
-    // tail
-    while i < n {
-        let price_v = _mm_set_sd(*data.get_unchecked(i));
-        let tmp     = _mm_fmadd_sd(half_v, a_v, _mm_add_sd(f_v, v_v));
-        let f_new   = _mm_fmadd_sd(na_v, price_v, _mm_mul_sd(one_na_v, tmp));
-        let v_new   = _mm_fmadd_sd(nb_v, _mm_sub_sd(f_new, f_v),
-                                   _mm_mul_sd(one_nb_v, _mm_add_sd(v_v, a_v)));
-        let a_new   = _mm_fmadd_sd(nc_v, _mm_sub_sd(v_new, v_v),
-                                   _mm_mul_sd(one_nc_v, a_v));
-        let out_v   = _mm_fmadd_sd(half_v, a_new, _mm_add_sd(f_new, v_new));
-        _mm_store_sd(out.as_mut_ptr().add(i), out_v);
-        f_v = f_new;  v_v = v_new;  a_v = a_new;
-        i += 1;
-    }
-}
-
 
 #[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
 #[target_feature(enable="avx512f,fma")]
@@ -365,8 +335,6 @@ pub unsafe fn hwma_avx512(
     data: &[f64], na: f64, nb: f64, nc: f64,
     first: usize, out: &mut [f64])
 {
-    // identical to AVX2 version; the CPU will use 512-wide FMA units
-    // thanks to the target_feature.  Copy or `#[cfg(target_feature="avx512f")]`.
     hwma_avx2(data, na, nb, nc, first, out);
 }
 
@@ -460,9 +428,9 @@ pub struct HwmaBatchRange {
 impl Default for HwmaBatchRange {
     fn default() -> Self {
         Self {
-            na: (0.2, 0.2, 0.0),
-            nb: (0.1, 0.1, 0.0),
-            nc: (0.1, 0.1, 0.0),
+            na: (0.2, 6.0, 0.0),
+            nb: (0.1, 4.0, 0.0),
+            nc: (0.1, 4.0, 0.0),
         }
     }
 }
@@ -706,7 +674,7 @@ unsafe fn hwma_row_avx2(
     nc: f64,
     out: &mut [f64],
 ) {
-    hwma_scalar(data, na, nb, nc, first, out);
+    hwma_avx2(data, na, nb, nc, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -719,7 +687,7 @@ pub unsafe fn hwma_row_avx512(
     nc: f64,
     out: &mut [f64],
 ) {
-    hwma_scalar(data, na, nb, nc, first, out);
+    hwma_avx2(data, na, nb, nc, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
