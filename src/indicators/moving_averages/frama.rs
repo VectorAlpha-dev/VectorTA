@@ -11,6 +11,8 @@
 //! - **fc**: Fast constant (default 1).
 //!
 //! ## Errors
+//! - **EmptyInputData**: frama: All three input slices are empty.
+//! - **MismatchedInputLength**: frama: `high`, `low`, and `close` have different lengths.
 //! - **AllValuesNaN**: frama: All input data values are `NaN`.
 //! - **InvalidWindow**: frama: `window` is zero or exceeds the data length.
 //! - **NotEnoughValidData**: frama: Not enough valid data points for the requested `window`.
@@ -22,17 +24,19 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use std::hint::unlikely;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
-use thiserror::Error;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::hint::unlikely;
 use std::mem::{swap, MaybeUninit};
-
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for FramaInput<'a> {
     #[inline(always)]
@@ -224,6 +228,16 @@ impl FramaBuilder {
 
 #[derive(Debug, Error)]
 pub enum FramaError {
+    /// Input slices were empty.
+    #[error("frama: Input data slice is empty.")]
+    EmptyInputData,
+    /// `high`, `low`, and `close` slices have mismatched lengths.
+    #[error("frama: Mismatched slice lengths: high={high}, low={low}, close={close}")]
+    MismatchedInputLength {
+        high: usize,
+        low: usize,
+        close: usize,
+    },
     #[error("frama: All values are NaN.")]
     AllValuesNaN,
     #[error("frama: Invalid window: window = {window}, data length = {data_len}")]
@@ -240,10 +254,14 @@ pub fn frama(input: &FramaInput) -> Result<FramaOutput, FramaError> {
 pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutput, FramaError> {
     let (high, low, close) = input.slices();
     let len = high.len();
-    if len == 0 || low.len() != len || close.len() != len {
-        return Err(FramaError::InvalidWindow {
-            window: input.get_window(),
-            data_len: len,
+    if len == 0 {
+        return Err(FramaError::EmptyInputData);
+    }
+    if low.len() != len || close.len() != len {
+        return Err(FramaError::MismatchedInputLength {
+            high: len,
+            low: low.len(),
+            close: close.len(),
         });
     }
     let window = input.get_window();
@@ -517,7 +535,6 @@ pub fn frama_scalar(
 ) -> Result<FramaOutput, FramaError> {
     let warm = first + window;
     let mut out = alloc_with_nan_prefix(len, warm);
-
 
     let mut win = window;
     if win & 1 == 1 {
@@ -877,8 +894,8 @@ pub fn frama_avx2(
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
     if window <= 32 && window & 1 == 0 {
-    let warm = first + window;              // first index that gets a real value
-    let mut out = alloc_with_nan_prefix(len, warm);
+        let warm = first + window; // first index that gets a real value
+        let mut out = alloc_with_nan_prefix(len, warm);
         unsafe {
             seed_sma(close, first, window, &mut out);
             match window {
@@ -908,7 +925,7 @@ pub fn frama_avx512(
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
     if window <= 32 && window & 1 == 0 {
-        let warm = first + window;              // first index that gets a real value
+        let warm = first + window; // first index that gets a real value
         let mut out = alloc_with_nan_prefix(len, warm);
         unsafe {
             seed_sma(close, first, window, &mut out);
@@ -1101,28 +1118,44 @@ pub fn frama_batch_par_slice(
 
 #[inline(always)]
 fn frama_batch_inner(
-    high:   &[f64],
-    low:    &[f64],
-    close:  &[f64],
-    sweep:  &FramaBatchRange,
-    kern:   Kernel,
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &FramaBatchRange,
+    kern: Kernel,
     parallel: bool,
 ) -> Result<FramaBatchOutput, FramaError> {
-
     // ---- parameter checking (unchanged) -----------------------------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(FramaError::InvalidWindow { window: 0, data_len: 0 });
+        return Err(FramaError::InvalidWindow {
+            window: 0,
+            data_len: 0,
+        });
     }
 
-    let len   = high.len();
+    if high.is_empty() {
+        return Err(FramaError::EmptyInputData);
+    }
+    if low.len() != high.len() || close.len() != high.len() {
+        return Err(FramaError::MismatchedInputLength {
+            high: high.len(),
+            low: low.len(),
+            close: close.len(),
+        });
+    }
+
+    let len = high.len();
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(FramaError::AllValuesNaN)?;
 
     let max_w = combos.iter().map(|c| c.window.unwrap()).max().unwrap();
     if len - first < max_w {
-        return Err(FramaError::NotEnoughValidData { needed: max_w, valid: len - first });
+        return Err(FramaError::NotEnoughValidData {
+            needed: max_w,
+            valid: len - first,
+        });
     }
 
     let rows = combos.len();
@@ -1133,9 +1166,10 @@ fn frama_batch_inner(
     // -----------------------------------------------------------------------
     let mut raw = make_uninit_matrix(rows, cols);
 
-    let warm: Vec<usize> = combos.iter()
-                                 .map(|p| first + p.window.unwrap() - 1)
-                                 .collect();
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|p| first + p.window.unwrap() - 1)
+        .collect();
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
     // -----------------------------------------------------------------------
@@ -1143,26 +1177,20 @@ fn frama_batch_inner(
     //    and casts that slice to &mut [f64] for the kernel
     // -----------------------------------------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-        let p      = &combos[row];
+        let p = &combos[row];
         let window = p.window.unwrap();
-        let sc     = p.sc.unwrap();
-        let fc     = p.fc.unwrap();
+        let sc = p.sc.unwrap();
+        let fc = p.fc.unwrap();
 
         // safe because dst_mu is the exclusive slice for this row
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 =>
-                frama_row_avx512(high, low, close, first, window, dst, sc, fc),
+            Kernel::Avx512 => frama_row_avx512(high, low, close, first, window, dst, sc, fc),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   =>
-                frama_row_avx2  (high, low, close, first, window, dst, sc, fc),
-            _ =>
-                frama_row_scalar(high, low, close, first, window, dst, sc, fc),
+            Kernel::Avx2 => frama_row_avx2(high, low, close, first, window, dst, sc, fc),
+            _ => frama_row_scalar(high, low, close, first, window, dst, sc, fc),
         }
     };
 
@@ -1171,8 +1199,8 @@ fn frama_batch_inner(
     // -----------------------------------------------------------------------
     if parallel {
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -1184,7 +1212,12 @@ fn frama_batch_inner(
     // -----------------------------------------------------------------------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(FramaBatchOutput { values, combos, rows, cols })
+    Ok(FramaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1378,10 +1411,11 @@ pub unsafe fn frama_row_avx512(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
-    use crate::skip_if_unsupported;
     use paste::paste;
+    use proptest::prelude::*;
 
     fn check_frama_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1491,6 +1525,102 @@ mod tests {
         assert!(res.is_err());
         Ok(())
     }
+    fn check_frama_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let params = FramaParams::default();
+        let input = FramaInput::from_slices(&empty, &empty, &empty, params);
+        let res = frama_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(FramaError::EmptyInputData)));
+        Ok(())
+    }
+
+    fn check_frama_mismatched_len(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let h = [1.0, 2.0, 3.0];
+        let l = [1.0, 2.0];
+        let c = [1.0, 2.0, 3.0];
+        let params = FramaParams::default();
+        let input = FramaInput::from_slices(&h, &l, &c, params);
+        let res = frama_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(FramaError::MismatchedInputLength { .. })));
+        Ok(())
+    }
+
+    fn check_frama_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = FramaParams::default();
+        let first_input = FramaInput::from_candles(&candles, params.clone());
+        let first_res = frama_with_kernel(&first_input, kernel)?;
+
+        let second_input = FramaInput::from_slices(
+            &first_res.values,
+            &first_res.values,
+            &first_res.values,
+            params,
+        );
+        let second_res = frama_with_kernel(&second_input, kernel)?;
+        assert_eq!(first_res.values.len(), second_res.values.len());
+        Ok(())
+    }
+
+    fn check_frama_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = FramaInput::from_candles(&candles, FramaParams::default());
+        let res = frama_with_kernel(&input, kernel)?;
+        if res.values.len() > 240 {
+            for (i, &v) in res.values[240..].iter().enumerate() {
+                assert!(
+                    !v.is_nan(),
+                    "[{}] Found unexpected NaN at out-index {}",
+                    test_name,
+                    240 + i
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn check_frama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let strat = (
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                30..200,
+            ),
+            3usize..30,
+        );
+
+        proptest::test_runner::TestRunner::default().run(&strat, |(data, win)| {
+            let params = FramaParams {
+                window: Some(win),
+                sc: None,
+                fc: None,
+            };
+            let input = FramaInput::from_slices(&data, &data, &data, params);
+            let FramaOutput { values } = frama_with_kernel(&input, kernel).unwrap();
+
+            for i in (win - 1)..data.len() {
+                let window = &data[i + 1 - win..=i];
+                let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let y = values[i];
+                prop_assert!(
+                    y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                    "idx {i}: {y} not in [{lo}, {hi}]"
+                );
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
     fn check_frama_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1588,6 +1718,11 @@ mod tests {
         check_frama_window_exceeds_length,
         check_frama_very_small_dataset,
         check_frama_all_nan,
+        check_frama_empty_input,
+        check_frama_mismatched_len,
+        check_frama_reinput,
+        check_frama_nan_handling,
+        check_frama_property,
         check_frama_streaming,
         check_frama_default_candles
     );
@@ -1639,4 +1774,5 @@ mod tests {
             }
         };
     }
+    gen_batch_tests!(check_batch_default_row);
 }
