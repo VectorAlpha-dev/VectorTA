@@ -213,23 +213,6 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
     Ok(JmaOutput { values: out })
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn jma_avx512(
-    data: &[f64],
-    period: usize,
-    phase: f64,
-    power: u32,
-    first_valid: usize,
-    out: &mut [f64],
-) {
-    if period <= 32 {
-        unsafe { jma_avx512_short(data, period, phase, power, first_valid, out) }
-    } else {
-        unsafe { jma_avx512_long(data, period, phase, power, first_valid, out) }
-    }
-}
-
 #[inline]
 pub fn jma_scalar(
     data: &[f64],
@@ -237,58 +220,10 @@ pub fn jma_scalar(
     phase: f64,
     power: u32,
     first_valid: usize,
-    out: &mut [f64],
-) {
-    let len = data.len();
-    let phase_ratio = if phase < -100.0 {
-        0.5
-    } else if phase > 100.0 {
-        2.5
-    } else {
-        (phase / 100.0) + 1.5
-    };
-    let beta = {
-        let numerator = 0.45 * (period as f64 - 1.0);
-        let denominator = numerator + 2.0;
-        if denominator.abs() < f64::EPSILON { 0.0 } else { numerator / denominator }
-    };
-    let alpha = beta.powi(power as i32);
-
-    let mut e0 = vec![0.0; len];
-    let mut e1 = vec![0.0; len];
-    let mut e2 = vec![0.0; len];
-    let mut jma_val = vec![f64::NAN; len];
-
-    e0[first_valid] = data[first_valid];
-    e1[first_valid] = 0.0;
-    e2[first_valid] = 0.0;
-    jma_val[first_valid] = data[first_valid];
-
-    for i in (first_valid + 1)..len {
-        let src_i = data[i];
-        e0[i] = (1.0 - alpha) * src_i + alpha * e0[i - 1];
-        e1[i] = (src_i - e0[i]) * (1.0 - beta) + beta * e1[i - 1];
-        let diff = e0[i] + phase_ratio * e1[i] - jma_val[i - 1];
-        e2[i] = diff * (1.0 - alpha).powi(2) + alpha.powi(2) * e2[i - 1];
-        jma_val[i] = e2[i] + jma_val[i - 1];
-    }
-    for i in 0..len {
-        out[i] = jma_val[i];
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn jma_avx2(
-    input: &[f64],
-    period: usize,
-    phase: f64,
-    power: u32,
-    first_valid: usize,
     output: &mut [f64],
 ) {
-    assert_eq!(input.len(), output.len());
-    assert!(first_valid < input.len());
+    assert_eq!(data.len(), output.len());
+    assert!(first_valid < data.len());
 
     let pr = if phase < -100.0 {
         0.5
@@ -309,16 +244,16 @@ pub fn jma_avx2(
     let alpha_sq = alpha * alpha;
     let oma_sq = one_minus_alpha * one_minus_alpha;
 
-    let mut e0 = input[first_valid];
+    let mut e0 = data[first_valid];
     let mut e1 = 0.0;
     let mut e2 = 0.0;
-    let mut j_prev = input[first_valid];
+    let mut j_prev = data[first_valid];
 
     output[first_valid] = j_prev;
 
     unsafe {
-        for i in (first_valid + 1)..input.len() {
-            let price = *input.get_unchecked(i);
+        for i in (first_valid + 1)..data.len() {
+            let price = *data.get_unchecked(i);
 
             e0 = one_minus_alpha * price + alpha * e0;
 
@@ -335,24 +270,93 @@ pub fn jma_avx2(
     }
 }
 
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
 #[inline]
-pub unsafe fn jma_avx512_short(
-    data: &[f64],
-    period: usize,
-    phase: f64,
-    power: u32,
+pub unsafe fn jma_avx2(
+    data:        &[f64],
+    period:      usize,
+    phase:       f64,
+    power:       u32,
     first_valid: usize,
-    out: &mut [f64],
+    output:         &mut [f64],
 ) {
-    // Stub: Points to scalar
-    jma_scalar(data, period, phase, power, first_valid, out)
+    assert_eq!(data.len(), output.len());
+    assert!(first_valid < data.len());
+
+    let pr = if phase < -100.0 {
+        0.5
+    } else if phase > 100.0 {
+        2.5
+    } else {
+        phase / 100.0 + 1.5
+    };
+
+    let beta = {
+        let num = 0.45 * (period as f64 - 1.0);
+        num / (num + 2.0)
+    };
+    let one_minus_beta = 1.0 - beta;
+
+    let alpha = beta.powi(power as i32);
+    let one_minus_alpha = 1.0 - alpha;
+    let alpha_sq = alpha * alpha;
+    let oma_sq = one_minus_alpha * one_minus_alpha;
+
+    let mut e0 = data[first_valid];
+    let mut e1 = 0.0;
+    let mut e2 = 0.0;
+    let mut j_prev = e0;
+
+    output[first_valid] = j_prev;
+
+    unsafe {
+        for i in (first_valid + 1)..data.len() {
+            let price = *data.get_unchecked(i);
+
+            e0 = one_minus_alpha.mul_add(price, alpha * e0);
+            e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
+
+            let diff = e0 + pr * e1 - j_prev;
+            e2 = diff.mul_add(oma_sq, alpha_sq * e2);
+
+            j_prev += e2;
+            *output.get_unchecked_mut(i) = j_prev;
+        }
+    }
 }
 
+#[inline(always)]
+fn jma_consts(period: usize, phase: f64, power: u32) -> (f64, f64, f64, f64, f64, f64, f64) {
+    let pr = if phase < -100.0 {
+        0.5
+    } else if phase > 100.0 {
+        2.5
+    } else {
+        phase / 100.0 + 1.5
+    };
+
+    let beta = {
+        let num = 0.45 * (period as f64 - 1.0);
+        num / (num + 2.0)
+    };
+    let alpha = beta.powi(power as i32);
+    (
+        pr,
+        beta,
+        alpha,
+        alpha * alpha,
+        (1.0 - alpha) * (1.0 - alpha),
+        1.0 - alpha,
+        1.0 - beta,
+    )
+}
+
+
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512dq,avx512vl,fma")]
 #[inline]
-pub unsafe fn jma_avx512_long(
+pub unsafe fn jma_avx512(
     data: &[f64],
     period: usize,
     phase: f64,
@@ -360,8 +364,57 @@ pub unsafe fn jma_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Stub: Points to scalar
-    jma_scalar(data, period, phase, power, first_valid, out)
+    debug_assert!(data.len() == out.len() && first_valid < data.len());
+
+    let (pr, beta, alpha, alpha_sq, oma_sq, one_minus_alpha, one_minus_beta) =
+        jma_consts(period, phase, power);
+
+    let pr_v = _mm512_set1_pd(pr);
+    let oma_sq_v = _mm512_set1_pd(oma_sq);
+    let alpha_sq_v = _mm512_set1_pd(alpha_sq);
+    let one_minus_alpha_v = _mm512_set1_pd(one_minus_alpha);
+    let alpha_v = _mm512_set1_pd(alpha);
+    let one_minus_beta_v = _mm512_set1_pd(one_minus_beta);
+    let beta_v = _mm512_set1_pd(beta);
+
+    let mut e0 = data[first_valid];
+    let mut e1 = 0.0;
+    let mut e2 = 0.0;
+    let mut j_prev = e0;
+
+    out[first_valid] = j_prev;
+
+    let mut i = first_valid + 1;
+    let n = data.len();
+
+    // Unroll loop by 4 (as an example to leverage AVX512 register space for ILP)
+    while i + 3 < n {
+        for k in 0..4 {
+            let price = *data.get_unchecked(i + k);
+
+            e0 = one_minus_alpha.mul_add(price, alpha * e0);
+            e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
+            let diff = e0 + pr * e1 - j_prev;
+            e2 = diff.mul_add(oma_sq, alpha_sq * e2);
+            j_prev += e2;
+
+            *out.get_unchecked_mut(i + k) = j_prev;
+        }
+        i += 4;
+    }
+
+    // Scalar tail for remaining elements
+    while i < n {
+        let price = *data.get_unchecked(i);
+        e0 = one_minus_alpha.mul_add(price, alpha * e0);
+        e1 = (price - e0).mul_add(one_minus_beta, beta * e1);
+        let diff = e0 + pr * e1 - j_prev;
+        e2 = diff.mul_add(oma_sq, alpha_sq * e2);
+        j_prev += e2;
+
+        *out.get_unchecked_mut(i) = j_prev;
+        i += 1;
+    }
 }
 
 // ===== BATCH & STREAMING API =====
@@ -681,7 +734,7 @@ unsafe fn jma_row_avx2(
     power: u32,
     out: &mut [f64],
 ) {
-    jma_scalar(data, period, phase, power, first, out);
+    jma_avx2(data, period, phase, power, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -694,37 +747,7 @@ unsafe fn jma_row_avx512(
     power: u32,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        jma_avx512_short(data, period, phase, power, first, out);
-    } else {
-        jma_avx512_long(data, period, phase, power, first, out);
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn jma_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    phase: f64,
-    power: u32,
-    out: &mut [f64],
-) {
-    jma_scalar(data, period, phase, power, first, out);
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn jma_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    phase: f64,
-    power: u32,
-    out: &mut [f64],
-) {
-    jma_scalar(data, period, phase, power, first, out);
+    jma_avx512(data, period, phase, power, first, out);
 }
 
 #[inline(always)]
