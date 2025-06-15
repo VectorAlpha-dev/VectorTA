@@ -20,14 +20,17 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for EhlersITrendInput<'a> {
     fn as_ref(&self) -> &[f64] {
@@ -111,6 +114,14 @@ pub enum EhlersITrendError {
     AllValuesNaN,
     #[error("ehlers_itrend: Not enough data for warmup. warmup_bars={warmup_bars} but data length={length}")]
     NotEnoughDataForWarmup { warmup_bars: usize, length: usize },
+    #[error("ehlers_itrend: Invalid warmup_bars: {warmup_bars}")]
+    InvalidWarmupBars { warmup_bars: usize },
+    #[error("ehlers_itrend: Invalid max_dc_period: {max_dc}")]
+    InvalidMaxDcPeriod { max_dc: usize },
+    #[error("ehlers_itrend: Invalid batch kernel")]
+    InvalidBatchKernel,
+    #[error("ehlers_itrend: Invalid batch range")]
+    InvalidBatchRange,
 }
 
 #[inline]
@@ -136,7 +147,13 @@ pub fn ehlers_itrend_with_kernel(
         .position(|x| !x.is_nan())
         .ok_or(EhlersITrendError::AllValuesNaN)?;
     let warmup_bars = input.get_warmup_bars();
-    let max_dc = input.get_max_dc_period().max(1);
+    let max_dc = input.get_max_dc_period();
+    if warmup_bars == 0 {
+        return Err(EhlersITrendError::InvalidWarmupBars { warmup_bars });
+    }
+    if max_dc == 0 {
+        return Err(EhlersITrendError::InvalidMaxDcPeriod { max_dc });
+    }
 
     if warmup_bars >= len {
         return Err(EhlersITrendError::NotEnoughDataForWarmup {
@@ -150,7 +167,7 @@ pub fn ehlers_itrend_with_kernel(
         other => other,
     };
 
-    let warm = first + warmup_bars;          
+    let warm = first + warmup_bars;
     let mut out = alloc_with_nan_prefix(len, warm);
 
     match chosen {
@@ -555,7 +572,13 @@ pub struct EhlersITrendStream {
 impl EhlersITrendStream {
     pub fn try_new(params: EhlersITrendParams) -> Result<Self, EhlersITrendError> {
         let warmup_bars = params.warmup_bars.unwrap_or(12);
-        let max_dc = params.max_dc_period.unwrap_or(50).max(1);
+        let max_dc = params.max_dc_period.unwrap_or(50);
+        if warmup_bars == 0 {
+            return Err(EhlersITrendError::InvalidWarmupBars { warmup_bars });
+        }
+        if max_dc == 0 {
+            return Err(EhlersITrendError::InvalidMaxDcPeriod { max_dc });
+        }
         Ok(Self {
             warmup_bars,
             max_dc,
@@ -770,7 +793,7 @@ pub fn ehlers_itrend_batch_with_kernel(
     let kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(EhlersITrendError::EmptyInputData),
+        _ => return Err(EhlersITrendError::InvalidBatchKernel),
     };
 
     let simd = match kernel {
@@ -782,7 +805,6 @@ pub fn ehlers_itrend_batch_with_kernel(
         _ => unreachable!(),
     };
 
-
     ehlers_itrend_batch_par_slice(data, sweep, simd)
 }
 
@@ -793,25 +815,22 @@ fn ehlers_itrend_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EhlersITrendBatchOutput, EhlersITrendError> {
-
     // ────────────────────────────────────────────────────────────────────
     // unchanged validity checks
     // ────────────────────────────────────────────────────────────────────
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(EhlersITrendError::EmptyInputData);
+        return Err(EhlersITrendError::InvalidBatchRange);
     }
-    let first = data.iter()
-                    .position(|x| !x.is_nan())
-                    .ok_or(EhlersITrendError::AllValuesNaN)?;
-    let max_warmup = combos.iter()
-                           .map(|c| c.warmup_bars.unwrap())
-                           .max()
-                           .unwrap();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(EhlersITrendError::AllValuesNaN)?;
+    let max_warmup = combos.iter().map(|c| c.warmup_bars.unwrap()).max().unwrap();
     if data.len() - first < max_warmup {
         return Err(EhlersITrendError::NotEnoughDataForWarmup {
             warmup_bars: max_warmup,
-            length:      data.len() - first,
+            length: data.len() - first,
         });
     }
 
@@ -836,25 +855,19 @@ fn ehlers_itrend_batch_inner(
     //     and casts that slice to &mut [f64] for the kernel call
     // ────────────────────────────────────────────────────────────────────
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-        let p        = &combos[row];
-        let warmup   = p.warmup_bars.unwrap();
-        let max_dc   = p.max_dc_period.unwrap();
+        let p = &combos[row];
+        let warmup = p.warmup_bars.unwrap();
+        let max_dc = p.max_dc_period.unwrap();
 
         // safe to cast because we will write every element
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 =>
-                ehlers_itrend_row_avx512(data, warmup, max_dc, first, dst),
+            Kernel::Avx512 => ehlers_itrend_row_avx512(data, warmup, max_dc, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   =>
-                ehlers_itrend_row_avx2  (data, warmup, max_dc, first, dst),
-            _ =>
-                ehlers_itrend_row_scalar(data, warmup, max_dc, first, dst),
+            Kernel::Avx2 => ehlers_itrend_row_avx2(data, warmup, max_dc, first, dst),
+            _ => ehlers_itrend_row_scalar(data, warmup, max_dc, first, dst),
         }
     };
 
@@ -863,8 +876,8 @@ fn ehlers_itrend_batch_inner(
     // ────────────────────────────────────────────────────────────────────
     if parallel {
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -883,7 +896,6 @@ fn ehlers_itrend_batch_inner(
         cols,
     })
 }
-
 
 #[derive(Clone, Debug)]
 pub struct EhlersITrendBatchOutput {
@@ -908,15 +920,22 @@ impl EhlersITrendBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &EhlersITrendBatchRange) -> Vec<EhlersITrendParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Option<Vec<usize>> {
+        if step == 0 {
+            return if start == end {
+                Some(vec![start])
+            } else {
+                None
+            };
         }
-        (start..=end).step_by(step).collect()
+        if start > end {
+            return None;
+        }
+        Some((start..=end).step_by(step).collect())
     }
-    let warmups = axis(r.warmup_bars);
-    let max_dcs = axis(r.max_dc_period);
+    let warmups = axis(r.warmup_bars).ok_or(EhlersITrendError::InvalidBatchRange)?;
+    let max_dcs = axis(r.max_dc_period).ok_or(EhlersITrendError::InvalidBatchRange)?;
     let mut out = Vec::with_capacity(warmups.len() * max_dcs.len());
     for &w in &warmups {
         for &m in &max_dcs {
@@ -926,7 +945,7 @@ fn expand_grid(r: &EhlersITrendBatchRange) -> Vec<EhlersITrendParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -983,8 +1002,8 @@ pub fn ehlers_itrend_row_avx512(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_itrend_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1209,6 +1228,59 @@ mod tests {
         Ok(())
     }
 
+    fn check_itrend_zero_warmup(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0];
+        let params = EhlersITrendParams {
+            warmup_bars: Some(0),
+            max_dc_period: Some(10),
+        };
+        let input = EhlersITrendInput::from_slice(&data, params);
+        let res = ehlers_itrend_with_kernel(&input, kernel);
+        assert!(matches!(
+            res,
+            Err(EhlersITrendError::InvalidWarmupBars { .. })
+        ));
+        Ok(())
+    }
+
+    fn check_itrend_invalid_max_dc(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0];
+        let params = EhlersITrendParams {
+            warmup_bars: Some(1),
+            max_dc_period: Some(0),
+        };
+        let input = EhlersITrendInput::from_slice(&data, params);
+        let res = ehlers_itrend_with_kernel(&input, kernel);
+        assert!(matches!(
+            res,
+            Err(EhlersITrendError::InvalidMaxDcPeriod { .. })
+        ));
+        Ok(())
+    }
+
+    fn check_itrend_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        use proptest::prelude::*;
+
+        let strat = (5usize..50, -1000.0f64..1000.0);
+        proptest::test_runner::TestRunner::default().run(&strat, |(len, val)| {
+            let data = vec![val; len];
+            let params = EhlersITrendParams {
+                warmup_bars: Some(1),
+                max_dc_period: Some(10),
+            };
+            let input = EhlersITrendInput::from_slice(&data, params);
+            let out = ehlers_itrend_with_kernel(&input, kernel).unwrap();
+            for &v in &out.values[1..] {
+                prop_assert!((v - val).abs() < 1e-9);
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     macro_rules! generate_all_itrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1242,7 +1314,10 @@ mod tests {
         check_itrend_very_small_dataset,
         check_itrend_reinput,
         check_itrend_nan_handling,
-        check_itrend_streaming
+        check_itrend_streaming,
+        check_itrend_zero_warmup,
+        check_itrend_invalid_max_dc,
+        check_itrend_property
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1263,6 +1338,26 @@ mod tests {
                 "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
             );
         }
+        Ok(())
+    }
+
+    fn check_batch_invalid_kernel(test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        let data = [1.0, 2.0, 3.0];
+        let sweep = EhlersITrendBatchRange::default();
+        let res = ehlers_itrend_batch_with_kernel(&data, &sweep, Kernel::Scalar);
+        assert!(matches!(res, Err(EhlersITrendError::InvalidBatchKernel)));
+        Ok(())
+    }
+
+    fn check_batch_invalid_range(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let data = [1.0, 2.0, 3.0, 4.0];
+        let sweep = EhlersITrendBatchRange {
+            warmup_bars: (5, 1, 1),
+            max_dc_period: (10, 10, 0),
+        };
+        let res = ehlers_itrend_batch_with_kernel(&data, &sweep, kernel);
+        assert!(matches!(res, Err(EhlersITrendError::InvalidBatchRange)));
         Ok(())
     }
 
@@ -1291,4 +1386,6 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_invalid_kernel);
+    gen_batch_tests!(check_batch_invalid_range);
 }
