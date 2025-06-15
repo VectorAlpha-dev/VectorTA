@@ -19,12 +19,14 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, 
-                                make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use rayon::prelude::*;
 use std::convert::AsRef;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
     #[inline(always)]
@@ -155,6 +157,8 @@ impl EmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum EmaError {
+    #[error("ema: Input data slice is empty.")]
+    EmptyInputData,
     #[error("ema: All values are NaN.")]
     AllValuesNaN,
     #[error("ema: Invalid period: period = {period}, data length = {data_len}")]
@@ -174,11 +178,15 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
         EmaData::Slice(sl) => sl,
     };
 
+    let len = data.len();
+    if len == 0 {
+        return Err(EmaError::EmptyInputData);
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(EmaError::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
@@ -201,14 +209,11 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch =>
-                ema_scalar (data, period, first, &mut out),
+            Kernel::Scalar | Kernel::ScalarBatch => ema_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   | Kernel::Avx2Batch   =>
-                ema_avx2   (data, period, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => ema_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch =>
-                ema_avx512 (data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => ema_avx512(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -458,23 +463,31 @@ pub fn ema_batch_par_slice(
 fn ema_batch_inner(
     data: &[f64],
     sweep: &EmaBatchRange,
-    kern:  Kernel,
+    kern: Kernel,
     parallel: bool,
 ) -> Result<EmaBatchOutput, EmaError> {
-
     // ------------ boiler-plate unchanged -----------------------------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EmaError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(EmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
 
-    let first = data.iter()
-                    .position(|x| !x.is_nan())
-                    .ok_or(EmaError::AllValuesNaN)?;
+    if data.is_empty() {
+        return Err(EmaError::EmptyInputData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(EmaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
         return Err(EmaError::NotEnoughValidData {
-            needed: max_p, valid: data.len() - first
+            needed: max_p,
+            valid: data.len() - first,
         });
     }
 
@@ -483,7 +496,7 @@ fn ema_batch_inner(
 
     // ------------ 1. allocate & warm-up prefixes ---------------------------
     let mut raw = make_uninit_matrix(rows, cols);
-    let warm: Vec<usize> = vec![first; rows];          // same warm-up for every row
+    let warm: Vec<usize> = vec![first; rows]; // same warm-up for every row
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
     // ------------ 2. row-kernel closure on MaybeUninit rows ---------------
@@ -491,25 +504,22 @@ fn ema_batch_inner(
         let period = combos[row].period.unwrap();
 
         // cast *this* row slice to &mut [f64] for the kernel
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => ema_row_avx512(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => ema_row_avx2  (data, first, period, dst),
-            _              => ema_row_scalar(data, first, period, dst),
+            Kernel::Avx2 => ema_row_avx2(data, first, period, dst),
+            _ => ema_row_scalar(data, first, period, dst),
         }
     };
 
     // ------------ 3. run rows in parallel or serial ------------------------
     if parallel {
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -519,9 +529,13 @@ fn ema_batch_inner(
     // ------------ 4. soundly transmute to Vec<f64> -------------------------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(EmaBatchOutput { values, combos, rows, cols })
+    Ok(EmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
-
 
 #[inline(always)]
 unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -547,8 +561,9 @@ unsafe fn ema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
 
     fn check_ema_partial_params(
         test_name: &str,
@@ -656,6 +671,22 @@ mod tests {
         assert!(
             res.is_err(),
             "[{}] EMA should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_ema_empty_input(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = EmaInput::from_slice(&empty, EmaParams::default());
+        let res = ema_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(EmaError::EmptyInputData)),
+            "[{}] EMA should fail with empty input",
             test_name
         );
         Ok(())
@@ -770,6 +801,46 @@ mod tests {
         Ok(())
     }
 
+    fn check_ema_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let strat = (
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                30..200,
+            ),
+            3usize..30,
+        );
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = EmaParams {
+                    period: Some(period),
+                };
+                let input = EmaInput::from_slice(&data, params);
+                let EmaOutput { values: out } = ema_with_kernel(&input, kernel).unwrap();
+
+                for i in (period - 1)..data.len() {
+                    let window = &data[..=i];
+                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let y = out[i];
+
+                    prop_assert!(
+                        y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                        "idx {i}: {y} not in [{lo}, {hi}]",
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        Ok(())
+    }
+
     macro_rules! generate_all_ema_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -795,7 +866,6 @@ mod tests {
         }
     }
 
-
     generate_all_ema_tests!(
         check_ema_partial_params,
         check_ema_accuracy,
@@ -803,9 +873,11 @@ mod tests {
         check_ema_zero_period,
         check_ema_period_exceeds_length,
         check_ema_very_small_dataset,
+        check_ema_empty_input,
         check_ema_reinput,
         check_ema_nan_handling,
-        check_ema_streaming
+        check_ema_streaming,
+        check_ema_property
     );
 
     fn check_batch_default_row(
