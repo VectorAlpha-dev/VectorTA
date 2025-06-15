@@ -27,6 +27,16 @@ use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;   // add near the other use lines
 
+impl<'a> AsRef<[f64]> for HighPassInput<'a> {
+    #[inline(always)]
+    fn as_ref(&self) -> &[f64] {
+        match &self.data {
+            HighPassData::Slice(slice) => slice,
+            HighPassData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum HighPassData<'a> {
     Candles {
