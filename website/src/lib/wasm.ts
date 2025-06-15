@@ -1,5 +1,7 @@
 // WASM integration utilities for Rust-Backtester
 
+import type { RawCandleData } from './chartData.ts';
+
 export interface WasmModule {
 	// Placeholder for actual WASM exports
 	// These will be replaced with real functions when WASM is built
@@ -75,5 +77,14 @@ export function getWasmModule(): WasmModule | null {
 }
 
 export function isWasmLoaded(): boolean {
-	return wasmModuleCache !== null;
+        return wasmModuleCache !== null;
+}
+
+export function extractPriceArrays(data: RawCandleData[]) {
+        return {
+                open: new Float64Array(data.map(d => d.open)),
+                high: new Float64Array(data.map(d => d.high)),
+                low:  new Float64Array(data.map(d => d.low)),
+                close: new Float64Array(data.map(d => d.close)),
+        };
 }
