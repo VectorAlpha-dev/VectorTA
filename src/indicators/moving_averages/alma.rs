@@ -11,6 +11,7 @@
 //! - **sigma**: Controls the Gaussian curve’s width (defaults to 6.0).
 //!
 //! ## Errors
+//! - **EmptyInputData**: alma: Input data slice is empty.
 //! - **AllValuesNaN**: alma: All input data values are `NaN`.
 //! - **InvalidPeriod**: alma: `period` is zero or exceeds the data length.
 //! - **NotEnoughValidData**: alma: Not enough valid data points for the requested `period`.
@@ -22,29 +23,32 @@
 //! - **`Err(AlmaError)`** otherwise.
 //!
 
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python")]
-use pyo3::types::{PyList, PyDict};
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy::{PyArray1, IntoPyArray};
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
-use std::alloc::{alloc, dealloc, Layout};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
+use std::alloc::{alloc, dealloc, Layout};
 use std::convert::AsRef;
 use std::error::Error;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -208,6 +212,8 @@ impl AlmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum AlmaError {
+    #[error("alma: Input data slice is empty.")]
+    EmptyInputData,
     #[error("alma: All values are NaN.")]
     AllValuesNaN,
 
@@ -231,24 +237,25 @@ pub fn alma(input: &AlmaInput) -> Result<AlmaOutput, AlmaError> {
 
 #[inline(always)]
 fn alma_compute_into(
-    data:    &[f64],
+    data: &[f64],
     weights: &[f64],
-    period:  usize,
-    first:   usize,
-    inv_n:   f64,
-    kernel:  Kernel,
-    out:     &mut [f64],
+    period: usize,
+    first: usize,
+    inv_n: f64,
+    kernel: Kernel,
+    out: &mut [f64],
 ) {
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch =>
-                alma_scalar (data, weights, period, first, inv_n, out),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                alma_scalar(data, weights, period, first, inv_n, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   | Kernel::Avx2Batch   =>
-                alma_avx2  (data, weights, period, first, inv_n, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => alma_avx2(data, weights, period, first, inv_n, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch =>
-                alma_avx512(data, weights, period, first, inv_n, out),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                alma_avx512(data, weights, period, first, inv_n, out)
+            }
             _ => unreachable!(),
         }
     }
@@ -256,33 +263,43 @@ fn alma_compute_into(
 
 #[inline(always)]
 fn alma_prepare<'a>(
-    input:  &'a AlmaInput,
+    input: &'a AlmaInput,
     kernel: Kernel,
 ) -> Result<
-       ( /*data*/     &'a [f64],
-         /*weights*/  AVec<f64>,
-         /*period*/   usize,
-         /*first*/    usize,
-         /*inv_norm*/ f64,
-         /*chosen*/   Kernel ),
-       AlmaError> 
-{
+    (
+        /*data*/ &'a [f64],
+        /*weights*/ AVec<f64>,
+        /*period*/ usize,
+        /*first*/ usize,
+        /*inv_norm*/ f64,
+        /*chosen*/ Kernel,
+    ),
+    AlmaError,
+> {
     let data: &[f64] = input.as_ref();
-    let first = data.iter().position(|x| !x.is_nan())
-                    .ok_or(AlmaError::AllValuesNaN)?;
-
-    let len    = data.len();
+    let len = data.len();
+    if len == 0 {
+        return Err(AlmaError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(AlmaError::AllValuesNaN)?;
     let period = input.get_period();
     let offset = input.get_offset();
-    let sigma  = input.get_sigma();
+    let sigma = input.get_sigma();
 
     // ---- same guards as before ----
     if period == 0 || period > len {
-        return Err(AlmaError::InvalidPeriod { period, data_len: len });
+        return Err(AlmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if len - first < period {
         return Err(AlmaError::NotEnoughValidData {
-            needed: period, valid: len - first
+            needed: period,
+            valid: len - first,
         });
     }
     if sigma <= 0.0 {
@@ -293,32 +310,31 @@ fn alma_prepare<'a>(
     }
 
     // ---- build weights once ----
-    let m   = offset * (period - 1) as f64;
-    let s   = period as f64 / sigma;
-    let s2  = 2.0 * s * s;
+    let m = offset * (period - 1) as f64;
+    let s = period as f64 / sigma;
+    let s2 = 2.0 * s * s;
 
     let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
     weights.resize(period, 0.0);
     let mut norm = 0.0;
     for i in 0..period {
         let w = (-(i as f64 - m).powi(2) / s2).exp();
-        weights[i] = w; norm += w;
+        weights[i] = w;
+        norm += w;
     }
     let inv_norm = 1.0 / norm;
 
     // kernel auto-detection only once
-    let chosen = match kernel { Kernel::Auto => detect_best_kernel(), k => k };
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
 
     Ok((data, weights, period, first, inv_norm, chosen))
 }
 
-pub fn alma_with_kernel(
-    input:  &AlmaInput,
-    kernel: Kernel,
-) -> Result<AlmaOutput, AlmaError> 
-{
-    let (data, weights, period, first, inv_n, chosen) =
-        alma_prepare(input, kernel)?;
+pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput, AlmaError> {
+    let (data, weights, period, first, inv_n, chosen) = alma_prepare(input, kernel)?;
 
     // identical warm-up allocation utility you already have
     let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
@@ -338,7 +354,7 @@ pub unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
     let hi128 = _mm256_extractf128_pd(sum256, 1);
     let lo128 = _mm256_castpd256_pd128(sum256);
     let sum128 = _mm_add_pd(hi128, lo128);
-    let hi64  = _mm_unpackhi_pd(sum128, sum128);
+    let hi64 = _mm_unpackhi_pd(sum128, sum128);
     let sum64 = _mm_add_sd(sum128, hi64);
     _mm_cvtsd_f64(sum64)
 }
@@ -508,8 +524,6 @@ unsafe fn alma_avx512_short(
     }
 }
 
-
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 unsafe fn alma_avx512_long(
@@ -521,24 +535,22 @@ unsafe fn alma_avx512_long(
     out: &mut [f64],
 ) {
     const STEP: usize = 8;
-    let n_chunks  = period / STEP;
-    let tail_len  = period % STEP;
-    let paired    = n_chunks & !3;
+    let n_chunks = period / STEP;
+    let tail_len = period % STEP;
+    let paired = n_chunks & !3;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     debug_assert!(period >= 1 && n_chunks > 0);
     debug_assert_eq!(data.len(), out.len());
     debug_assert!(weights.len() >= period);
 
-    let mut wregs: Vec<__m512d> =
-        Vec::with_capacity(n_chunks + (tail_len != 0) as usize);
+    let mut wregs: Vec<__m512d> = Vec::with_capacity(n_chunks + (tail_len != 0) as usize);
 
     for blk in 0..n_chunks {
         wregs.push(_mm512_load_pd(weights.as_ptr().add(blk * STEP)));
     }
     let w_tail = if tail_len != 0 {
-        let wt = _mm512_maskz_loadu_pd(tail_mask,
-                                       weights.as_ptr().add(n_chunks * STEP));
+        let wt = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(n_chunks * STEP));
         wregs.push(wt);
         Some(wt)
     } else {
@@ -546,9 +558,9 @@ unsafe fn alma_avx512_long(
     };
 
     let mut data_ptr = data.as_ptr().add(first_valid);
-    let stop_ptr     = data.as_ptr().add(data.len());
+    let stop_ptr = data.as_ptr().add(data.len());
 
-    let mut dst_ptr  = out.as_mut_ptr().add(first_valid + period - 1);
+    let mut dst_ptr = out.as_mut_ptr().add(first_valid + period - 1);
 
     if tail_len == 0 {
         while data_ptr.add(period) <= stop_ptr {
@@ -558,8 +570,7 @@ unsafe fn alma_avx512_long(
             let mut s3 = _mm512_setzero_pd();
 
             for blk in (0..paired).step_by(4) {
-                _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8,
-                             _MM_HINT_T0);
+                _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
 
                 let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
                 let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
@@ -578,12 +589,11 @@ unsafe fn alma_avx512_long(
             }
 
             // horizontal reduction (hand-coded)
-            let tot = _mm512_add_pd(_mm512_add_pd(s0, s1),
-                                    _mm512_add_pd(s2, s3));
+            let tot = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
             *dst_ptr = hsum_pd_zmm(tot) * inv_norm;
 
             data_ptr = data_ptr.add(1);
-            dst_ptr  = dst_ptr.add(1);
+            dst_ptr = dst_ptr.add(1);
         }
     } else {
         let wt = w_tail.expect("tail_len != 0 but w_tail missing");
@@ -595,8 +605,7 @@ unsafe fn alma_avx512_long(
             let mut s3 = _mm512_setzero_pd();
 
             for blk in (0..paired).step_by(4) {
-                _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8,
-                             _MM_HINT_T0);
+                _mm_prefetch(data_ptr.add((blk + 8) * STEP) as *const i8, _MM_HINT_T0);
 
                 let d0 = _mm512_loadu_pd(data_ptr.add((blk + 0) * STEP));
                 let d1 = _mm512_loadu_pd(data_ptr.add((blk + 1) * STEP));
@@ -614,20 +623,17 @@ unsafe fn alma_avx512_long(
                 s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(blk), s0);
             }
 
-            let d_tail = _mm512_maskz_loadu_pd(tail_mask,
-                                               data_ptr.add(n_chunks * STEP));
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data_ptr.add(n_chunks * STEP));
             s0 = _mm512_fmadd_pd(d_tail, wt, s0);
 
-            let tot = _mm512_add_pd(_mm512_add_pd(s0, s1),
-                                    _mm512_add_pd(s2, s3));
+            let tot = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
             *dst_ptr = hsum_pd_zmm(tot) * inv_norm;
 
             data_ptr = data_ptr.add(1);
-            dst_ptr  = dst_ptr.add(1);
+            dst_ptr = dst_ptr.add(1);
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct AlmaStream {
@@ -969,15 +975,11 @@ fn alma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-
     // collect warm-up lengths per row once
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
-
-
-
 
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
@@ -988,21 +990,18 @@ fn alma_batch_inner(
     // ---------------------------------------------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr  = flat_w.as_ptr().add(row * max_p);
-        let inv_n  = *inv_norms.get_unchecked(row);
+        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let inv_n = *inv_norms.get_unchecked(row);
 
         // Cast the row slice (which is definitely ours to mutate) to f64
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar   => alma_row_scalar (data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Scalar => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2     => alma_row_avx2   (data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Avx2 => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512   => alma_row_avx512 (data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst),
             _ => unreachable!(),
         }
     };
@@ -1364,8 +1363,8 @@ unsafe fn long_kernel_with_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
 
     fn check_alma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1486,6 +1485,55 @@ mod tests {
         assert!(
             res.is_err(),
             "[{}] ALMA should fail with insufficient data",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_alma_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = AlmaInput::from_slice(&empty, AlmaParams::default());
+        let res = alma_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(AlmaError::EmptyInputData)),
+            "[{}] ALMA should fail with empty input",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_alma_invalid_sigma(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0];
+        let params = AlmaParams {
+            period: Some(2),
+            offset: None,
+            sigma: Some(0.0),
+        };
+        let input = AlmaInput::from_slice(&data, params);
+        let res = alma_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(AlmaError::InvalidSigma { .. })),
+            "[{}] ALMA should fail with invalid sigma",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_alma_invalid_offset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0];
+        let params = AlmaParams {
+            period: Some(2),
+            offset: Some(f64::NAN),
+            sigma: None,
+        };
+        let input = AlmaInput::from_slice(&data, params);
+        let res = alma_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(AlmaError::InvalidOffset { .. })),
+            "[{}] ALMA should fail with invalid offset",
             test_name
         );
         Ok(())
@@ -1618,26 +1666,35 @@ mod tests {
         }
         Ok(())
     }
-    fn check_alma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_alma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
         let strat = (
-            proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
-                                    30..200),
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                30..200,
+            ),
             3usize..30,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period)| {
-                let params = AlmaParams { period: Some(period), offset: None, sigma: None };
-                let input  = AlmaInput::from_slice(&data, params);
+                let params = AlmaParams {
+                    period: Some(period),
+                    offset: None,
+                    sigma: None,
+                };
+                let input = AlmaInput::from_slice(&data, params);
                 let AlmaOutput { values: out } = alma_with_kernel(&input, kernel).unwrap();
 
                 for i in (period - 1)..data.len() {
-                    let window = &data[i + 1 - period ..= i];
+                    let window = &data[i + 1 - period..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y  = out[i];
+                    let y = out[i];
 
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
@@ -1681,6 +1738,9 @@ mod tests {
         check_alma_zero_period,
         check_alma_period_exceeds_length,
         check_alma_very_small_dataset,
+        check_alma_empty_input,
+        check_alma_invalid_sigma,
+        check_alma_invalid_offset,
         check_alma_reinput,
         check_alma_nan_handling,
         check_alma_streaming,
@@ -1750,18 +1810,21 @@ fn alma<'py>(
     arr_in: PyReadonlyArray1<'py, f64>,
     period: usize,
     offset: f64,
-    sigma:  f64,
+    sigma: f64,
 ) -> PyResult<&'py PyArray1<f64>> {
-
-    let slice_in = arr_in.as_slice()?;           // zero-copy, read-only view
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
 
     // ---------- build input struct -------------------------------------------------
-    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
+    let params = AlmaParams {
+        period: Some(period),
+        offset: Some(offset),
+        sigma: Some(sigma),
+    };
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
     // ---------- allocate NumPy output buffer ---------------------------------------
-    let out_arr   = PyArray1::<f64>::new(py, [slice_in.len()], false);
-    let slice_out = unsafe { out_arr.as_slice_mut()? };  // safe: we own the array
+    let out_arr = PyArray1::<f64>::new(py, [slice_in.len()], false);
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AlmaError> {
@@ -1770,7 +1833,8 @@ fn alma<'py>(
         slice_out[..first + per - 1].fill(f64::NAN);
         alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
         Ok(())
-    }).map_err(|e| PyValueError::new_err(e.to_string()))?;   // unify error type
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
 
     Ok(out_arr)
 }
@@ -1791,8 +1855,8 @@ impl AlmaStreamPy {
             offset: Some(offset),
             sigma: Some(sigma),
         };
-        let stream = AlmaStream::try_new(params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let stream =
+            AlmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(AlmaStreamPy { stream })
     }
 
@@ -1810,45 +1874,59 @@ fn alma_batch<'py>(
     data: &'py PyArray1<f64>,
     period_range: (usize, usize, usize),
     offset_range: (f64, f64, f64),
-    sigma_range:  (f64, f64, f64),
+    sigma_range: (f64, f64, f64),
 ) -> PyResult<PyObject> {
-
     use numpy::{PyArray1, PyArrayDyn};
     use pyo3::types::PyDict;
 
     let slice_in = unsafe { data.as_slice()? };
 
     let sweep = AlmaBatchRange {
-        period: period_range, offset: offset_range, sigma: sigma_range,
+        period: period_range,
+        offset: offset_range,
+        sigma: sigma_range,
     };
 
     // 1. Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
-    let rows   = combos.len();
-    let cols   = slice_in.len();
+    let rows = combos.len();
+    let cols = slice_in.len();
 
     // 2. Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = PyArray1::<f64>::new(py, [rows*cols], false);
+    let out_arr = PyArray1::<f64>::new(py, [rows * cols], false);
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 3. Heavy work without the GIL
-    py.allow_threads(|| {
-        alma_batch_into_slice(slice_in, &sweep, Kernel::Auto, slice_out)
-    }).map_err(|e| PyValueError::new_err(e.to_string()))??;   // two ? because of nested Result
+    py.allow_threads(|| alma_batch_into_slice(slice_in, &sweep, Kernel::Auto, slice_out))
+        .map_err(|e| PyValueError::new_err(e.to_string()))??; // two ? because of nested Result
 
     // 4. Build dict with the GIL
     let dict = PyDict::new(py);
-    dict.set_item("values",
-        out_arr.reshape((rows, cols))?)?;
-    dict.set_item("periods",
-        combos.iter().map(|p| p.period.unwrap() as u64)
-              .collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("offsets",
-        combos.iter().map(|p| p.offset.unwrap())
-              .collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("sigmas",
-        combos.iter().map(|p| p.sigma.unwrap())
-              .collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "offsets",
+        combos
+            .iter()
+            .map(|p| p.offset.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "sigmas",
+        combos
+            .iter()
+            .map(|p| p.sigma.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
 
     Ok(dict.into())
 }
@@ -1864,15 +1942,13 @@ fn ta_indicators(py: Python<'_>, m: &PyModule) -> PyResult<()> {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn alma_js(
-    data: &[f64],
-    period: usize,
-    offset: f64,
-    sigma:  f64,
-) -> Result<Vec<f64>, JsValue> {
-
-    let params = AlmaParams { period: Some(period), offset: Some(offset), sigma: Some(sigma) };
-    let input  = AlmaInput::from_slice(data, params);
+pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<Vec<f64>, JsValue> {
+    let params = AlmaParams {
+        period: Some(period),
+        offset: Some(offset),
+        sigma: Some(sigma),
+    };
+    let input = AlmaInput::from_slice(data, params);
 
     alma_with_kernel(&input, Kernel::Auto)
         .map(|o| o.values)
