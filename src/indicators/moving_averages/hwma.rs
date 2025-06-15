@@ -19,15 +19,18 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
-use std::mem::MaybeUninit;  
 
 impl<'a> AsRef<[f64]> for HwmaInput<'a> {
     #[inline(always)]
@@ -41,7 +44,10 @@ impl<'a> AsRef<[f64]> for HwmaInput<'a> {
 
 #[derive(Debug, Clone)]
 pub enum HwmaData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -77,7 +83,10 @@ impl<'a> HwmaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: HwmaParams) -> Self {
         Self {
-            data: HwmaData::Candles { candles: c, source: s },
+            data: HwmaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -153,19 +162,31 @@ impl HwmaBuilder {
 
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<HwmaOutput, HwmaError> {
-        let p = HwmaParams { na: self.na, nb: self.nb, nc: self.nc };
+        let p = HwmaParams {
+            na: self.na,
+            nb: self.nb,
+            nc: self.nc,
+        };
         let i = HwmaInput::from_candles(c, "close", p);
         hwma_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<HwmaOutput, HwmaError> {
-        let p = HwmaParams { na: self.na, nb: self.nb, nc: self.nc };
+        let p = HwmaParams {
+            na: self.na,
+            nb: self.nb,
+            nc: self.nc,
+        };
         let i = HwmaInput::from_slice(d, p);
         hwma_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<HwmaStream, HwmaError> {
-        let p = HwmaParams { na: self.na, nb: self.nb, nc: self.nc };
+        let p = HwmaParams {
+            na: self.na,
+            nb: self.nb,
+            nc: self.nc,
+        };
         HwmaStream::try_new(p)
     }
 }
@@ -187,15 +208,21 @@ pub fn hwma(input: &HwmaInput) -> Result<HwmaOutput, HwmaError> {
 
 pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput, HwmaError> {
     let data: &[f64] = input.as_ref();
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(HwmaError::AllValuesNaN)?;
     let len = data.len();
     if len == 0 {
         return Err(HwmaError::EmptyData);
     }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HwmaError::AllValuesNaN)?;
     let na = input.get_na();
     let nb = input.get_nb();
     let nc = input.get_nc();
 
+    if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
+        return Err(HwmaError::InvalidParams { na, nb, nc });
+    }
     if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
         return Err(HwmaError::InvalidParams { na, nb, nc });
     }
@@ -208,17 +235,11 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                hwma_scalar(data, na, nb, nc, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => hwma_scalar(data, na, nb, nc, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                hwma_avx2(data, na, nb, nc, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => hwma_avx2(data, na, nb, nc, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                hwma_avx512(data, na, nb, nc, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => hwma_avx512(data, na, nb, nc, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -227,16 +248,11 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
 }
 
 #[inline(always)]
-pub fn hwma_scalar(
-    data: &[f64],
-    na: f64,
-    nb: f64,
-    nc: f64,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
-    if first_valid >= data.len() { return }
+    if first_valid >= data.len() {
+        return;
+    }
 
     // Pre-compute complements once.
     let one_m_na = 1.0 - na;
@@ -244,9 +260,9 @@ pub fn hwma_scalar(
     let one_m_nc = 1.0 - nc;
 
     // State registers
-    let mut f = data[first_valid];   // level
-    let mut v = 0.0;                 // velocity / trend
-    let mut a = 0.0;                 // acceleration
+    let mut f = data[first_valid]; // level
+    let mut v = 0.0; // velocity / trend
+    let mut a = 0.0; // acceleration
 
     // Main pass
     for i in first_valid..data.len() {
@@ -254,14 +270,14 @@ pub fn hwma_scalar(
         let price = unsafe { *data.get_unchecked(i) };
 
         // f = na·price + (1-na)·(f + v + 0.5 a)
-        let fv_sum  = f + v + 0.5 * a;
-        let f_new   = na.mul_add(price, one_m_na * fv_sum);
+        let fv_sum = f + v + 0.5 * a;
+        let f_new = na.mul_add(price, one_m_na * fv_sum);
 
         // v = nb·(f_new - f) + (1-nb)·(v + a)
-        let v_new   = nb.mul_add(f_new - f, one_m_nb * (v + a));
+        let v_new = nb.mul_add(f_new - f, one_m_nb * (v + a));
 
         // a = nc·(v_new - v) + (1-nc)·a
-        let a_new   = nc.mul_add(v_new - v, one_m_nc * a);
+        let a_new = nc.mul_add(v_new - v, one_m_nc * a);
 
         // Output HWMA = f + v + 0.5 a
         out[i] = f_new + v_new + 0.5 * a_new;
@@ -276,16 +292,11 @@ pub fn hwma_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub unsafe fn hwma_avx2(
-    data:   &[f64],
-    na:     f64,
-    nb:     f64,
-    nc:     f64,
-    first:  usize,
-    out:    &mut [f64],
-) {
+pub unsafe fn hwma_avx2(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
-    if first >= data.len() { return; }
+    if first >= data.len() {
+        return;
+    }
 
     /* -------- coefficients (kept once) ---------------------------- */
     let one_m_na = 1.0 - na;
@@ -294,9 +305,9 @@ pub unsafe fn hwma_avx2(
     const HALF: f64 = 0.5;
 
     /* -------- state registers ------------------------------------- */
-    let mut f = data[first];   // level
-    let mut v = 0.0;           // trend
-    let mut a = 0.0;           // acceleration
+    let mut f = data[first]; // level
+    let mut v = 0.0; // trend
+    let mut a = 0.0; // acceleration
 
     /* -------- main loop ------------------------------------------- */
     for i in first..data.len() {
@@ -305,41 +316,36 @@ pub unsafe fn hwma_avx2(
 
         /* ---- level (f') ---- */
         // s = f + v + 0.5·a   computed with one FMA
-        let s        = HALF.mul_add(a, f + v);
+        let s = HALF.mul_add(a, f + v);
         // f' = na·price + (1-na)·s
-        let f_new    = na.mul_add(price, one_m_na * s);
+        let f_new = na.mul_add(price, one_m_na * s);
 
         /* ---- trend (v') ---- */
-        let diff_f   = f_new - f;
+        let diff_f = f_new - f;
         // v' = nb·(f'-f) + (1-nb)·(v + a)
-        let v_new    = nb.mul_add(diff_f, one_m_nb * (v + a));
+        let v_new = nb.mul_add(diff_f, one_m_nb * (v + a));
 
         /* ---- acceleration (a') ---- */
-        let diff_v   = v_new - v;
+        let diff_v = v_new - v;
         // a' = nc·(v'-v) + (1-nc)·a
-        let a_new    = nc.mul_add(diff_v, one_m_nc * a);
+        let a_new = nc.mul_add(diff_v, one_m_nc * a);
 
         /* ---- output HWMA = f' + v' + 0.5·a'  (one more FMA) ---- */
-        out[i]       = HALF.mul_add(a_new, f_new + v_new);
+        out[i] = HALF.mul_add(a_new, f_new + v_new);
 
         /* ---- roll state ---- */
-        f = f_new;  v = v_new;  a = a_new;
+        f = f_new;
+        v = v_new;
+        a = a_new;
     }
 }
 
-
-#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
-#[target_feature(enable="avx512f,fma")]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
 #[inline]
-pub unsafe fn hwma_avx512(
-    data: &[f64], na: f64, nb: f64, nc: f64,
-    first: usize, out: &mut [f64])
-{
+pub unsafe fn hwma_avx512(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, out: &mut [f64]) {
     hwma_avx2(data, na, nb, nc, first, out);
 }
-
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -384,6 +390,9 @@ impl HwmaStream {
         let nb = params.nb.unwrap_or(0.1);
         let nc = params.nc.unwrap_or(0.1);
 
+        if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
+            return Err(HwmaError::InvalidParams { na, nb, nc });
+        }
         if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
             return Err(HwmaError::InvalidParams { na, nb, nc });
         }
@@ -527,9 +536,9 @@ pub struct HwmaBatchOutput {
 impl HwmaBatchOutput {
     pub fn row_for_params(&self, p: &HwmaParams) -> Option<usize> {
         self.combos.iter().position(|c| {
-            (c.na.unwrap_or(0.2) - p.na.unwrap_or(0.2)).abs() < 1e-12 &&
-            (c.nb.unwrap_or(0.1) - p.nb.unwrap_or(0.1)).abs() < 1e-12 &&
-            (c.nc.unwrap_or(0.1) - p.nc.unwrap_or(0.1)).abs() < 1e-12
+            (c.na.unwrap_or(0.2) - p.na.unwrap_or(0.2)).abs() < 1e-12
+                && (c.nb.unwrap_or(0.1) - p.nb.unwrap_or(0.1)).abs() < 1e-12
+                && (c.nc.unwrap_or(0.1) - p.nc.unwrap_or(0.1)).abs() < 1e-12
         })
     }
     pub fn values_for(&self, p: &HwmaParams) -> Option<&[f64]> {
@@ -562,7 +571,11 @@ fn expand_grid(r: &HwmaBatchRange) -> Vec<HwmaParams> {
     for &a in &nas {
         for &b in &nbs {
             for &c in &ncs {
-                out.push(HwmaParams { na: Some(a), nb: Some(b), nc: Some(c) });
+                out.push(HwmaParams {
+                    na: Some(a),
+                    nb: Some(b),
+                    nc: Some(c),
+                });
             }
         }
     }
@@ -598,9 +611,27 @@ fn hwma_batch_inner(
     if combos.is_empty() {
         return Err(HwmaError::EmptyData);
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(HwmaError::AllValuesNaN)?;
+    let len = data.len();
+    if len == 0 {
+        return Err(HwmaError::EmptyData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HwmaError::AllValuesNaN)?;
+    for prm in &combos {
+        let na = prm.na.unwrap();
+        let nb = prm.nb.unwrap();
+        let nc = prm.nc.unwrap();
+        if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
+            return Err(HwmaError::InvalidParams { na, nb, nc });
+        }
+        if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
+            return Err(HwmaError::InvalidParams { na, nb, nc });
+        }
+    }
     let rows = combos.len();
-    let cols = data.len();
+    let cols = len;
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
     // ----- 2. allocate rows×cols as MaybeUninit and write the NaN prefixes --------
@@ -615,15 +646,13 @@ fn hwma_batch_inner(
         let nc = prm.nc.unwrap();
 
         // cast this row to &mut [f64]
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             Kernel::Scalar => hwma_row_scalar(data, first, na, nb, nc, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => hwma_row_avx2  (data, first, na, nb, nc, out_row),
+            Kernel::Avx2 => hwma_row_avx2(data, first, na, nb, nc, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => hwma_row_avx512(data, first, na, nb, nc, out_row),
             _ => unreachable!(),
@@ -633,8 +662,8 @@ fn hwma_batch_inner(
     // ----- 4. run every row, writing directly into `raw` ---------------------------
     if parallel {
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -653,27 +682,13 @@ fn hwma_batch_inner(
 }
 
 #[inline(always)]
-unsafe fn hwma_row_scalar(
-    data: &[f64],
-    first: usize,
-    na: f64,
-    nb: f64,
-    nc: f64,
-    out: &mut [f64],
-) {
+unsafe fn hwma_row_scalar(data: &[f64], first: usize, na: f64, nb: f64, nc: f64, out: &mut [f64]) {
     hwma_scalar(data, na, nb, nc, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn hwma_row_avx2(
-    data: &[f64],
-    first: usize,
-    na: f64,
-    nb: f64,
-    nc: f64,
-    out: &mut [f64],
-) {
+unsafe fn hwma_row_avx2(data: &[f64], first: usize, na: f64, nb: f64, nc: f64, out: &mut [f64]) {
     hwma_avx2(data, na, nb, nc, first, out);
 }
 
@@ -724,14 +739,19 @@ pub fn expand_grid_hwma(r: &HwmaBatchRange) -> Vec<HwmaParams> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
 
     fn check_hwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let default_params = HwmaParams { na: None, nb: None, nc: None };
+        let default_params = HwmaParams {
+            na: None,
+            nb: None,
+            nc: None,
+        };
         let input = HwmaInput::from_candles(&candles, "close", default_params);
         let output = hwma_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
@@ -754,7 +774,15 @@ mod tests {
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            assert!(diff < 1e-3, "[{}] HWMA {:?} mismatch at idx {}: got {}, expected {}", test_name, kernel, i, val, expected_last_five[i]);
+            assert!(
+                diff < 1e-3,
+                "[{}] HWMA {:?} mismatch at idx {}: got {}, expected {}",
+                test_name,
+                kernel,
+                i,
+                val,
+                expected_last_five[i]
+            );
         }
         Ok(())
     }
@@ -776,35 +804,67 @@ mod tests {
     fn check_hwma_invalid_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
-        let params = HwmaParams { na: Some(-0.2), nb: Some(1.1), nc: Some(0.1) };
+        let params = HwmaParams {
+            na: Some(-0.2),
+            nb: Some(1.1),
+            nc: Some(0.1),
+        };
         let input = HwmaInput::from_slice(&data, params);
         let result = hwma_with_kernel(&input, kernel);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(HwmaError::InvalidParams { .. })));
+        Ok(())
+    }
+
+    fn check_hwma_invalid_nan_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0];
+        let params = HwmaParams {
+            na: Some(f64::NAN),
+            nb: Some(0.5),
+            nc: Some(0.5),
+        };
+        let input = HwmaInput::from_slice(&data, params);
+        let res = hwma_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(HwmaError::InvalidParams { .. })));
         Ok(())
     }
 
     fn check_hwma_empty_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data: [f64; 0] = [];
-        let params = HwmaParams { na: Some(0.2), nb: Some(0.1), nc: Some(0.1) };
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
         let input = HwmaInput::from_slice(&data, params);
         let result = hwma_with_kernel(&input, kernel);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(HwmaError::EmptyData)));
         Ok(())
     }
 
     fn check_hwma_small_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
-        let params = HwmaParams { na: Some(0.2), nb: Some(0.1), nc: Some(0.1) };
+        let params = HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1),
+        };
         let input = HwmaInput::from_slice(&data, params);
         let result = hwma_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), data.len());
-        assert_eq!(result.values[0], data[0] + 0.0 + 0.5 * 0.0);
+        assert!((result.values[0] - data[0]).abs() < 1e-12);
         Ok(())
     }
 
-    fn check_hwma_slice_data_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_hwma_slice_data_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -812,7 +872,11 @@ mod tests {
         let input_1 = HwmaInput::from_candles(&candles, "close", params_1);
         let result_1 = hwma_with_kernel(&input_1, kernel)?;
         assert_eq!(result_1.values.len(), candles.close.len());
-        let params_2 = HwmaParams { na: Some(0.3), nb: Some(0.15), nc: Some(0.05) };
+        let params_2 = HwmaParams {
+            na: Some(0.3),
+            nb: Some(0.15),
+            nc: Some(0.05),
+        };
         let input_2 = HwmaInput::from_slice(&result_1.values, params_2);
         let result_2 = hwma_with_kernel(&input_2, kernel)?;
         assert_eq!(result_2.values.len(), result_1.values.len());
@@ -838,6 +902,81 @@ mod tests {
         Ok(())
     }
 
+    fn check_hwma_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = HwmaParams::default();
+        let input = HwmaInput::from_candles(&candles, "close", params.clone());
+        let batch = hwma_with_kernel(&input, kernel)?.values;
+
+        let mut stream = HwmaStream::try_new(params)?;
+        let mut streaming = Vec::with_capacity(candles.close.len());
+        for &v in &candles.close {
+            match stream.update(v) {
+                Some(x) => streaming.push(x),
+                None => streaming.push(f64::NAN),
+            }
+        }
+
+        assert_eq!(batch.len(), streaming.len());
+        for (i, (&b, &s)) in batch.iter().zip(streaming.iter()).enumerate() {
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+            assert!((b - s).abs() < 1e-9, "[{test_name}] mismatch at {i}");
+        }
+        Ok(())
+    }
+
+    fn check_hwma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let strat = (
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                20..100,
+            ),
+            0.01f64..0.99,
+            0.01f64..0.99,
+            0.01f64..0.99,
+        );
+
+        proptest::test_runner::TestRunner::default().run(&strat, |(data, na, nb, nc)| {
+            let params = HwmaParams {
+                na: Some(na),
+                nb: Some(nb),
+                nc: Some(nc),
+            };
+            let input = HwmaInput::from_slice(&data, params);
+            let HwmaOutput { values } = hwma_with_kernel(&input, kernel).unwrap();
+
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for (idx, &x) in data.iter().enumerate() {
+                if !x.is_nan() {
+                    if x < min {
+                        min = x;
+                    }
+                    if x > max {
+                        max = x;
+                    }
+                }
+                let y = values[idx];
+                prop_assert!(
+                    y.is_nan() || (y >= min - 1e-9 && y <= max + 1e-9),
+                    "idx {idx}: {y} not in [{min}, {max}]"
+                );
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
     macro_rules! generate_all_hwma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -860,10 +999,13 @@ mod tests {
         check_hwma_accuracy,
         check_hwma_default_candles,
         check_hwma_invalid_params,
+        check_hwma_invalid_nan_params,
         check_hwma_empty_data,
         check_hwma_small_data,
         check_hwma_slice_data_reinput,
-        check_hwma_nan_check
+        check_hwma_nan_check,
+        check_hwma_streaming,
+        check_hwma_property
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
