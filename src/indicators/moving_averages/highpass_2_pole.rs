@@ -18,7 +18,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -173,6 +176,8 @@ impl HighPass2Builder {
 pub enum HighPass2Error {
     #[error("highpass_2_pole: All values are NaN.")]
     AllValuesNaN,
+    #[error("highpass_2_pole: Input data slice is empty.")]
+    EmptyInputData,
     #[error("highpass_2_pole: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("highpass_2_pole: Invalid k value: {k}")]
@@ -181,25 +186,36 @@ pub enum HighPass2Error {
     NotEnoughValidData { needed: usize, valid: usize },
 }
 
+/// Computes a two-pole high-pass filter using the best available kernel.
+///
+/// # Errors
+/// Returns [`HighPass2Error`] when parameters are invalid.
 #[inline]
 pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPass2Error> {
     highpass_2_pole_with_kernel(input, Kernel::Auto)
 }
 
+/// Computes a two-pole high-pass filter with a specific kernel.
+///
+/// # Errors
+/// See [`HighPass2Error`] for details.
 pub fn highpass_2_pole_with_kernel(
     input: &HighPass2Input,
     kernel: Kernel,
 ) -> Result<HighPass2Output, HighPass2Error> {
     let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(HighPass2Error::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(HighPass2Error::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
     let k = input.get_k();
 
-    if period < 2 || len == 0 {
+    if period < 2 || period > len {
         return Err(HighPass2Error::InvalidPeriod {
             period,
             data_len: len,
@@ -243,6 +259,7 @@ pub fn highpass_2_pole_with_kernel(
     Ok(HighPass2Output { values: out })
 }
 
+/// Scalar fallback implementation.
 #[inline(always)]
 pub fn highpass_2_pole_scalar(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
     unsafe {
@@ -260,6 +277,8 @@ pub unsafe fn highpass_2_pole_scalar_(
 ) {
     use std::f64::consts::PI;
     let len = data.len();
+    debug_assert!(out.len() >= data.len());
+    debug_assert!(period >= 2 && period <= data.len());
     let angle = 2.0 * PI * k / (period as f64);
     let sin_val = angle.sin();
     let cos_val = angle.cos();
@@ -287,6 +306,7 @@ pub unsafe fn highpass_2_pole_scalar_(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+/// AVX2 implementation of the filter.
 #[inline]
 pub unsafe fn highpass_2_pole_avx2(
     data: &[f64],
@@ -298,26 +318,34 @@ pub unsafe fn highpass_2_pole_avx2(
     use core::f64::consts::PI;
 
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
+    debug_assert!(out.len() >= n);
+    debug_assert!(period >= 2 && period <= n);
 
     /* ---- pre-compute coefficients (unchanged) ---- */
-    let theta      = 2.0 * PI * k / period as f64;
-    let alpha      = 1.0 + ((theta.sin() - 1.0) / theta.cos());
-    let c          = (1.0 - 0.5 * alpha).powi(2);
-    let cm2        = -2.0 * c;
-    let two_1m     =  2.0 * (1.0 - alpha);
+    let theta = 2.0 * PI * k / period as f64;
+    let alpha = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+    let c = (1.0 - 0.5 * alpha).powi(2);
+    let cm2 = -2.0 * c;
+    let two_1m = 2.0 * (1.0 - alpha);
     let neg_oma_sq = -(1.0 - alpha).powi(2);
 
     /* ---- seed ---- */
     out[0] = data[0];
-    if n == 1 { return; }
+    if n == 1 {
+        return;
+    }
     out[1] = data[1];
-    if n == 2 { return; }
+    if n == 2 {
+        return;
+    }
 
     /* ---- pointer iteration, but count-controlled ---- */
-    let mut rem   = n - 2;                           // how many samples left
-    let mut src   = data.as_ptr().add(2);
-    let mut dst   = out .as_mut_ptr().add(2);
+    let mut rem = n - 2; // how many samples left
+    let mut src = data.as_ptr().add(2);
+    let mut dst = out.as_mut_ptr().add(2);
 
     // state registers
     let mut x_im2 = data[0];
@@ -327,24 +355,24 @@ pub unsafe fn highpass_2_pole_avx2(
 
     while rem >= 2 {
         /* y[i] */
-        let x_i  = *src;
-        let t0   = cm2.mul_add(x_im1, c * x_i);
-        let t1   = c.mul_add(x_im2,   t0);
-        let y_i  = two_1m.mul_add(y_im1,
-                     neg_oma_sq.mul_add(y_im2, t1));
+        let x_i = *src;
+        let t0 = cm2.mul_add(x_im1, c * x_i);
+        let t1 = c.mul_add(x_im2, t0);
+        let y_i = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, t1));
         *dst = y_i;
 
         /* y[i+1] */
-        let x_ip1  = *src.add(1);
-        let t0b    = cm2.mul_add(x_i,  c * x_ip1);
-        let t1b    = c.mul_add(x_im1,  t0b);
-        let y_ip1  = two_1m.mul_add(y_i,
-                       neg_oma_sq.mul_add(y_im1, t1b));
+        let x_ip1 = *src.add(1);
+        let t0b = cm2.mul_add(x_i, c * x_ip1);
+        let t1b = c.mul_add(x_im1, t0b);
+        let y_ip1 = two_1m.mul_add(y_i, neg_oma_sq.mul_add(y_im1, t1b));
         *dst.add(1) = y_ip1;
 
         /* rotate */
-        x_im2 = x_i;   x_im1 = x_ip1;
-        y_im2 = y_i;   y_im1 = y_ip1;
+        x_im2 = x_i;
+        x_im1 = x_ip1;
+        y_im2 = y_i;
+        y_im1 = y_ip1;
 
         src = src.add(2);
         dst = dst.add(2);
@@ -356,19 +384,14 @@ pub unsafe fn highpass_2_pole_avx2(
         let x_i = *src;
         let y_i = two_1m.mul_add(
             y_im1,
-            neg_oma_sq.mul_add(
-                y_im2,
-                c.mul_add(
-                    x_im2,
-                    cm2.mul_add(x_im1, c * x_i)
-                )
-            ),
+            neg_oma_sq.mul_add(y_im2, c.mul_add(x_im2, cm2.mul_add(x_im1, c * x_i))),
         );
         *dst = y_i;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+/// AVX-512 implementation. Internally uses the AVX2 routine.
 #[inline(always)]
 pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
     unsafe { highpass_2_pole_avx2(data, period, k, first, out) }
@@ -591,9 +614,7 @@ fn highpass_2_pole_batch_inner(
     let cols = data.len();
 
     // ---------- per-row warm-up lengths ----------
-    let warm: Vec<usize> = combos.iter()
-        .map(|c| first + c.period.unwrap())
-        .collect();
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
     // ---------- 1. allocate rows×cols buffer & seed NaN prefixes ----------
     let mut raw = make_uninit_matrix(rows, cols);
@@ -602,27 +623,25 @@ fn highpass_2_pole_batch_inner(
     // ---------- 2. worker that fills one row ----------
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let k      = combos[row].k.unwrap();
+        let k = combos[row].k.unwrap();
 
         // Re-interpret this row as &mut [f64]
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => highpass_2_pole_row_avx512(data, first, period, k, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => highpass_2_pole_row_avx2  (data, first, period, k, out_row),
-            _              => highpass_2_pole_row_scalar(data, first, period, k, out_row),
+            Kernel::Avx2 => highpass_2_pole_row_avx2(data, first, period, k, out_row),
+            _ => highpass_2_pole_row_scalar(data, first, period, k, out_row),
         }
     };
 
     if parallel {
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -631,8 +650,12 @@ fn highpass_2_pole_batch_inner(
 
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(HighPass2BatchOutput { values, combos, rows, cols })
-
+    Ok(HighPass2BatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
@@ -649,11 +672,11 @@ pub unsafe fn highpass_2_pole_row_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn highpass_2_pole_row_avx2(
-    data:   &[f64],
-    first:  usize,
+    data: &[f64],
+    first: usize,
     period: usize,
-    k:      f64,
-    out:    &mut [f64],
+    k: f64,
+    out: &mut [f64],
 ) {
     highpass_2_pole_avx2(data, period, k, first, out);
 }
@@ -678,8 +701,8 @@ fn round_up8(x: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
 
     fn check_highpass2_partial_params(
@@ -834,6 +857,52 @@ mod tests {
         }
         Ok(())
     }
+
+    fn check_highpass2_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = HighPass2Input::from_slice(&empty, HighPass2Params::default());
+        let res = highpass_2_pole_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(HighPass2Error::EmptyInputData)));
+        Ok(())
+    }
+
+    fn check_highpass2_invalid_k(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0];
+        let params = HighPass2Params {
+            period: Some(2),
+            k: Some(-0.5),
+        };
+        let input = HighPass2Input::from_slice(&data, params);
+        let res = highpass_2_pole_with_kernel(&input, kernel);
+        assert!(matches!(res, Err(HighPass2Error::InvalidK { .. })));
+        Ok(())
+    }
+
+    fn check_highpass2_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        use proptest::prelude::*;
+
+        let strat = (30usize..100, 2usize..20, 0.1f64..0.9);
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(len, period, k)| {
+                let data = vec![5.0; len];
+                let params = HighPass2Params {
+                    period: Some(period),
+                    k: Some(k),
+                };
+                let input = HighPass2Input::from_slice(&data, params);
+                let out = highpass_2_pole_with_kernel(&input, kernel).unwrap();
+                prop_assert_eq!(out.values.len(), len);
+                let tail = out.values.last().copied().unwrap_or(0.0).abs();
+                prop_assert!(tail.is_finite());
+                Ok(())
+            })
+            .unwrap();
+        Ok(())
+    }
     macro_rules! generate_all_highpass2_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -865,7 +934,10 @@ mod tests {
         check_highpass2_period_exceeds_length,
         check_highpass2_very_small_dataset,
         check_highpass2_reinput,
-        check_highpass2_nan_handling
+        check_highpass2_nan_handling,
+        check_highpass2_empty_input,
+        check_highpass2_invalid_k,
+        check_highpass2_property
     );
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
