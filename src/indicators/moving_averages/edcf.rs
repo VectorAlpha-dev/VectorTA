@@ -19,13 +19,16 @@
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum EdcfData<'a> {
@@ -47,7 +50,9 @@ impl<'a> AsRef<[f64]> for EdcfInput<'a> {
 }
 
 #[derive(Debug, Clone)]
+/// Parameters controlling the EDCF calculation.
 pub struct EdcfParams {
+    /// Window size for the filter.
     pub period: Option<usize>,
 }
 
@@ -59,12 +64,15 @@ impl Default for EdcfParams {
 
 #[derive(Debug, Clone)]
 pub struct EdcfOutput {
+    /// Filtered values matching the input length.
     pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EdcfInput<'a> {
+    /// Input data series.
     pub data: EdcfData<'a>,
+    /// Filter parameters.
     pub params: EdcfParams,
 }
 
@@ -108,9 +116,12 @@ pub enum EdcfError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("edcf: NaN found in data after the first valid index.")]
     NaNFound,
+    #[error("edcf: Invalid kernel specified")]
+    InvalidKernel,
 }
 
 #[derive(Copy, Clone, Debug)]
+/// Builder providing a fluent API for [`EdcfOutput`].
 pub struct EdcfBuilder {
     period: Option<usize>,
     kernel: Kernel,
@@ -399,6 +410,7 @@ pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 }
 
 #[derive(Debug, Clone)]
+/// Streaming variant of the EDCF filter.
 pub struct EdcfStream {
     period: usize,
     buffer: Vec<f64>,
@@ -408,6 +420,7 @@ pub struct EdcfStream {
 }
 
 impl EdcfStream {
+    /// Creates a new stream with the provided parameters.
     pub fn try_new(params: EdcfParams) -> Result<Self, EdcfError> {
         let period = params.period.unwrap_or(15);
         if period == 0 {
@@ -425,7 +438,12 @@ impl EdcfStream {
         })
     }
     #[inline(always)]
+    /// Feeds a new value and returns the filtered result once enough
+    /// observations are available.
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        if !value.is_finite() {
+            return None;
+        }
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
@@ -466,6 +484,7 @@ impl EdcfStream {
 
 #[derive(Clone, Debug)]
 pub struct EdcfBatchRange {
+    /// Range for `period` as `(start, end, step)`.
     pub period: (usize, usize, usize),
 }
 
@@ -478,6 +497,7 @@ impl Default for EdcfBatchRange {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Builder for [`EdcfBatchOutput`] across a sweep of parameters.
 pub struct EdcfBatchBuilder {
     range: EdcfBatchRange,
     kernel: Kernel,
@@ -523,15 +543,13 @@ pub fn edcf_batch_with_kernel(
     sweep: &EdcfBatchRange,
     k: Kernel,
 ) -> Result<EdcfBatchOutput, EdcfError> {
+    if data.is_empty() {
+        return Err(EdcfError::NoData);
+    }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EdcfError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(EdcfError::InvalidKernel),
     };
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -546,9 +564,13 @@ pub fn edcf_batch_with_kernel(
 
 #[derive(Clone, Debug)]
 pub struct EdcfBatchOutput {
+    /// Flattened matrix of batch results.
     pub values: Vec<f64>,
+    /// Parameter combinations for each row.
     pub combos: Vec<EdcfParams>,
+    /// Number of rows in `values`.
     pub rows: usize,
+    /// Number of columns in `values`.
     pub cols: usize,
 }
 impl EdcfBatchOutput {
@@ -571,7 +593,7 @@ fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
 
     // Build the list of periods
     let periods: Vec<usize> = if step == 0 || start == end {
-        vec![start]                          // static single value
+        vec![start] // static single value
     } else {
         (start..=end).step_by(step).collect()
     };
@@ -609,18 +631,26 @@ fn edcf_batch_inner(
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
     // ─────────────────── guards unchanged ───────────────────
+    if data.is_empty() {
+        return Err(EdcfError::NoData);
+    }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EdcfError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(EdcfError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
 
-    let first = data.iter().position(|x| !x.is_nan())
-                    .ok_or(EdcfError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(EdcfError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < 2 * max_p {
         return Err(EdcfError::NotEnoughValidData {
             needed: 2 * max_p,
-            valid:  data.len() - first,
+            valid: data.len() - first,
         });
     }
 
@@ -631,7 +661,8 @@ fn edcf_batch_inner(
     let mut raw = make_uninit_matrix(rows, cols);
 
     // ─────────────────── 2️⃣ seed NaN prefixes ────────────────────────
-    let warm: Vec<usize> = combos.iter()
+    let warm: Vec<usize> = combos
+        .iter()
         .map(|c| first + 2 * c.period.unwrap())
         .collect();
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
@@ -641,24 +672,21 @@ fn edcf_batch_inner(
         let period = combos[row].period.unwrap();
 
         // Cast this single row to &mut [f64] for the kernel call
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => edcf_row_avx512(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => edcf_row_avx2  (data, first, period, dst),
-            _              => edcf_row_scalar(data, first, period, dst),
+            Kernel::Avx2 => edcf_row_avx2(data, first, period, dst),
+            _ => edcf_row_scalar(data, first, period, dst),
         }
     };
 
     if parallel {
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -668,7 +696,12 @@ fn edcf_batch_inner(
     // ─────────────────── 4️⃣ now every element is initialised ──────────
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(EdcfBatchOutput { values, combos, rows, cols })
+    Ok(EdcfBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
@@ -688,8 +721,9 @@ unsafe fn edcf_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
 
     fn check_edcf_partial_params(
         test_name: &str,
@@ -852,6 +886,73 @@ mod tests {
         Ok(())
     }
 
+    fn check_edcf_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = EdcfInput::from_candles(&candles, "close", EdcfParams { period: Some(15) });
+        let _batch = edcf_with_kernel(&input, kernel)?;
+
+        let mut stream = EdcfStream::try_new(EdcfParams { period: Some(15) })?;
+        let mut vals = Vec::with_capacity(candles.close.len());
+        for &v in &candles.close {
+            vals.push(stream.update(v).unwrap_or(f64::NAN));
+        }
+        for (i, &v) in vals.iter().enumerate().skip(30) {
+            assert!(!v.is_nan(), "[{test_name}] NaN at {i}");
+        }
+        Ok(())
+    }
+
+    fn check_edcf_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let strat = (
+            proptest::collection::vec((-1e6f64..1e6).prop_filter("f", |x| x.is_finite()), 40..200),
+            3usize..30,
+        );
+        proptest::test_runner::TestRunner::default().run(&strat, |(data, period)| {
+            prop_assume!(data.len() >= 2 * period);
+            let input = EdcfInput::from_slice(
+                &data,
+                EdcfParams {
+                    period: Some(period),
+                },
+            );
+            let out = edcf_with_kernel(&input, kernel).unwrap().values;
+            for i in (2 * period)..data.len() {
+                let window = &data[i + 1 - period..=i];
+                let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let y = out[i];
+                prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn check_edcf_invalid_kernel(
+        test_name: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let data = [1.0, 2.0, 3.0];
+        let range = EdcfBatchRange::default();
+        let res = edcf_batch_with_kernel(&data, &range, Kernel::Avx2);
+        assert!(
+            matches!(res, Err(EdcfError::InvalidKernel)),
+            "{}",
+            test_name
+        );
+        Ok(())
+    }
+
     macro_rules! generate_all_edcf_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -884,7 +985,10 @@ mod tests {
         check_edcf_with_period_exceeding_data_length,
         check_edcf_very_small_data_set,
         check_edcf_with_slice_data_reinput,
-        check_edcf_accuracy_nan_check
+        check_edcf_accuracy_nan_check,
+        check_edcf_streaming,
+        check_edcf_property,
+        check_edcf_invalid_kernel
     );
 
     fn check_batch_default_row(
