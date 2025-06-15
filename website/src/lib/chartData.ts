@@ -48,8 +48,45 @@ export interface IndicatorData {
  * Parse CSV data into structured format
  */
 export async function parseCsvData(): Promise<RawCandleData[]> {
-	// Use fallback data for reliable loading
-	return generateFallbackData();
+        const csvPath = '/2018-09-01-2024-Bitfinex_Spot-4h.csv';
+
+        try {
+                let text: string;
+
+                if (typeof fetch !== 'undefined') {
+                        const res = await fetch(csvPath);
+                        if (!res.ok) {
+                                throw new Error(`HTTP ${res.status}`);
+                        }
+                        text = await res.text();
+                } else {
+                        const fs = await import('fs/promises');
+                        const fileUrl = new URL(`../static${csvPath}`, import.meta.url);
+                        text = await fs.readFile(fileUrl, 'utf8');
+                }
+
+                const lines = text.trim().split(/\r?\n/);
+
+                // Ignore header if first value isn't a realistic timestamp
+                if (parseInt(lines[0].split(',')[0], 10) < 1e12) {
+                        lines.shift();
+                }
+
+                return lines.map((line) => {
+                        const [t, open, close, high, low, vol] = line.split(',');
+                        return {
+                                timestamp: Number(t),
+                                open: Number(open),
+                                high: Number(high),
+                                low: Number(low),
+                                close: Number(close),
+                                volume: Number(vol),
+                        } as RawCandleData;
+                });
+        } catch (err) {
+                console.error('Failed to load CSV data:', err);
+                return generateFallbackData();
+        }
 }
 
 /**
