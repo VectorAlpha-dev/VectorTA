@@ -18,14 +18,17 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
-use thiserror::Error;
-use std::mem::MaybeUninit;   // add near the other use lines
+use std::mem::MaybeUninit;
+use thiserror::Error; // add near the other use lines
 
 impl<'a> AsRef<[f64]> for HighPassInput<'a> {
     #[inline(always)]
@@ -71,7 +74,10 @@ impl<'a> HighPassInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: HighPassParams) -> Self {
         Self {
-            data: HighPassData::Candles { candles: c, source: s },
+            data: HighPassData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -107,37 +113,57 @@ impl Default for HighPassBuilder {
 }
 impl HighPassBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
-    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<HighPassOutput, HighPassError> {
-        let p = HighPassParams { period: self.period };
+        let p = HighPassParams {
+            period: self.period,
+        };
         let i = HighPassInput::from_candles(c, "close", p);
         highpass_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<HighPassOutput, HighPassError> {
-        let p = HighPassParams { period: self.period };
+        let p = HighPassParams {
+            period: self.period,
+        };
         let i = HighPassInput::from_slice(d, p);
         highpass_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<HighPassStream, HighPassError> {
-        let p = HighPassParams { period: self.period };
+        let p = HighPassParams {
+            period: self.period,
+        };
         HighPassStream::try_new(p)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum HighPassError {
+    #[error("highpass: Input data slice is empty.")]
+    EmptyInputData,
     #[error("highpass: All values are NaN.")]
     AllValuesNaN,
     #[error("highpass: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}")]
+    #[error("highpass: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error(
+        "highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}"
+    )]
     InvalidAlpha { cos_val: f64 },
 }
 
@@ -146,17 +172,43 @@ pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, HighPassError> 
     highpass_with_kernel(input, Kernel::Auto)
 }
 
-pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<HighPassOutput, HighPassError> {
+pub fn highpass_with_kernel(
+    input: &HighPassInput,
+    kernel: Kernel,
+) -> Result<HighPassOutput, HighPassError> {
     let data: &[f64] = match &input.data {
         HighPassData::Candles { candles, source } => source_type(candles, source),
         HighPassData::Slice(sl) => sl,
     };
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(HighPassError::AllValuesNaN)?;
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HighPassError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
     if len <= 2 || period == 0 || period > len {
-        return Err(HighPassError::InvalidPeriod { period, data_len: len });
+        return Err(HighPassError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if len - first < period {
+        return Err(HighPassError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    let k = 1.0;
+    let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
+    let cos_val = two_pi_k_div.cos();
+    if cos_val.abs() < 1e-15 {
+        return Err(HighPassError::InvalidAlpha { cos_val });
     }
 
     let chosen = match kernel {
@@ -168,17 +220,11 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
     let mut out = alloc_with_nan_prefix(len, warm);
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                highpass_scalar(data, period, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                highpass_avx2(data, period, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                highpass_avx512(data, period, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -188,12 +234,7 @@ pub fn highpass_with_kernel(input: &HighPassInput, kernel: Kernel) -> Result<Hig
 
 // Scalar implementation
 #[inline]
-pub unsafe fn highpass_scalar(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let k = 1.0;
     let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
@@ -206,8 +247,7 @@ pub unsafe fn highpass_scalar(
 
     out[0] = data[0];
     for i in 1..len {
-        let val = one_minus_half_alpha * data[i]
-            - one_minus_half_alpha * data[i - 1]
+        let val = one_minus_half_alpha * data[i] - one_minus_half_alpha * data[i - 1]
             + one_minus_alpha * out[i - 1];
         out[i] = val;
     }
@@ -216,52 +256,51 @@ pub unsafe fn highpass_scalar(
 // AVX2 stub
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn highpass_avx2(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     use core::f64::consts::PI;
 
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
 
     /* --- pre-compute coefficients --------------------------------------- */
-    let k        = 1.0;
-    let theta    = 2.0 * PI * k / period as f64;
-    let alpha    = 1.0 + ((theta.sin() - 1.0) / theta.cos());
-    let c        = 1.0 - 0.5 * alpha;        // (1-α/2)
-    let oma      = 1.0 - alpha;              // (1-α)
+    let k = 1.0;
+    let theta = 2.0 * PI * k / period as f64;
+    let alpha = 1.0 + ((theta.sin() - 1.0) / theta.cos());
+    let c = 1.0 - 0.5 * alpha; // (1-α/2)
+    let oma = 1.0 - alpha; // (1-α)
 
     /* --- seed ----------------------------------------------------------- */
     out[0] = data[0];
-    if n == 1 { return; }
+    if n == 1 {
+        return;
+    }
 
     /* --- pointer loop, 2× unrolled ------------------------------------- */
-    let mut src  = data.as_ptr().add(1);
-    let mut dst  = out .as_mut_ptr().add(1);
+    let mut src = data.as_ptr().add(1);
+    let mut dst = out.as_mut_ptr().add(1);
     let mut y_im1 = out[0];
     let mut x_im1 = data[0];
-    let mut rem   = n - 1;
+    let mut rem = n - 1;
 
     while rem >= 2 {
         // y[i]
-        let x_i   = *src;
-        let y_i   = oma.mul_add(y_im1, c * (x_i - x_im1));
+        let x_i = *src;
+        let y_i = oma.mul_add(y_im1, c * (x_i - x_im1));
         *dst = y_i;
 
         // y[i+1]
         let x_ip1 = *src.add(1);
-        let y_ip1 = oma.mul_add(y_i,   c * (x_ip1 - x_i));
+        let y_ip1 = oma.mul_add(y_i, c * (x_ip1 - x_i));
         *dst.add(1) = y_ip1;
 
         /* rotate state */
         x_im1 = x_ip1;
         y_im1 = y_ip1;
-        src   = src.add(2);
-        dst   = dst.add(2);
-        rem  -= 2;
+        src = src.add(2);
+        dst = dst.add(2);
+        rem -= 2;
     }
 
     if rem == 1 {
@@ -270,17 +309,10 @@ pub unsafe fn highpass_avx2(
     }
 }
 
-
-
 // AVX512 stub and long/short variants
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn highpass_avx512(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     highpass_avx2(data, period, first, out)
 }
 
@@ -291,7 +323,9 @@ pub struct HighPassBatchRange {
 }
 impl Default for HighPassBatchRange {
     fn default() -> Self {
-        Self { period: (48, 48, 0) }
+        Self {
+            period: (48, 48, 0),
+        }
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -300,8 +334,13 @@ pub struct HighPassBatchBuilder {
     kernel: Kernel,
 }
 impl HighPassBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.range.period = (start, end, step);
         self
@@ -313,15 +352,24 @@ impl HighPassBatchBuilder {
     pub fn apply_slice(self, data: &[f64]) -> Result<HighPassBatchOutput, HighPassError> {
         highpass_batch_with_kernel(data, &self.range, self.kernel)
     }
-    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<HighPassBatchOutput, HighPassError> {
+    pub fn with_default_slice(
+        data: &[f64],
+        k: Kernel,
+    ) -> Result<HighPassBatchOutput, HighPassError> {
         HighPassBatchBuilder::new().kernel(k).apply_slice(data)
     }
-    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<HighPassBatchOutput, HighPassError> {
+    pub fn apply_candles(
+        self,
+        c: &Candles,
+        src: &str,
+    ) -> Result<HighPassBatchOutput, HighPassError> {
         let slice = source_type(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<HighPassBatchOutput, HighPassError> {
-        HighPassBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "close")
+        HighPassBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "close")
     }
 }
 
@@ -334,7 +382,9 @@ pub struct HighPassBatchOutput {
 }
 impl HighPassBatchOutput {
     pub fn row_for_params(&self, p: &HighPassParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(48) == p.period.unwrap_or(48))
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(48) == p.period.unwrap_or(48))
     }
     pub fn values_for(&self, p: &HighPassParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -369,7 +419,12 @@ pub fn highpass_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(HighPassError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(HighPassError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -406,14 +461,34 @@ fn highpass_batch_inner(
 ) -> Result<HighPassBatchOutput, HighPassError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(HighPassError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(HighPassError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(HighPassError::AllValuesNaN)?;
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HighPassError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(HighPassError::InvalidPeriod { period: max_p, data_len: data.len() });
+        return Err(HighPassError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
 
+    for c in &combos {
+        let period = c.period.unwrap();
+        let k = 1.0;
+        let cos_val = (2.0 * std::f64::consts::PI * k / period as f64).cos();
+        if cos_val.abs() < 1e-15 {
+            return Err(HighPassError::InvalidAlpha { cos_val });
+        }
+    }
 
     // ------------------------------------------------------------------
     // after the usual validation checks …
@@ -422,10 +497,7 @@ fn highpass_batch_inner(
     let cols = data.len();
 
     /* ---------- 1.  NaN prefixes per-row ---------- */
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap())
-        .collect();
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
     /* ---------- 2.  allocate big matrix ---------- */
     let mut raw = make_uninit_matrix(rows, cols);
@@ -433,29 +505,27 @@ fn highpass_batch_inner(
 
     /* ---------- 3.  row worker ---------- */
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-        let period  = combos[row].period.unwrap();
+        let period = combos[row].period.unwrap();
 
         // reinterpret just this row as &mut [f64]
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar => highpass_row_scalar (data, first, period, out_row),
+            Kernel::Scalar => highpass_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => highpass_row_avx2    (data, first, period, out_row),
+            Kernel::Avx2 => highpass_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => highpass_row_avx512  (data, first, period, out_row),
-            _               => unreachable!(),
+            Kernel::Avx512 => highpass_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
         }
     };
 
     /* ---------- 4.  run every row ---------- */
     if parallel {
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -465,38 +535,28 @@ fn highpass_batch_inner(
     /* ---------- 5.  transmute to Vec<f64> ---------- */
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
-    Ok(HighPassBatchOutput { values, combos, rows, cols })
+    Ok(HighPassBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 // Row functions, all variants just call scalar
 #[inline(always)]
-pub unsafe fn highpass_row_scalar(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     highpass_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn highpass_row_avx2(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     highpass_avx2(data, period, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn highpass_row_avx512(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn highpass_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     highpass_row_avx2(data, first, period, out)
 }
 
@@ -515,7 +575,10 @@ impl HighPassStream {
     pub fn try_new(params: HighPassParams) -> Result<Self, HighPassError> {
         let period = params.period.unwrap_or(48);
         if period == 0 {
-            return Err(HighPassError::InvalidPeriod { period, data_len: 0 });
+            return Err(HighPassError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let k = 1.0;
         let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
@@ -543,8 +606,7 @@ impl HighPassStream {
             self.initialized = true;
             return value;
         }
-        let out = self.one_minus_half_alpha * value
-            - self.one_minus_half_alpha * self.prev_data
+        let out = self.one_minus_half_alpha * value - self.one_minus_half_alpha * self.prev_data
             + self.one_minus_alpha * self.prev_output;
         self.prev_data = value;
         self.prev_output = out;
@@ -556,11 +618,15 @@ impl HighPassStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
     use std::error::Error;
 
-    fn check_highpass_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_highpass_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -591,11 +657,21 @@ mod tests {
         let last_five = &result.values[start..];
         for (i, &val) in last_five.iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            assert!(diff < 1e-6, "[{}] Highpass mismatch at {}: expected {}, got {}", test_name, i, expected_last_five[i], val);
+            assert!(
+                diff < 1e-6,
+                "[{}] Highpass mismatch at {}: expected {}, got {}",
+                test_name,
+                i,
+                expected_last_five[i],
+                val
+            );
         }
         Ok(())
     }
-    fn check_highpass_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_highpass_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -614,25 +690,43 @@ mod tests {
         let params = HighPassParams { period: Some(0) };
         let input = HighPassInput::from_slice(&input_data, params);
         let result = highpass_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Highpass should fail with zero period", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Highpass should fail with zero period",
+            test_name
+        );
         Ok(())
     }
-    fn check_highpass_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_highpass_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = HighPassParams { period: Some(48) };
         let input = HighPassInput::from_slice(&input_data, params);
         let result = highpass_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Highpass should fail with period exceeding length", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Highpass should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
-    fn check_highpass_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_highpass_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [42.0, 43.0];
         let params = HighPassParams { period: Some(2) };
         let input = HighPassInput::from_slice(&input_data, params);
         let result = highpass_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Highpass should fail with insufficient data", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Highpass should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
     fn check_highpass_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -668,9 +762,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 48;
-        let input = HighPassInput::from_candles(&candles, "close", HighPassParams { period: Some(period) });
+        let input = HighPassInput::from_candles(
+            &candles,
+            "close",
+            HighPassParams {
+                period: Some(period),
+            },
+        );
         let batch_output = highpass_with_kernel(&input, kernel)?.values;
-        let mut stream = HighPassStream::try_new(HighPassParams { period: Some(period) })?;
+        let mut stream = HighPassStream::try_new(HighPassParams {
+            period: Some(period),
+        })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
             let hp_val = stream.update(price);
@@ -678,10 +780,71 @@ mod tests {
         }
         assert_eq!(batch_output.len(), stream_values.len());
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
-            if b.is_nan() && s.is_nan() { continue; }
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
             let diff = (b - s).abs();
-            assert!(diff < 1e-8, "[{}] Highpass streaming mismatch at idx {}: batch={}, stream={}", test_name, i, b, s);
+            assert!(
+                diff < 1e-8,
+                "[{}] Highpass streaming mismatch at idx {}: batch={}, stream={}",
+                test_name,
+                i,
+                b,
+                s
+            );
         }
+        Ok(())
+    }
+
+    fn check_highpass_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = HighPassInput::from_slice(&empty, HighPassParams::default());
+        let res = highpass_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(HighPassError::EmptyInputData)),
+            "[{}] expected EmptyInputData",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_highpass_invalid_alpha(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let params = HighPassParams { period: Some(4) }; // cos(pi/2) ~ 0
+        let input = HighPassInput::from_slice(&data, params);
+        let res = highpass_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(HighPassError::InvalidAlpha { .. })),
+            "[{}] expected InvalidAlpha",
+            test_name
+        );
+        Ok(())
+    }
+
+    fn check_highpass_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let strat = (
+            (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+            30usize..200,
+            3usize..30,
+        );
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(val, len, period)| {
+                let cos_val = (2.0 * std::f64::consts::PI / (period as f64)).cos();
+                prop_assume!(cos_val.abs() >= 1e-15);
+                let data = vec![val; len];
+                let params = HighPassParams {
+                    period: Some(period),
+                };
+                let input = HighPassInput::from_slice(&data, params);
+                let HighPassOutput { values: out } = highpass_with_kernel(&input, kernel).unwrap();
+                let last = *out.last().unwrap();
+                prop_assert!(last.abs() <= val.abs() * 0.01);
+                Ok(())
+            })
+            .unwrap();
         Ok(())
     }
 
@@ -712,7 +875,10 @@ mod tests {
         check_highpass_very_small_dataset,
         check_highpass_reinput,
         check_highpass_nan_handling,
-        check_highpass_streaming
+        check_highpass_streaming,
+        check_highpass_empty_input,
+        check_highpass_invalid_alpha,
+        check_highpass_property
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -734,7 +900,10 @@ mod tests {
         ];
         let start = row.len() - 5;
         for (i, &v) in row[start..].iter().enumerate() {
-            assert!((v - expected[i]).abs() < 1e-6, "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}");
+            assert!(
+                (v - expected[i]).abs() < 1e-6,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
         }
         Ok(())
     }
