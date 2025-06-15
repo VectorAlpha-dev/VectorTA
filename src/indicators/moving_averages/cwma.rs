@@ -9,6 +9,7 @@
 //! - **period**: Window size (number of data points, defaults to 14).
 //!
 //! ## Errors
+//! - **EmptyInputData**: cwma: Input data slice is empty.
 //! - **AllValuesNaN**: cwma: All input data values are NaN.
 //! - **InvalidPeriod**: cwma: period is zero or exceeds the data length.
 //! - **NotEnoughValidData**: cwma: Not enough valid data points for the requested period.
@@ -28,8 +29,8 @@ use crate::utilities::helpers::{
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CwmaInput<'a> {
     #[inline(always)]
@@ -100,6 +101,7 @@ impl<'a> CwmaInput<'a> {
     }
 }
 
+/// Convenience builder for [`cwma`] with optional parameters.
 #[derive(Copy, Clone, Debug)]
 pub struct CwmaBuilder {
     period: Option<usize>,
@@ -160,6 +162,8 @@ impl CwmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum CwmaError {
+    #[error("cwma: Input data slice is empty.")]
+    EmptyInputData,
     #[error("cwma: All values are NaN.")]
     AllValuesNaN,
     #[error("cwma: Invalid period specified for CWMA calculation: period = {period}, data length = {data_len}")]
@@ -180,12 +184,15 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
         CwmaData::Candles { candles, source } => source_type(candles, source),
         CwmaData::Slice(sl) => sl,
     };
+    let len = data.len();
+    if len == 0 {
+        return Err(CwmaError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
 
-    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
@@ -472,6 +479,7 @@ pub unsafe fn cwma_avx512_long(
     }
 }
 
+/// Streaming CWMA calculator that mirrors [`cwma`] output.
 #[derive(Debug, Clone)]
 pub struct CwmaStream {
     period: usize,
@@ -552,6 +560,7 @@ impl Default for CwmaBatchRange {
     }
 }
 
+/// Builder for [`cwma_batch_slice`] and related functions.
 #[derive(Clone, Debug, Default)]
 pub struct CwmaBatchBuilder {
     range: CwmaBatchRange,
@@ -695,6 +704,9 @@ fn cwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CwmaBatchOutput, CwmaError> {
+    if data.is_empty() {
+        return Err(CwmaError::EmptyInputData);
+    }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(CwmaError::InvalidPeriod {
@@ -747,29 +759,27 @@ fn cwma_batch_inner(
     // 2. closure that fills one row; takes &mut [MaybeUninit<f64>]
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr  = flat_w.as_ptr().add(row * max_p);
-        let inv_n  = *inv_norms.get_unchecked(row);
+        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let inv_n = *inv_norms.get_unchecked(row);
 
         // cast just this row to &mut [f64]
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => cwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => cwma_row_avx2  (data, first, period, max_p, w_ptr, inv_n, out_row),
-            _              => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2 => cwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            _ => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
         }
     };
 
     // 3. run every row, writing directly into `raw`
     if parallel {
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -780,7 +790,12 @@ fn cwma_batch_inner(
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     // ---------- 5. package result ----------
-    Ok(CwmaBatchOutput { values, combos, rows, cols })
+    Ok(CwmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
@@ -1035,6 +1050,7 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use proptest::prelude::*;
 
     fn check_cwma_partial_params(
         test_name: &str,
@@ -1164,6 +1180,22 @@ mod tests {
         Ok(())
     }
 
+    fn check_cwma_empty_input(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: [f64; 0] = [];
+        let input = CwmaInput::from_slice(&empty, CwmaParams::default());
+        let res = cwma_with_kernel(&input, kernel);
+        assert!(
+            matches!(res, Err(CwmaError::EmptyInputData)),
+            "[{}] Should fail with empty input",
+            test_name
+        );
+        Ok(())
+    }
+
     fn check_cwma_reinput(
         test_name: &str,
         kernel: Kernel,
@@ -1266,6 +1298,42 @@ mod tests {
         Ok(())
     }
 
+    fn check_cwma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let strat = (
+            proptest::collection::vec(
+                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
+                30..200,
+            ),
+            3usize..30,
+        );
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = CwmaParams {
+                    period: Some(period),
+                };
+                let input = CwmaInput::from_slice(&data, params);
+                let CwmaOutput { values: out } = cwma_with_kernel(&input, kernel).unwrap();
+
+                for i in (period - 1)..data.len() {
+                    let window = &data[i + 1 - period..=i];
+                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let y = out[i];
+                    prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        Ok(())
+    }
+
     macro_rules! generate_all_cwma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1297,9 +1365,11 @@ mod tests {
         check_cwma_zero_period,
         check_cwma_period_exceeds_length,
         check_cwma_very_small_dataset,
+        check_cwma_empty_input,
         check_cwma_reinput,
         check_cwma_nan_handling,
-        check_cwma_streaming
+        check_cwma_streaming,
+        check_cwma_property
     );
 
     fn check_batch_default_row(
