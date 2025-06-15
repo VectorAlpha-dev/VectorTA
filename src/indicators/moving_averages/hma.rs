@@ -23,7 +23,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -31,7 +31,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-
+use std::mem::MaybeUninit;
 impl<'a> AsRef<[f64]> for HmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -180,7 +180,8 @@ pub fn hma_with_kernel(input: &HmaInput, kernel: Kernel) -> Result<HmaOutput, Hm
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = vec![f64::NAN; len];
+    let warm      = first + period;
+    let mut out   = alloc_with_nan_prefix(len, warm);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -207,222 +208,404 @@ pub fn hma_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    // --- main HMA scalar logic (unchanged from your code) ---
+    use std::f64;
+
+    // ------------- validation -------------
     let len = data.len();
-    let half = period / 2;
-    if half == 0 || period > len {
+    if period < 2 || first >= len || period > len - first {
         return;
     }
-    let sqrtp = (period as f64).sqrt().floor() as usize;
-    if sqrtp == 0 {
-        return;
-    }
-    let m = len - first;
-    if period > m {
-        return;
-    }
+    let half_len  = period / 2;
+    if half_len == 0 { return; }
+    let sqrt_len  = (period as f64).sqrt().floor() as usize;
+    if sqrt_len == 0 { return; }
 
-    let sum_w_half = (half * (half + 1)) >> 1;
-    let denom_half = sum_w_half as f64;
+    let first_out = first + period + sqrt_len - 2;
+    if first_out >= len { return; }
 
-    let sum_w_full = (period * (period + 1)) >> 1;
-    let denom_full = sum_w_full as f64;
+    for v in &mut out[..] { *v = f64::NAN; }
 
-    let sum_w_sqrt = (sqrtp * (sqrtp + 1)) >> 1;
-    let denom_sqrt = sum_w_sqrt as f64;
+    // ---------- pre-computed constants ----------
+    let ws_half = (half_len * (half_len + 1) / 2) as f64;
+    let ws_full = (period   * (period   + 1) / 2) as f64;
+    let ws_sqrt = (sqrt_len * (sqrt_len + 1) / 2) as f64;
 
-    let lookback_half = half - 1;
-    let lookback_full = period - 1;
+    // ---------- running state ----------
+    let (mut sum_half, mut wsum_half) = (0.0, 0.0);
+    let (mut sum_full, mut wsum_full) = (0.0, 0.0);
+    let (mut wma_half, mut wma_full)  = (f64::NAN, f64::NAN);
 
-    let half_f = half as f64;
-    let period_f = period as f64;
-    let sqrtp_f = sqrtp as f64;
+    // ring buffer for √n intermediate values
+    let mut x_buf  = vec![0.0; sqrt_len];
+    let mut x_sum  = 0.0;
+    let mut x_wsum = 0.0;
+    let mut x_head = 0usize;
 
-    let mut wma_half = vec![f64::NAN; len];
-    let mut wma_full = vec![f64::NAN; len];
+    // ---------- main loop ----------
+    let start = first;
+    for j in 0..(len - start) {
+        let idx = start + j;
+        let val = data[idx];
 
-    let mut period_sub_half = 0.0;
-    let mut period_sum_half = 0.0;
-    let mut in_idx = 0;
-    let mut i_half = 1;
+        // ---- WMA(full) ----
+        if j < period {
+            // window not yet full
+            sum_full  += val;
+            wsum_full += (j as f64 + 1.0) * val;
+        } else {
+            let old       = data[idx - period];
+            let sum_prev  = sum_full;                  // save old Σ
+            sum_full      = sum_prev + val - old;      // new Σ
+            wsum_full     = wsum_full - sum_prev + (period as f64) * val;
+        }
+        if j + 1 >= period {
+            wma_full = wsum_full / ws_full;
+        }
 
-    while in_idx < lookback_half {
-        let val = data[first + in_idx];
-        period_sub_half += val;
-        period_sum_half += val * (i_half as f64);
-        in_idx += 1;
-        i_half += 1;
-    }
+        // ---- WMA(half) ----
+        if j < half_len {
+            sum_half  += val;
+            wsum_half += (j as f64 + 1.0) * val;
+        } else {
+            let old       = data[idx - half_len];
+            let sum_prev  = sum_half;
+            sum_half      = sum_prev + val - old;
+            wsum_half     = wsum_half - sum_prev + (half_len as f64) * val;
+        }
+        if j + 1 >= half_len {
+            wma_half = wsum_half / ws_half;
+        }
 
-    let mut period_sub_full = 0.0;
-    let mut period_sum_full = 0.0;
-    let mut in_idx_full = 0;
-    let mut i_full = 1;
+        // ---- combine into X once both WMAs exist ----
+        if j + 1 >= period {
+            let x_val = 2.0 * wma_half - wma_full;
 
-    while in_idx_full < lookback_full {
-        let val = data[first + in_idx_full];
-        period_sub_full += val;
-        period_sum_full += val * (i_full as f64);
-        in_idx_full += 1;
-        i_full += 1;
-    }
+            // fill √n buffer first …
+            if j + 1 < period + sqrt_len {
+                let pos = j + 1 - period;
+                x_buf[pos] = x_val;
+                x_sum     += x_val;
 
-    if in_idx < m {
-        let val = data[first + in_idx];
-        in_idx += 1;
-        period_sub_half += val;
-        period_sum_half += val * half_f;
-
-        wma_half[first + lookback_half] = period_sum_half / denom_half;
-        period_sum_half -= period_sub_half;
-
-        let mut trailing_idx_half = 1;
-        let mut trailing_value_half = data[first];
-
-        if in_idx_full < m {
-            let valf = data[first + in_idx_full];
-            in_idx_full += 1;
-            period_sub_full += valf;
-            period_sum_full += valf * period_f;
-
-            wma_full[first + lookback_full] = period_sum_full / denom_full;
-            period_sum_full -= period_sub_full;
-
-            let mut trailing_idx_full = 1;
-            let mut trailing_value_full = data[first];
-
-            while in_idx < m || in_idx_full < m {
-                if in_idx < m {
-                    let new_val = data[first + in_idx];
-                    in_idx += 1;
-
-                    period_sub_half += new_val;
-                    period_sub_half -= trailing_value_half;
-                    period_sum_half += new_val * half_f;
-
-                    trailing_value_half = data[first + trailing_idx_half];
-                    trailing_idx_half += 1;
-
-                    wma_half[first + (in_idx - 1)] = period_sum_half / denom_half;
-                    period_sum_half -= period_sub_half;
+                if pos + 1 == sqrt_len {
+                    // buffer full ⇒ first HMA
+                    x_wsum = 0.0;
+                    for k in 0..sqrt_len {
+                        x_wsum += (k as f64 + 1.0) * x_buf[k];
+                    }
+                    out[first_out] = x_wsum / ws_sqrt;
                 }
-
-                if in_idx_full < m {
-                    let new_valf = data[first + in_idx_full];
-                    in_idx_full += 1;
-
-                    period_sub_full += new_valf;
-                    period_sub_full -= trailing_value_full;
-                    period_sum_full += new_valf * period_f;
-
-                    trailing_value_full = data[first + trailing_idx_full];
-                    trailing_idx_full += 1;
-
-                    wma_full[first + (in_idx_full - 1)] = period_sum_full / denom_full;
-                    period_sum_full -= period_sub_full;
-                }
-            }
-        }
-    }
-
-    let mut diff = vec![f64::NAN; len];
-    for i in 0..len {
-        let a = wma_half[i];
-        let b = wma_full[i];
-        if a.is_finite() && b.is_finite() {
-            diff[i] = 2.0 * a - b;
-        }
-    }
-
-    let mut wma_sqrt = vec![f64::NAN; len];
-    {
-        let lookback_sqrt = sqrtp - 1;
-        let mut period_sub_sqrt = 0.0;
-        let mut period_sum_sqrt = 0.0;
-        let mut in_idx_sqrt = 0;
-        let mut i_s = 1;
-
-        while in_idx_sqrt < lookback_sqrt {
-            let val = diff[first + in_idx_sqrt];
-            if val.is_finite() {
-                period_sub_sqrt += val;
-                period_sum_sqrt += val * (i_s as f64);
-            }
-            in_idx_sqrt += 1;
-            i_s += 1;
-        }
-
-        if in_idx_sqrt < m {
-            let val = diff[first + in_idx_sqrt];
-            in_idx_sqrt += 1;
-            if val.is_finite() {
-                period_sub_sqrt += val;
-                period_sum_sqrt += val * sqrtp_f;
-            }
-            let mut trailing_idx_sqrt = 1;
-            let mut trailing_value_sqrt = diff[first];
-
-            wma_sqrt[first + lookback_sqrt] = if trailing_value_sqrt.is_finite() {
-                period_sum_sqrt / denom_sqrt
             } else {
-                f64::NAN
-            };
-            period_sum_sqrt -= period_sub_sqrt;
+                // … then do rolling updates
+                let old_x     = x_buf[x_head];
+                x_buf[x_head] = x_val;
+                x_head        = (x_head + 1) % sqrt_len;
 
-            while in_idx_sqrt < m {
-                let new_val = diff[first + in_idx_sqrt];
-                in_idx_sqrt += 1;
+                let sum_prev  = x_sum;
+                x_sum         = sum_prev + x_val - old_x;
+                x_wsum        = x_wsum - sum_prev + (sqrt_len as f64) * x_val;
 
-                if new_val.is_finite() {
-                    period_sub_sqrt += new_val;
-                }
-                if trailing_value_sqrt.is_finite() {
-                    period_sub_sqrt -= trailing_value_sqrt;
-                }
-                if new_val.is_finite() {
-                    period_sum_sqrt += new_val * sqrtp_f;
-                }
-
-                trailing_value_sqrt = diff[first + trailing_idx_sqrt];
-                trailing_idx_sqrt += 1;
-
-                wma_sqrt[first + (in_idx_sqrt - 1)] = if period_sub_sqrt != 0.0 {
-                    period_sum_sqrt / denom_sqrt
-                } else {
-                    f64::NAN
-                };
-                period_sum_sqrt -= period_sub_sqrt;
+                out[idx] = x_wsum / ws_sqrt;
             }
         }
     }
-    out.copy_from_slice(&wma_sqrt);
 }
 
-// --- AVX2/AVX512 stubs (redirect to scalar) ---
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn hma_avx2(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
-    hma_scalar(data, period, first, out)
-}
+pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
+    // SAFETY: we just verified AVX2+FMA at runtime.
+    unsafe {
+        // ----------- early-exit checks (unchanged from scalar) -----------
+        let len = data.len();
+        if period < 2 || first >= len || period > len - first {
+            return;
+        }
+        let half_len = period / 2;
+        if half_len == 0 { return; }
+        let sqrt_len = (period as f64).sqrt().floor() as usize;
+        if sqrt_len == 0 { return; }
+        let first_out = first + period + sqrt_len - 2;
+        if first_out >= len { return; }
+
+        let ws_half = (half_len * (half_len + 1) / 2) as f64;
+        let ws_full = (period   * (period   + 1) / 2) as f64;
+        let ws_sqrt = (sqrt_len * (sqrt_len + 1) / 2) as f64;
+
+        let (mut sum_half, mut wsum_half) = (0.0, 0.0);
+        let (mut sum_full, mut wsum_full) = (0.0, 0.0);
+        let (mut wma_half, mut wma_full)  = (f64::NAN, f64::NAN);
+
+        // √n ring-buffer + constant weights
+        let mut x_buf  = vec![0.0; sqrt_len];
+        let mut weights = vec![0.0; sqrt_len];
+        for (k, w) in weights.iter_mut().enumerate() { *w = (k + 1) as f64; }
+
+        let mut x_sum  = 0.0;
+        let mut x_wsum = 0.0;
+        let mut x_head = 0usize;
+
+        // ------------------------- main loop -------------------------
+        let start = first;
+        for j in 0..(len - start) {
+            let idx = start + j;
+            let val = *data.get_unchecked(idx);
+
+            // ----- WMA(full) rolling update -----
+            if j < period {
+                sum_full  += val;
+                wsum_full += (j as f64 + 1.0) * val;
+            } else {
+                let old      = *data.get_unchecked(idx - period);
+                let sum_prev = sum_full;
+                sum_full     = sum_prev + val - old;
+                wsum_full    = wsum_full - sum_prev + (period as f64) * val;
+            }
+            if j + 1 >= period {
+                wma_full = wsum_full / ws_full;
+            }
+
+            // ----- WMA(half) rolling update -----
+            if j < half_len {
+                sum_half  += val;
+                wsum_half += (j as f64 + 1.0) * val;
+            } else {
+                let old      = *data.get_unchecked(idx - half_len);
+                let sum_prev = sum_half;
+                sum_half     = sum_prev + val - old;
+                wsum_half    = wsum_half - sum_prev + (half_len as f64) * val;
+            }
+            if j + 1 >= half_len {
+                wma_half = wsum_half / ws_half;
+            }
+
+            // ----- combine once both WMAs exist -----
+            if j + 1 >= period {
+                let x_val = 2.0 * wma_half - wma_full;
+
+                // fill √n buffer first
+                if j + 1 < period + sqrt_len {
+                    let pos = j + 1 - period;
+                    *x_buf.get_unchecked_mut(pos) = x_val;
+                    x_sum += x_val;
+
+                    if pos + 1 == sqrt_len {
+                        // SIMD dot‐product for the first HMA
+                        x_wsum = {
+                            use std::arch::x86_64::*;
+                            // len is ≤ period, so always multiple of 4? Not necessarily.
+                            let mut acc = _mm256_setzero_pd();
+                            let chunks  = sqrt_len / 4;
+                            for c in 0..chunks {
+                                let v1 = _mm256_loadu_pd(x_buf.as_ptr().add(c * 4));
+                                let v2 = _mm256_loadu_pd(weights.as_ptr().add(c * 4));
+                                acc    = _mm256_fmadd_pd(v1, v2, acc);
+                            }
+                            // horizontal add
+                            let hi = _mm256_extractf128_pd(acc, 1);
+                            let lo = _mm256_castpd256_pd128(acc);
+                            let t  = _mm_add_pd(hi, lo);
+                            let t  = _mm_hadd_pd(t, t);
+                            let mut sum = _mm_cvtsd_f64(t);
+
+                            for i in (chunks * 4)..sqrt_len {
+                                sum += *x_buf.get_unchecked(i) * *weights.get_unchecked(i);
+                            }
+                            sum
+                        };
+                        *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt;
+                    }
+                } else {
+                    // rolling update after buffer full
+                    let old_x  = *x_buf.get_unchecked(x_head);
+                    *x_buf.get_unchecked_mut(x_head) = x_val;
+                    x_head = (x_head + 1) % sqrt_len;
+
+                    let sum_prev = x_sum;
+                    x_sum        = sum_prev + x_val - old_x;
+                    x_wsum       = x_wsum - sum_prev + (sqrt_len as f64) * x_val;
+
+                    *out.get_unchecked_mut(idx) = x_wsum / ws_sqrt;
+                }
+            }
+        }
+    }
+}
+ 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
 #[inline]
-pub fn hma_avx512(
-    data: &[f64],
+pub unsafe fn hma_avx512(
+    data:  &[f64],
     period: usize,
-    first: usize,
-    out: &mut [f64],
+    first:  usize,
+    out:    &mut [f64],
 ) {
-    hma_scalar(data, period, first, out)
+    use core::arch::x86_64::*;
+    use aligned_vec::AVec;
+
+    /* ---------- parameter & safety checks ---------- */
+    let len = data.len();
+    if period < 2 || first >= len || period > len - first { return; }
+    let half = period / 2;
+    if half == 0 { return; }
+    let sq = (period as f64).sqrt().floor() as usize;
+    debug_assert!(sq > 0 && sq <= 65_535,
+        "HMA: √period must fit in 16-bit to keep Σw < 2^53");
+    if sq == 0 { return; }
+    let first_out = first + period + sq - 2;
+    if first_out >= len { return; }
+
+    /* ---------- pre-computed window constants ---------- */
+    let ws_half = (half   * (half   + 1) / 2) as f64;
+    let ws_full = (period * (period + 1) / 2) as f64;
+    let ws_sqrt = (sq     * (sq     + 1) / 2) as f64;
+    let sq_f    = sq as f64;                       // for FMA later
+
+    /* ---------- rolling state ---------- */
+    let (mut s_half, mut ws_half_acc) = (0.0, 0.0);
+    let (mut s_full, mut ws_full_acc) = (0.0, 0.0);
+    let (mut wma_half, mut wma_full)  = (f64::NAN, f64::NAN);
+
+    /* √n ring buffer – 64 B aligned & length rounded up to 8 × */
+    let sq_aligned      = (sq + 7) & !7;
+    let mut x_buf: AVec<f64> = AVec::with_capacity(64, sq_aligned);
+    x_buf.resize(sq_aligned, 0.0);
+
+    let mut x_sum  = 0.0;
+    let mut x_wsum = 0.0;
+    let mut x_head = 0usize;
+
+    /* lane-local ramp 0‥7 → shifted per block */
+    const W_RAMP_ARR: [f64; 8] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+
+    // ❷  Load once into a ZMM register
+    let w_ramp: __m512d = _mm512_loadu_pd(W_RAMP_ARR.as_ptr());
+
+    /* fast horizontal sum (avoids _mm512_reduce_add_pd latency) */
+    #[inline(always)]
+    unsafe fn horiz_sum(z: __m512d) -> f64 {
+        let hi = _mm512_extractf64x4_pd(z, 1);
+        let lo = _mm512_castpd512_pd256(z);
+        let red = _mm256_add_pd(hi, lo);
+        let red = _mm256_hadd_pd(red, red);
+        _mm_cvtsd_f64(_mm256_castpd256_pd128(red))
+    }
+
+    /* ---------- phase 1: warm-up ---------- */
+    for j in 0..(period + sq - 1) {
+        let idx = first + j;
+        let val = *data.get_unchecked(idx);                 // unaligned load OK
+
+        /* full WMA update */
+        if j < period {
+            s_full      += val;
+            ws_full_acc += (j as f64 + 1.0) * val;
+        } else {
+            let old = *data.get_unchecked(idx - period);
+            let prev = s_full;
+            s_full      = prev + val - old;
+            ws_full_acc = ws_full_acc - prev + (period as f64) * val;
+        }
+
+        /* half WMA update */
+        if j < half {
+            s_half      += val;
+            ws_half_acc += (j as f64 + 1.0) * val;
+        } else {
+            let old = *data.get_unchecked(idx - half);
+            let prev = s_half;
+            s_half      = prev + val - old;
+            ws_half_acc = ws_half_acc - prev + (half as f64) * val;
+        }
+
+        if j + 1 >= half   { wma_half = ws_half_acc / ws_half; }
+        if j + 1 >= period { wma_full = ws_full_acc / ws_full; }
+
+        if j + 1 >= period {
+            let x_val = 2.0 * wma_half - wma_full;
+            let pos   = (j + 1 - period) as usize;
+
+            if pos < sq {
+                *x_buf.get_unchecked_mut(pos) = x_val;
+                x_sum += x_val;
+
+                if pos + 1 == sq {
+                    /* first full dot-product (SIMD) */
+                    let mut acc = _mm512_setzero_pd();
+                    let mut i   = 0usize;
+                    let mut off = 0.0;
+                    while i + 8 <= sq {
+                        let x = _mm512_loadu_pd(x_buf.as_ptr().add(i));          // unaligned OK
+                        // use the *vector* you just loaded
+                        let w = _mm512_add_pd(w_ramp, _mm512_set1_pd(off + 1.0));
+                        acc   = _mm512_fmadd_pd(x, w, acc);
+                        i   += 8;
+                        off += 8.0;
+                    }
+                    x_wsum = horiz_sum(acc);
+                    for k in i..sq {
+                        x_wsum += x_buf[k] * (k as f64 + 1.0);
+                    }
+                    *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt; // unaligned store
+                }
+            }
+        }
+    }
+
+    /* ---------- phase 2: steady-state ---------- */
+    for j in (period + sq - 1)..(len - first) {
+        let idx = first + j;
+        let val = *data.get_unchecked(idx);                 // unaligned load
+
+        /* vectorised rolling update for both WMAs (128-bit packs) */
+        let old_f = *data.get_unchecked(idx - period);
+        let old_h = *data.get_unchecked(idx - half);
+
+        let sum_vec = _mm_set_pd(s_full,      s_half);      // [hi | lo]
+        let old_vec = _mm_set_pd(old_f,       old_h);
+        let ws_vec  = _mm_set_pd(ws_full_acc, ws_half_acc);
+        let weights = _mm_set_pd(period as f64, half as f64);
+        let v_val   = _mm_set1_pd(val);
+
+        /* Σ ← Σ − old + val */
+        let new_sum_vec = _mm_add_pd(_mm_sub_pd(sum_vec, old_vec), v_val);
+
+        /* WS ← WS − Σ_prev + w*val  (single FMA) */
+        let diff        = _mm_sub_pd(ws_vec, sum_vec);
+        let new_ws_vec  = _mm_fmadd_pd(v_val, weights, diff);
+
+        /* unpack back to scalars */
+        s_full      = _mm_cvtsd_f64(_mm_unpackhi_pd(new_sum_vec, new_sum_vec));
+        s_half      = _mm_cvtsd_f64(new_sum_vec);
+        ws_full_acc = _mm_cvtsd_f64(_mm_unpackhi_pd(new_ws_vec, new_ws_vec));
+        ws_half_acc = _mm_cvtsd_f64(new_ws_vec);
+
+        /* derive WMAs & combine */
+        wma_full = ws_full_acc / ws_full;
+        wma_half = ws_half_acc / ws_half;
+        let x_val = 2.0 * wma_half - wma_full;
+
+        /* ring update – O(1) with fused multiply-add */
+        let old_x = *x_buf.get_unchecked(x_head);
+        *x_buf.get_unchecked_mut(x_head) = x_val;
+        x_head = (x_head + 1) % sq;
+
+        let prev_sum = x_sum;
+        x_sum  = prev_sum + x_val - old_x;
+        x_wsum = sq_f.mul_add(x_val, x_wsum - prev_sum);    // single FMA
+
+        *out.get_unchecked_mut(idx) = x_wsum / ws_sqrt;     // unaligned store
+
+        /* software prefetch to L2 ~16 iterations ahead */
+        let pf = core::cmp::min(idx + 128, len - 1);
+        _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
+    }
 }
 
-// --- Batch API, batch builder, and helpers ---
+
 
 #[derive(Clone, Debug)]
 pub struct HmaBatchRange {
@@ -573,34 +756,51 @@ fn hma_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+
+    // one warm-prefix per row so batch + streaming agree
+    let warm: Vec<usize> = combos.iter()
+                                 .map(|c| first + c.period.unwrap())
+                                 .collect();
+
+    // -------- allocate rows×cols uninitialised -----------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // -------- per-row worker closure -----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this row into &mut [f64] once we’re ready to write real numbers
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => hma_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => hma_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => hma_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => hma_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
+
+    // -------- run every row -----------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(HmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // -------- transmute to a normal Vec<f64> -----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(HmaBatchOutput { values, combos, rows, cols })
 }
 
 // --- row variants (all AVX point to scalar, as per your pattern) ---
@@ -623,7 +823,7 @@ pub unsafe fn hma_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    hma_row_scalar(data, first, period, out)
+   hma_avx2(data, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -634,34 +834,9 @@ pub unsafe fn hma_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        hma_row_avx512_short(data, first, period, out)
-    } else {
-        hma_row_avx512_long(data, first, period, out)
-    }
+    hma_avx512(data, period, first, out);
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn hma_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    hma_row_scalar(data, first, period, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn hma_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    hma_row_scalar(data, first, period, out)
-}
 
 #[inline(always)]
 fn expand_grid_hma(r: &HmaBatchRange) -> Vec<HmaParams> {
@@ -765,11 +940,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let params = HmaParams::default();
+        let period = params.period.unwrap_or(5) * 2;
         let input = HmaInput::from_candles(&candles, "close", params);
         let result = hma_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), candles.close.len());
-        if result.values.len() > 50 {
-            for i in 50..result.values.len() {
+        if result.values.len() > period {
+            for i in period..result.values.len() {
                 assert!(!result.values[i].is_nan());
             }
         }

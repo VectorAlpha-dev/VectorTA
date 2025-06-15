@@ -68,11 +68,13 @@ use my_project::indicators::{
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
     gaussian::{gaussian_with_kernel, GaussianBatchBuilder, GaussianData, GaussianInput},
     heikin_ashi_candles::{heikin_ashi_candles as heikin_ashi_candles_raw, HeikinAshiInput},
-    highpass::{highpass as highpass_raw, HighPassInput},
-    highpass_2_pole::{highpass_2_pole_with_kernel, HighPass2BatchBuilder, HighPass2Data, HighPass2Input},
-    hma::{hma as hma_raw, HmaInput},
+    highpass::{highpass_with_kernel, HighPassBatchBuilder, HighPassData, HighPassInput},
+    highpass_2_pole::{
+        highpass_2_pole_with_kernel, HighPass2BatchBuilder, HighPass2Data, HighPass2Input,
+    },
+    hma::{hma_with_kernel, HmaBatchBuilder, HmaData, HmaInput},
     ht_dcperiod::{ht_dcperiod as ht_dcperiod_raw, HtDcPeriodInput},
-    hwma::{hwma as hwma_raw, HwmaInput},
+    hwma::{hwma_with_kernel, HwmaBatchBuilder, HwmaData, HwmaInput},
     ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
     jma::{jma as jma_raw, JmaInput},
     jsa::{jsa as jsa_raw, JsaInput},
@@ -675,10 +677,7 @@ bench_wrappers! {
     (fosc_bench, fosc_raw, FoscInputS),
     (gatorosc_bench, gatorosc_raw, GatorOscInputS),
     (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
-    (highpass_bench, highpass_raw, HighPassInputS),
-    (hma_bench, hma_raw, HmaInputS),
     (ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
-    (hwma_bench, hwma_raw, HwmaInputS),
     (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
     (jma_bench, jma_raw, JmaInputS),
     (jsa_bench, jsa_raw, JsaInputS),
@@ -820,10 +819,7 @@ bench_scalars!(
     fosc_bench        => FoscInputS,
     gatorosc_bench    => GatorOscInputS,
     heikin_ashi_candles_bench => HeikinAshiInputS,
-    highpass_bench    => HighPassInputS,
-    hma_bench         => HmaInputS,
     ht_dcperiod_bench => HtDcPeriodInputS,
-    hwma_bench        => HwmaInputS,
     ift_rsi_bench     => IftRsiInputS,
     jma_bench         => JmaInputS,
     jsa_bench         => JsaInputS,
@@ -929,6 +925,9 @@ make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512)
 make_kernel_wrappers!(fwma, fwma_with_kernel, FwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(gaussian, gaussian_with_kernel, GaussianInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(highpass_2_pole, highpass_2_pole_with_kernel, HighPass2InputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(highpass, highpass_with_kernel, HighPassInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(hma, hma_with_kernel, HmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(hwma, hwma_with_kernel, HwmaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -981,6 +980,9 @@ make_batch_wrappers!(
 );
 
 make_batch_wrappers!(highpass_2_pole_batch, HighPass2BatchBuilder, HighPass2InputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(highpass_batch, HighPassBatchBuilder, HighPassInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(hma_batch, HmaBatchBuilder, HmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(hwma_batch, HwmaBatchBuilder, HwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1049,7 +1051,7 @@ bench_variants!(
     gaussian_batch => GaussianInputS; Some(227);
     gaussian_batch_scalarbatch,
     gaussian_batch_avx2batch,
-    gaussian_batch_avx512batch, 
+    gaussian_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1057,7 +1059,28 @@ bench_variants!(
     highpass_2_pole_batch_scalarbatch,
     highpass_2_pole_batch_avx2batch,
     highpass_2_pole_batch_avx512batch,
-);  
+);
+
+bench_variants!(
+    highpass_batch => HighPassInputS; Some(227);
+    highpass_batch_scalarbatch,
+    highpass_batch_avx2batch,
+    highpass_batch_avx512batch,
+);
+
+bench_variants!(
+    hma_batch => HmaInputS; Some(227);
+    hma_batch_scalarbatch,
+    hma_batch_avx2batch,
+    hma_batch_avx512batch,
+);
+
+bench_variants!(
+    hwma_batch => HwmaInputS; Some(227);
+    hwma_batch_scalarbatch,
+    hwma_batch_avx2batch,
+    hwma_batch_avx512batch,
+);
 
 bench_variants!(
     alma => AlmaInputS; None;
@@ -1136,6 +1159,27 @@ bench_variants!(
     highpass_2_pole_avx512,
 );
 
+bench_variants!(
+    highpass => HighPassInputS; None;
+    highpass_scalar,
+    highpass_avx2,
+    highpass_avx512,
+);
+
+bench_variants!(
+    hma => HmaInputS; None;
+    hma_scalar,
+    hma_avx2,
+    hma_avx512,
+);
+
+bench_variants!(
+    hwma => HwmaInputS; None;
+    hwma_scalar,
+    hwma_avx2,
+    hwma_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1160,4 +1204,10 @@ criterion_main!(
     benches_gaussian_batch,
     benches_highpass_2_pole,
     benches_highpass_2_pole_batch,
+    benches_highpass,
+    benches_highpass_batch,
+    benches_hma,
+    benches_hma_batch,
+    benches_hwma,
+    benches_hwma_batch
 );

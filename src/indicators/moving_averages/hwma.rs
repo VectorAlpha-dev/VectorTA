@@ -19,7 +19,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +27,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;  
 
 impl<'a> AsRef<[f64]> for HwmaInput<'a> {
     #[inline(always)]
@@ -204,8 +205,7 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
-
+    let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -226,56 +226,152 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     Ok(HwmaOutput { values: out })
 }
 
-#[inline]
+#[inline(always)]
 pub fn hwma_scalar(
     data: &[f64],
     na: f64,
     nb: f64,
     nc: f64,
-    first_valid: usize,
+    first: usize,
     out: &mut [f64],
 ) {
-    let len = data.len();
-    let mut last_f = data[first_valid];
-    let mut last_v = 0.0;
-    let mut last_a = 0.0;
-    for i in first_valid..len {
-        let price = data[i];
-        let f = (1.0 - na) * (last_f + last_v + 0.5 * last_a) + na * price;
-        let v = (1.0 - nb) * (last_v + last_a) + nb * (f - last_f);
-        let a = (1.0 - nc) * last_a + nc * (v - last_v);
-        out[i] = f + v + 0.5 * a;
-        last_f = f;
-        last_v = v;
-        last_a = a;
+    debug_assert_eq!(data.len(), out.len());
+    if first >= data.len() { return; }
+
+    /* -------- coefficients (kept once) ---------------------------- */
+    let one_m_na = 1.0 - na;
+    let one_m_nb = 1.0 - nb;
+    let one_m_nc = 1.0 - nc;
+    const HALF: f64 = 0.5;
+
+    /* -------- state registers ------------------------------------- */
+    let mut f = data[first];   // level
+    let mut v = 0.0;           // trend
+    let mut a = 0.0;           // acceleration
+
+    /* -------- main loop ------------------------------------------- */
+    for i in first..data.len() {
+        // SAFETY: `i` checked by loop guard.
+        let price = unsafe { *data.get_unchecked(i) };
+
+        /* ---- level (f') ---- */
+        // s = f + v + 0.5·a   computed with one FMA
+        let s        = HALF.mul_add(a, f + v);
+        // f' = na·price + (1-na)·s
+        let f_new    = na.mul_add(price, one_m_na * s);
+
+        /* ---- trend (v') ---- */
+        let diff_f   = f_new - f;
+        // v' = nb·(f'-f) + (1-nb)·(v + a)
+        let v_new    = nb.mul_add(diff_f, one_m_nb * (v + a));
+
+        /* ---- acceleration (a') ---- */
+        let diff_v   = v_new - v;
+        // a' = nc·(v'-v) + (1-nc)·a
+        let a_new    = nc.mul_add(diff_v, one_m_nc * a);
+
+        /* ---- output HWMA = f' + v' + 0.5·a'  (one more FMA) ---- */
+        out[i]       = HALF.mul_add(a_new, f_new + v_new);
+
+        /* ---- roll state ---- */
+        f = f_new;  v = v_new;  a = a_new;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
 #[inline]
-pub fn hwma_avx512(
+pub unsafe fn hwma_avx2(
     data: &[f64],
     na: f64,
     nb: f64,
     nc: f64,
-    first_valid: usize,
+    first: usize,
     out: &mut [f64],
 ) {
-    unsafe { hwma_avx512_short(data, na, nb, nc, first_valid, out) }
+    use core::arch::x86_64::*;
+    debug_assert_eq!(data.len(), out.len());
+    if first >= data.len() { return; }
+
+    // ---- broadcast constants once ---------------------------------------
+    let na_v     = _mm_set_sd(na);
+    let one_na_v = _mm_set_sd(1.0 - na);
+    let nb_v     = _mm_set_sd(nb);
+    let one_nb_v = _mm_set_sd(1.0 - nb);
+    let nc_v     = _mm_set_sd(nc);
+    let one_nc_v = _mm_set_sd(1.0 - nc);
+    let half_v   = _mm_set_sd(0.5);
+
+    // ---- state registers -------------------------------------------------
+    let mut f_v = _mm_set_sd(*data.get_unchecked(first));
+    let mut v_v = _mm_setzero_pd();      // v = 0
+    let mut a_v = _mm_setzero_pd();      // a = 0
+
+    // ---- software‑pipelined main loop (4‑way unroll) --------------------
+    let mut i = first;
+    let n = data.len();
+    while i + 3 < n {
+        macro_rules! step {
+            ($idx:expr) => {{
+                let price_v = _mm_set_sd(*data.get_unchecked($idx));
+
+                // tmp = f + v + 0.5·a
+                let tmp  = _mm_fmadd_sd(half_v, a_v, _mm_add_sd(f_v, v_v));
+
+                // f_new = (1‑na)*tmp + na*price
+                let f_new = _mm_fmadd_sd(na_v, price_v, _mm_mul_sd(one_na_v, tmp));
+
+                // v_new = (1‑nb)*(v+a) + nb*(f_new‑f)
+                let vpa   = _mm_add_sd(v_v, a_v);
+                let diff_f= _mm_sub_sd(f_new, f_v);
+                let v_new = _mm_fmadd_sd(nb_v, diff_f, _mm_mul_sd(one_nb_v, vpa));
+
+                // a_new = (1‑nc)*a + nc*(v_new‑v)
+                let diff_v= _mm_sub_sd(v_new, v_v);
+                let a_new = _mm_fmadd_sd(nc_v, diff_v, _mm_mul_sd(one_nc_v, a_v));
+
+                // out = f_new + v_new + 0.5·a_new
+                let out_v = _mm_fmadd_sd(half_v, a_new, _mm_add_sd(f_new, v_new));
+                _mm_store_sd(out.as_mut_ptr().add($idx), out_v);
+
+                // roll state
+                f_v = f_new;  v_v = v_new;  a_v = a_new;
+            }};
+        }
+        step!(i);     step!(i + 1);  step!(i + 2);  step!(i + 3);
+        i += 4;
+    }
+    // tail
+    while i < n {
+        let price_v = _mm_set_sd(*data.get_unchecked(i));
+        let tmp     = _mm_fmadd_sd(half_v, a_v, _mm_add_sd(f_v, v_v));
+        let f_new   = _mm_fmadd_sd(na_v, price_v, _mm_mul_sd(one_na_v, tmp));
+        let v_new   = _mm_fmadd_sd(nb_v, _mm_sub_sd(f_new, f_v),
+                                   _mm_mul_sd(one_nb_v, _mm_add_sd(v_v, a_v)));
+        let a_new   = _mm_fmadd_sd(nc_v, _mm_sub_sd(v_new, v_v),
+                                   _mm_mul_sd(one_nc_v, a_v));
+        let out_v   = _mm_fmadd_sd(half_v, a_new, _mm_add_sd(f_new, v_new));
+        _mm_store_sd(out.as_mut_ptr().add(i), out_v);
+        f_v = f_new;  v_v = v_new;  a_v = a_new;
+        i += 1;
+    }
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+
+#[cfg(all(feature="nightly-avx", target_arch="x86_64"))]
+#[target_feature(enable="avx512f,fma")]
 #[inline]
-pub fn hwma_avx2(
-    data: &[f64],
-    na: f64,
-    nb: f64,
-    nc: f64,
-    first_valid: usize,
-    out: &mut [f64],
-) {
-    hwma_scalar(data, na, nb, nc, first_valid, out)
+pub unsafe fn hwma_avx512(
+    data: &[f64], na: f64, nb: f64, nc: f64,
+    first: usize, out: &mut [f64])
+{
+    // identical to AVX2 version; the CPU will use 512-wide FMA units
+    // thanks to the target_feature.  Copy or `#[cfg(target_feature="avx512f")]`.
+    hwma_avx2(data, na, nb, nc, first, out);
 }
+
+
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -537,33 +633,48 @@ fn hwma_batch_inner(
     let first = data.iter().position(|x| !x.is_nan()).ok_or(HwmaError::AllValuesNaN)?;
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ----- 2. allocate rows×cols as MaybeUninit and write the NaN prefixes --------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ----- 3. closure that fills one row ------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let na = prm.na.unwrap();
         let nb = prm.nb.unwrap();
         let nc = prm.nc.unwrap();
+
+        // cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => hwma_row_scalar(data, first, na, nb, nc, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => hwma_row_avx2(data, first, na, nb, nc, out_row),
+            Kernel::Avx2   => hwma_row_avx2  (data, first, na, nb, nc, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => hwma_row_avx512(data, first, na, nb, nc, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ----- 4. run every row, writing directly into `raw` ---------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ----- 5. transmute to Vec<f64> once everything is initialised -----------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(HwmaBatchOutput {
         values,
