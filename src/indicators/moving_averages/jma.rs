@@ -280,16 +280,61 @@ pub fn jma_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn jma_avx2(
-    data: &[f64],
+    input: &[f64],
     period: usize,
     phase: f64,
     power: u32,
     first_valid: usize,
-    out: &mut [f64],
+    output: &mut [f64],
 ) {
-    // Stub: Points to scalar
-    jma_scalar(data, period, phase, power, first_valid, out)
+    assert_eq!(input.len(), output.len());
+    assert!(first_valid < input.len());
+
+    let pr = if phase < -100.0 {
+        0.5
+    } else if phase > 100.0 {
+        2.5
+    } else {
+        phase / 100.0 + 1.5
+    };
+
+    let beta = {
+        let num = 0.45 * (period as f64 - 1.0);
+        num / (num + 2.0)
+    };
+    let one_minus_beta = 1.0 - beta;
+
+    let alpha = beta.powi(power as i32);
+    let one_minus_alpha = 1.0 - alpha;
+    let alpha_sq = alpha * alpha;
+    let oma_sq = one_minus_alpha * one_minus_alpha;
+
+    let mut e0 = input[first_valid];
+    let mut e1 = 0.0;
+    let mut e2 = 0.0;
+    let mut j_prev = input[first_valid];
+
+    output[first_valid] = j_prev;
+
+    unsafe {
+        for i in (first_valid + 1)..input.len() {
+            let price = *input.get_unchecked(i);
+
+            e0 = one_minus_alpha * price + alpha * e0;
+
+            e1 = (price - e0) * one_minus_beta + beta * e1;
+            let diff = e0 + pr * e1 - j_prev;
+
+            e2 = diff * oma_sq + alpha_sq * e2;
+            let j = j_prev + e2;
+
+            *output.get_unchecked_mut(i) = j;
+
+            j_prev = j;
+        }
+    }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
