@@ -25,3 +25,6 @@ file_structure.py
 profile.ps1
 build.rs
 third_party/
+website/dist/
+website/node_modules/
+website/*.csv
