@@ -1310,26 +1310,37 @@ mod tests {
                 30..200,
             ),
             3usize..30,
+            -1e3f64..1e3,  // additive offset
+            -10f64..10f64, // multiplicative scale
         );
 
         proptest::test_runner::TestRunner::default()
-            .run(&strat, |(data, period)| {
-                let params = CwmaParams {
-                    period: Some(period),
-                };
-                let input = CwmaInput::from_slice(&data, params);
-                let CwmaOutput { values: out } = cwma_with_kernel(&input, kernel).unwrap();
+            .run(&strat, |(data, period, offset, scale)| {
+                let params = CwmaParams { period: Some(period) };
 
-                for i in (period - 1)..data.len() {
-                    let window = &data[i + 1 - period..=i];
-                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
-                    prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+                let input = CwmaInput::from_slice(&data, params.clone());
+                let CwmaOutput { values: base } =
+                    cwma_with_kernel(&input, kernel).unwrap();
+
+                let transformed: Vec<f64> =
+                    data.iter().map(|&x| x * scale + offset).collect();
+                let input_trans = CwmaInput::from_slice(&transformed, params);
+                let CwmaOutput { values: trans } =
+                    cwma_with_kernel(&input_trans, kernel).unwrap();
+
+                prop_assert_eq!(base.len(), trans.len());
+
+                for (idx, (&b, &t)) in base.iter().zip(trans.iter()).enumerate() {
+                    if b.is_nan() {
+                        prop_assert!(t.is_nan());
+                        continue;
+                    }
+                    let expected = b * scale + offset;
+                    prop_assert!((t - expected).abs() < 1e-6,
+                                 "idx {idx}: got {t}, expected {expected}");
                 }
                 Ok(())
-            })
-            .unwrap();
+            })?;
 
         Ok(())
     }
