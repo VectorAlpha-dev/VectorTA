@@ -1687,23 +1687,31 @@ mod tests {
                     offset: None,
                     sigma: None,
                 };
-                let input = AlmaInput::from_slice(&data, params);
-                let AlmaOutput { values: out } = alma_with_kernel(&input, kernel).unwrap();
+                let input = AlmaInput::from_slice(&data, params.clone());
+                let AlmaOutput { values: batch } = alma_with_kernel(&input, kernel).unwrap();
 
-                for i in (period - 1)..data.len() {
-                    let window = &data[i + 1 - period..=i];
-                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
+                let mut stream = AlmaStream::try_new(params).unwrap();
+                let mut streaming = Vec::with_capacity(data.len());
+                for &value in &data {
+                    match stream.update(value) {
+                        Some(v) => streaming.push(v),
+                        None => streaming.push(f64::NAN),
+                    }
+                }
 
+                prop_assert_eq!(batch.len(), streaming.len());
+                for (i, (&b, &s)) in batch.iter().zip(streaming.iter()).enumerate() {
+                    if b.is_nan() && s.is_nan() {
+                        continue;
+                    }
+                    let diff = (b - s).abs();
                     prop_assert!(
-                        y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
-                        "idx {i}: {y} not in [{lo}, {hi}]",
+                        diff < 1e-9,
+                        "idx {i}: batch={b}, stream={s}, diff={diff}"
                     );
                 }
                 Ok(())
-            })
-            .unwrap();
+            })?;
 
         Ok(())
     }
