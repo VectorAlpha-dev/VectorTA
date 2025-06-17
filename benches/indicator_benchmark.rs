@@ -77,8 +77,8 @@ use my_project::indicators::{
     hwma::{hwma_with_kernel, HwmaBatchBuilder, HwmaData, HwmaInput},
     ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
     jma::{jma_with_kernel, JmaBatchBuilder, JmaData, JmaInput},
-    jsa::{jsa as jsa_raw, JsaInput},
-    kama::{kama as kama_raw, KamaInput},
+    jsa::{jsa_with_kernel, JsaBatchBuilder, JsaData, JsaInput},
+    kama::{kama_with_kernel, KamaBatchBuilder, KamaData, KamaInput},
     kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
     kdj::{kdj as kdj_raw, KdjInput},
     keltner::{keltner as keltner_raw, KeltnerInput},
@@ -90,7 +90,7 @@ use my_project::indicators::{
         linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput,
     },
     linearreg_slope::{linearreg_slope as linearreg_slope_raw, LinearRegSlopeInput},
-    linreg::{linreg as linreg_raw, LinRegInput},
+    linreg::{linreg_with_kernel, LinRegBatchBuilder, LinRegData, LinRegInput},
     lrsi::{lrsi as lrsi_raw, LrsiInput},
     maaq::{maaq as maaq_raw, MaaqInput},
     mab::{mab as mab_raw, MabInput},
@@ -679,8 +679,6 @@ bench_wrappers! {
     (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
     (ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
     (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
-    (jsa_bench, jsa_raw, JsaInputS),
-    (kama_bench, kama_raw, KamaInputS),
     (kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
     (kdj_bench, kdj_raw, KdjInputS),
     (keltner_bench, keltner_raw, KeltnerInputS),
@@ -690,7 +688,6 @@ bench_wrappers! {
     (linearreg_angle_bench, linearreg_angle_raw, Linearreg_angleInputS),
     (linearreg_intercept_bench, linearreg_intercept_raw, LinearRegInterceptInputS),
     (linearreg_slope_bench, linearreg_slope_raw, LinearRegSlopeInputS),
-    (linreg_bench, linreg_raw, LinRegInputS),
     (lrsi_bench, lrsi_raw, LrsiInputS),
     (maaq_bench, maaq_raw, MaaqInputS),
     (mab_bench, mab_raw, MabInputS),
@@ -820,8 +817,6 @@ bench_scalars!(
     heikin_ashi_candles_bench => HeikinAshiInputS,
     ht_dcperiod_bench => HtDcPeriodInputS,
     ift_rsi_bench     => IftRsiInputS,
-    jsa_bench         => JsaInputS,
-    kama_bench        => KamaInputS,
     kaufmanstop_bench => KaufmanstopInputS,
     kdj_bench         => KdjInputS,
     keltner_bench     => KeltnerInputS,
@@ -832,7 +827,6 @@ bench_scalars!(
     linearreg_angle_bench     => Linearreg_angleInputS,
     linearreg_intercept_bench => LinearRegInterceptInputS,
     linearreg_slope_bench     => LinearRegSlopeInputS,
-    linreg_bench              => LinRegInputS,
     lrsi_bench                => LrsiInputS,
 
     maaq_bench => MaaqInputS,
@@ -927,6 +921,9 @@ make_kernel_wrappers!(highpass, highpass_with_kernel, HighPassInputS; Scalar,Avx
 make_kernel_wrappers!(hma, hma_with_kernel, HmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(hwma, hwma_with_kernel, HwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(jma, jma_with_kernel, JmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(jsa, jsa_with_kernel, JsaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(kama, kama_with_kernel, KamaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(linreg, linreg_with_kernel, LinRegInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -983,6 +980,9 @@ make_batch_wrappers!(highpass_batch, HighPassBatchBuilder, HighPassInputS; Scala
 make_batch_wrappers!(hma_batch, HmaBatchBuilder, HmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(hwma_batch, HwmaBatchBuilder, HwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(jma_batch, JmaBatchBuilder, JmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(jsa_batch, JsaBatchBuilder, JsaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(kama_batch, KamaBatchBuilder, KamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(linreg_batch, LinRegBatchBuilder, LinRegInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1090,6 +1090,27 @@ bench_variants!(
 );
 
 bench_variants!(
+    jsa_batch => JsaInputS; Some(227);
+    jsa_batch_scalarbatch,
+    jsa_batch_avx2batch,
+    jsa_batch_avx512batch,
+);
+
+bench_variants!(
+    kama_batch => KamaInputS; Some(227);
+    kama_batch_scalarbatch,
+    kama_batch_avx2batch,
+    kama_batch_avx512batch,
+);
+
+bench_variants!(
+    linreg_batch => LinRegInputS; Some(227);
+    linreg_batch_scalarbatch,
+    linreg_batch_avx2batch,
+    linreg_batch_avx512batch,
+);
+
+bench_variants!(
     alma => AlmaInputS; None;
     alma_scalar,
     alma_avx2,
@@ -1194,6 +1215,27 @@ bench_variants!(
     jma_avx512,
 );
 
+bench_variants!(
+    jsa => JsaInputS; None;
+    jsa_scalar,
+    jsa_avx2,
+    jsa_avx512,
+);
+
+bench_variants!(
+    kama => KamaInputS; None;
+    kama_scalar,
+    kama_avx2,
+    kama_avx512,
+);
+
+bench_variants!(
+    linreg => LinRegInputS; None;
+    linreg_scalar,
+    linreg_avx2,
+    linreg_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1225,5 +1267,11 @@ criterion_main!(
     benches_hwma,
     benches_hwma_batch,
     benches_jma,
-    benches_jma_batch
+    benches_jma_batch,
+    benches_jsa,
+    benches_jsa_batch,
+    benches_kama,
+    benches_kama_batch,
+    benches_linreg,
+    benches_linreg_batch
 );

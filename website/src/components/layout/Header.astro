@@ -1,0 +1,32 @@
+---
+import { Search } from './Search';
+import ThemeToggle from '../ui/ThemeToggle.astro';
+---
+
+<header class="fixed top-0 left-0 right-0 z-40 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+  <div class="flex items-center justify-between px-6 py-4">
+    <div class="flex items-center space-x-8">
+      <a href="/" class="text-xl font-bold text-gray-900 dark:text-gray-100">
+        TA Indicators
+      </a>
+      <nav class="hidden md:flex space-x-6">
+        <a href="/" class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100">
+          Home
+        </a>
+        <a href="/indicators/sma" class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100">
+          Indicators
+        </a>
+        <a href="https://github.com" target="_blank" class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100">
+          GitHub
+        </a>
+      </nav>
+    </div>
+    
+    <div class="flex items-center space-x-4">
+      <Search client:load />
+      <ThemeToggle />
+    </div>
+  </div>
+</header>
+
+<div class="h-16"></div>

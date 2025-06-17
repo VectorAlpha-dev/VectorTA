@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'ema';
+const indicatorName = 'Exponential Moving Average';
+const description = `Technical analysis indicator: Exponential Moving Average`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Exponential Moving Average gives more weight to recent prices, making it more responsive to new information compared to the SMA. It uses a smoothing factor to exponentially decrease the weights of older observations.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Exponential Moving Average to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Exponential Moving Average in Rust
+let result = indicators::ema(&data, 14);
+  </code></pre>
+</IndicatorLayout>

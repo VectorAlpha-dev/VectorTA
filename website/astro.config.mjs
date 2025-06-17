@@ -1,19 +1,14 @@
-// @ts-check
 import { defineConfig } from 'astro/config';
+import tailwind from '@astrojs/tailwind';
+import sitemap from '@astrojs/sitemap';
+import react from '@astrojs/react';
+import wasm from 'vite-plugin-wasm';
+import topLevelAwait from 'vite-plugin-top-level-await';
 
-// https://astro.build/config
 export default defineConfig({
-  build: {
-    assets: '_astro'
-  },
+  site: 'https://ta-indicators-demo.com', // Update with actual domain
+  integrations: [tailwind(), sitemap(), react()],
   vite: {
-    optimizeDeps: {
-      exclude: ['lightweight-charts']
-    },
-    server: {
-      fs: {
-        allow: ['..']
-      }
-    }
+    plugins: [wasm(), topLevelAwait()]
   }
 });

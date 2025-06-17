@@ -1,0 +1,53 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'deviation';
+const indicatorName = 'Deviation';
+const description = `Technical analysis indicator: Deviation`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 20,
+    "min": 2,
+    "max": 200,
+    "description": "Moving average period"
+  },
+  {
+    "name": "std_dev",
+    "type": "number",
+    "default": 2,
+    "min": 0.1,
+    "max": 5,
+    "description": "Standard deviation multiplier"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Deviation helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Moving average period (default: 20)</li>
+    <li><strong>std_dev</strong>: Standard deviation multiplier (default: 2)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Deviation to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Deviation in Rust
+let result = indicators::deviation(&data, 20, 2);
+  </code></pre>
+</IndicatorLayout>

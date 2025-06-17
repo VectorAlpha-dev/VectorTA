@@ -351,8 +351,6 @@ fn jma_consts(period: usize, phase: f64, power: u32) -> (f64, f64, f64, f64, f64
     )
 }
 
-
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,fma")]
 #[inline]

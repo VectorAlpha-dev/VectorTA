@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'utility_functions';
+const indicatorName = 'Utility Functions';
+const description = `Technical analysis indicator: Utility Functions`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Utility Functions helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Utility Functions to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Utility Functions in Rust
+let result = indicators::utility_functions(&data, 14);
+  </code></pre>
+</IndicatorLayout>

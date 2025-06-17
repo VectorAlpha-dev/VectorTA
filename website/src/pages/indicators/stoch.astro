@@ -1,0 +1,53 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'stoch';
+const indicatorName = 'Stochastic Oscillator';
+const description = `Technical analysis indicator: Stochastic Oscillator`;
+const parameters = [
+  {
+    "name": "k_period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "%K period"
+  },
+  {
+    "name": "d_period",
+    "type": "number",
+    "default": 3,
+    "min": 1,
+    "max": 200,
+    "description": "%D period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Stochastic Oscillator compares a security's closing price to its price range over a given time period. It generates values between 0 and 100 to identify overbought and oversold conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>k_period</strong>: %K period (default: 14)</li>
+    <li><strong>d_period</strong>: %D period (default: 3)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>- %K > 80: Overbought territory<br />- %K < 20: Oversold territory<br />- %K crossing above %D: Potential buy signal<br />- %K crossing below %D: Potential sell signal</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Stochastic Oscillator in Rust
+let result = indicators::stoch(&data, 14, 3);
+  </code></pre>
+</IndicatorLayout>

@@ -1,0 +1,53 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'stc';
+const indicatorName = 'Schaff Trend Cycle';
+const description = `Technical analysis indicator: Schaff Trend Cycle`;
+const parameters = [
+  {
+    "name": "fast_period",
+    "type": "number",
+    "default": 12,
+    "min": 2,
+    "max": 200,
+    "description": "Fast period"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 26,
+    "min": 2,
+    "max": 200,
+    "description": "Slow period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Schaff Trend Cycle helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>fast_period</strong>: Fast period (default: 12)</li>
+    <li><strong>slow_period</strong>: Slow period (default: 26)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Schaff Trend Cycle to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Schaff Trend Cycle in Rust
+let result = indicators::stc(&data, 12, 26);
+  </code></pre>
+</IndicatorLayout>

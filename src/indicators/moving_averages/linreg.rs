@@ -17,7 +17,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;  
 
 // --- DATA, PARAMS, INPUT/OUTPUT STRUCTS ---
 
@@ -174,7 +175,8 @@ pub fn linreg_with_kernel(input: &LinRegInput, kernel: Kernel) -> Result<LinRegO
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm  = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     unsafe {
         match chosen {
@@ -190,77 +192,69 @@ pub fn linreg_with_kernel(input: &LinRegInput, kernel: Kernel) -> Result<LinRegO
     Ok(LinRegOutput { values: out })
 }
 
-// --- SIMD STUBS (API parity, but call scalar implementation) ---
 
 #[inline]
-pub unsafe fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar_inner(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar_inner(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    if period <= 32 {
-        linreg_avx512_short(data, period, first, out)
-    } else {
-        linreg_avx512_long(data, period, first, out)
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn linreg_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar_inner(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn linreg_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    linreg_scalar_inner(data, period, first, out)
-}
-
-// --- Scalar Calculation ---
-
-#[inline]
-fn linreg_scalar_inner(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    let size = data.len();
-    let x = (period * (period + 1)) / 2;
-    let x2 = (period * (period + 1) * (2 * period + 1)) / 6;
-    let x_f = x as f64;
-    let x2_f = x2 as f64;
+fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // ---- invariant pre‑computations ---------------------------------------------------------
     let period_f = period as f64;
-    let bd = 1.0 / (period_f * x2_f - x_f * x_f);
+    let x_sum   = ((period * (period + 1)) / 2)            as f64;         // Σx
+    let x2_sum  = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; // Σx²
+    let denom_inv = 1.0 / (period_f * x2_sum - x_sum * x_sum);            // 1 / Δ
+    let inv_period = 1.0 / period_f;
 
-    let mut y = 0.0;
-    let mut xy = 0.0;
-
-    for i in 0..(period - 1) {
-        let x_i = (i + 1) as f64;
-        let val = data[i + first];
-        y += val;
-        xy += val * x_i;
+    // ---- prime running sums with the first (period‑1) points -------------------------------
+    let mut y_sum  = 0.0;
+    let mut xy_sum = 0.0;
+    {
+        let init_slice = &data[first .. first + period - 1];
+        // k = 0‑based here; (k+1) gives us x ∈ [1, period‑1]
+        for (k, &v) in init_slice.iter().enumerate() {
+            let x = (k + 1) as f64;
+            y_sum  += v;
+            xy_sum += v * x;
+        }
     }
 
-    for i in (first + period - 1)..size {
-        let val = data[i];
-        xy += val * (period as f64);
-        y += val;
-        let b = (period_f * xy - x_f * y) * bd;
-        let a = (y - b * x_f) / period_f;
-        let forecast = a + b * period_f;
-        out[i] = forecast;
-        xy -= y;
-        let oldest_idx = i - (period - 1);
-        let oldest_val = data[oldest_idx];
-        y -= oldest_val;
+    // ---- main rolling loop -----------------------------------------------------------------
+    let mut idx = first + period - 1;          // index of *last* element in the current window
+    while idx < data.len() {
+        let new_val = data[idx];
+        y_sum  += new_val;                     // include newest sample
+        xy_sum += new_val * period_f;          // its x = period
+
+        // coefficients
+        let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
+        let a = (y_sum - b * x_sum) * inv_period;
+        out[idx] = a + b * period_f;           // forecast next point (x = period)
+
+        // slide window: remove oldest point and shift indices by ‑1
+        xy_sum -= y_sum;                       // Σ(x·y) → Σ((x‑1)·y)
+        y_sum  -= data[idx + 1 - period];      // drop y_{t‑period+1}
+
+        idx += 1;
     }
 }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn linreg_avx2(
+    data: &[f64], period: usize, first: usize, out: &mut [f64],
+) {
+    linreg_scalar(data, period, first, out);
+}
+
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+pub unsafe fn linreg_avx512(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    out:   &mut [f64],
+) {
+    linreg_scalar(data, period, first, out);
+}
+
 
 // --- BATCH RANGE/BUILDER/OUTPUT/GRID ---
 
@@ -377,41 +371,67 @@ fn linreg_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<LinRegBatchOutput, LinRegError> {
+    // ------------- 0. sanity checks -------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(LinRegError::InvalidPeriod { period: 0, data_len: 0 });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(LinRegError::AllValuesNaN)?;
+    let first = data.iter().position(|x| !x.is_nan())
+        .ok_or(LinRegError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(LinRegError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(LinRegError::NotEnoughValidData {
+            needed: max_p,
+            valid : data.len() - first,
+        });
     }
+
+    // ------------- 1. matrix set-up -------------
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+
+    // per-row prefix length that must stay NaN
+    let warm: Vec<usize> =
+        combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // allocate rows × cols as MaybeUninit and paint the prefixes
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ------------- 2. per-row worker ------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this single row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
         match kern {
-            Kernel::Scalar => linreg_row_scalar(data, first, period, out_row),
+            Kernel::Scalar => linreg_row_scalar (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => linreg_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => linreg_row_avx2   (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => linreg_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 => linreg_row_avx512 (data, first, period, out_row),
             _ => unreachable!(),
         }
     };
+
+    // ------------- 3. run every row -------------
     if parallel {
-        values.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ------------- 4. transmute -----------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
     Ok(LinRegBatchOutput { values, combos, rows, cols })
 }
-
 // --- ROW SCALAR/SIMD (all AVX just call scalar for parity) ---
 
 #[inline(always)]
@@ -421,7 +441,7 @@ unsafe fn linreg_row_scalar(
     period: usize,
     out: &mut [f64],
 ) {
-    linreg_scalar_inner(data, period, first, out)
+    linreg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -432,7 +452,7 @@ unsafe fn linreg_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    linreg_scalar_inner(data, period, first, out)
+    linreg_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -443,33 +463,7 @@ unsafe fn linreg_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        linreg_row_avx512_short(data, first, period, out)
-    } else {
-        linreg_row_avx512_long(data, first, period, out)
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn linreg_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    linreg_scalar_inner(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn linreg_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    linreg_scalar_inner(data, period, first, out)
+    linreg_avx512(data, period, first, out)
 }
 
 // --- STREAM SUPPORT ---

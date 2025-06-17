@@ -1,0 +1,62 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'vwmacd';
+const indicatorName = 'Vwmacd';
+const description = `Technical analysis indicator: Vwmacd`;
+const parameters = [
+  {
+    "name": "fast_period",
+    "type": "number",
+    "default": 12,
+    "min": 2,
+    "max": 200,
+    "description": "Fast EMA period"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 26,
+    "min": 2,
+    "max": 200,
+    "description": "Slow EMA period"
+  },
+  {
+    "name": "signal_period",
+    "type": "number",
+    "default": 9,
+    "min": 2,
+    "max": 200,
+    "description": "Signal line period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Vwmacd helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>fast_period</strong>: Fast EMA period (default: 12)</li>
+    <li><strong>slow_period</strong>: Slow EMA period (default: 26)</li>
+    <li><strong>signal_period</strong>: Signal line period (default: 9)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Vwmacd to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Vwmacd in Rust
+let result = indicators::vwmacd(&data, 12, 26, 9);
+  </code></pre>
+</IndicatorLayout>

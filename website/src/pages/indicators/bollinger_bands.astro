@@ -1,0 +1,53 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'bollinger_bands';
+const indicatorName = 'Bollinger Bands';
+const description = `Technical analysis indicator: Bollinger Bands`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 20,
+    "min": 2,
+    "max": 200,
+    "description": "Moving average period"
+  },
+  {
+    "name": "std_dev",
+    "type": "number",
+    "default": 2,
+    "min": 0.1,
+    "max": 5,
+    "description": "Standard deviation multiplier"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>Bollinger Bands consist of a middle band (SMA) and two outer bands that are standard deviations away from the middle. They expand and contract based on market volatility.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Moving average period (default: 20)</li>
+    <li><strong>std_dev</strong>: Standard deviation multiplier (default: 2)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>- Price near upper band: Potentially overbought<br />- Price near lower band: Potentially oversold<br />- Band squeeze: Low volatility, potential breakout coming<br />- Band expansion: High volatility</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Bollinger Bands in Rust
+let result = indicators::bollinger_bands(&data, 20, 2);
+  </code></pre>
+</IndicatorLayout>

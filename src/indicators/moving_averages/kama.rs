@@ -21,7 +21,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,6 +29,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 #[derive(Debug, Clone)]
 pub enum KamaData<'a> {
@@ -190,7 +191,8 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period;                 // prefix that must stay NaN
+    let mut out = alloc_with_nan_prefix(len, warm);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => kama_scalar(data, period, first, &mut out),
@@ -255,47 +257,214 @@ pub fn kama_scalar(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
 #[inline]
-pub fn kama_avx2(
+pub unsafe fn kama_avx2(
     data: &[f64],
     period: usize,
     first_valid: usize,
     out: &mut [f64],
 ) {
-    kama_scalar(data, period, first_valid, out)
+    use core::arch::x86_64::*;
+
+    const ABS_MASK: i64 = 0x7FFF_FFFF_FFFF_FFFFu64 as i64;
+    debug_assert!(period >= 2 && period <= data.len());
+    debug_assert_eq!(data.len(), out.len());
+
+    /* ----------------------------------------------------------- *
+     * 1.  Σ|Δprice| for the first window                           *
+     * ----------------------------------------------------------- */
+    let lookback = period - 1;
+    let mut sum_roc1: f64 = 0.0;
+    let base = data.as_ptr().add(first_valid);
+
+    if lookback >= 15 {
+        let mask_pd = _mm256_castsi256_pd(_mm256_set1_epi64x(ABS_MASK));
+        let mut acc0 = _mm256_setzero_pd();
+        let mut acc1 = _mm256_setzero_pd();
+        let mut idx = 0usize;
+
+        // helper: |ptr[idx+1] – ptr[idx]|
+        #[inline(always)]
+        unsafe fn abs_diff(ptr: *const f64, ofs: usize, m: __m256d) -> __m256d {
+            let a = _mm256_loadu_pd(ptr.add(ofs));
+            let b = _mm256_loadu_pd(ptr.add(ofs + 1));
+            _mm256_and_pd(_mm256_sub_pd(b, a), m)
+        }
+
+        while idx + 15 <= lookback {
+            acc0 = _mm256_add_pd(acc0, abs_diff(base, idx,      mask_pd));
+            acc1 = _mm256_add_pd(acc1, abs_diff(base, idx + 4,  mask_pd));
+            acc0 = _mm256_add_pd(acc0, abs_diff(base, idx + 8,  mask_pd));
+            acc1 = _mm256_add_pd(acc1, abs_diff(base, idx + 12, mask_pd));
+            idx += 16;
+        }
+
+        // horizontal reduction (AVX2 – no native reduce)
+        let sumv = _mm256_add_pd(acc0, acc1);                         // 4-lanes
+        let hi   = _mm256_extractf128_pd::<1>(sumv);                  // upper 2
+        let lo   = _mm256_castpd256_pd128(sumv);                      // lower 2
+        let pair = _mm_add_pd(lo, hi);                                // 2-lanes
+        sum_roc1 = _mm_cvtsd_f64(pair) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair, pair));   // scalar :contentReference[oaicite:0]{index=0}
+
+        // scalar tail (<16)
+        while idx <= lookback {
+            sum_roc1 += (*base.add(idx + 1) - *base.add(idx)).abs();
+            idx += 1;
+        }
+    } else {
+        for k in 0..=lookback {
+            sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
+        }
+    }
+
+    /* ----------------------------------------------------------- *
+     * 2.  Seed first KAMA                                         *
+     * ----------------------------------------------------------- */
+    let init_idx = first_valid + lookback + 1;
+    let mut kama = *data.get_unchecked(init_idx);
+    *out.get_unchecked_mut(init_idx) = kama;
+
+    /* ----------------------------------------------------------- *
+     * 3.  Rolling update                                          *
+     * ----------------------------------------------------------- */
+    let const_max  = 2.0 / 31.0;
+    let const_diff = (2.0 / 3.0) - const_max;
+
+    let mut tail_idx = first_valid;
+    let mut tail_val = *data.get_unchecked(tail_idx);
+
+    for i in (init_idx + 1)..data.len() {
+        // Σ|Δp| update
+        let price     = *data.get_unchecked(i);
+        let new_diff  = (price - *data.get_unchecked(i - 1)).abs();
+
+        let next_tail = *data.get_unchecked(tail_idx + 1);
+        let old_diff  = (next_tail - tail_val).abs();
+        sum_roc1 += new_diff - old_diff;
+
+        tail_val  = next_tail;
+        tail_idx += 1;
+
+        // smoothing constant (square cheaper than powi) :contentReference[oaicite:1]{index=1}
+        let direction = (price - *data.get_unchecked(tail_idx)).abs();
+        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+        let t  = er.mul_add(const_diff, const_max);                   // one FMA, one round :contentReference[oaicite:2]{index=2}
+        let sc = t * t;
+
+        // KAMA recurrence – compiler emits vfmadd132sd on AVX2 targets :contentReference[oaicite:3]{index=3}
+        kama = (price - kama).mul_add(sc, kama);
+
+        *out.get_unchecked_mut(i) = kama;                             // scalar store
+
+        // Prefetch 128 B ahead into L2 (T1 hint) :contentReference[oaicite:4]{index=4}
+        _mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vl,fma")]
 #[inline]
-pub fn kama_avx512(
-    data: &[f64],
-    period: usize,
+pub unsafe fn kama_avx512(
+    data:        &[f64],
+    period:      usize,
     first_valid: usize,
-    out: &mut [f64],
+    out:         &mut [f64],
 ) {
-    kama_scalar(data, period, first_valid, out)
-}
+    use core::arch::x86_64::*;
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn kama_avx512_short(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
-    kama_scalar(data, period, first_valid, out)
-}
+    const ABS_MASK: i64 = 0x7FFF_FFFF_FFFF_FFFFu64 as i64;
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn kama_avx512_long(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
-    kama_scalar(data, period, first_valid, out)
+    debug_assert!(period >= 2 && period <= data.len());
+    debug_assert_eq!(data.len(), out.len());
+
+    /* ------------------------------------------------------------------ *
+     * 1.  Σ|Δprice| for the first window                                  *
+     * ------------------------------------------------------------------ */
+    let lookback = period - 1;
+    let mut sum_roc1: f64 = 0.0;
+    let base = data.as_ptr().add(first_valid);
+
+    if lookback >= 31 {
+        let mask_pd = _mm512_castsi512_pd(_mm512_set1_epi64(ABS_MASK));
+        let mut acc0 = _mm512_setzero_pd();
+        let mut acc1 = _mm512_setzero_pd();
+        let mut acc2 = _mm512_setzero_pd();
+        let mut acc3 = _mm512_setzero_pd();
+
+        #[inline(always)]
+        unsafe fn abs_diff(ptr: *const f64, idx: usize, mask: __m512d) -> __m512d {
+            let a = _mm512_loadu_pd(ptr.add(idx));
+            let b = _mm512_loadu_pd(ptr.add(idx + 1));
+            _mm512_and_pd(_mm512_sub_pd(b, a), mask)
+        }
+
+        let mut j = 0usize;
+        while j + 31 <= lookback {
+            acc0 = _mm512_add_pd(acc0, abs_diff(base, j,      mask_pd));
+            acc1 = _mm512_add_pd(acc1, abs_diff(base, j + 8,  mask_pd));
+            acc2 = _mm512_add_pd(acc2, abs_diff(base, j + 16, mask_pd));
+            acc3 = _mm512_add_pd(acc3, abs_diff(base, j + 24, mask_pd));
+            j += 32;
+        }
+        let acc_all = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
+        sum_roc1 = _mm512_reduce_add_pd(acc_all);          // horizontal sum :contentReference[oaicite:0]{index=0}
+
+        while j <= lookback {
+            sum_roc1 += (*base.add(j + 1) - *base.add(j)).abs();
+            j += 1;
+        }
+    } else {
+        for k in 0..=lookback {
+            sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
+        }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 2.  Seed first output                                              *
+     * ------------------------------------------------------------------ */
+    let init_idx = first_valid + lookback + 1;
+    let mut kama = *data.get_unchecked(init_idx);
+    *out.get_unchecked_mut(init_idx) = kama;
+
+    /* ------------------------------------------------------------------ *
+     * 3.  Rolling KAMA update (scalar recurrence)                        *
+     * ------------------------------------------------------------------ */
+    let const_max  = 2.0 / 31.0;
+    let const_diff = (2.0 / 3.0) - const_max;
+
+    let mut tail_idx = first_valid;
+    let mut tail_val = *data.get_unchecked(tail_idx);
+
+    for i in (init_idx + 1)..data.len() {
+        /* ---- update Σ|Δp| ---- */
+        let price     = *data.get_unchecked(i);
+        let new_diff  = (price - *data.get_unchecked(i - 1)).abs();
+
+        let next_tail = *data.get_unchecked(tail_idx + 1);
+        let old_diff  = (next_tail - tail_val).abs();
+        sum_roc1 += new_diff - old_diff;
+
+        tail_val = next_tail;
+        tail_idx += 1;
+
+        /* ---- efficiency ratio & smoothing constant ---- */
+        let direction = (price - *data.get_unchecked(tail_idx)).abs();
+        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+
+        // fused multiply-add → one FMA µ-op; square via multiplication (faster than powi) :contentReference[oaicite:1]{index=1}
+        let t  = er.mul_add(const_diff, const_max);
+        let sc = t * t;
+
+        /* ---- KAMA recurrence ---- */
+        // compiler lowers mul_add to `vfmadd132sd` on AVX-512 targets :contentReference[oaicite:2]{index=2}
+        kama = (price - kama).mul_add(sc, kama);
+
+        *out.get_unchecked_mut(i) = kama;  // regular scalar store (no NT store) :contentReference[oaicite:3]{index=3}
+
+        // Prefetch two cache lines ahead; _MM_HINT_T1 prefers L2 :contentReference[oaicite:4]{index=4}
+        _mm_prefetch(data.as_ptr().add(i + 128) as *const i8, _MM_HINT_T1);
+    }
 }
 
 use std::collections::VecDeque;
@@ -380,7 +549,7 @@ pub struct KamaBatchRange {
 
 impl Default for KamaBatchRange {
     fn default() -> Self {
-        Self { period: (30, 100, 1) }
+        Self { period: (30, 240, 1) }
     }
 }
 
@@ -512,30 +681,60 @@ fn kama_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    /* ---------------------------------------------------------------
+    * 1.  allocate un-initialised matrix and write the NaN prefixes
+    * ------------------------------------------------------------- */
+    let warm: Vec<usize> = combos.iter()
+                                .map(|c| first + c.period.unwrap())
+                                .collect();
+
+    let mut raw = make_uninit_matrix(rows, cols);     // Vec<MaybeUninit<f64>>
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    /* ---------------------------------------------------------------
+    * 2.  helper that fills a single row
+    * ------------------------------------------------------------- */
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this row to &mut [f64] once, then pass to the kernel
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => kama_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => kama_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => kama_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => kama_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
 
+    /* ---------------------------------------------------------------
+    * 3.  run every row, writing **directly** into `raw`
+    * ------------------------------------------------------------- */
     if parallel {
-        values.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
+    /* ---------------------------------------------------------------
+    * 4.  turn the fully-initialised buffer into Vec<f64>
+    * ------------------------------------------------------------- */
+    let values: Vec<f64> = unsafe { core::mem::transmute(raw) };
+
+    /* ---------------------------------------------------------------
+    * 5.  package result
+    * ------------------------------------------------------------- */
     Ok(KamaBatchOutput { values, combos, rows, cols })
 }
 
@@ -557,7 +756,7 @@ pub unsafe fn kama_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    kama_scalar(data, period, first, out)
+    kama_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -568,30 +767,9 @@ pub unsafe fn kama_row_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    kama_scalar(data, period, first, out)
+    kama_avx512(data, period, first, out)
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kama_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    kama_scalar(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub unsafe fn kama_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
-    kama_scalar(data, period, first, out)
-}
 
 #[inline(always)]
 pub fn expand_grid_kama(r: &KamaBatchRange) -> Vec<KamaParams> {

@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'highpass_2_pole';
+const indicatorName = 'Highpass 2 Pole';
+const description = `Technical analysis indicator: Highpass 2 Pole`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Highpass 2 Pole helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Highpass 2 Pole to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Highpass 2 Pole in Rust
+let result = indicators::highpass_2_pole(&data, 14);
+  </code></pre>
+</IndicatorLayout>

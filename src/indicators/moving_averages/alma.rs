@@ -478,51 +478,45 @@ unsafe fn alma_avx512_short(
     debug_assert!(weights.len() >= period);
 
     const STEP: usize = 8;
-    let chunks = period / STEP;
-    let tail_len = period % STEP;
+    let chunks    = period / STEP;      // 0,1,2,3,4 (≤ 4 because period ≤ 32)
+    let tail_len  = period % STEP;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
+    // ---------- fast path for period ≤ 8 ---------------------------------------
     if chunks == 0 {
         let w_vec = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr());
         for i in (first_valid + period - 1)..data.len() {
             let start = i + 1 - period;
             let d_vec = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
-            let sum = hsum_pd_zmm(_mm512_mul_pd(d_vec, w_vec));
-            *out.get_unchecked_mut(i) = sum * inv_norm;
+            let sum   = hsum_pd_zmm(_mm512_mul_pd(d_vec, w_vec)) * inv_norm;
+            *out.get_unchecked_mut(i) = sum;
         }
         return;
     }
 
-    let w0 = _mm512_loadu_pd(weights.as_ptr());
-    let w1 = if chunks >= 2 {
-        Some(_mm512_loadu_pd(weights.as_ptr().add(STEP)))
-    } else {
-        None
-    };
-
+    // ---------- general short‑kernel (1 ≤ chunks ≤ 4) ---------------------------
     for i in (first_valid + period - 1)..data.len() {
         let start = i + 1 - period;
-
         let mut acc = _mm512_setzero_pd();
 
-        let d0 = _mm512_loadu_pd(data.as_ptr().add(start));
-        acc = _mm512_fmadd_pd(d0, w0, acc);
-
-        if let Some(w1v) = w1 {
-            let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
-            acc = _mm512_fmadd_pd(d1, w1v, acc);
+        // handle all full 8‑wide blocks
+        for blk in 0..chunks {
+            let w = _mm512_loadu_pd(weights.as_ptr().add(blk * STEP));
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            acc = _mm512_fmadd_pd(d, w, acc);
         }
 
+        // optional tail
         if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
             let w_tail = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(chunks * STEP));
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
             acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
         }
 
-        let sum = hsum_pd_zmm(acc);
-        *out.get_unchecked_mut(i) = sum * inv_norm;
+        *out.get_unchecked_mut(i) = hsum_pd_zmm(acc) * inv_norm;
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
@@ -1138,54 +1132,44 @@ unsafe fn alma_row_avx512_short(
     debug_assert!(period <= 32);
     const STEP: usize = 8;
 
-    let chunks = period / STEP;
-    let tail_len = period % STEP;
+    let chunks   = period / STEP;       // number of full 8‑wide blocks (0‑4)
+    let tail_len = period % STEP;       // 0‑7 remaining samples
+    let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    let w0 = _mm512_loadu_pd(w_ptr);
-    let w1 = if chunks >= 2 {
-        Some(_mm512_loadu_pd(w_ptr.add(STEP)))
-    } else {
-        None
-    };
-
-    if tail_len == 0 {
+    // ───────────────────────────────────────────────────────────────────────────
+    // Fast path: period ≤ 8  (no full 8‑wide block, only a masked tail)
+    // ───────────────────────────────────────────────────────────────────────────
+    if chunks == 0 {
+        let w_tail = _mm512_maskz_loadu_pd(tail_mask, w_ptr);
         for i in (first + period - 1)..data.len() {
             let start = i + 1 - period;
-            let mut acc = _mm512_fmadd_pd(
-                _mm512_loadu_pd(data.as_ptr().add(start)),
-                w0,
-                _mm512_setzero_pd(),
-            );
-
-            if let Some(w1v) = w1 {
-                let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
-                acc = _mm512_fmadd_pd(d1, w1v, acc);
-            }
-
-            let res = hsum_pd_zmm(acc) * inv_n;
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
+            let res = hsum_pd_zmm(_mm512_mul_pd(d_tail, w_tail)) * inv_n;
             _mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
         }
         return;
     }
 
-    let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
-    let w_tail = _mm512_maskz_loadu_pd(tmask, w_ptr.add(chunks * STEP));
-
+    // ───────────────────────────────────────────────────────────────────────────
+    // General short kernel (1 ≤ chunks ≤ 4; tail_len may be 0)
+    // ───────────────────────────────────────────────────────────────────────────
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
-        let mut acc = _mm512_fmadd_pd(
-            _mm512_loadu_pd(data.as_ptr().add(start)),
-            w0,
-            _mm512_setzero_pd(),
-        );
+        let mut acc = _mm512_setzero_pd();
 
-        if let Some(w1v) = w1 {
-            let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
-            acc = _mm512_fmadd_pd(d1, w1v, acc);
+        // accumulate every full 8‑wide block
+        for blk in 0..chunks {
+            let w = _mm512_loadu_pd(w_ptr.add(blk * STEP));
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
+            acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        let d_tail = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
-        acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
+        // optional tail
+        if tail_len != 0 {
+            let w_tail = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(chunks * STEP));
+            let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
+            acc = _mm512_fmadd_pd(d_tail, w_tail, acc);
+        }
 
         let res = hsum_pd_zmm(acc) * inv_n;
         _mm_stream_sd(out.get_unchecked_mut(i) as *mut f64, _mm_set_sd(res));
@@ -1666,39 +1650,83 @@ mod tests {
         }
         Ok(())
     }
+    #[allow(clippy::float_cmp)]
     fn check_alma_property(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (
-            proptest::collection::vec(
-                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
-                30..200,
-            ),
-            3usize..30,
-        );
+        // ── 1. Pick a period first, then a vector that is long enough ───────────
+        let strat = (1usize..=64)                                      // period
+            .prop_flat_map(|period| {                                  // ↙ dependents see it
+                (
+                    prop::collection::vec(
+                        (-1e6f64..1e6f64)
+                            .prop_filter("finite", |x| x.is_finite()),
+                        period..400,                                   // len ≥ period
+                    ),
+                    Just(period),
+                    0f64..1f64,                                        // offset
+                    0.1f64..10.0f64,                                   // sigma
+                )
+            });
 
         proptest::test_runner::TestRunner::default()
-            .run(&strat, |(data, period)| {
+            .run(&strat, |(data, period, offset, sigma)| {
+                // ── 2. Build Alma input and reference outputs ───────────────────
                 let params = AlmaParams {
                     period: Some(period),
-                    offset: None,
-                    sigma: None,
+                    offset: Some(offset),
+                    sigma:  Some(sigma),
                 };
                 let input = AlmaInput::from_slice(&data, params);
-                let AlmaOutput { values: out } = alma_with_kernel(&input, kernel).unwrap();
 
+                let AlmaOutput { values: out }    = alma_with_kernel(&input, kernel).unwrap();
+                let AlmaOutput { values: ref_out} = alma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+                // ── 3. Core properties ──────────────────────────────────────────
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
+                    let y  = out[i];
+                    let r  = ref_out[i];
 
+                    // (a) boundedness
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
-                        "idx {i}: {y} not in [{lo}, {hi}]",
+                        "idx {i}: {y} ∉ [{lo}, {hi}]"
+                    );
+
+                    // (b) period-1 identity
+                    if period == 1 {
+                        prop_assert!((y - data[i]).abs() <= f64::EPSILON);
+                    }
+
+                    // (c) constant-series invariance
+                    if data.windows(2).all(|w| w[0] == w[1]) {
+                        prop_assert!((y - data[0]).abs() <= 1e-9);
+                    }
+
+                    let y_bits  = y.to_bits();
+                    let r_bits  = r.to_bits();
+
+                    // Skip special cases: if either value is NaN or ±Inf, we only check that the
+                    // other is equal (covers constant-series invariance and keeps shrinking sane).
+                    if !y.is_finite() || !r.is_finite() {
+                        prop_assert!(y.to_bits() == r.to_bits(),
+                            "finite/NaN mismatch idx {i}: {y} vs {r}");
+                        continue;
+                    }
+
+                    // ----------- safe ULP distance (no panics in debug) --------------------------
+                    let ulp_diff: u64 = y_bits.abs_diff(r_bits);   // or: (y_bits.max(r_bits) - y_bits.min(r_bits));
+
+                    prop_assert!(
+                        (y - r).abs() <= 1e-9 || ulp_diff <= 4,
+                        "mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
                     );
                 }
                 Ok(())
@@ -1707,6 +1735,7 @@ mod tests {
 
         Ok(())
     }
+
     macro_rules! generate_all_alma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {

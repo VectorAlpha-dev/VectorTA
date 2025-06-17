@@ -1,0 +1,53 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'rvi';
+const indicatorName = 'Relative Volatility Index';
+const description = `Technical analysis indicator: Relative Volatility Index`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 20,
+    "min": 2,
+    "max": 200,
+    "description": "Moving average period"
+  },
+  {
+    "name": "std_dev",
+    "type": "number",
+    "default": 2,
+    "min": 0.1,
+    "max": 5,
+    "description": "Standard deviation multiplier"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Relative Volatility Index helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Moving average period (default: 20)</li>
+    <li><strong>std_dev</strong>: Standard deviation multiplier (default: 2)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Relative Volatility Index to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Relative Volatility Index in Rust
+let result = indicators::rvi(&data, 20, 2);
+  </code></pre>
+</IndicatorLayout>

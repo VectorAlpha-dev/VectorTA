@@ -1,23 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)",
-      "Bash(pkill:*)",
-      "Bash(npm run dev:*)",
-      "Bash(npm run build:*)",
-      "Bash(grep:*)",
-      "Bash(npm run preview:*)",
       "Bash(npm create:*)",
-      "Bash(mv:*)",
-      "Bash(rmdir:*)",
-      "Bash(cp:*)",
-      "Bash(rm:*)",
-      "Bash(true)",
-      "Bash(ls:*)",
-      "Bash(npm install)",
-      "Bash(timeout 10 npm run dev)",
-      "Bash(npx astro:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": []
   }

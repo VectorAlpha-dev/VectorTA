@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'mfi';
+const indicatorName = 'Money Flow Index';
+const description = `Technical analysis indicator: Money Flow Index`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Money Flow Index is a momentum indicator that uses price and volume data to identify overbought or oversold signals. It's similar to RSI but incorporates volume.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Money Flow Index to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Money Flow Index in Rust
+let result = indicators::mfi(&data, 14);
+  </code></pre>
+</IndicatorLayout>

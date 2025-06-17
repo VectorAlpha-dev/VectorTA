@@ -1,0 +1,38 @@
+---
+import Header from '../components/layout/Header.astro';
+import Sidebar from '../components/layout/Sidebar.astro';
+import '../styles/global.css';
+
+export interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'Technical Analysis Indicators Documentation' } = Astro.props;
+---
+
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} | TA Indicators</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+    <Header />
+    <div class="flex">
+      <Sidebar />
+      <main class="flex-1 px-6 py-8 ml-64">
+        <slot />
+      </main>
+    </div>
+    
+    <script>
+      // Theme toggle logic
+      const theme = localStorage.getItem('theme') || 'dark';
+      document.documentElement.classList.toggle('dark', theme === 'dark');
+    </script>
+  </body>
+</html>

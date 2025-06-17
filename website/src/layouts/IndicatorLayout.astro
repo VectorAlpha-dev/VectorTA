@@ -1,0 +1,69 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import { IndicatorChart } from '../components/charts/IndicatorChart';
+import { ChartControls } from '../components/charts/ChartControls';
+
+export interface Props {
+  indicatorId: string;
+  indicatorName: string;
+  description?: string;
+  parameters: any[];
+}
+
+const { indicatorId, indicatorName, description, parameters } = Astro.props;
+
+// Get default parameters
+const defaultParams = parameters.reduce((acc, p) => ({ 
+  ...acc, 
+  [p.name]: p.default 
+}), {});
+
+// For now, we'll use empty data array to avoid parsing errors
+// This will be replaced with real data when WASM is ready
+const sampleData = [];
+---
+
+<BaseLayout title={indicatorName} description={description}>
+  <div class="max-w-7xl mx-auto">
+    <h1 class="text-4xl font-bold mb-4">{indicatorName}</h1>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div class="lg:col-span-3 space-y-6">
+        <!-- Chart -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+          <div id="chart-container">
+            <IndicatorChart
+              client:only="react"
+              indicatorId={indicatorId}
+              data={sampleData}
+              parameters={defaultParams}
+              darkMode={true}
+            />
+          </div>
+        </div>
+        
+        <!-- Documentation -->
+        <div class="prose dark:prose-invert max-w-none">
+          <slot />
+        </div>
+      </div>
+      
+      <!-- Controls -->
+      <div class="lg:col-span-1">
+        <div class="sticky top-20">
+          <div id="controls-container">
+            <ChartControls
+              client:only="react"
+              indicatorId={indicatorId}
+              parameters={defaultParams}
+              parameterDefs={parameters}
+              onParameterChange={() => {
+                // This will be handled by a parent component wrapper
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</BaseLayout>

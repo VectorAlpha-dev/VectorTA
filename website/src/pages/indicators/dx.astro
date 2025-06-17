@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'dx';
+const indicatorName = 'Dx';
+const description = `Technical analysis indicator: Dx`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Dx helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>Traders use the Dx to make informed decisions about entry and exit points.</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Dx in Rust
+let result = indicators::dx(&data, 14);
+  </code></pre>
+</IndicatorLayout>

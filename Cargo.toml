@@ -54,7 +54,7 @@ panic           = "abort"
 overflow-checks = false
 debug = true
 strip = "none"
-split-debuginfo = "packed"
+split-debuginfo = "unpacked"
 
 [profile.bench]
 inherits = "release"

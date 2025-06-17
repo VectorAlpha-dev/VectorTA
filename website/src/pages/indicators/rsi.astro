@@ -1,0 +1,44 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'rsi';
+const indicatorName = 'Relative Strength Index';
+const description = `Technical analysis indicator: Relative Strength Index`;
+const parameters = [
+  {
+    "name": "period",
+    "type": "number",
+    "default": 14,
+    "min": 2,
+    "max": 200,
+    "description": "Lookback period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2>Overview</h2>
+  <p>{description}</p>
+
+  <h2>How it works</h2>
+  <p>The Relative Strength Index measures momentum by comparing the magnitude of recent gains to recent losses. It oscillates between 0 and 100, with readings above 70 indicating overbought conditions and below 30 indicating oversold conditions.</p>
+
+  <h2>Parameters</h2>
+  <ul>
+    <li><strong>period</strong>: Lookback period (default: 14)</li>
+  </ul>
+
+  <h2>Interpretation</h2>
+  <p>- RSI > 70: Potentially overbought<br />- RSI < 30: Potentially oversold<br />- Divergences with price: Potential reversals</p>
+
+  <h2>Example Usage</h2>
+  <pre><code class="language-rust">
+// Example of using Relative Strength Index in Rust
+let result = indicators::rsi(&data, 14);
+  </code></pre>
+</IndicatorLayout>
