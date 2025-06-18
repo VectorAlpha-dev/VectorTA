@@ -11,7 +11,8 @@
       "Bash(for:*)",
       "Bash(do echo \"Processing $file\")",
       "Bash(done)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }

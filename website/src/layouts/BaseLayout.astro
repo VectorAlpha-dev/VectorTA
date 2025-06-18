@@ -1,6 +1,7 @@
 ---
 import Header from '../components/layout/Header.astro';
 import Sidebar from '../components/layout/Sidebar.astro';
+import SkipToContent from '../components/ui/SkipToContent.astro';
 import '../styles/global.css';
 
 export interface Props {
@@ -8,7 +9,7 @@ export interface Props {
   description?: string;
 }
 
-const { title, description = 'Technical Analysis Indicators Documentation' } = Astro.props;
+const { title, description = 'VectorTA - High-performance technical analysis library with 300+ indicators' } = Astro.props;
 ---
 
 <!DOCTYPE html>
@@ -16,23 +17,102 @@ const { title, description = 'Technical Analysis Indicators Documentation' } = A
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{title} | TA Indicators</title>
+    <title>{title} | VectorTA</title>
     <meta name="description" content={description} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    
+    <!-- Preload fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    
+    <!-- Theme color -->
+    <meta name="theme-color" content="#3b82f6" />
   </head>
-  <body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+  <body class="bg-background text-foreground min-h-screen">
+    <SkipToContent />
     <Header />
+    
+    <!-- Mobile menu backdrop -->
+    <div id="mobile-backdrop" class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden" aria-hidden="true"></div>
+    
     <div class="flex">
       <Sidebar />
-      <main class="flex-1 px-6 py-8 ml-64">
-        <slot />
+      <main id="main-content" class="flex-1 lg:ml-64 min-w-0" role="main">
+        <div class="px-4 sm:px-6 py-6 sm:py-8">
+          <slot />
+        </div>
       </main>
     </div>
     
     <script>
-      // Theme toggle logic
-      const theme = localStorage.getItem('theme') || 'dark';
+      // Theme management
+      const getPreferredTheme = () => {
+        const stored = localStorage.getItem('theme');
+        if (stored) return stored;
+        
+        // Check system preference
+        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+          return 'dark';
+        }
+        return 'light';
+      };
+      
+      const theme = getPreferredTheme();
       document.documentElement.classList.toggle('dark', theme === 'dark');
+      
+      // Listen for theme changes
+      window.addEventListener('theme-change', (e) => {
+        const newTheme = e.detail.theme;
+        document.documentElement.classList.toggle('dark', newTheme === 'dark');
+        localStorage.setItem('theme', newTheme);
+      });
+      
+      // Mobile menu toggle
+      const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+      const mobileSidebar = document.getElementById('sidebar');
+      const mobileBackdrop = document.getElementById('mobile-backdrop');
+      
+      function toggleMobileMenu() {
+        const isOpen = mobileSidebar?.classList.contains('translate-x-0');
+        
+        if (isOpen) {
+          mobileSidebar?.classList.remove('translate-x-0');
+          mobileSidebar?.classList.add('-translate-x-full');
+          mobileBackdrop?.classList.add('hidden');
+          document.body.style.overflow = '';
+        } else {
+          mobileSidebar?.classList.add('translate-x-0');
+          mobileSidebar?.classList.remove('-translate-x-full');
+          mobileBackdrop?.classList.remove('hidden');
+          document.body.style.overflow = 'hidden';
+        }
+      }
+      
+      mobileMenuToggle?.addEventListener('click', toggleMobileMenu);
+      mobileBackdrop?.addEventListener('click', toggleMobileMenu);
+      
+      // Close mobile menu on resize to desktop
+      let lastWidth = window.innerWidth;
+      window.addEventListener('resize', () => {
+        if (window.innerWidth >= 1024 && lastWidth < 1024) {
+          mobileSidebar?.classList.remove('translate-x-0');
+          mobileSidebar?.classList.add('-translate-x-full');
+          mobileBackdrop?.classList.add('hidden');
+          document.body.style.overflow = '';
+        }
+        lastWidth = window.innerWidth;
+      });
     </script>
   </body>
 </html>
+
+<style>
+  /* Ensure smooth transitions */
+  #sidebar {
+    transition: transform 0.3s ease-in-out;
+  }
+  
+  #mobile-backdrop {
+    transition: opacity 0.3s ease-in-out;
+  }
+</style>

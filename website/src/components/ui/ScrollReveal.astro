@@ -1,0 +1,111 @@
+---
+export interface Props {
+  animation?: 'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'scale';
+  delay?: number;
+  duration?: number;
+  threshold?: number;
+  className?: string;
+}
+
+const { 
+  animation = 'fade', 
+  delay = 0, 
+  duration = 600,
+  threshold = 0.1,
+  className = ''
+} = Astro.props;
+
+const animationClass = `scroll-reveal-${animation}`;
+const uniqueId = `reveal-${Math.random().toString(36).substr(2, 9)}`;
+---
+
+<div 
+  id={uniqueId}
+  class={`${animationClass} ${className}`}
+  data-delay={delay}
+  data-duration={duration}
+  data-threshold={threshold}
+>
+  <slot />
+</div>
+
+<style>
+  .scroll-reveal-fade {
+    opacity: 0;
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .scroll-reveal-slide-up {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms),
+                transform var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .scroll-reveal-slide-down {
+    opacity: 0;
+    transform: translateY(-30px);
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms),
+                transform var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .scroll-reveal-slide-left {
+    opacity: 0;
+    transform: translateX(30px);
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms),
+                transform var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .scroll-reveal-slide-right {
+    opacity: 0;
+    transform: translateX(-30px);
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms),
+                transform var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .scroll-reveal-scale {
+    opacity: 0;
+    transform: scale(0.9);
+    transition: opacity var(--duration, 600ms) ease-out var(--delay, 0ms),
+                transform var(--duration, 600ms) ease-out var(--delay, 0ms);
+  }
+  
+  .revealed {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+</style>
+
+<script>
+  // Initialize Intersection Observer for scroll animations
+  document.addEventListener('DOMContentLoaded', () => {
+    const revealElements = document.querySelectorAll('[class*="scroll-reveal-"]');
+    
+    const revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const element = entry.target as HTMLElement;
+          const delay = parseInt(element.dataset.delay || '0');
+          const duration = parseInt(element.dataset.duration || '600');
+          
+          // Set CSS variables for animation timing
+          element.style.setProperty('--delay', `${delay}ms`);
+          element.style.setProperty('--duration', `${duration}ms`);
+          
+          // Add revealed class after a small delay to ensure styles are applied
+          setTimeout(() => {
+            element.classList.add('revealed');
+          }, 10);
+          
+          // Stop observing once revealed
+          revealObserver.unobserve(element);
+        }
+      });
+    }, {
+      threshold: 0.1,
+      rootMargin: '0px 0px -50px 0px' // Trigger slightly before element is fully in view
+    });
+    
+    revealElements.forEach(el => revealObserver.observe(el));
+  });
+</script>

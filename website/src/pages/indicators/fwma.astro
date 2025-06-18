@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'fwma';
-const indicatorName = 'Fwma';
-const description = `Technical analysis indicator: Fwma`;
+const indicatorName = 'Fibonacci Weighted Moving Average (FWMA)';
+const description = `The Fibonacci Weighted Moving Average (FWMA) applies Fibonacci sequence numbers as weights to create a unique moving average that emphasizes both recent and mathematically significant past data points. This creates a natural smoothing that aligns with the Fibonacci ratios found throughout nature and financial markets, providing a harmonious balance between responsiveness and stability.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 13,
+    "min": 5,
+    "max": 89,
+    "description": "Number of periods (ideally a Fibonacci number)"
   }
 ];
 ---
@@ -23,22 +23,170 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Fibonacci Weighted Moving Average (FWMA) represents a unique approach to price smoothing that incorporates 
+    the mathematical elegance of the Fibonacci sequence into technical analysis. Unlike traditional weighted moving 
+    averages that use linear or exponential weights, FWMA assigns weights based on Fibonacci numbers, creating a 
+    natural progression that many believe reflects the underlying structure of financial markets. This approach 
+    produces a moving average that responds to price changes in a way that feels more organic and aligned with 
+    market rhythms.
+  </p>
+  <p>
+    What makes FWMA particularly interesting is its connection to the golden ratio (φ = 1.618...), which appears 
+    throughout nature and has been observed in market behavior. By using Fibonacci numbers as weights, FWMA gives 
+    more importance to certain historical data points that correspond to these natural ratios. This creates a moving 
+    average that many traders find provides better support and resistance levels, as it aligns with the Fibonacci 
+    retracements and extensions commonly used in technical analysis.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Fwma helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>FWMA uses Fibonacci sequence numbers as weights for price data:</p>
+  <ol>
+    <li><strong>Generate Fibonacci Sequence:</strong> Create sequence up to period length</li>
+    <li><strong>Assign Weights:</strong> Most recent price gets highest Fibonacci number</li>
+    <li><strong>Calculate Weighted Sum:</strong> Multiply each price by its Fibonacci weight</li>
+    <li><strong>Normalize:</strong> Divide by sum of all Fibonacci weights</li>
+    <li><strong>Result:</strong> Smoothed average emphasizing Fibonacci-weighted prices</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Fibonacci Sequence: 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89...<br/>
+      Where: F(n) = F(n-1) + F(n-2)<br/>
+      <br/>
+      For FWMA with period N:<br/>
+      Generate first N Fibonacci numbers<br/>
+      <br/>
+      Weight Assignment (most recent first):<br/>
+      Price[0] × F(N)<br/>
+      Price[1] × F(N-1)<br/>
+      Price[2] × F(N-2)<br/>
+      ...<br/>
+      Price[N-1] × F(1)<br/>
+      <br/>
+      FWMA = Σ(Price[i] × F(N-i)) / Σ(F(j))<br/>
+      <br/>
+      where i = 0 to N-1 (price index)<br/>
+      and j = 1 to N (Fibonacci sum)<br/>
+      <br/>
+      Example for 5-period FWMA:<br/>
+      Weights: [5, 3, 2, 1, 1]<br/>
+      Sum of weights: 12<br/>
+      FWMA = (P₀×5 + P₁×3 + P₂×2 + P₃×1 + P₄×1) / 12
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Natural Weighting:</strong> Uses nature's growth sequence</li>
+    <li><strong>Golden Ratio Connection:</strong> Inherent φ relationships</li>
+    <li><strong>Smooth Progression:</strong> Weights increase naturally</li>
+    <li><strong>Market Harmony:</strong> Aligns with Fibonacci retracements</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Fwma to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>FWMA Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trend Identification:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising FWMA:</strong> Uptrend with Fibonacci-weighted momentum</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling FWMA:</strong> Downtrend with natural deceleration</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FWMA Slope:</strong> Trend strength indicator</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Price vs FWMA:</strong> Dynamic support/resistance</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Golden Cross:</strong> Price crosses above FWMA</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Death Cross:</strong> Price crosses below FWMA</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FWMA Touch:</strong> Often acts as Fibonacci support/resistance</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FWMA Reversal:</strong> Direction change signals trend shift</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Fibonacci Trend Following:</strong>
+      <ul>
+        <li>Use Fibonacci period lengths (8, 13, 21, 34)</li>
+        <li>Buy when price crosses above FWMA</li>
+        <li>Hold while price remains above rising FWMA</li>
+        <li>Exit on close below FWMA</li>
+      </ul>
+    </li>
+    <li><strong>Multiple FWMA System:</strong>
+      <ul>
+        <li>Use 8, 13, and 21 period FWMAs</li>
+        <li>Strong trend when all aligned and separated</li>
+        <li>Trade pullbacks to middle FWMA</li>
+        <li>Exit when FWMAs converge</li>
+      </ul>
+    </li>
+    <li><strong>FWMA with Fibonacci Retracements:</strong>
+      <ul>
+        <li>Combine FWMA with Fib retracement levels</li>
+        <li>Look for confluence at key levels</li>
+        <li>Enter when both confirm support/resistance</li>
+        <li>Higher probability at golden ratio levels</li>
+      </ul>
+    </li>
+    <li><strong>Natural Rhythm Trading:</strong> Time entries with Fibonacci time cycles</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Adaptive FWMA:</strong> Adjust period based on market cycles</li>
+    <li><strong>FWMA Bands:</strong> Add Fibonacci ratios as band multipliers</li>
+    <li><strong>Harmonic FWMA:</strong> Combine with harmonic patterns</li>
+    <li><strong>Golden Ratio FWMA:</strong> Emphasize φ relationships</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Natural weighting progression</li>
+    <li>Aligns with Fibonacci analysis tools</li>
+    <li>Provides unique support/resistance levels</li>
+    <li>Smooth yet responsive to price changes</li>
+    <li>Works well with harmonic trading</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>More complex calculation than simple MAs</li>
+    <li>Best periods limited to Fibonacci numbers</li>
+    <li>May lag in very fast markets</li>
+    <li>Requires understanding of Fibonacci concepts</li>
+    <li>Not suitable for very short periods</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>FWMA works exceptionally well with:</p>
+  <ul>
+    <li><strong>Fibonacci Tools:</strong> Natural complement to Fib retracements</li>
+    <li><strong>Elliott Wave:</strong> FWMA aligns with wave principles</li>
+    <li><strong>Harmonic Patterns:</strong> Use FWMA for pattern confirmation</li>
+    <li><strong>RSI:</strong> FWMA for trend, RSI for momentum</li>
+    <li><strong>Pivot Points:</strong> Combine natural and calculated levels</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Fwma in Rust
-let result = indicators::fwma(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical elegance of FWMA lies in its use of the Fibonacci sequence, where each number is the sum of 
+    the two preceding ones. This creates a natural growth pattern that appears throughout nature—from spiral galaxies 
+    to flower petals to market movements. The ratio between consecutive Fibonacci numbers approaches the golden ratio 
+    (φ ≈ 1.618) as the sequence progresses, embedding this fundamental constant into the moving average calculation.
+  </p>
+  <p>
+    By using these naturally occurring numbers as weights, FWMA creates a smoothing effect that many traders find 
+    more in tune with market behavior than artificial weighting schemes. The heavier weighting on recent prices 
+    (using larger Fibonacci numbers) combined with the specific mathematical relationships between the weights 
+    produces a moving average that often provides support and resistance at levels that coincide with other 
+    Fibonacci-based analysis tools, creating a self-reinforcing system of technical levels.
+  </p>
 </IndicatorLayout>

@@ -20,38 +20,154 @@ const defaultParams = parameters.reduce((acc, p) => ({
 // For now, we'll use empty data array to avoid parsing errors
 // This will be replaced with real data when WASM is ready
 const sampleData = [];
+
+// Create a table of contents from the sections
+const sections = [
+  { id: 'overview', title: 'Overview' },
+  { id: 'interpretation', title: 'Interpretation' },
+  { id: 'calculation', title: 'Calculation' },
+  { id: 'parameters', title: 'Parameters' },
+  { id: 'returns', title: 'Returns & Output' },
+  { id: 'usage', title: 'Example Usage' },
+  { id: 'use-cases', title: 'Common Use Cases' },
+  { id: 'edge-cases', title: 'Edge Cases & Errors' },
+  { id: 'references', title: 'References' },
+];
 ---
 
 <BaseLayout title={indicatorName} description={description}>
-  <div class="max-w-7xl mx-auto">
-    <h1 class="text-4xl font-bold mb-4">{indicatorName}</h1>
+  <div class="content-container">
+    <header class="mb-8">
+      <h1 class="gradient-text">{indicatorName}</h1>
+      {description && (
+        <p class="text-lg text-muted-foreground max-w-3xl">
+          {description}
+        </p>
+      )}
+    </header>
     
-    <div class="space-y-6">
-      <!-- Chart -->
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <div id="chart-container">
-          <IndicatorChart
-            client:only="react"
-            indicatorId={indicatorId}
-            data={sampleData}
-            parameters={defaultParams}
-            darkMode={true}
-          />
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <!-- Main Content Area -->
+      <div class="lg:col-span-3 space-y-6">
+        <!-- Chart Card -->
+        <div class="card">
+          <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+            Interactive Chart
+          </h2>
+          <div id="chart-container" class="min-h-[400px] animate-fade-in">
+            <IndicatorChart
+              client:only="react"
+              indicatorId={indicatorId}
+              data={sampleData}
+              parameters={defaultParams}
+              darkMode={true}
+            />
+          </div>
+          <div class="mt-4 p-4 bg-muted rounded-lg">
+            <p class="text-sm text-muted-foreground">
+              <strong>Note:</strong> Interactive chart will be available once WASM implementation is complete. 
+              The chart will update in real-time as you adjust parameters.
+            </p>
+          </div>
+        </div>
+        
+        <!-- Documentation Content -->
+        <div class="prose prose-lg dark:prose-invert prose-content">
+          <slot />
         </div>
       </div>
       
-      <!-- Documentation -->
-      <div class="prose prose-lg dark:prose-invert max-w-none 
-        prose-headings:scroll-mt-20 
-        prose-h2:text-2xl prose-h2:font-bold prose-h2:mt-8 prose-h2:mb-4
-        prose-h3:text-xl prose-h3:font-semibold prose-h3:mt-6 prose-h3:mb-3
-        prose-p:text-gray-700 dark:prose-p:text-gray-300 
-        prose-li:text-gray-700 dark:prose-li:text-gray-300
-        prose-code:text-sm prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-        prose-pre:bg-gray-100 dark:prose-pre:bg-gray-800 prose-pre:overflow-x-auto
-        prose-strong:text-gray-900 dark:prose-strong:text-gray-100">
-        <slot />
+      <!-- Sidebar -->
+      <div class="lg:col-span-1 space-y-6">
+        <!-- Table of Contents -->
+        <div class="card sticky top-20">
+          <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            On This Page
+          </h3>
+          <nav class="space-y-2">
+            {sections.map((section) => (
+              <a 
+                href={`#${section.id}`} 
+                class="block text-sm text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {section.title}
+              </a>
+            ))}
+          </nav>
+        </div>
+        
+        <!-- Parameters Card -->
+        <div class="card">
+          <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+            </svg>
+            Quick Reference
+          </h3>
+          <div class="space-y-4">
+            <div>
+              <h4 class="font-medium text-sm mb-2">Parameters</h4>
+              <div class="space-y-2">
+                {parameters.map((param) => (
+                  <div class="text-sm">
+                    <code class="text-xs bg-muted px-1 py-0.5 rounded">{param.name}</code>
+                    <span class="text-muted-foreground"> = {param.default}</span>
+                    {param.min !== undefined && param.max !== undefined && (
+                      <div class="text-xs text-muted-foreground mt-0.5">
+                        Range: {param.min}–{param.max}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            <div class="border-t border-border pt-4">
+              <h4 class="font-medium text-sm mb-2">Category</h4>
+              <p class="text-sm text-muted-foreground">Technical Indicator</p>
+            </div>
+            
+            <div class="border-t border-border pt-4">
+              <h4 class="font-medium text-sm mb-2">Complexity</h4>
+              <p class="text-sm text-muted-foreground">O(n) - Linear time</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </BaseLayout>
+
+<style>
+  /* Ensure proper spacing for content */
+  .prose-content :global(h2) {
+    @apply scroll-mt-20;
+  }
+  
+  .prose-content :global(h3) {
+    @apply scroll-mt-16;
+  }
+  
+  /* Code block styling */
+  .prose-content :global(.not-prose) {
+    @apply my-6;
+  }
+  
+  /* Responsive adjustments */
+  @media (max-width: 1024px) {
+    .sticky {
+      position: static;
+    }
+  }
+  
+  /* Smooth scroll for anchor links */
+  html {
+    scroll-behavior: smooth;
+  }
+</style>

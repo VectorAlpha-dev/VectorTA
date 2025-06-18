@@ -211,6 +211,25 @@ export const indicators = {
     ],
     "description": ""
   },
+  "avgprice": {
+    "id": "avgprice",
+    "name": "Avgprice",
+    "category": "other",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 14,
+        "min": 2,
+        "max": 200,
+        "description": "Lookback period"
+      }
+    ],
+    "outputs": [
+      "value"
+    ],
+    "description": "# Average Price"
+  },
   "bandpass": {
     "id": "bandpass",
     "name": "Band Pass Filter",

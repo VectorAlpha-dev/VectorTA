@@ -2,16 +2,56 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'gatorosc';
-const indicatorName = 'Gatorosc';
-const description = `Technical analysis indicator: Gatorosc`;
+const indicatorName = 'Gator Oscillator';
+const description = `The Gator Oscillator, developed by Bill Williams, visualizes the convergence and divergence of the Alligator indicator's balance lines as a histogram. By showing when the Alligator is "sleeping" (lines converged) or "eating" (lines diverged), the Gator helps traders identify trend periods and avoid choppy markets with remarkable clarity.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "jaw_period",
     "type": "number",
-    "default": 14,
+    "default": 13,
+    "min": 10,
+    "max": 30,
+    "description": "Period for the Jaw (blue) line"
+  },
+  {
+    "name": "jaw_offset",
+    "type": "number",
+    "default": 8,
+    "min": 5,
+    "max": 15,
+    "description": "Forward offset for the Jaw line"
+  },
+  {
+    "name": "teeth_period",
+    "type": "number",
+    "default": 8,
+    "min": 5,
+    "max": 20,
+    "description": "Period for the Teeth (red) line"
+  },
+  {
+    "name": "teeth_offset",
+    "type": "number",
+    "default": 5,
+    "min": 3,
+    "max": 10,
+    "description": "Forward offset for the Teeth line"
+  },
+  {
+    "name": "lips_period",
+    "type": "number",
+    "default": 5,
+    "min": 3,
+    "max": 10,
+    "description": "Period for the Lips (green) line"
+  },
+  {
+    "name": "lips_offset",
+    "type": "number",
+    "default": 3,
     "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "max": 5,
+    "description": "Forward offset for the Lips line"
   }
 ];
 ---
@@ -23,22 +63,173 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Gator Oscillator, created by legendary trader Bill Williams, transforms the Alligator indicator into a 
+    powerful histogram that reveals market states with remarkable clarity. Williams observed that markets trend only 
+    about 15-30% of the time, spending the rest in consolidation. The Gator Oscillator brilliantly visualizes these 
+    states by showing the relationship between the Alligator's three balance lines (Jaw, Teeth, and Lips) as histogram 
+    bars that expand and contract like a living creature's mouth.
+  </p>
+  <p>
+    What makes the Gator Oscillator particularly effective is its ability to identify the four market phases Williams 
+    described: sleeping (convergence), awakening (initial divergence), eating (full trend), and satisfied (trend 
+    exhaustion). By displaying the absolute differences between balance lines as colored histogram bars above and 
+    below zero, traders can instantly see whether to trade aggressively (when the Gator is "hungry") or stay aside 
+    (when it's "sleeping"). This visual representation makes complex market dynamics accessible to traders at all levels.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Gatorosc helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Gator Oscillator displays Alligator line relationships as histograms:</p>
+  <ol>
+    <li><strong>Calculate Balance Lines:</strong> Three smoothed moving averages (SMMA)</li>
+    <li><strong>Upper Histogram:</strong> Absolute difference between Jaw and Teeth</li>
+    <li><strong>Lower Histogram:</strong> Negative of absolute difference between Teeth and Lips</li>
+    <li><strong>Color Coding:</strong> Green for expanding, red for contracting</li>
+    <li><strong>Market States:</strong> Width shows trend strength, color shows phase</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Balance Lines (Smoothed Moving Averages):<br/>
+      Jaw (Blue) = SMMA(Median Price, 13) shifted 8 bars<br/>
+      Teeth (Red) = SMMA(Median Price, 8) shifted 5 bars<br/>
+      Lips (Green) = SMMA(Median Price, 5) shifted 3 bars<br/>
+      <br/>
+      Where Median Price = (High + Low) / 2<br/>
+      <br/>
+      Gator Oscillator Calculations:<br/>
+      Upper Histogram = |Jaw - Teeth|<br/>
+      Lower Histogram = -|Teeth - Lips|<br/>
+      <br/>
+      Bar Colors:<br/>
+      Green = Current bar > Previous bar (expanding)<br/>
+      Red = Current bar &lt; Previous bar (contracting)<br/>
+      <br/>
+      Market Phases:<br/>
+      1. Sleeping: Both bars are red (convergence)<br/>
+      2. Awakening: One bar turns green<br/>
+      3. Eating: Both bars are green (trend)<br/>
+      4. Satisfied: One bar turns red (exhaustion)<br/>
+      <br/>
+      Trading Rules:<br/>
+      - Don't trade when Gator is sleeping<br/>
+      - Enter on awakening in balance line direction<br/>
+      - Add positions while eating<br/>
+      - Exit when satisfied
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Visual Market States:</strong> Clear phases from sleeping to eating</li>
+    <li><strong>Trend Strength:</strong> Histogram width shows momentum</li>
+    <li><strong>No Whipsaws:</strong> Avoids trading in consolidations</li>
+    <li><strong>Fractal Based:</strong> Part of Williams' fractal trading system</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Gatorosc to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Gator States Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market Phases:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Sleeping Gator:</strong> Both histograms red, lines converged - stay out</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Awakening Gator:</strong> One histogram turns green - prepare to trade</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Eating Gator:</strong> Both histograms green - trend in progress</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Satisfied Gator:</strong> One histogram turns red - consider exits</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergence Start:</strong> Gator awakens, trend beginning</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Maximum Divergence:</strong> Both bars green and expanding</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Convergence Start:</strong> First red bar appears</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Approach:</strong> Bars shrinking toward zero line</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Williams' Profitunity System:</strong>
+      <ul>
+        <li>Wait for Gator to wake up (one green bar)</li>
+        <li>Confirm with Awesome Oscillator direction</li>
+        <li>Enter on first fractal break after awakening</li>
+        <li>Add positions while both bars remain green</li>
+      </ul>
+    </li>
+    <li><strong>Gator Trend Following:</strong>
+      <ul>
+        <li>Identify sleeping periods (both bars red)</li>
+        <li>Place pending orders above/below range</li>
+        <li>Activate when Gator awakens</li>
+        <li>Trail stops using balance lines</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong>
+      <ul>
+        <li>Maximum divergence = strongest trend</li>
+        <li>Trade pullbacks when one bar contracts briefly</li>
+        <li>Exit when both bars start contracting</li>
+        <li>Re-enter on new awakening cycle</li>
+      </ul>
+    </li>
+    <li><strong>Multi-Timeframe Gator:</strong> Align Gator states across timeframes</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Gator with Fractals:</strong> Trade fractal breaks during eating phase</li>
+    <li><strong>Volume Confirmation:</strong> Validate Gator signals with volume</li>
+    <li><strong>Gator Squeeze:</strong> Trade breakouts from prolonged sleep</li>
+    <li><strong>Modified Parameters:</strong> Adjust for different market types</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Clear visual representation of market states</li>
+    <li>Keeps traders out of choppy markets</li>
+    <li>Identifies trend starts early</li>
+    <li>Part of complete trading system</li>
+    <li>Works across all markets and timeframes</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Lagging due to smoothed averages</li>
+    <li>Many parameters to optimize</li>
+    <li>Can miss quick moves during sleep</li>
+    <li>Requires understanding of full system</li>
+    <li>Forward offset can repaint</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>Gator Oscillator works best with Williams' indicators:</p>
+  <ul>
+    <li><strong>Alligator:</strong> Gator is derived from Alligator lines</li>
+    <li><strong>Awesome Oscillator:</strong> Confirms Gator signals</li>
+    <li><strong>Fractals:</strong> Entry points during Gator trends</li>
+    <li><strong>Market Facilitation Index:</strong> Volume confirmation</li>
+    <li><strong>Traditional Indicators:</strong> RSI, MACD for additional confirmation</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Gatorosc in Rust
-let result = indicators::gatorosc(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical foundation of the Gator Oscillator lies in its use of Smoothed Moving Averages (SMMA) with 
+    specific Fibonacci-based periods and offsets. The SMMA, also known as the Running Moving Average, provides 
+    exceptional smoothing by incorporating all historical data with exponentially decreasing weights. The formula 
+    SMMA = (SMMA_prev × (N-1) + Price) / N creates a very smooth line that filters out market noise effectively.
+  </p>
+  <p>
+    The genius of the Gator Oscillator is in visualizing the phase relationships between these smoothed lines as 
+    a histogram. By taking absolute differences and displaying them as expanding/contracting bars, Williams created 
+    an intuitive representation of market dynamics. The color coding (green for expansion, red for contraction) 
+    instantly conveys whether the market forces are diverging (trending) or converging (consolidating), making 
+    complex market analysis accessible through simple visual patterns that mirror natural predator-prey cycles.
+  </p>
 </IndicatorLayout>

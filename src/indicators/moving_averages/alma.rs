@@ -49,6 +49,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {

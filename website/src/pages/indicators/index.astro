@@ -1,0 +1,260 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { indicators } from '../../data/indicator-registry';
+
+// Group indicators by category with proper descriptions
+const categoryDescriptions = {
+  'momentum': 'Measure the rate of price change and identify overbought/oversold conditions',
+  'trend': 'Identify and follow market trends and their strength',
+  'volatility': 'Measure market volatility and price ranges',
+  'volume': 'Analyze trading volume and its relationship with price',
+  'moving_averages': 'Smooth price data to identify trends and support/resistance levels',
+  'oscillators': 'Identify cycles, overbought/oversold conditions, and divergences',
+  'other': 'Specialized indicators and unique analysis tools'
+};
+
+// Group indicators by category
+const categorizedIndicators = Object.entries(indicators).reduce((acc, [id, indicator]) => {
+  const category = indicator.category || 'other';
+  if (!acc[category]) acc[category] = [];
+  acc[category].push({ id, ...indicator });
+  return acc;
+}, {} as Record<string, any[]>);
+
+// Sort categories by importance and indicators within each category
+const categoryOrder = ['trend', 'momentum', 'oscillators', 'moving_averages', 'volatility', 'volume', 'other'];
+const sortedCategories = categoryOrder
+  .filter(cat => categorizedIndicators[cat])
+  .map(category => ({
+    name: category,
+    description: categoryDescriptions[category] || '',
+    indicators: categorizedIndicators[category].sort((a, b) => a.name.localeCompare(b.name))
+  }));
+
+// Add any remaining categories not in the order
+Object.keys(categorizedIndicators).forEach(cat => {
+  if (!categoryOrder.includes(cat)) {
+    sortedCategories.push({
+      name: cat,
+      description: categoryDescriptions[cat] || '',
+      indicators: categorizedIndicators[cat].sort((a, b) => a.name.localeCompare(b.name))
+    });
+  }
+});
+
+const totalIndicators = Object.keys(indicators).length;
+const implementedIndicators = 178; // From README
+---
+
+<BaseLayout 
+  title="Technical Indicators Reference" 
+  description="Comprehensive reference for all technical analysis indicators in VectorTA. Browse by category or search for specific indicators."
+>
+  <div class="content-container">
+    <!-- Header -->
+    <header class="mb-12 text-center">
+      <h1 class="gradient-text mb-4">Technical Indicators Reference</h1>
+      <p class="text-lg text-muted-foreground max-w-3xl mx-auto">
+        Explore our comprehensive collection of {totalIndicators} technical analysis indicators. 
+        Each indicator includes detailed documentation, parameter explanations, and practical examples.
+      </p>
+      <div class="flex justify-center gap-6 mt-6">
+        <div class="text-center">
+          <p class="text-3xl font-bold text-primary">{implementedIndicators}</p>
+          <p class="text-sm text-muted-foreground">Implemented</p>
+        </div>
+        <div class="text-center">
+          <p class="text-3xl font-bold text-muted-foreground">{totalIndicators - implementedIndicators}</p>
+          <p class="text-sm text-muted-foreground">Coming Soon</p>
+        </div>
+      </div>
+    </header>
+
+    <!-- Search Bar -->
+    <div class="mb-8">
+      <div class="max-w-2xl mx-auto">
+        <div class="relative">
+          <input
+            type="text"
+            id="indicator-search"
+            placeholder="Search indicators by name, category, or keyword..."
+            class="w-full px-4 py-3 pl-12 bg-muted rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
+        <p class="text-sm text-muted-foreground mt-2 text-center">
+          Try searching for "momentum", "RSI", or "moving average"
+        </p>
+      </div>
+    </div>
+
+    <!-- Quick Links -->
+    <div class="mb-12">
+      <div class="flex flex-wrap justify-center gap-2">
+        {sortedCategories.map(({ name }) => (
+          <a 
+            href={`#${name}`}
+            class="px-4 py-2 bg-muted hover:bg-muted/80 rounded-lg text-sm transition-colors capitalize"
+          >
+            {name.replace(/_/g, ' ')}
+          </a>
+        ))}
+      </div>
+    </div>
+
+    <!-- Categories -->
+    <div class="space-y-12">
+      {sortedCategories.map(({ name, description, indicators: categoryIndicators }) => (
+        <section id={name} class="scroll-mt-20">
+          <div class="mb-6">
+            <h2 class="text-2xl font-bold capitalize flex items-center gap-2">
+              <span class="text-primary">
+                {name === 'trend' && '📈'}
+                {name === 'momentum' && '⚡'}
+                {name === 'oscillators' && '〰️'}
+                {name === 'moving_averages' && '📊'}
+                {name === 'volatility' && '📉'}
+                {name === 'volume' && '📊'}
+                {name === 'other' && '🔧'}
+              </span>
+              {name.replace(/_/g, ' ')}
+              <span class="text-sm font-normal text-muted-foreground">({categoryIndicators.length})</span>
+            </h2>
+            {description && (
+              <p class="text-muted-foreground mt-2">{description}</p>
+            )}
+          </div>
+          
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {categoryIndicators.map((indicator) => (
+              <a
+                href={`/indicators/${indicator.id}`}
+                class="card hover:shadow-lg transition-all group indicator-card"
+                data-indicator={JSON.stringify({ id: indicator.id, name: indicator.name, category: name })}
+              >
+                <h3 class="font-semibold mb-2 group-hover:text-primary transition-colors">
+                  {indicator.name}
+                </h3>
+                <p class="text-sm text-muted-foreground mb-3 line-clamp-2">
+                  {indicator.description || `Calculate ${indicator.name} for technical analysis`}
+                </p>
+                <div class="flex items-center justify-between text-xs text-muted-foreground">
+                  <span class="font-mono">{indicator.id}</span>
+                  <span class="flex items-center gap-1">
+                    {indicator.parameters?.length || 0} params
+                    <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </span>
+                </div>
+              </a>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+
+    <!-- Getting Started Section -->
+    <section class="mt-16 py-12 border-t border-border">
+      <h2 class="text-2xl font-bold mb-6 text-center">Getting Started</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto">
+        <div class="text-center">
+          <div class="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+          </div>
+          <h3 class="font-semibold mb-2">Read the Docs</h3>
+          <p class="text-sm text-muted-foreground">
+            Each indicator has comprehensive documentation with examples and use cases
+          </p>
+        </div>
+        
+        <div class="text-center">
+          <div class="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+          <h3 class="font-semibold mb-2">Interactive Charts</h3>
+          <p class="text-sm text-muted-foreground">
+            Visualize indicators with real-time parameter adjustments
+          </p>
+        </div>
+        
+        <div class="text-center">
+          <div class="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+            </svg>
+          </div>
+          <h3 class="font-semibold mb-2">Copy & Use</h3>
+          <p class="text-sm text-muted-foreground">
+            Example code for every indicator ready to copy and integrate
+          </p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Search functionality
+    const searchInput = document.getElementById('indicator-search') as HTMLInputElement;
+    const indicatorCards = document.querySelectorAll('.indicator-card') as NodeListOf<HTMLElement>;
+    const categories = document.querySelectorAll('section[id]') as NodeListOf<HTMLElement>;
+
+    searchInput?.addEventListener('input', (e) => {
+      const query = (e.target as HTMLInputElement).value.toLowerCase();
+      
+      if (!query) {
+        // Show all cards and categories
+        indicatorCards.forEach(card => card.style.display = '');
+        categories.forEach(cat => cat.style.display = '');
+        return;
+      }
+
+      // Track which categories have visible indicators
+      const visibleCategories = new Set<string>();
+
+      // Filter indicators
+      indicatorCards.forEach(card => {
+        const data = JSON.parse(card.dataset.indicator || '{}');
+        const matches = 
+          data.name?.toLowerCase().includes(query) ||
+          data.id?.toLowerCase().includes(query) ||
+          data.category?.toLowerCase().includes(query);
+        
+        card.style.display = matches ? '' : 'none';
+        
+        if (matches && data.category) {
+          visibleCategories.add(data.category);
+        }
+      });
+
+      // Hide categories with no visible indicators
+      categories.forEach(cat => {
+        if (cat.id && !visibleCategories.has(cat.id)) {
+          cat.style.display = 'none';
+        } else {
+          cat.style.display = '';
+        }
+      });
+    });
+
+    // Smooth scroll for anchor links
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function (e) {
+        e.preventDefault();
+        const href = anchor.getAttribute('href');
+        if (href) {
+          document.querySelector(href)?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+          });
+        }
+      });
+    });
+  </script>
+</BaseLayout>

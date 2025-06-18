@@ -1,21 +1,359 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 47.4% 11.2%;
+    /* Professional Color Palette - Light Mode */
+    --background: 0 0% 100%;              /* Pure white */
+    --foreground: 222 47% 11%;            /* Dark blue-gray */
+    
+    /* Primary colors - Trust-inspiring blue */
+    --primary: 217 91% 60%;               /* Professional blue */
+    --primary-foreground: 0 0% 100%;      /* White text on primary */
+    
+    /* Secondary colors - Growth green */
+    --secondary: 142 76% 36%;             /* Finance green */
+    --secondary-foreground: 0 0% 100%;    /* White text on secondary */
+    
+    /* Neutral colors */
+    --muted: 210 40% 96%;                 /* Light gray background */
+    --muted-foreground: 215 16% 47%;      /* Muted text */
+    
+    --accent: 210 40% 96%;                /* Accent background */
+    --accent-foreground: 222 47% 11%;     /* Accent text */
+    
+    /* UI colors */
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    
+    /* Borders and rings */
+    --border: 214 32% 91%;                /* Light border */
+    --input: 214 32% 91%;
+    --ring: 217 91% 60%;                  /* Focus ring */
+    
+    /* Status colors */
+    --destructive: 0 84% 60%;             /* Error red */
+    --destructive-foreground: 0 0% 98%;
+    
+    /* Chart colors */
+    --chart-up: 142 76% 36%;              /* Green for gains */
+    --chart-down: 0 84% 60%;              /* Red for losses */
+    
+    /* Radius */
+    --radius: 0.5rem;
+    
+    /* Spacing scale (base unit: 4px) */
+    --space-1: 0.25rem;   /* 4px */
+    --space-2: 0.5rem;    /* 8px */
+    --space-3: 0.75rem;   /* 12px */
+    --space-4: 1rem;      /* 16px */
+    --space-5: 1.25rem;   /* 20px */
+    --space-6: 1.5rem;    /* 24px */
+    --space-8: 2rem;      /* 32px */
+    --space-10: 2.5rem;   /* 40px */
+    --space-12: 3rem;     /* 48px */
+    --space-16: 4rem;     /* 64px */
+    
+    /* Typography scale */
+    --text-xs: 0.75rem;   /* 12px */
+    --text-sm: 0.875rem;  /* 14px */
+    --text-base: 1rem;    /* 16px */
+    --text-lg: 1.125rem;  /* 18px */
+    --text-xl: 1.25rem;   /* 20px */
+    --text-2xl: 1.5rem;   /* 24px */
+    --text-3xl: 1.875rem; /* 30px */
+    --text-4xl: 2.25rem;  /* 36px */
+    --text-5xl: 3rem;     /* 48px */
+    
+    /* Line heights */
+    --leading-tight: 1.25;
+    --leading-snug: 1.375;
+    --leading-normal: 1.5;
+    --leading-relaxed: 1.625;
+    --leading-loose: 2;
+    
+    /* Content width */
+    --content-width: 75ch;
+    --content-max-width: 1280px;
   }
-
+  
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
+    /* Professional Color Palette - Dark Mode */
+    --background: 222 84% 5%;             /* Deep blue-black */
+    --foreground: 210 40% 98%;            /* Off-white */
+    
+    /* Primary colors - Adjusted for dark mode */
+    --primary: 217 91% 60%;               /* Same blue, works in dark */
+    --primary-foreground: 222 84% 5%;     /* Dark text on primary */
+    
+    /* Secondary colors - Adjusted for dark mode */
+    --secondary: 142 76% 42%;             /* Slightly brighter green */
+    --secondary-foreground: 222 84% 5%;   /* Dark text on secondary */
+    
+    /* Neutral colors */
+    --muted: 217 33% 17%;                 /* Dark muted background */
+    --muted-foreground: 215 20% 65%;      /* Muted text for dark */
+    
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+    
+    /* UI colors */
+    --card: 222 84% 7%;                   /* Slightly lighter than background */
+    --card-foreground: 210 40% 98%;
+    
+    --popover: 222 84% 5%;
+    --popover-foreground: 210 40% 98%;
+    
+    /* Borders and rings */
+    --border: 217 33% 17%;                /* Subtle dark border */
+    --input: 217 33% 17%;
+    --ring: 217 91% 60%;
+    
+    /* Status colors */
+    --destructive: 0 63% 50%;             /* Adjusted red for dark mode */
+    --destructive-foreground: 210 40% 98%;
+    
+    /* Chart colors remain vibrant */
+    --chart-up: 142 76% 42%;
+    --chart-down: 0 84% 55%;
   }
 }
 
 @layer base {
+  /* Reset and base styles */
+  * {
+    border-color: hsl(var(--border));
+  }
+  
   body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
     font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  /* Typography */
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+  }
+  
+  /* Headings */
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    line-height: var(--leading-tight);
+    letter-spacing: -0.02em;
+  }
+  
+  h1 {
+    font-size: var(--text-4xl);
+    margin-bottom: var(--space-6);
+  }
+  
+  h2 {
+    font-size: var(--text-3xl);
+    margin-top: var(--space-10);
+    margin-bottom: var(--space-4);
+  }
+  
+  h3 {
+    font-size: var(--text-2xl);
+    margin-top: var(--space-8);
+    margin-bottom: var(--space-3);
+  }
+  
+  h4 {
+    font-size: var(--text-xl);
+    margin-top: var(--space-6);
+    margin-bottom: var(--space-2);
+  }
+  
+  /* Paragraphs and lists */
+  p {
+    margin-bottom: var(--space-4);
+  }
+  
+  ul, ol {
+    margin-bottom: var(--space-4);
+    padding-left: var(--space-6);
+  }
+  
+  li {
+    margin-bottom: var(--space-2);
+  }
+  
+  /* Code and monospace */
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+    font-size: 0.9em;
+  }
+  
+  /* Inline code */
+  :not(pre) > code {
+    background-color: hsl(var(--muted));
+    padding: 0.125rem 0.25rem;
+    border-radius: 0.25rem;
+    font-weight: 500;
+  }
+  
+  /* Links */
+  a {
+    color: hsl(var(--primary));
+    text-decoration: none;
+    transition: color 0.2s ease;
+  }
+  
+  a:hover {
+    text-decoration: underline;
+  }
+  
+  /* Focus styles */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  
+  /* Selection */
+  ::selection {
+    background-color: hsl(var(--primary) / 0.2);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  /* Content container */
+  .content-container {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: 0 var(--space-4);
+  }
+  
+  /* Prose content */
+  .prose-content {
+    max-width: var(--content-width);
+  }
+  
+  /* Card component */
+  .card {
+    background-color: hsl(var(--card));
+    border-radius: var(--radius);
+    border: 1px solid hsl(var(--border));
+    padding: var(--space-6);
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  }
+  
+  .dark .card {
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.4), 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+  }
+  
+  /* Button base */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-2) var(--space-4);
+    font-weight: 500;
+    border-radius: var(--radius);
+    transition: all 0.2s ease;
+    cursor: pointer;
+  }
+  
+  .btn-primary {
+    background-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+  
+  .btn-primary:hover {
+    background-color: hsl(var(--primary) / 0.9);
+  }
+  
+  .btn-secondary {
+    background-color: hsl(var(--secondary));
+    color: hsl(var(--secondary-foreground));
+  }
+  
+  .btn-secondary:hover {
+    background-color: hsl(var(--secondary) / 0.9);
+  }
+  
+  /* Code blocks */
+  .code-block {
+    background-color: hsl(var(--muted));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    overflow-x: auto;
+    margin-bottom: var(--space-4);
+  }
+  
+  /* Responsive utilities */
+  @media (max-width: 640px) {
+    :root {
+      --text-base: 0.875rem;  /* 14px on mobile */
+      --text-lg: 1rem;        /* 16px on mobile */
+      --text-xl: 1.125rem;    /* 18px on mobile */
+      --text-2xl: 1.25rem;    /* 20px on mobile */
+      --text-3xl: 1.5rem;     /* 24px on mobile */
+      --text-4xl: 1.875rem;   /* 30px on mobile */
+      --text-5xl: 2.25rem;    /* 36px on mobile */
+    }
+    
+    .content-container {
+      padding: 0 var(--space-3);
+    }
+  }
+}
+
+@layer utilities {
+  /* Smooth scroll */
+  html {
+    scroll-behavior: smooth;
+  }
+  
+  /* Hide scrollbar but keep functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  /* Text balance for better readability */
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  /* Gradient text */
+  .gradient-text {
+    background: linear-gradient(to right, hsl(var(--primary)), hsl(var(--secondary)));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  /* Chart animations */
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out;
   }
 }

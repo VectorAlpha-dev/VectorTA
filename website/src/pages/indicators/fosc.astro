@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'fosc';
-const indicatorName = 'Forecast Oscillator';
-const description = `Technical analysis indicator: Forecast Oscillator`;
+const indicatorName = 'Forecast Oscillator (FOSC)';
+const description = `The Forecast Oscillator (FOSC) measures the difference between current price and a linear regression forecast, expressed as a percentage. This unique approach identifies when prices deviate significantly from their statistical expectation, providing early warning signals of potential reversals or acceleration in the existing trend.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "min": 5,
+    "max": 50,
+    "description": "Period for linear regression forecast"
   }
 ];
 ---
@@ -23,22 +23,168 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Forecast Oscillator (FOSC) represents a sophisticated approach to identifying overbought and oversold conditions 
+    by comparing actual prices to statistically forecasted values. Unlike traditional oscillators that use fixed 
+    thresholds or moving averages, FOSC employs linear regression to create a dynamic forecast of where price "should" 
+    be based on recent trend. When actual price deviates significantly from this forecast, it signals potential 
+    exhaustion or the beginning of a new move.
+  </p>
+  <p>
+    What makes FOSC particularly valuable is its self-adjusting nature. The linear regression forecast automatically 
+    adapts to the current market's trend and volatility, making the oscillator equally effective in trending and 
+    ranging markets. By expressing the deviation as a percentage, FOSC provides normalized readings that can be 
+    compared across different securities and timeframes, making it an excellent tool for systematic trading approaches.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Forecast Oscillator helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>FOSC calculates the percentage deviation from a regression forecast:</p>
+  <ol>
+    <li><strong>Linear Regression:</strong> Calculate best-fit line through recent prices</li>
+    <li><strong>Forecast Value:</strong> Determine where regression line projects current price</li>
+    <li><strong>Calculate Deviation:</strong> Find difference between actual and forecast</li>
+    <li><strong>Express as Percentage:</strong> Normalize deviation relative to forecast</li>
+    <li><strong>Oscillator Output:</strong> Result oscillates around zero</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Linear Regression over N periods:<br/>
+      Slope (m) = Σ((i - ī)(Price[i] - P̄)) / Σ((i - ī)²)<br/>
+      Intercept (b) = P̄ - m × ī<br/>
+      <br/>
+      Where:<br/>
+      i = time index (0 to N-1)<br/>
+      ī = average of i = (N-1)/2<br/>
+      P̄ = average price over period<br/>
+      <br/>
+      Forecast = m × (N-1) + b<br/>
+      <br/>
+      FOSC = ((Close - Forecast) / Forecast) × 100<br/>
+      <br/>
+      Interpretation:<br/>
+      FOSC &gt; 0: Price above regression forecast<br/>
+      FOSC &lt; 0: Price below regression forecast<br/>
+      FOSC &gt; +3%: Potentially overbought<br/>
+      FOSC &lt; -3%: Potentially oversold<br/>
+      <br/>
+      Zero Line Crosses:<br/>
+      Cross above zero: Price momentum turning positive<br/>
+      Cross below zero: Price momentum turning negative
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Statistical Basis:</strong> Uses regression for objective forecast</li>
+    <li><strong>Self-Normalizing:</strong> Percentage format enables comparison</li>
+    <li><strong>Adaptive Nature:</strong> Adjusts to market conditions automatically</li>
+    <li><strong>Early Signals:</strong> Detects deviations before they become extreme</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Forecast Oscillator to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>FOSC Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Oscillator Readings:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">FOSC &gt; +5%:</strong> Significantly overbought condition</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FOSC +2% to +5%:</strong> Moderately overbought</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FOSC -2% to +2%:</strong> Normal range, price near forecast</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">FOSC &lt; -5%:</strong> Significantly oversold condition</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Reversals:</strong> Buy at -5%, sell at +5%</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Line Cross:</strong> Momentum shift signals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> FOSC/price divergences warn of reversals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Trend Confirmation:</strong> Rising FOSC in uptrends is bullish</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Mean Reversion:</strong>
+      <ul>
+        <li>Buy when FOSC reaches -3% to -5%</li>
+        <li>Sell when FOSC reaches +3% to +5%</li>
+        <li>Exit at zero line or opposite extreme</li>
+        <li>Use tighter stops in trending markets</li>
+      </ul>
+    </li>
+    <li><strong>Trend Following:</strong>
+      <ul>
+        <li>Buy when FOSC crosses above zero in uptrend</li>
+        <li>Add when FOSC pulls back to zero support</li>
+        <li>Exit when FOSC turns negative</li>
+        <li>Use FOSC slope for trend strength</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong>
+      <ul>
+        <li>Identify price making new highs/lows</li>
+        <li>Check if FOSC makes lower highs/higher lows</li>
+        <li>Enter when FOSC confirms reversal</li>
+        <li>Place stops beyond price extremes</li>
+      </ul>
+    </li>
+    <li><strong>Breakout Confirmation:</strong> Use FOSC momentum to confirm breakouts</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Dynamic Thresholds:</strong> Adjust OB/OS levels based on volatility</li>
+    <li><strong>Multi-Period FOSC:</strong> Compare different regression periods</li>
+    <li><strong>FOSC Bands:</strong> Add standard deviation bands to FOSC</li>
+    <li><strong>Filtered FOSC:</strong> Smooth oscillator for cleaner signals</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Statistically based with objective signals</li>
+    <li>Self-adjusting to market conditions</li>
+    <li>Works in trending and ranging markets</li>
+    <li>Normalized readings enable comparison</li>
+    <li>Combines trend and momentum analysis</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can stay extreme in strong trends</li>
+    <li>Regression assumes linear price movement</li>
+    <li>May lag during volatile reversals</li>
+    <li>Requires sufficient data for accuracy</li>
+    <li>Less effective during news events</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>FOSC works exceptionally well with:</p>
+  <ul>
+    <li><strong>RSI/Stochastic:</strong> Compare overbought/oversold readings</li>
+    <li><strong>Linear Regression Channel:</strong> Natural complement</li>
+    <li><strong>Moving Averages:</strong> FOSC for timing, MA for trend</li>
+    <li><strong>ATR:</strong> Adjust FOSC thresholds by volatility</li>
+    <li><strong>Volume:</strong> Confirm FOSC extremes with volume</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Forecast Oscillator in Rust
-let result = indicators::fosc(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical foundation of FOSC rests on linear regression analysis and the concept of statistical deviation. 
+    By fitting a least-squares regression line through recent price data, FOSC creates an objective "fair value" 
+    estimate based on the prevailing trend. The percentage deviation from this forecast follows approximately normal 
+    distribution properties, making extreme readings statistically significant and actionable.
+  </p>
+  <p>
+    The elegance of expressing the deviation as a percentage rather than absolute terms solves the problem of 
+    comparing readings across different price levels and securities. A 3% deviation is equally significant whether 
+    the security trades at $10 or $1000. This normalization, combined with the self-adjusting nature of the regression 
+    forecast, creates a robust oscillator that maintains its effectiveness across changing market conditions without 
+    requiring parameter optimization.
+  </p>
 </IndicatorLayout>
