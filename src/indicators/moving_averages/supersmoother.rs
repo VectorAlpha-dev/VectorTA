@@ -19,7 +19,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,6 +28,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 use std::f64::consts::PI;
+use std::mem::MaybeUninit;
 
 #[derive(Debug, Clone)]
 pub enum SuperSmootherData<'a> {
@@ -161,38 +162,66 @@ pub fn supersmoother(input: &SuperSmootherInput) -> Result<SuperSmootherOutput, 
     supersmoother_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
 pub fn supersmoother_with_kernel(
     input: &SuperSmootherInput,
     kernel: Kernel,
 ) -> Result<SuperSmootherOutput, SuperSmootherError> {
+    // ---------- 0. validation ----------
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
         return Err(SuperSmootherError::EmptyData);
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(SuperSmootherError::AllValuesNaN)?;
-    let len = data.len();
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SuperSmootherError::AllValuesNaN)?;
+
+    let len    = data.len();
     let period = input.get_period();
+
     if period == 0 || period > len {
         return Err(SuperSmootherError::InvalidPeriod { period, data_len: len });
     }
     if (len - first) < period {
-        return Err(SuperSmootherError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(SuperSmootherError::NotEnoughValidData {
+            needed: period,
+            valid : len - first,
+        });
     }
 
+    // ---------- 1. prepare the output buffer ----------
+    //   All indices 0‥warm-1 are guaranteed NaN so the stream version lines up.
+    let warm = first + period - 1;
+    let mut out = alloc_with_nan_prefix(len, warm);
+
+    // ---------- 2. choose kernel ----------
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other => other,
+        other        => other,
     };
+
+    // ---------- 3. do the work ----------
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => supersmoother_scalar(data, period, first),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                supersmoother_row_scalar(data, first, period, &mut out);
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => supersmoother_avx2(data, period, first),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                supersmoother_row_avx2(data, first, period, &mut out);
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => supersmoother_avx512(data, period, first),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                supersmoother_row_avx512(data, first, period, &mut out);
+            }
             _ => unreachable!(),
         }
     }
+
+    // ---------- 4. package and return ----------
+    Ok(SuperSmootherOutput { values: out })
 }
 
 #[inline]
@@ -459,25 +488,46 @@ fn supersmoother_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    let mut raw = make_uninit_matrix(rows, cols);
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)          // NaN prefix length for each row
+        .collect();
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 2. closure that fills one row ----------
+    let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // Cast just this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => supersmoother_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => supersmoother_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => supersmoother_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => supersmoother_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+            _              => unreachable!(),
         }
     };
+
+    // ---------- 3. run every row directly into `raw` ----------
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------- 4. all elements are now initialised – transmute ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(SuperSmootherBatchOutput { values, combos, rows, cols })
 }
 

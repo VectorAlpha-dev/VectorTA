@@ -19,7 +19,7 @@
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix, alloc_with_nan_prefix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +27,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 use paste::paste;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for TrimaInput<'a> {
     #[inline(always)]
@@ -208,7 +209,8 @@ pub fn trima_with_kernel(input: &TrimaInput, kernel: Kernel) -> Result<TrimaOutp
         return Err(TrimaError::NoData);
     }
 
-    let mut out = vec![f64::NAN; len];
+    let warm  = first + period;              // prefix length that must stay NaN
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -658,29 +660,47 @@ fn trima_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+
+    // ---------- 2. allocate rows×cols buffer and stamp NaN prefixes ----------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 3. closure that writes one row in-place ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast *just this row* to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => trima_row_scalar(data, first, period, 0, std::ptr::null(), 1.0, out_row),
+            Kernel::Scalar => trima_row_scalar(data, first, period, 0, core::ptr::null(), 1.0, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => trima_row_avx2(data, first, period, 0, std::ptr::null(), 1.0, out_row),
+            Kernel::Avx2   => trima_row_avx2  (data, first, period, 0, core::ptr::null(), 1.0, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => trima_row_avx512(data, first, period, 0, std::ptr::null(), 1.0, out_row),
+            Kernel::Avx512 => trima_row_avx512(data, first, period, 0, core::ptr::null(), 1.0, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---------- 4. run every row (parallel or serial) ----------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------- 5. convert Vec<MaybeUninit<f64>> → Vec<f64> ----------
+    let values: Vec<f64> = unsafe { core::mem::transmute(raw) };
 
     Ok(TrimaBatchOutput {
         values,

@@ -2,18 +2,9 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ad';
-const indicatorName = 'Accumulation/Distribution';
-const description = `Technical analysis indicator: Accumulation/Distribution`;
-const parameters = [
-  {
-    "name": "period",
-    "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
-  }
-];
+const indicatorName = 'Accumulation/Distribution Line (A/D)';
+const description = `The Accumulation/Distribution Line (A/D) is a volume-based indicator designed to measure the cumulative flow of money into and out of a security. It helps traders identify whether a stock is being accumulated (bought) or distributed (sold) by comparing price and volume movements.`;
+const parameters = [];
 ---
 
 <IndicatorLayout
@@ -23,22 +14,112 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Accumulation/Distribution Line (A/D) is a cumulative indicator that uses volume and price to assess whether a stock is being accumulated or distributed. 
+    Created by Marc Chaikin, it's designed to measure the cumulative flow of money into and out of a security.
+  </p>
+  <p>
+    The A/D line attempts to gauge supply and demand by determining whether investors are generally "accumulating" (buying) or "distributing" (selling) a certain stock by identifying divergences between stock price and volume flow.
+    This provides insight into the strength of a trend.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Accumulation/Distribution helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Accumulation/Distribution Line is calculated using the following steps:</p>
+  <ol>
+    <li><strong>Calculate the Money Flow Multiplier (MFM):</strong> MFM = [(Close - Low) - (High - Close)] / (High - Low)</li>
+    <li><strong>Calculate the Money Flow Volume (MFV):</strong> MFV = MFM × Volume</li>
+    <li><strong>Calculate the A/D Line:</strong> A/D = Previous A/D + Current MFV</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      MFM = [(Close - Low) - (High - Close)] / (High - Low)<br/>
+      MFV = MFM × Volume<br/>
+      A/D = Previous A/D + MFV
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Cumulative Indicator:</strong> Each period's value is added to or subtracted from the previous period</li>
+    <li><strong>Volume-Weighted:</strong> Combines price action with volume to show buying/selling pressure</li>
+    <li><strong>Money Flow Multiplier:</strong> Ranges from -1 to +1, indicating where the close is relative to the high-low range</li>
+    <li><strong>Divergence Detection:</strong> Particularly useful for spotting divergences with price</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Accumulation/Distribution to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Basic Interpretation</h3>
+  <ul>
+    <li><strong>Rising A/D Line:</strong> Indicates accumulation (buying pressure) - bullish signal</li>
+    <li><strong>Falling A/D Line:</strong> Indicates distribution (selling pressure) - bearish signal</li>
+    <li><strong>A/D Line confirms price trend:</strong> When both price and A/D move in the same direction, it confirms the trend strength</li>
+  </ul>
+
+  <h3>Divergence Signals</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Bullish Divergence:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li>Price makes lower lows while A/D makes higher lows</li>
+      <li>Suggests underlying buying pressure despite falling prices</li>
+      <li>Often precedes bullish reversals</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Bearish Divergence:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li>Price makes higher highs while A/D makes lower highs</li>
+      <li>Indicates distribution despite rising prices</li>
+      <li>Often precedes bearish reversals</li>
+    </ul>
+  </div>
+
+  <h3>Trend Confirmation</h3>
+  <ul>
+    <li><strong>Strong Uptrend:</strong> Both price and A/D line making new highs</li>
+    <li><strong>Strong Downtrend:</strong> Both price and A/D line making new lows</li>
+    <li><strong>Weak Trend:</strong> Price and A/D line moving in opposite directions</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Combines price and volume for a more complete picture</li>
+    <li>Excellent for identifying divergences</li>
+    <li>Can confirm breakouts when used with price patterns</li>
+    <li>No parameters to optimize - purely mathematical</li>
+    <li>Works well across different timeframes</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can give false signals in low-volume conditions</li>
+    <li>Gaps can distort the indicator</li>
+    <li>Less effective for securities with limited volume data</li>
+    <li>Being cumulative, the absolute value is less important than the direction</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The A/D Line works particularly well when combined with:</p>
+  <ul>
+    <li><strong>On-Balance Volume (OBV):</strong> Another volume indicator for confirmation</li>
+    <li><strong>Moving Averages:</strong> To identify trend direction and generate crossover signals</li>
+    <li><strong>RSI or MACD:</strong> For additional divergence confirmation</li>
+    <li><strong>Support/Resistance Levels:</strong> To confirm breakouts or breakdowns</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Accumulation/Distribution in Rust
-let result = indicators::ad(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Money Flow Multiplier (MFM) is the key component that determines whether volume should be added or subtracted from the cumulative total. 
+    When the close is in the upper half of the high-low range, the MFM is positive, indicating buying pressure. 
+    When the close is in the lower half, the MFM is negative, indicating selling pressure.
+  </p>
+  <p>
+    The A/D line is particularly sensitive to the relationship between closing prices and the trading range, making it effective at detecting subtle shifts in supply and demand 
+    that may not be immediately apparent from price action alone.
+  </p>
+
 </IndicatorLayout>

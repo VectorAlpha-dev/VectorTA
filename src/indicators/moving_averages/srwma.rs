@@ -19,13 +19,14 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
+use std::mem::MaybeUninit;
 
 #[derive(Debug, Clone)]
 pub enum SrwmaData<'a> {
@@ -200,7 +201,8 @@ pub fn srwma_with_kernel(
     }
     let inv_norm = 1.0 / norm;
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period + 1;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -509,41 +511,49 @@ fn srwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let mut values = vec![f64::NAN; rows * cols];
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() + 1)   // +1 because SRWMA starts at first+period+1
+        .collect();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 2. per-row worker ---------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let wlen = period - 1;
-        let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
-        let inv_n = inv_norms[row];
-        let start_idx = first + period + 1;
+        let w_ptr  = flat_slice.as_ptr().add(row * max_wlen);
+        let inv_n  = *inv_norms.get_unchecked(row);
+
+        // treat this row as &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
         match kern {
-            Kernel::Scalar => {
-                srwma_row_scalar(data, first, period, max_wlen, w_ptr, inv_n, out_row)
-            }
+            Kernel::Scalar => srwma_row_scalar(data, first, period, max_wlen, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                srwma_row_avx2(data, first, period, max_wlen, w_ptr, inv_n, out_row)
-            }
+            Kernel::Avx2   => srwma_row_avx2  (data, first, period, max_wlen, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                srwma_row_avx512(data, first, period, max_wlen, w_ptr, inv_n, out_row)
-            }
-            _ => unreachable!(),
+            Kernel::Avx512 => srwma_row_avx512(data, first, period, max_wlen, w_ptr, inv_n, out_row),
+            _              => unreachable!(),
         }
     };
 
+    // ---------- 3. fill every row directly into `raw` --------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------- 4. finished – convert to Vec<f64> ------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(SrwmaBatchOutput {
         values,

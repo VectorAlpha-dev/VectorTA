@@ -8,9 +8,8 @@
     "build": "npm run prebuild && astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "prebuild": "npm run scan-indicators && npm run generate-pages && npm run cache-data",
+    "prebuild": "npm run scan-indicators && npm run cache-data",
     "scan-indicators": "npx tsx scripts/scan-indicators.ts",
-    "generate-pages": "npx tsx scripts/generate-astro-pages.ts",
     "cache-data": "npx tsx scripts/cache-sample-data.ts"
   },
   "dependencies": {
@@ -18,13 +17,17 @@
     "@astrojs/react": "^4.3.0",
     "@astrojs/sitemap": "^3.4.1",
     "@astrojs/tailwind": "^6.0.2",
+    "@tippyjs/react": "^4.2.6",
     "astro": "^5.9.3",
     "lightweight-charts": "^5.0.7",
     "papaparse": "^5.5.3",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-colorful": "^5.6.1",
+    "react-dom": "^19.1.0",
+    "react-hotkeys-hook": "^5.1.0"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.16",
     "@types/papaparse": "^5.3.16",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

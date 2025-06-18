@@ -2,16 +2,24 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'epma';
-const indicatorName = 'Epma';
-const description = `Technical analysis indicator: Epma`;
+const indicatorName = 'Endpoint Moving Average (EPMA)';
+const description = `The Endpoint Moving Average (EPMA) is a unique moving average that uses linear regression to project where prices are heading, rather than simply averaging past prices. By focusing on the regression line's endpoint, EPMA provides a forward-looking perspective that reduces lag significantly compared to traditional moving averages, making it excellent for early trend detection.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 20,
+    "min": 5,
+    "max": 100,
+    "description": "Lookback period for linear regression calculation"
+  },
+  {
+    "name": "offset",
+    "type": "number",
+    "default": 0,
+    "min": -10,
+    "max": 10,
+    "description": "Forward projection offset (0 = current, positive = future)"
   }
 ];
 ---
@@ -23,22 +31,172 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Endpoint Moving Average (EPMA) represents a paradigm shift in moving average construction, moving beyond 
+    simple historical averaging to incorporate predictive elements. Instead of calculating the average of past prices, 
+    EPMA fits a linear regression line through recent price data and uses the endpoint of this line as the current 
+    value. This approach effectively projects where prices "should be" based on recent trends, creating a moving 
+    average that leads rather than lags price action.
+  </p>
+  <p>
+    What makes EPMA particularly powerful is its ability to anticipate trend changes before they become apparent in 
+    traditional indicators. By constantly recalculating the best-fit line through recent prices, EPMA adapts to 
+    changing market conditions while maintaining smooth, tradeable signals. The indicator can even project forward 
+    in time using the offset parameter, allowing traders to see where the regression suggests prices are heading. 
+    This forward-looking characteristic makes EPMA invaluable for traders seeking early entry into new trends.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Epma helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>EPMA uses linear regression to create a predictive moving average:</p>
+  <ol>
+    <li><strong>Collect Data Points:</strong> Gather the last N price values</li>
+    <li><strong>Calculate Linear Regression:</strong> Find best-fit line through prices</li>
+    <li><strong>Extract Endpoint:</strong> Use regression line's current (or projected) value</li>
+    <li><strong>Apply Offset:</strong> Optional forward projection along regression line</li>
+    <li><strong>Smooth Output:</strong> Result is naturally smooth due to regression</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Linear Regression through N points:<br/>
+      y = mx + b<br/>
+      <br/>
+      Where:<br/>
+      m = slope = Σ((x - x̄)(y - ȳ)) / Σ((x - x̄)²)<br/>
+      b = intercept = ȳ - m × x̄<br/>
+      x = time index (0, 1, 2, ..., N-1)<br/>
+      y = price values<br/>
+      x̄ = mean of x values = (N-1)/2<br/>
+      ȳ = mean of y values<br/>
+      <br/>
+      EPMA Calculation:<br/>
+      EPMA[current] = m × (N-1) + b<br/>
+      EPMA[projected] = m × (N-1 + offset) + b<br/>
+      <br/>
+      Key Properties:<br/>
+      - Zero lag at regression endpoint<br/>
+      - Can project into future with positive offset<br/>
+      - Smoother than price but more responsive than MA<br/>
+      - Slope indicates trend strength<br/>
+      <br/>
+      Common Applications:<br/>
+      - Offset = 0: Current endpoint value<br/>
+      - Offset > 0: Future projection<br/>
+      - Multiple EPMAs: Different periods for confirmation
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Predictive Nature:</strong> Projects where price is heading</li>
+    <li><strong>Minimal Lag:</strong> Leads rather than follows price</li>
+    <li><strong>Trend Strength:</strong> Regression slope indicates momentum</li>
+    <li><strong>Forward Projection:</strong> Can forecast future values</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Epma to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>EPMA Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trend Direction:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising EPMA:</strong> Uptrend with positive slope</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling EPMA:</strong> Downtrend with negative slope</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Steep Slope:</strong> Strong trending movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Flat EPMA:</strong> Consolidation or trend pause</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Price Cross Above EPMA:</strong> Bullish momentum building</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Price Cross Below EPMA:</strong> Bearish momentum building</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">EPMA Direction Change:</strong> Early trend reversal signal</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Price-EPMA Gap:</strong> Overextension when gap widens</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Early Trend Entry:</strong>
+      <ul>
+        <li>Enter when EPMA slope turns positive/negative</li>
+        <li>Confirm with price crossing EPMA</li>
+        <li>Use projected EPMA as initial target</li>
+        <li>Trail stop along EPMA line</li>
+      </ul>
+    </li>
+    <li><strong>Regression Channel Trading:</strong>
+      <ul>
+        <li>Create channel using EPMA ± standard error</li>
+        <li>Buy at lower channel in uptrends</li>
+        <li>Sell at upper channel in downtrends</li>
+        <li>Exit on channel break</li>
+      </ul>
+    </li>
+    <li><strong>Momentum Acceleration:</strong>
+      <ul>
+        <li>Monitor EPMA slope changes</li>
+        <li>Increasing slope: Add to positions</li>
+        <li>Decreasing slope: Reduce exposure</li>
+        <li>Slope reversal: Exit signal</li>
+      </ul>
+    </li>
+    <li><strong>Projection Trading:</strong> Use forward offset to set profit targets</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Multi-Period EPMA:</strong> Layer different periods for confirmation</li>
+    <li><strong>EPMA Oscillator:</strong> Price - EPMA for overbought/oversold</li>
+    <li><strong>Adaptive Period:</strong> Vary period based on market volatility</li>
+    <li><strong>R-Squared Filter:</strong> Trade only when regression fit is strong</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Minimal lag compared to traditional MAs</li>
+    <li>Built-in trend strength measurement</li>
+    <li>Can project future price targets</li>
+    <li>Smooth signals reduce whipsaws</li>
+    <li>Adapts quickly to trend changes</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Assumes linear price movement</li>
+    <li>Can overshoot in volatile markets</li>
+    <li>Sensitive to outliers in price data</li>
+    <li>Projection accuracy decreases with offset</li>
+    <li>May repaint slightly as new data arrives</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>EPMA works exceptionally well with:</p>
+  <ul>
+    <li><strong>Traditional MAs:</strong> EPMA leads, MA confirms</li>
+    <li><strong>Linear Regression Channels:</strong> Natural complement</li>
+    <li><strong>Momentum Oscillators:</strong> EPMA for trend, oscillators for timing</li>
+    <li><strong>Volatility Bands:</strong> Add bands based on regression error</li>
+    <li><strong>Time Series Forecast:</strong> Compare different projection methods</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Epma in Rust
-let result = indicators::epma(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical foundation of EPMA rests on ordinary least squares (OLS) regression, which finds the line that 
+    minimizes the sum of squared distances from data points to the line. This creates an optimal fit through recent 
+    prices, with the regression line representing the "central tendency" of price movement. By using the endpoint 
+    (or a projected point) of this line, EPMA captures where prices "should be" based on recent behavior.
+  </p>
+  <p>
+    The brilliance of this approach lies in its implicit detrending: the regression line naturally filters out noise 
+    while preserving the underlying trend. The slope of the regression provides additional information about trend 
+    strength, while the standard error can be used to create confidence bands. This makes EPMA not just a moving 
+    average, but a complete trend analysis system that provides direction, strength, and statistical confidence in 
+    a single elegant calculation.
+  </p>
 </IndicatorLayout>

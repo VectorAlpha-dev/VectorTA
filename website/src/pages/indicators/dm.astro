@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'dm';
-const indicatorName = 'Dm';
-const description = `Technical analysis indicator: Dm`;
+const indicatorName = 'Directional Movement (+DM/-DM)';
+const description = `Directional Movement (+DM and -DM) are the raw components of Welles Wilder's Directional Movement System that measure the actual amount of upward and downward price movement between periods. These values form the foundation for calculating the Directional Indicators (+DI/-DI) and provide insight into the strength and direction of price movements.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "min": 10,
+    "max": 30,
+    "description": "Smoothing period for directional movement calculation"
   }
 ];
 ---
@@ -23,22 +23,161 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    Directional Movement (+DM and -DM) represents the foundation of Welles Wilder's groundbreaking Directional 
+    Movement System, introduced in his 1978 book "New Concepts in Technical Trading Systems." These raw measurements 
+    capture the essence of market movement by quantifying how much progress price makes in the upward or downward 
+    direction from one period to the next, focusing on the market's ability to make new extremes.
+  </p>
+  <p>
+    The brilliance of Directional Movement lies in its simplicity and effectiveness. Rather than just measuring 
+    price change, it specifically identifies when the market is making directional progress by comparing current 
+    highs to previous highs (+DM) and current lows to previous lows (-DM). This approach filters out sideways 
+    movement and captures only meaningful directional activity, making it invaluable for trend identification 
+    and momentum analysis.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Dm helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The DM calculation captures directional price movements:</p>
+  <ol>
+    <li><strong>Calculate Upward Movement:</strong> Current High minus Previous High</li>
+    <li><strong>Calculate Downward Movement:</strong> Previous Low minus Current Low</li>
+    <li><strong>Apply Directional Rules:</strong> Only positive values count, larger movement wins</li>
+    <li><strong>Smooth the Values:</strong> Apply Wilder's smoothing method</li>
+    <li><strong>Track Separately:</strong> Maintain +DM and -DM as distinct measurements</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Up Move = High[0] - High[1]<br/>
+      Down Move = Low[1] - Low[0]<br/>
+      <br/>
+      Directional Movement Rules:<br/>
+      If Up Move > Down Move and Up Move > 0:<br/>
+      &nbsp;&nbsp;+DM = Up Move<br/>
+      &nbsp;&nbsp;-DM = 0<br/>
+      <br/>
+      If Down Move > Up Move and Down Move > 0:<br/>
+      &nbsp;&nbsp;-DM = Down Move<br/>
+      &nbsp;&nbsp;+DM = 0<br/>
+      <br/>
+      If Up Move ≤ 0 and Down Move ≤ 0:<br/>
+      &nbsp;&nbsp;+DM = 0<br/>
+      &nbsp;&nbsp;-DM = 0<br/>
+      <br/>
+      Smoothed +DM = ((Prior +DM × (Period - 1)) + Current +DM) / Period<br/>
+      Smoothed -DM = ((Prior -DM × (Period - 1)) + Current -DM) / Period
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Pure Direction:</strong> Measures only meaningful directional movement</li>
+    <li><strong>Mutually Exclusive:</strong> Only +DM or -DM can be positive for any period</li>
+    <li><strong>Trend Foundation:</strong> Forms basis for DI and ADX calculations</li>
+    <li><strong>Price Progress:</strong> Captures market's ability to make new extremes</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Dm to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>DM Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Movement Patterns:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Consistent +DM:</strong> Uptrend with higher highs</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Consistent -DM:</strong> Downtrend with lower lows</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Alternating DM:</strong> Choppy, directionless market</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Low Both DMs:</strong> Tight consolidation pattern</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Insights:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising Smoothed +DM:</strong> Increasing bullish pressure</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising Smoothed -DM:</strong> Increasing bearish pressure</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DM Crossovers:</strong> Potential trend changes</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DM Expansion:</strong> Trend acceleration</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>DM Trend Following:</strong>
+      <ul>
+        <li>Buy when +DM consistently exceeds -DM</li>
+        <li>Sell when -DM consistently exceeds +DM</li>
+        <li>Exit when DMs converge or alternate</li>
+      </ul>
+    </li>
+    <li><strong>DM Breakout Strategy:</strong>
+      <ul>
+        <li>Watch for DM expansion after consolidation</li>
+        <li>Enter in direction of dominant DM</li>
+        <li>Use opposite DM as stop reference</li>
+      </ul>
+    </li>
+    <li><strong>DM Momentum:</strong>
+      <ul>
+        <li>Calculate rate of change of smoothed DMs</li>
+        <li>Trade acceleration in dominant direction</li>
+        <li>Exit on DM deceleration</li>
+      </ul>
+    </li>
+    <li><strong>DM Divergence:</strong> Look for price/DM divergences at extremes</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>DM Ratio Analysis:</strong> Study +DM/-DM ratio for trend strength</li>
+    <li><strong>Multiple Period DMs:</strong> Compare short and long period DMs</li>
+    <li><strong>DM Volatility:</strong> Use DM variance for volatility analysis</li>
+    <li><strong>Cross-Market DM:</strong> Compare DMs across correlated markets</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Captures true directional movement</li>
+    <li>Filters out non-directional noise</li>
+    <li>Foundation for complete trend system</li>
+    <li>Works across all markets</li>
+    <li>Simple yet powerful concept</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Raw values need further processing</li>
+    <li>Can be erratic without smoothing</li>
+    <li>Doesn't account for closing prices</li>
+    <li>May miss subtle trend changes</li>
+    <li>Requires other indicators for complete system</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>DM values are most useful when combined with:</p>
+  <ul>
+    <li><strong>ATR:</strong> Normalize DM by ATR to create DI indicators</li>
+    <li><strong>ADX:</strong> Use DM to calculate trend strength</li>
+    <li><strong>Moving Averages:</strong> Confirm DM signals with MA direction</li>
+    <li><strong>Volume:</strong> Validate DM expansion with volume</li>
+    <li><strong>Support/Resistance:</strong> Use DM at key levels</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Dm in Rust
-let result = indicators::dm(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical elegance of Directional Movement lies in its ability to isolate pure directional progress. By 
+    comparing only highs to highs and lows to lows, Wilder created a system that ignores the noise of intraday 
+    movement and focuses solely on the market's ability to make directional progress. The mutual exclusivity rule 
+    (only one DM can be positive) ensures that the system always identifies the dominant direction for each period.
+  </p>
+  <p>
+    Wilder's smoothing technique, which predates the widespread use of exponential moving averages in technical 
+    analysis, provides an elegant solution for creating stable indicators from potentially erratic daily movements. 
+    The formula essentially creates a weighted average that gives approximately 1/n weight to the current observation 
+    and (n-1)/n weight to historical data, similar to but computationally simpler than modern EMA calculations.
+  </p>
+
 </IndicatorLayout>

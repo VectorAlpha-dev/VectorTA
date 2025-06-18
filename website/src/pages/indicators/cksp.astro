@@ -2,16 +2,32 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'cksp';
-const indicatorName = 'Cksp';
-const description = `Technical analysis indicator: Cksp`;
+const indicatorName = 'Chande Kroll Stop (CKSP)';
+const description = `The Chande Kroll Stop is a trend-following indicator developed by Tushar Chande and Stanley Kroll that combines volatility-based stops with directional movement. It creates dynamic support and resistance levels that trail price action, helping traders stay in trends while providing clear stop-loss levels based on market volatility.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
+    "default": 10,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for ATR calculation"
+  },
+  {
+    "name": "multiplier",
+    "type": "number",
+    "default": 3,
+    "min": 1,
+    "max": 5,
+    "description": "ATR multiplier for stop distance"
+  },
+  {
+    "name": "smooth_period",
+    "type": "number",
+    "default": 20,
+    "min": 1,
+    "max": 50,
+    "description": "Smoothing period for final stop levels"
   }
 ];
 ---
@@ -23,22 +39,156 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Chande Kroll Stop (CKSP) is an advanced trailing stop system that adapts to market volatility while maintaining 
+    directional bias. Developed by Tushar Chande and Stanley Kroll, it creates two stop lines - one for long positions 
+    and one for short positions - that dynamically adjust based on price action and volatility. This dual-stop approach 
+    helps traders maximize profits during trends while protecting against adverse moves.
+  </p>
+  <p>
+    Unlike fixed percentage stops or simple trailing stops, the Chande Kroll Stop uses Average True Range (ATR) to 
+    measure volatility and adjust stop distances accordingly. This makes it more responsive in volatile markets and 
+    tighter in quiet markets. The indicator also incorporates smoothing to reduce whipsaws while maintaining 
+    sensitivity to significant price moves.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Cksp helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Chande Kroll Stop calculation involves multiple steps:</p>
+  <ol>
+    <li><strong>Calculate ATR:</strong> Measure market volatility over the specified period</li>
+    <li><strong>Initial Stops:</strong> Set preliminary stops based on high/low minus ATR multiple</li>
+    <li><strong>Directional Logic:</strong> Apply rules to ensure stops only move in profit direction</li>
+    <li><strong>Smoothing:</strong> Apply moving average to reduce noise</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      ATR = Average True Range(Period)<br/>
+      <br/>
+      Preliminary Long Stop = High - (Multiplier × ATR)<br/>
+      Preliminary Short Stop = Low + (Multiplier × ATR)<br/>
+      <br/>
+      Long Stop Rules:<br/>
+      - Can only move up (never down)<br/>
+      - Reset when price crosses below<br/>
+      <br/>
+      Short Stop Rules:<br/>
+      - Can only move down (never up)<br/>
+      - Reset when price crosses above<br/>
+      <br/>
+      Final Stop = SMA(Preliminary Stop, Smooth_Period)
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Volatility-Based:</strong> Adapts stop distance to market conditions</li>
+    <li><strong>Dual Stops:</strong> Separate stops for long and short positions</li>
+    <li><strong>Trend Following:</strong> Stops only move in profit direction</li>
+    <li><strong>Smoothed Output:</strong> Reduces false signals while maintaining effectiveness</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Cksp to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Stop Levels</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Rules:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Long Position:</strong> Exit when price crosses below long stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Short Position:</strong> Exit when price crosses above short stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Entry Signal:</strong> When price crosses above/below opposite stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Stop Distance:</strong> Wider in volatile markets, tighter in calm markets</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market Conditions:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Trending:</strong> Stops trail smoothly in trend direction</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Volatile:</strong> Stops widen to avoid premature exits</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Ranging:</strong> Stops may generate whipsaws</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Breakout:</strong> Stops confirm breakout when crossed</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Following:</strong>
+      <ul>
+        <li>Enter long when price crosses above short stop</li>
+        <li>Use long stop as trailing stop-loss</li>
+        <li>Stay in position until stop is hit</li>
+      </ul>
+    </li>
+    <li><strong>Stop-and-Reverse:</strong>
+      <ul>
+        <li>Always in market (long or short)</li>
+        <li>Switch positions when stops are crossed</li>
+        <li>Suitable for strongly trending markets</li>
+      </ul>
+    </li>
+    <li><strong>Filtered Entries:</strong>
+      <ul>
+        <li>Combine with trend indicator (MA, ADX)</li>
+        <li>Only take signals in trend direction</li>
+        <li>Use stops for exits only</li>
+      </ul>
+    </li>
+    <li><strong>Multi-Timeframe:</strong> Use longer timeframe CKSP for trend, shorter for entry/exit</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Dynamic Multiplier:</strong> Adjust multiplier based on market conditions</li>
+    <li><strong>Volatility Regime:</strong> Different parameters for high/low volatility periods</li>
+    <li><strong>Stop Convergence:</strong> Tightening stops may signal consolidation</li>
+    <li><strong>Breakout Confirmation:</strong> Use stop breaks to confirm other signals</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Adapts automatically to volatility changes</li>
+    <li>Keeps traders in strong trends</li>
+    <li>Clear, objective stop levels</li>
+    <li>Works well across different markets</li>
+    <li>Reduces emotional decision-making</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can whipsaw in ranging markets</li>
+    <li>Lagging nature may give back profits</li>
+    <li>Requires trending markets for best results</li>
+    <li>Parameter optimization needed per market</li>
+    <li>May exit too early in volatile trends</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>CKSP works best when combined with:</p>
+  <ul>
+    <li><strong>ADX:</strong> Confirm trend strength before following CKSP signals</li>
+    <li><strong>Moving Averages:</strong> Use for trend direction, CKSP for stops</li>
+    <li><strong>RSI:</strong> Avoid new positions when extremely overbought/oversold</li>
+    <li><strong>Volume:</strong> Confirm stop breaks with volume surge</li>
+    <li><strong>Support/Resistance:</strong> Adjust multiplier near key levels</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Cksp in Rust
-let result = indicators::cksp(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Chande Kroll Stop combines several mathematical concepts to create an adaptive stop-loss system. The use of 
+    Average True Range ensures that stop distances are proportional to actual market volatility rather than arbitrary 
+    percentages. The directional logic (stops can only move favorably) implements a ratchet mechanism that locks in 
+    profits while giving trades room to develop.
+  </p>
+  <p>
+    The smoothing component serves a dual purpose: it reduces noise that could cause premature exits while maintaining 
+    responsiveness to significant moves. The choice of smoothing period creates a balance between protection and 
+    profit potential. Shorter periods provide tighter stops but more whipsaws; longer periods reduce false signals 
+    but may give back more profit during reversals.
+  </p>
+
 </IndicatorLayout>

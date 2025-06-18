@@ -21,7 +21,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,6 +29,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for ReflexInput<'a> {
     #[inline(always)]
@@ -189,7 +190,11 @@ pub fn reflex_with_kernel(input: &ReflexInput, kernel: Kernel) -> Result<ReflexO
         other => other,
     };
 
-    let mut out = vec![0.0; len];
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, period);
+    for x in &mut out[..period.min(len)] {
+        *x = 0.0;
+    }
 
     unsafe {
         match chosen {
@@ -214,34 +219,55 @@ pub fn reflex_with_kernel(input: &ReflexInput, kernel: Kernel) -> Result<ReflexO
 #[inline]
 pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
-    let half_period = (period / 2).max(1);
-    let a = (-1.414_f64 * std::f64::consts::PI / half_period as f64).exp();
-    let a_sq = a * a;
-    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period as f64).cos();
-    let c = (1.0 + a_sq - b) * 0.5;
-
-    let mut ssf = vec![0.0; len];
-    let mut ms = vec![0.0; len];
-    let mut sums = vec![0.0; len];
-
-    if len > 0 {
-        ssf[0] = data[0];
+    if len == 0 || period < 2 {
+        return;
     }
+
+    // ------------------------------------------------------------------------
+    // 2-pole smoothing filter coefficients (identical to the original version)
+    // ------------------------------------------------------------------------
+    let half_period = (period / 2).max(1);
+    let a     = (-1.414_f64 * std::f64::consts::PI / half_period as f64).exp();
+    let a_sq  = a * a;
+    let b     = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period as f64).cos();
+    let c     = (1.0 + a_sq - b) * 0.5;
+
+    // ------------------------------------------------------------------------
+    // Working buffers
+    // ------------------------------------------------------------------------
+    let mut ssf  = vec![0.0; len];   // 2-pole smoothed series
+    let mut ms   = vec![0.0; len];   // rolling mean-square of “my_sum”
+    let mut sums = vec![0.0; len];   // raw “my_sum” values (for debugging)
+
+    // ------------------------------------------------------------------------
+    // Seed the first two ssf values (per the original algorithm)
+    // ------------------------------------------------------------------------
+    ssf[0] = data[0];
     if len > 1 {
         ssf[1] = data[1];
     }
+
     let period_f = period as f64;
 
+    // ------------------------------------------------------------------------
+    // Main loop
+    // ------------------------------------------------------------------------
     for i in 2..len {
-        let d_i = data[i];
-        let d_im1 = data[i - 1];
-        let prev_ssf1 = ssf[i - 1];
-        let prev_ssf2 = ssf[i - 2];
-        let ssf_i = c * (d_i + d_im1) + b * prev_ssf1 - a_sq * prev_ssf2;
+        // ---- 1. update the 2-pole smoothed price (ssf[i]) -------------------
+        let d_i     = data[i];
+        let d_im1   = data[i - 1];
+        let ssf_im1 = ssf[i - 1];
+        let ssf_im2 = ssf[i - 2];
+
+        let ssf_i = c * (d_i + d_im1) + b * ssf_im1 - a_sq * ssf_im2;
         ssf[i] = ssf_i;
 
+        // ---- 2. once we have at least `period` values, compute Reflex -------
         if i >= period {
+            // slope of the line connecting ssf[i-period] … ssf[i]
             let slope = (ssf[i - period] - ssf_i) / period_f;
+
+            // ∑_{t = 1..period} ( predicted – past )
             let mut my_sum = 0.0;
             for t in 1..=period {
                 let pred = ssf_i + slope * (t as f64);
@@ -250,19 +276,21 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
             }
             my_sum /= period_f;
             sums[i] = my_sum;
+
+            // exponentially-weighted rolling variance proxy (ms[i])
             let ms_im1 = ms[i - 1];
-            let my_sum_sq = my_sum * my_sum;
-            let ms_i = 0.04 * my_sum_sq + 0.96 * ms_im1;
+            let ms_i   = 0.04 * my_sum * my_sum + 0.96 * ms_im1;
             ms[i] = ms_i;
 
-            out[i] = if ms_i > 0.0 {
-                my_sum / ms_i.sqrt()
-            } else {
-                0.0
-            };
+            // ---- 3. write output *only* after the warm-up prefix ------------
+            if i >= period && ms_i > 0.0 {
+                out[i] = my_sum / ms_i.sqrt();
+            }
+            // else: leave the NaN written by `alloc_with_nan_prefix`
         }
     }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -594,37 +622,54 @@ fn reflex_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![0.0; rows * cols];
+    let warm: Vec<usize> = combos.iter()
+                                .map(|c| c.period.unwrap())
+                                .collect();
+    let mut raw: Vec<MaybeUninit<f64>> = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ---- row-filler closure ----------------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
+
+        // cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => reflex_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => reflex_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   => reflex_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => reflex_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---- fill every row directly into `raw` ------------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(ReflexBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    // ---- transmute after all rows are written ----------------------------------
+    let mut values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    for (row, prm) in combos.iter().enumerate() {
+        let p = prm.period.unwrap();
+        let start = row * cols;
+        for cell in &mut values[start .. start + p.min(cols)] {
+            *cell = 0.0;
+        }
+    }
+    return Ok(ReflexBatchOutput { values, combos, rows, cols });
 }
 
 #[inline(always)]

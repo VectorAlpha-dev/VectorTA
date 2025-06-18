@@ -377,7 +377,8 @@ fn bench_one<F, In>(
     let input = In::with_len(len);
 
     if let Some(n) = elements {
-        group.throughput(Throughput::Elements(n));
+        let bytes = (len * std::mem::size_of::<f64>()) as u64;
+        group.throughput(Throughput::Bytes(bytes));
     }
 
     group.bench_with_input(

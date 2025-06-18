@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'dec_osc';
-const indicatorName = 'Dec Osc';
-const description = `Technical analysis indicator: Dec Osc`;
+const indicatorName = 'Detrended Price Oscillator (DPO)';
+const description = `The Detrended Price Oscillator (DPO) is a unique momentum indicator that removes trend from price to identify cycles. By shifting the moving average back in time, it isolates short-term cycles and overbought/oversold conditions, helping traders identify potential turning points based on cyclical patterns rather than trend.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 20,
+    "min": 10,
+    "max": 50,
+    "description": "Number of periods for the moving average and shift calculation"
   }
 ];
 ---
@@ -23,22 +23,153 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Detrended Price Oscillator (DPO) is a revolutionary approach to cycle analysis that strips away the dominant 
+    trend to reveal underlying market rhythms. Unlike most oscillators that compare current price to past price, the 
+    DPO compares current price to a displaced moving average, effectively removing the trend component and highlighting 
+    cyclical movements that would otherwise be hidden.
+  </p>
+  <p>
+    What makes the DPO particularly valuable is its ability to identify market cycles without the distortion of trend. 
+    By centering the moving average calculation and displacing it backwards, the indicator creates a zero-centered 
+    oscillator that clearly shows when prices are at cyclical highs or lows. This makes it an excellent tool for 
+    timing entries and exits based on market rhythm rather than momentum.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Dec Osc helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The DPO calculation involves a unique displacement technique:</p>
+  <ol>
+    <li><strong>Calculate Moving Average:</strong> Simple moving average of closing prices</li>
+    <li><strong>Determine Displacement:</strong> Shift = (Period / 2) + 1</li>
+    <li><strong>Displace Average:</strong> Shift the moving average back by displacement amount</li>
+    <li><strong>Calculate Oscillator:</strong> Price minus displaced moving average</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Displacement = (Period / 2) + 1<br/>
+      <br/>
+      SMA = Simple Moving Average(Close, Period)<br/>
+      <br/>
+      Displaced_SMA = SMA shifted back by Displacement bars<br/>
+      <br/>
+      DPO = Close - Displaced_SMA[Displacement]<br/>
+      <br/>
+      Where:<br/>
+      - Positive DPO = Price above cycle average<br/>
+      - Negative DPO = Price below cycle average<br/>
+      - Zero line = Cycle midpoint
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Trend Removal:</strong> Isolates cycles by removing trend influence</li>
+    <li><strong>Cycle Identification:</strong> Clearly shows market rhythms and patterns</li>
+    <li><strong>Leading Indicator:</strong> Displacement creates forward-looking signals</li>
+    <li><strong>Zero-Centered:</strong> Easy interpretation around neutral line</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Dec Osc to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>DPO Readings</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Cycle Positions:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Peak Values:</strong> Cycle high - potential reversal down</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Trough Values:</strong> Cycle low - potential reversal up</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Crossings:</strong> Cycle midpoint - trend continuation</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings:</strong> Overextended cycle - reversal likely</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Buy Signal:</strong> DPO at cycle low turning up</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Sell Signal:</strong> DPO at cycle high turning down</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Cycle Length:</strong> Measure peak-to-peak or trough-to-trough</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> Price/DPO divergences at extremes</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Cycle Trading:</strong>
+      <ul>
+        <li>Buy at historical cycle lows (DPO troughs)</li>
+        <li>Sell at historical cycle highs (DPO peaks)</li>
+        <li>Use consistent cycle length for timing</li>
+      </ul>
+    </li>
+    <li><strong>Mean Reversion:</strong>
+      <ul>
+        <li>Buy when DPO reaches -2 standard deviations</li>
+        <li>Sell when DPO reaches +2 standard deviations</li>
+        <li>Target zero line for profit taking</li>
+      </ul>
+    </li>
+    <li><strong>Cycle Confirmation:</strong>
+      <ul>
+        <li>Confirm trend trades at cycle lows</li>
+        <li>Avoid trend trades at cycle highs</li>
+        <li>Use DPO to time trend entries</li>
+      </ul>
+    </li>
+    <li><strong>Pattern Recognition:</strong> Identify repeating DPO patterns for prediction</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Multiple Periods:</strong> Use different DPO periods to identify various cycles</li>
+    <li><strong>Cycle Projection:</strong> Project future turning points based on cycle length</li>
+    <li><strong>Amplitude Analysis:</strong> Monitor cycle strength through peak heights</li>
+    <li><strong>Composite Cycles:</strong> Combine multiple DPOs for complex cycle analysis</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Excellent for identifying market cycles</li>
+    <li>Removes trend bias from analysis</li>
+    <li>Clear overbought/oversold identification</li>
+    <li>Works well in cyclic markets</li>
+    <li>Simple calculation and interpretation</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Not suitable for strong trending markets</li>
+    <li>Historical indicator - not real-time</li>
+    <li>Requires consistent cycles to be effective</li>
+    <li>May give false signals in erratic markets</li>
+    <li>Displacement creates lag in signals</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>DPO works best when combined with:</p>
+  <ul>
+    <li><strong>Trend Indicators:</strong> Use MA or ADX for trend, DPO for timing</li>
+    <li><strong>RSI/Stochastic:</strong> Confirm DPO extremes with momentum</li>
+    <li><strong>Cycle Analysis:</strong> Combine with Fourier or other cycle tools</li>
+    <li><strong>Support/Resistance:</strong> DPO extremes often occur at key levels</li>
+    <li><strong>Volume:</strong> Confirm cycle turns with volume patterns</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Dec Osc in Rust
-let result = indicators::dec_osc(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The DPO's mathematical elegance lies in its displacement mechanism. By shifting the moving average backward by 
+    (Period/2 + 1) bars, it creates a centered moving average that represents the cycle midpoint at each historical 
+    point. This centering technique, borrowed from statistical time series analysis, ensures that the oscillator 
+    measures deviations from the true cycle center rather than from a lagging average.
+  </p>
+  <p>
+    The zero-centered nature of DPO makes it particularly useful for cycle analysis. Unlike price-based indicators 
+    that must account for trend, DPO's detrended values oscillate predictably around zero, making cycle 
+    identification straightforward. The indicator essentially answers: "Where is price relative to its natural 
+    cycle, independent of trend?"
+  </p>
+
 </IndicatorLayout>

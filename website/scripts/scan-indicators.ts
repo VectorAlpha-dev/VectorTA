@@ -156,7 +156,7 @@ function categorizeIndicator(id: string): string {
     'pattern': ['pattern_recognition', 'heikin_ashi_candles'],
     'cycle': ['ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendmode', 'correlation_cycle'],
     'statistics': ['linearreg_slope', 'linearreg_intercept', 'linearreg_angle', 'tsf', 'stddev', 'var', 'correl_hl', 'kurtosis'],
-    'price_transform': ['avgprice', 'medprice', 'typprice', 'wclprice', 'midpoint', 'midprice'],
+    'price_transform': ['medprice', 'typprice', 'wclprice', 'midpoint', 'midprice'],
   };
   
   for (const [category, indicators] of Object.entries(categories)) {

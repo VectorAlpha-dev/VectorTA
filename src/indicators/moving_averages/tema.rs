@@ -17,7 +17,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +25,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;
+
 
 // ========== Input Data Types ==========
 
@@ -193,7 +195,10 @@ pub fn tema_with_kernel(input: &TemaInput, kernel: Kernel) -> Result<TemaOutput,
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let lookback = (period - 1) * 3;
+    let warm     = first + lookback;
+
+    let mut out = alloc_with_nan_prefix(len, warm);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -514,6 +519,7 @@ fn tema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TemaBatchOutput, TemaError> {
+    // ---------- 0. parameter checks ----------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(TemaError::InvalidPeriod { period: 0, data_len: 0 });
@@ -527,33 +533,57 @@ fn tema_batch_inner(
             valid: data.len() - first,
         });
     }
+
+    // ---------- 1. matrix dimensions ----------
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+
+    // ---------- 2. build per-row warm-up lengths ----------
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + (c.period.unwrap() - 1) * 3)   // (period-1)*3 matches tema_scalar
+        .collect();
+
+    // ---------- 3. allocate rows×cols uninitialised, fill NaN prefixes ----------
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 4. closure that fills ONE row ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this row to &mut [f64] so the row-kernel can write normally
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => tema_row_scalar(data, first, period, out_row),
+            Kernel::Scalar =>  tema_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => tema_row_avx2(data, first, period, out_row),
+            Kernel::Avx2   =>  tema_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => tema_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 =>  tema_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
+
+    // ---------- 5. run all rows (optionally in parallel) ----------
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(TemaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // ---------- 6. transmute to fully-initialised Vec<f64> ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    // ---------- 7. package ----------
+    Ok(TemaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]

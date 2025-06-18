@@ -2,16 +2,32 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'dti';
-const indicatorName = 'Dti';
-const description = `Technical analysis indicator: Dti`;
+const indicatorName = 'Directional Trend Index (DTI)';
+const description = `The Directional Trend Index (DTI) is an advanced momentum indicator that measures the strength and direction of a trend by analyzing price movement efficiency. By comparing actual price movement to the theoretical straight-line distance, DTI provides a unique perspective on whether a trend is gaining or losing momentum, helping traders stay with strong trends and exit weakening ones.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "r_period",
     "type": "number",
     "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "min": 10,
+    "max": 30,
+    "description": "Period for calculating price movement ratio"
+  },
+  {
+    "name": "s_period",
+    "type": "number",
+    "default": 10,
+    "min": 5,
+    "max": 20,
+    "description": "Smoothing period for the DTI calculation"
+  },
+  {
+    "name": "u_period",
+    "type": "number",
+    "default": 5,
+    "min": 3,
+    "max": 10,
+    "description": "Ultra-smooth period for final DTI"
   }
 ];
 ---
@@ -23,22 +39,165 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Directional Trend Index (DTI) represents a sophisticated approach to trend measurement that goes beyond simple 
+    momentum or moving average analysis. By calculating the efficiency of price movement—comparing how far price actually 
+    traveled versus the straight-line distance—DTI identifies when trends are moving with conviction versus when they're 
+    struggling. This unique perspective helps traders distinguish between healthy trends worth following and exhausted 
+    moves ready to reverse.
+  </p>
+  <p>
+    What makes DTI particularly powerful is its multi-layered smoothing approach that filters out noise while maintaining 
+    responsiveness to genuine trend changes. The indicator oscillates between +100 and -100, with positive values 
+    indicating uptrends and negative values showing downtrends. The magnitude tells you the trend strength, while 
+    crossovers through zero signal potential trend reversals. This clear, bounded scale makes DTI intuitive to use 
+    while providing sophisticated market insights.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Dti helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>DTI calculates trend efficiency through multiple steps:</p>
+  <ol>
+    <li><strong>Price Movement:</strong> Calculate actual price change over r_period</li>
+    <li><strong>Path Distance:</strong> Sum all absolute price movements</li>
+    <li><strong>Efficiency Ratio:</strong> Straight-line distance / Total path distance</li>
+    <li><strong>Directional Scaling:</strong> Apply direction and scale to ±100</li>
+    <li><strong>Triple Smoothing:</strong> Apply s_period and u_period smoothing</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Price Change = Close - Close[r_period]<br/>
+      <br/>
+      Path Distance = Σ|Close[i] - Close[i-1]| for i = 1 to r_period<br/>
+      <br/>
+      Efficiency = Price Change / Path Distance<br/>
+      <br/>
+      Raw DTI = Efficiency × 100 × Sign(Price Change)<br/>
+      <br/>
+      Smoothed DTI = EMA(Raw DTI, s_period)<br/>
+      <br/>
+      Final DTI = EMA(Smoothed DTI, u_period)<br/>
+      <br/>
+      Range: -100 to +100<br/>
+      Where:<br/>
+      +100 = Perfect uptrend (straight line up)<br/>
+      -100 = Perfect downtrend (straight line down)<br/>
+      0 = No directional movement
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Efficiency Measurement:</strong> Quantifies how directly price moves</li>
+    <li><strong>Bounded Oscillator:</strong> Clear -100 to +100 scale</li>
+    <li><strong>Triple Smoothing:</strong> Reduces noise while maintaining signals</li>
+    <li><strong>Trend Quality:</strong> Distinguishes strong from weak trends</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Dti to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>DTI Readings</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trend States:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">DTI > +50:</strong> Strong uptrend with good efficiency</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DTI 0 to +50:</strong> Weak uptrend or consolidation</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DTI 0 to -50:</strong> Weak downtrend or consolidation</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DTI < -50:</strong> Strong downtrend with good efficiency</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Cross Up:</strong> Trend turning bullish</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Cross Down:</strong> Trend turning bearish</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings (±80):</strong> Potential exhaustion</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">DTI Divergence:</strong> Trend weakening internally</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Following:</strong>
+      <ul>
+        <li>Enter long when DTI crosses above +20</li>
+        <li>Enter short when DTI crosses below -20</li>
+        <li>Exit when DTI returns toward zero</li>
+        <li>Use DTI magnitude for position sizing</li>
+      </ul>
+    </li>
+    <li><strong>Momentum Confirmation:</strong>
+      <ul>
+        <li>Only take long trades when DTI > 0</li>
+        <li>Only take short trades when DTI < 0</li>
+        <li>Increase position size when DTI > ±50</li>
+        <li>Reduce exposure when DTI weakens</li>
+      </ul>
+    </li>
+    <li><strong>Reversal Trading:</strong>
+      <ul>
+        <li>Look for DTI divergences at price extremes</li>
+        <li>Fade moves when DTI reaches ±80-90</li>
+        <li>Wait for DTI to turn before entering</li>
+        <li>Target opposite DTI extreme</li>
+      </ul>
+    </li>
+    <li><strong>Efficiency Filter:</strong> Only trade when |DTI| > 30 (efficient trends)</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>DTI Slope Analysis:</strong> Measure rate of change for acceleration</li>
+    <li><strong>Multi-Timeframe DTI:</strong> Align different timeframes for confluence</li>
+    <li><strong>DTI Bands:</strong> Create overbought/oversold zones</li>
+    <li><strong>Adaptive Parameters:</strong> Adjust periods based on market volatility</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Measures trend quality, not just direction</li>
+    <li>Clear bounded scale for easy interpretation</li>
+    <li>Excellent trend-following tool</li>
+    <li>Filters out choppy, inefficient moves</li>
+    <li>Works across all markets and timeframes</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Multiple smoothing creates some lag</li>
+    <li>May miss early trend starts</li>
+    <li>Less effective in ranging markets</li>
+    <li>Requires understanding of efficiency concept</li>
+    <li>Parameter optimization needed for different markets</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>DTI works exceptionally well with:</p>
+  <ul>
+    <li><strong>Moving Averages:</strong> MA for direction, DTI for quality</li>
+    <li><strong>ATR:</strong> Combine DTI with volatility for complete picture</li>
+    <li><strong>RSI/MACD:</strong> DTI for trend, oscillators for timing</li>
+    <li><strong>Support/Resistance:</strong> Trade DTI signals at key levels</li>
+    <li><strong>Volume:</strong> Confirm efficient trends with volume</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Dti in Rust
-let result = indicators::dti(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical foundation of DTI rests on the concept of price path efficiency, similar to measuring the 
+    straightness of a road between two points. In physics, this is analogous to displacement versus distance traveled. 
+    A perfectly efficient trend would move in a straight line (efficiency = 1), while a choppy, meandering price path 
+    would have low efficiency despite potentially covering the same net distance.
+  </p>
+  <p>
+    The triple smoothing process (raw → s_period → u_period) creates a sophisticated noise filter that preserves 
+    trend information while eliminating minor fluctuations. This cascaded smoothing approach, borrowed from signal 
+    processing, ensures that only significant trend changes generate signals. The bounded scaling to ±100 makes the 
+    indicator universally comparable across different markets and volatility regimes, solving a common problem with 
+    unbounded indicators.
+  </p>
+
 </IndicatorLayout>

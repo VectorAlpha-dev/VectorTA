@@ -2,16 +2,32 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'acosc';
-const indicatorName = 'Acceleration Oscillator';
-const description = `Technical analysis indicator: Acceleration Oscillator`;
+const indicatorName = 'Acceleration/Deceleration Oscillator (AC)';
+const description = `The Acceleration/Deceleration Oscillator (AC) is a momentum indicator developed by Bill Williams that measures the acceleration and deceleration of the current market driving force. It helps traders identify early changes in momentum before they are reflected in price movements.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "fast_period",
     "type": "number",
-    "default": 14,
+    "default": 5,
     "min": 2,
+    "max": 50,
+    "description": "Fast moving average period for Awesome Oscillator calculation"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 34,
+    "min": 10,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Slow moving average period for Awesome Oscillator calculation"
+  },
+  {
+    "name": "signal_period",
+    "type": "number",
+    "default": 5,
+    "min": 2,
+    "max": 20,
+    "description": "Signal line smoothing period"
   }
 ];
 ---
@@ -23,22 +39,106 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Acceleration/Deceleration Oscillator (AC) is a leading indicator that provides early signals about potential changes in market momentum. 
+    Developed by Bill Williams as part of his Trading Chaos theory, the AC indicator measures whether the market's driving force is accelerating or decelerating.
+  </p>
+  <p>
+    The indicator is derived from the Awesome Oscillator (AO) and adds an additional layer of analysis by measuring the change in momentum itself. 
+    This makes it particularly useful for identifying potential trend reversals before they become apparent in price action.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Acceleration Oscillator helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
 
-  <h2>Parameters</h2>
+  <h2>How It Works</h2>
+  <p>The Acceleration/Deceleration Oscillator is calculated using the following steps:</p>
+  <ol>
+    <li><strong>Calculate the Awesome Oscillator (AO):</strong> The difference between a 5-period and 34-period Simple Moving Average of the median price (High + Low) / 2</li>
+    <li><strong>Calculate the Signal Line:</strong> A 5-period Simple Moving Average of the AO</li>
+    <li><strong>Calculate AC:</strong> AC = AO - Signal Line</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Median Price = (High + Low) / 2<br/>
+      AO = SMA(Median Price, 5) - SMA(Median Price, 34)<br/>
+      AC = AO - SMA(AO, 5)
+    </p>
+  </div>
+
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Zero Line Crossover:</strong> The AC oscillates around a zero line, with positive values indicating acceleration and negative values indicating deceleration</li>
+    <li><strong>Color Coding:</strong> Traditionally displayed as a histogram with green bars for increasing values and red bars for decreasing values</li>
+    <li><strong>Leading Indicator:</strong> Provides early warnings of potential trend changes before they appear in price</li>
+    <li><strong>Momentum Measurement:</strong> Measures the rate of change of momentum, not just momentum itself</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Acceleration Oscillator to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Basic Signals</h3>
+  <ul>
+    <li><strong>Above Zero + Green Bars:</strong> Strong bullish momentum accelerating - strongest buy signal</li>
+    <li><strong>Above Zero + Red Bars:</strong> Bullish momentum decelerating - caution for longs</li>
+    <li><strong>Below Zero + Red Bars:</strong> Strong bearish momentum accelerating - strongest sell signal</li>
+    <li><strong>Below Zero + Green Bars:</strong> Bearish momentum decelerating - caution for shorts</li>
+  </ul>
+
+  <h3>Trading Rules (Bill Williams' Approach)</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Buy Signals:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Zero:</strong> Buy on two consecutive green bars</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Zero:</strong> Buy on three consecutive green bars (requires additional confirmation)</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Sell Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Zero:</strong> Sell on two consecutive red bars</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Zero:</strong> Sell on three consecutive red bars (requires additional confirmation)</li>
+    </ul>
+  </div>
+
+  <h3>Advanced Interpretation</h3>
+  <ul>
+    <li><strong>Divergence:</strong> When price makes new highs/lows but AC doesn't confirm, it signals potential reversal</li>
+    <li><strong>Twin Peaks:</strong> Two peaks above/below zero line with the second peak closer to zero indicates trend weakness</li>
+    <li><strong>Saucer Setup:</strong> A specific three-bar pattern that signals continuation of the current trend</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Provides early warning signals before price movement</li>
+    <li>Clear visual representation with color-coded histogram</li>
+    <li>Works well in trending markets</li>
+    <li>Can be combined with other Bill Williams indicators for a complete trading system</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can produce false signals in ranging or choppy markets</li>
+    <li>Lagging nature due to moving average calculations</li>
+    <li>Should be used with other indicators for confirmation</li>
+    <li>Requires understanding of the overall market context</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The AC works particularly well when combined with:</p>
+  <ul>
+    <li><strong>Awesome Oscillator (AO):</strong> For confirmation of momentum direction</li>
+    <li><strong>Fractals:</strong> For identifying potential reversal points</li>
+    <li><strong>Alligator Indicator:</strong> For trend direction and strength</li>
+    <li><strong>Market Facilitation Index (MFI):</strong> For volume analysis</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Acceleration Oscillator in Rust
-let result = indicators::acosc(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The AC is essentially the second derivative of price with respect to time, measuring the rate of change of momentum. 
+    This mathematical property makes it sensitive to subtle changes in market dynamics that might not be immediately visible in price charts.
+  </p>
+
 </IndicatorLayout>

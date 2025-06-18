@@ -2,16 +2,24 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'emv';
-const indicatorName = 'Emv';
-const description = `Technical analysis indicator: Emv`;
+const indicatorName = 'Ease of Movement (EMV)';
+const description = `The Ease of Movement (EMV) indicator, developed by Richard Arms, quantifies how easily price moves up or down by relating price change to volume. By measuring the "ease" with which prices can move, EMV helps identify whether accumulation or distribution is occurring with minimal effort, revealing when smart money is positioning for major moves.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "min": 5,
+    "max": 50,
+    "description": "Smoothing period for the EMV calculation"
+  },
+  {
+    "name": "scale",
+    "type": "number",
+    "default": 1000000,
+    "min": 10000,
+    "max": 10000000,
+    "description": "Scaling factor for EMV values"
   }
 ];
 ---
@@ -23,22 +31,167 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Ease of Movement (EMV) indicator, created by Richard W. Arms Jr., provides unique insights into the relationship 
+    between price movement and volume. The core concept is brilliantly simple yet profound: when prices move easily 
+    (with low volume), it suggests that there's little resistance to the movement and the trend is likely to continue. 
+    Conversely, when prices struggle to move despite high volume, it indicates resistance and potential exhaustion. 
+    This makes EMV particularly valuable for identifying sustainable trends versus forced movements.
+  </p>
+  <p>
+    What sets EMV apart from other volume indicators is its focus on efficiency rather than raw volume levels. By 
+    calculating the ratio of price movement to volume, EMV reveals whether big players are accumulating or distributing 
+    with minimal market impact—a classic sign of smart money positioning. The indicator oscillates around zero, with 
+    positive values indicating easy upward movement and negative values showing easy downward movement. This clarity 
+    makes EMV an excellent tool for confirming trend quality and identifying potential reversals before they become obvious.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Emv helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>EMV calculates the ease of price movement through these steps:</p>
+  <ol>
+    <li><strong>Distance Moved:</strong> Calculate midpoint movement from previous period</li>
+    <li><strong>High-Low Box:</strong> Measure the price range (high - low)</li>
+    <li><strong>Box Ratio:</strong> Relate volume to the high-low range</li>
+    <li><strong>EMV Calculation:</strong> Divide distance by box ratio</li>
+    <li><strong>Smoothing:</strong> Apply moving average for stable signals</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Distance Moved = Midpoint - Previous Midpoint<br/>
+      Where: Midpoint = (High + Low) / 2<br/>
+      <br/>
+      Box Height = High - Low<br/>
+      <br/>
+      Box Ratio = Volume / (Scale × Box Height)<br/>
+      <br/>
+      1-Period EMV = Distance Moved / Box Ratio<br/>
+      <br/>
+      Smoothed EMV = SMA(1-Period EMV, Period)<br/>
+      <br/>
+      Interpretation:<br/>
+      EMV > 0 and rising: Easy upward movement<br/>
+      EMV > 0 and falling: Upward movement facing resistance<br/>
+      EMV < 0 and falling: Easy downward movement<br/>
+      EMV < 0 and rising: Downward movement facing support<br/>
+      <br/>
+      Zero Line Crosses:<br/>
+      Cross above zero: Bullish shift in ease<br/>
+      Cross below zero: Bearish shift in ease
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Volume Efficiency:</strong> Measures movement ease, not just volume</li>
+    <li><strong>Trend Quality:</strong> Identifies sustainable vs. forced movements</li>
+    <li><strong>Early Signals:</strong> Often leads price at turning points</li>
+    <li><strong>Clear Interpretation:</strong> Simple positive/negative readings</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Emv to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>EMV Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Movement Quality:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">High Positive EMV:</strong> Price rising easily, low resistance</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Low Positive EMV:</strong> Upward movement facing resistance</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">High Negative EMV:</strong> Price falling easily, low support</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Low Negative EMV:</strong> Downward movement finding support</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Line Cross Up:</strong> Shift to easy upward movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Line Cross Down:</strong> Shift to easy downward movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">EMV Divergence:</strong> Price/EMV divergence warns of reversal</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">EMV Peaks/Troughs:</strong> Potential exhaustion points</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Confirmation:</strong>
+      <ul>
+        <li>Buy when EMV crosses above zero with rising trend</li>
+        <li>Sell when EMV crosses below zero with falling trend</li>
+        <li>Stay in position while EMV confirms ease of movement</li>
+        <li>Exit when EMV shows movement becoming difficult</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong>
+      <ul>
+        <li>Bullish: Price makes lower low, EMV makes higher low</li>
+        <li>Bearish: Price makes higher high, EMV makes lower high</li>
+        <li>Enter on EMV zero line cross following divergence</li>
+        <li>Use tight stops as divergence trades can fail</li>
+      </ul>
+    </li>
+    <li><strong>Smart Money Following:</strong>
+      <ul>
+        <li>Rising EMV with flat price: Accumulation</li>
+        <li>Falling EMV with flat price: Distribution</li>
+        <li>Trade in direction of EMV before price moves</li>
+        <li>Look for EMV leading price at key levels</li>
+      </ul>
+    </li>
+    <li><strong>Box Breakouts:</strong> High EMV readings often precede breakouts</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>EMV Histogram:</strong> Plot EMV - Signal Line for momentum</li>
+    <li><strong>Multi-Timeframe EMV:</strong> Confirm ease across timeframes</li>
+    <li><strong>EMV Bands:</strong> Add standard deviation bands for extremes</li>
+    <li><strong>Volume-Adjusted EMV:</strong> Normalize for average volume</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Unique volume efficiency perspective</li>
+    <li>Early warning of trend changes</li>
+    <li>Identifies smart money activity</li>
+    <li>Works in all market conditions</li>
+    <li>Clear, intuitive signals</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Requires accurate volume data</li>
+    <li>Less effective in thin markets</li>
+    <li>Can give false signals during gaps</li>
+    <li>Scaling factor needs adjustment per market</li>
+    <li>Smoothing creates some lag</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>EMV works excellently with:</p>
+  <ul>
+    <li><strong>Price Oscillators:</strong> EMV for quality, RSI/MACD for timing</li>
+    <li><strong>Volume Indicators:</strong> Compare EMV with OBV, Volume</li>
+    <li><strong>Trend Indicators:</strong> EMV confirms trend sustainability</li>
+    <li><strong>Support/Resistance:</strong> EMV behavior at key levels</li>
+    <li><strong>Arms Index:</strong> Combine with creator's other tools</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Emv in Rust
-let result = indicators::emv(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical elegance of EMV lies in its ratio-based approach to volume analysis. By dividing the distance 
+    moved by a "box ratio" that relates volume to price range, Arms created a normalized measure of movement efficiency. 
+    The scaling factor (typically 1,000,000) ensures the indicator produces readable values regardless of the security's 
+    price or volume levels, making it universally applicable across different markets.
+  </p>
+  <p>
+    The use of midpoint movement rather than close-to-close changes is particularly insightful, as it captures the 
+    true center of trading activity. The high-low range in the denominator acts as a volatility adjustment, recognizing 
+    that the same volume has different implications in narrow-range versus wide-range bars. This creates an indicator 
+    that truly measures how "easily" prices move, providing unique insights into the internal dynamics of market trends 
+    that price and volume alone cannot reveal.
+  </p>
 </IndicatorLayout>

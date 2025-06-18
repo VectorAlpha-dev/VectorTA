@@ -1,0 +1,64 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { SimpleChart } from '../components/charts/SimpleChart';
+import { TestComponent } from '../components/TestComponent';
+---
+
+<BaseLayout title="Chart Debug" description="Debugging TradingView Charts">
+  <div class="container mx-auto p-8">
+    <h1 class="text-3xl font-bold mb-8">Chart Debug Page</h1>
+    
+    <div class="space-y-8">
+      <div class="border-2 border-green-500 p-4 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">1. React Test Component</h2>
+        <TestComponent client:load />
+      </div>
+
+      <div class="border-2 border-blue-500 p-4 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">2. Simple Chart (Hardcoded Dimensions)</h2>
+        <SimpleChart client:load />
+      </div>
+
+      <div class="border-2 border-purple-500 p-4 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">3. Direct Chart Mount</h2>
+        <div id="direct-chart" style="width: 100%; height: 400px; background: #f0f0f0;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Test direct chart creation without React
+    import { createChart, ColorType } from 'lightweight-charts';
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      const container = document.getElementById('direct-chart');
+      if (!container) return;
+
+      try {
+        const chart = createChart(container, {
+          width: container.clientWidth,
+          height: 400,
+          layout: {
+            background: { type: ColorType.Solid, color: '#ffffff' },
+            textColor: '#333',
+          },
+        });
+
+        const candlestickSeries = chart.addCandlestickSeries();
+        
+        // Simple data
+        const data = [
+          { time: '2024-01-01', open: 40000, high: 41000, low: 39000, close: 40500 },
+          { time: '2024-01-02', open: 40500, high: 41500, low: 40000, close: 41000 },
+          { time: '2024-01-03', open: 41000, high: 42000, low: 40500, close: 41500 },
+        ];
+        
+        candlestickSeries.setData(data);
+        
+        console.log('Direct chart created successfully');
+      } catch (error) {
+        console.error('Direct chart error:', error);
+      }
+    });
+  </script>
+</BaseLayout>

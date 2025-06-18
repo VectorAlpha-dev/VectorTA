@@ -2,8 +2,8 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'chop';
-const indicatorName = 'Chop';
-const description = `Technical analysis indicator: Chop`;
+const indicatorName = 'Choppiness Index (CHOP)';
+const description = `The Choppiness Index (CHOP) is a volatility indicator that determines whether the market is trending or moving sideways (choppy). Developed by Australian commodity trader E.W. Dreiss, it measures the market's directional movement efficiency on a scale from 0 to 100, helping traders identify when to use trend-following or range-trading strategies.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,7 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for choppiness calculation"
   }
 ];
 ---
@@ -23,22 +23,153 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Choppiness Index (CHOP) is a unique indicator that doesn't predict price direction but instead measures 
+    whether the market is trending or consolidating. Created by E.W. Dreiss, it quantifies the market's efficiency 
+    in moving from point A to point B. High values indicate choppy, sideways markets, while low values suggest 
+    strong directional trends. This makes CHOP invaluable for determining which trading strategies to employ.
+  </p>
+  <p>
+    What makes the Choppiness Index particularly useful is its ability to help traders avoid the common mistake of 
+    using trend-following strategies in ranging markets or mean-reversion strategies in trending markets. By clearly 
+    identifying market conditions, CHOP acts as a filter that can significantly improve the performance of other 
+    technical indicators and trading systems.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Chop helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Choppiness Index calculation uses the following components:</p>
+  <ol>
+    <li><strong>True Range Sum:</strong> Sum of True Range over the period</li>
+    <li><strong>Price Movement:</strong> Difference between highest high and lowest low</li>
+    <li><strong>Logarithmic Scaling:</strong> Natural log ratio for normalization</li>
+    <li><strong>Final Scaling:</strong> Convert to 0-100 scale</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      ATR Sum = Σ(True Range) for n periods<br/>
+      <br/>
+      True Range = Max(High - Low, |High - Close[1]|, |Low - Close[1]|)<br/>
+      <br/>
+      Max Hi-Lo = Highest High - Lowest Low over n periods<br/>
+      <br/>
+      CHOP = 100 × LOG10(ATR Sum / Max Hi-Lo) / LOG10(n)<br/>
+      <br/>
+      Range: 0 to 100<br/>
+      Where:<br/>
+      61.8+ = High choppiness (sideways market)<br/>
+      38.2- = Low choppiness (trending market)<br/>
+      38.2-61.8 = Transitional zone
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Market State Identifier:</strong> Clearly distinguishes trending from ranging markets</li>
+    <li><strong>Non-Directional:</strong> Doesn't predict direction, only market condition</li>
+    <li><strong>Fibonacci Levels:</strong> Uses 38.2 and 61.8 as key thresholds</li>
+    <li><strong>Strategy Filter:</strong> Helps select appropriate trading approaches</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Chop to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Market States</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">CHOP Levels:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Above 61.8:</strong> High choppiness - Strong consolidation/ranging</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">50-61.8:</strong> Moderate choppiness - Weakening trend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">38.2-50:</strong> Moderate trend - Strengthening directional move</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below 38.2:</strong> Low choppiness - Strong trending market</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Implications:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">High CHOP:</strong> Use range-trading strategies, fade breakouts</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Low CHOP:</strong> Use trend-following strategies, ride momentum</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising CHOP:</strong> Trend weakening, prepare for consolidation</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling CHOP:</strong> Trend emerging, prepare for directional move</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Strategy Selection:</strong>
+      <ul>
+        <li>CHOP > 61.8: Use oscillators (RSI, Stochastic) for overbought/oversold</li>
+        <li>CHOP < 38.2: Use trend indicators (Moving Averages, MACD)</li>
+        <li>Transitional zone: Reduce position size, wait for clarity</li>
+      </ul>
+    </li>
+    <li><strong>Breakout Filter:</strong>
+      <ul>
+        <li>Only trade breakouts when CHOP is falling from high levels</li>
+        <li>Avoid breakout trades when CHOP is already low (trend exhaustion)</li>
+      </ul>
+    </li>
+    <li><strong>Trend Exhaustion:</strong>
+      <ul>
+        <li>CHOP < 30 suggests trend may be overextended</li>
+        <li>Look for reversal setups when CHOP starts rising from lows</li>
+      </ul>
+    </li>
+    <li><strong>Consolidation Breakout:</strong> Trade when CHOP falls below 61.8 after extended high readings</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Multi-Timeframe Analysis:</strong> Compare CHOP across timeframes for context</li>
+    <li><strong>CHOP Divergence:</strong> Price making new highs/lows with different CHOP levels</li>
+    <li><strong>Volatility Cycles:</strong> Track CHOP cycles to anticipate market phases</li>
+    <li><strong>Combined Filters:</strong> Use with ADX for comprehensive market analysis</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Excellent market condition identifier</li>
+    <li>Helps avoid wrong strategy selection</li>
+    <li>Clear, objective readings</li>
+    <li>Works on all timeframes and markets</li>
+    <li>Complements other indicators perfectly</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Doesn't provide directional signals</li>
+    <li>Lagging indicator - confirms rather than predicts</li>
+    <li>Can give false readings during news events</li>
+    <li>Requires other indicators for entry/exit signals</li>
+    <li>Period selection affects sensitivity</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>CHOP works best as a filter for other indicators:</p>
+  <ul>
+    <li><strong>ADX:</strong> Confirm trend strength (Low CHOP + High ADX = Strong trend)</li>
+    <li><strong>Bollinger Bands:</strong> Use BB squeeze when CHOP is high</li>
+    <li><strong>Moving Averages:</strong> Follow MA signals only when CHOP is low</li>
+    <li><strong>RSI/Stochastic:</strong> Use for entries when CHOP is high</li>
+    <li><strong>ATR:</strong> Combine for comprehensive volatility analysis</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Chop in Rust
-let result = indicators::chop(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Choppiness Index uses a logarithmic formula to normalize the relationship between actual price movement 
+    (sum of True Ranges) and theoretical straight-line movement (highest high minus lowest low). This creates a 
+    bounded oscillator that effectively measures market efficiency. The logarithmic scaling ensures that the 
+    indicator remains sensitive across different price levels and volatility regimes.
+  </p>
+  <p>
+    The use of Fibonacci ratios (38.2% and 61.8%) as thresholds is not arbitrary but based on extensive empirical 
+    observation. These levels consistently mark the boundaries between trending and choppy market conditions across 
+    various markets and timeframes. The 14-period default aligns with half a lunar cycle, a timeframe that often 
+    captures natural market rhythms.
+  </p>
+
 </IndicatorLayout>

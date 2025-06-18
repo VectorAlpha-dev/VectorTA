@@ -1,58 +1,37 @@
 ---
 import { indicators } from '../../data/indicator-registry';
 
-// Group indicators by category
-const categories = Object.entries(indicators).reduce((acc, [id, indicator]) => {
-  const category = indicator.category;
-  if (!acc[category]) acc[category] = [];
-  acc[category].push({ id, ...indicator });
-  return acc;
-}, {} as Record<string, any[]>);
-
-// Sort categories and indicators
-const sortedCategories = Object.entries(categories).sort(([a], [b]) => {
-  const order = ['trend', 'momentum', 'volatility', 'volume', 'moving_averages'];
-  const aIndex = order.indexOf(a);
-  const bIndex = order.indexOf(b);
-  if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
-  if (aIndex !== -1) return -1;
-  if (bIndex !== -1) return 1;
-  return a.localeCompare(b);
-});
-
-sortedCategories.forEach(([, items]) => {
-  items.sort((a, b) => a.name.localeCompare(b.name));
-});
+// Convert indicators to array and sort alphabetically by name
+const sortedIndicators = Object.entries(indicators)
+  .map(([id, indicator]) => ({ id, ...indicator }))
+  .sort((a, b) => a.name.localeCompare(b.name));
 
 const currentPath = Astro.url.pathname;
 ---
 
 <aside class="fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-gray-50 dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 overflow-y-auto">
-  <nav class="p-4 space-y-6">
-    <a href="/" class="block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+  <nav class="p-4 space-y-1">
+    <a href="/" class="block px-4 py-2 mb-4 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors font-medium">
       🏠 Home
     </a>
     
-    {sortedCategories.map(([category, items]) => (
-      <div class="space-y-2">
-        <h3 class="px-4 text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-          {category.replace(/_/g, ' ')}
-        </h3>
-        <div class="space-y-1">
-          {items.map(indicator => (
-            <a 
-              href={`/indicators/${indicator.id}`}
-              class={`block px-4 py-2 text-sm rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors ${
-                currentPath === `/indicators/${indicator.id}` 
-                  ? 'bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300' 
-                  : ''
-              }`}
-            >
-              {indicator.name}
-            </a>
-          ))}
-        </div>
-      </div>
-    ))}
+    <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+      <h3 class="px-4 mb-2 text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+        All Indicators ({sortedIndicators.length})
+      </h3>
+      
+      {sortedIndicators.map(indicator => (
+        <a 
+          href={`/indicators/${indicator.id}`}
+          class={`block px-4 py-1.5 text-sm rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors ${
+            currentPath === `/indicators/${indicator.id}` 
+              ? 'bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300' 
+              : 'text-gray-700 dark:text-gray-300'
+          }`}
+        >
+          {indicator.name}
+        </a>
+      ))}
+    </div>
   </nav>
 </aside>

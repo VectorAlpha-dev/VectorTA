@@ -3,15 +3,23 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'bandpass';
 const indicatorName = 'Band Pass Filter';
-const description = `Technical analysis indicator: Band Pass Filter`;
+const description = `The Band Pass Filter is a digital signal processing technique developed by John Ehlers that isolates a specific frequency range from price data. It removes both high-frequency noise and low-frequency trends, leaving only the cyclical components within a defined band, making it ideal for identifying market cycles and turning points.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 20,
+    "min": 10,
+    "max": 100,
+    "description": "Center period of the frequency band to isolate"
+  },
+  {
+    "name": "bandwidth",
+    "type": "number",
+    "default": 0.3,
+    "min": 0.1,
+    "max": 1.0,
+    "description": "Width of the frequency band (fraction of center frequency)"
   }
 ];
 ---
@@ -23,22 +31,145 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Band Pass Filter is a sophisticated digital filter designed by John Ehlers to extract cyclical price movements 
+    within a specific frequency range. Unlike traditional indicators that react to all price movements, the Band Pass 
+    Filter isolates only those oscillations that fall within a defined frequency band, effectively removing both 
+    high-frequency noise and low-frequency trends.
+  </p>
+  <p>
+    This selective filtering makes the Band Pass Filter particularly valuable for cycle analysis and identifying 
+    potential turning points in the market. By focusing on a specific frequency range, traders can tune the filter 
+    to capture the dominant market cycle while ignoring both short-term noise and long-term trend movements.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Band Pass Filter helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Band Pass Filter uses a two-step filtering process:</p>
+  <ol>
+    <li><strong>High-Pass Filter:</strong> Removes low-frequency components (long-term trends)</li>
+    <li><strong>Low-Pass Filter:</strong> Removes high-frequency components (short-term noise)</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      α = (cos(2π/Period) + sin(2π/Period) - 1) / cos(2π/Period)<br/>
+      <br/>
+      HP[i] = (1 - α/2)² × (Price[i] - 2×Price[i-1] + Price[i-2]) + <br/>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;2×(1 - α) × HP[i-1] - (1 - α)² × HP[i-2]<br/>
+      <br/>
+      β = 2π × Bandwidth / Period<br/>
+      γ = 1 - cos(2π/Period)<br/>
+      <br/>
+      BP[i] = 0.5×(1 - γ) × (HP[i] - HP[i-2]) + <br/>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;β×(1 + γ) × BP[i-1] - γ × BP[i-2]
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Frequency Selective:</strong> Isolates specific cycle frequencies from price data</li>
+    <li><strong>Noise Reduction:</strong> Removes high-frequency noise for cleaner signals</li>
+    <li><strong>Trend Elimination:</strong> Filters out long-term trends to focus on cycles</li>
+    <li><strong>Zero Lag:</strong> Minimal phase distortion compared to traditional filters</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Band Pass Filter to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Signal Generation</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Basic Signals:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Crossovers:</strong> Buy when filter crosses above zero, sell when below</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Peak/Trough:</strong> Peaks indicate cycle highs, troughs indicate cycle lows</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Amplitude:</strong> Large amplitudes suggest strong cyclical movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Phase:</strong> Regular oscillations indicate stable market cycles</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Advanced Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Cycle Confirmation:</strong> Multiple consecutive peaks/troughs at regular intervals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Phase Shift:</strong> Changes in cycle timing may signal trend changes</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Amplitude Divergence:</strong> Decreasing amplitude with rising prices suggests weakness</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Frequency Stability:</strong> Consistent cycle periods indicate reliable signals</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Cycle Trading:</strong>
+      <ul>
+        <li>Enter long positions at cycle troughs (filter at minimum)</li>
+        <li>Exit or short at cycle peaks (filter at maximum)</li>
+      </ul>
+    </li>
+    <li><strong>Zero-Line Strategy:</strong>
+      <ul>
+        <li>Buy when filter crosses above zero with increasing amplitude</li>
+        <li>Sell when filter crosses below zero with increasing amplitude</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong> Look for price/filter divergences at extremes</li>
+    <li><strong>Multi-Timeframe:</strong> Use different periods to identify nested cycles</li>
+  </ul>
+
+  <h3>Parameter Optimization</h3>
+  <ul>
+    <li><strong>Period Selection:</strong> Should match the dominant market cycle (use spectral analysis)</li>
+    <li><strong>Bandwidth Tuning:</strong>
+      <ul>
+        <li>Narrow (0.1-0.2): More selective, cleaner signals, may miss some cycles</li>
+        <li>Medium (0.3): Balanced selectivity and responsiveness</li>
+        <li>Wide (0.5-1.0): Captures more cycles but includes more noise</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Excellent at isolating specific market cycles</li>
+    <li>Removes both noise and trend for pure cycle analysis</li>
+    <li>Minimal lag compared to traditional indicators</li>
+    <li>Works well in cyclical markets</li>
+    <li>Can identify turning points early</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Requires stable market cycles to be effective</li>
+    <li>May produce false signals in trending markets</li>
+    <li>Parameter selection is critical and market-dependent</li>
+    <li>Complex mathematical foundation</li>
+    <li>Less effective in highly volatile or news-driven markets</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The Band Pass Filter works well when combined with:</p>
+  <ul>
+    <li><strong>Trend Indicators:</strong> Use MA or ADX to determine overall trend direction</li>
+    <li><strong>Momentum Oscillators:</strong> RSI or Stochastic for confirmation at cycle extremes</li>
+    <li><strong>Volume Analysis:</strong> Volume should confirm cycle turning points</li>
+    <li><strong>Other Ehlers Indicators:</strong> Combine with MESA, Hilbert Transform for complete cycle analysis</li>
+    <li><strong>Support/Resistance:</strong> Cycle extremes often align with key levels</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Band Pass Filter in Rust
-let result = indicators::bandpass(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Band Pass Filter combines two complementary filtering operations to isolate a specific frequency band. 
+    The high-pass filter removes low frequencies (trends) using a second-order IIR (Infinite Impulse Response) 
+    filter, while the subsequent low-pass operation removes high frequencies (noise). The bandwidth parameter 
+    controls the Q-factor (quality factor) of the filter, determining how selective it is.
+  </p>
+  <p>
+    John Ehlers' implementation uses minimum-lag filter coefficients derived from spectral analysis, ensuring 
+    that the extracted cycles maintain proper phase relationships with price movements. This is crucial for 
+    timing entries and exits, as traditional filters often introduce significant lag that makes them unsuitable 
+    for trading applications.
+  </p>
+
 </IndicatorLayout>

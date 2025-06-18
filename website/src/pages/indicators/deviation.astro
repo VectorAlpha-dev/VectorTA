@@ -2,24 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'deviation';
-const indicatorName = 'Deviation';
-const description = `Technical analysis indicator: Deviation`;
+const indicatorName = 'Standard Deviation';
+const description = `Standard Deviation is a fundamental statistical measure that quantifies the amount of variation or dispersion in price data. In technical analysis, it measures market volatility by calculating how much prices deviate from their average, providing traders with crucial information about risk, potential price movements, and market uncertainty.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 20,
-    "min": 2,
+    "min": 5,
     "max": 200,
-    "description": "Moving average period"
-  },
-  {
-    "name": "std_dev",
-    "type": "number",
-    "default": 2,
-    "min": 0.1,
-    "max": 5,
-    "description": "Standard deviation multiplier"
+    "description": "Number of periods for calculating the mean and standard deviation"
   }
 ];
 ---
@@ -31,23 +23,155 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    Standard Deviation is one of the most important statistical tools in technical analysis, providing a mathematically 
+    precise measure of market volatility. Originally developed in statistics to measure data dispersion, it has become 
+    indispensable for traders seeking to understand market risk and price variability. By quantifying how much prices 
+    typically move away from their average, standard deviation gives traders a reliable gauge of market uncertainty.
+  </p>
+  <p>
+    What makes standard deviation particularly powerful in trading is its ability to adapt to different market conditions. 
+    During calm periods, it contracts, signaling low volatility and potential breakout setups. During turbulent times, 
+    it expands, warning traders of increased risk and wider potential price swings. This dynamic nature makes it the 
+    foundation for many other indicators, most notably Bollinger Bands, and a crucial component of risk management systems.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Deviation helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>Standard Deviation calculation follows classical statistical methodology:</p>
+  <ol>
+    <li><strong>Calculate Mean:</strong> Find the average price over the specified period</li>
+    <li><strong>Calculate Deviations:</strong> Measure how far each price is from the mean</li>
+    <li><strong>Square Deviations:</strong> Square each deviation to make all values positive</li>
+    <li><strong>Calculate Variance:</strong> Average the squared deviations</li>
+    <li><strong>Take Square Root:</strong> Square root of variance gives standard deviation</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Mean (μ) = Σ(Price[i]) / n<br/>
+      <br/>
+      Variance (σ²) = Σ((Price[i] - μ)²) / n<br/>
+      <br/>
+      Standard Deviation (σ) = √(Variance)<br/>
+      <br/>
+      Where:<br/>
+      - n = number of periods<br/>
+      - Higher σ = Higher volatility<br/>
+      - Lower σ = Lower volatility<br/>
+      - ~68% of prices fall within ±1σ<br/>
+      - ~95% of prices fall within ±2σ
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Moving average period (default: 20)</li>
-    <li><strong>std_dev</strong>: Standard deviation multiplier (default: 2)</li>
+    <li><strong>Volatility Measurement:</strong> Precise quantification of price variability</li>
+    <li><strong>Statistical Foundation:</strong> Based on proven mathematical principles</li>
+    <li><strong>Dynamic Adaptation:</strong> Automatically adjusts to market conditions</li>
+    <li><strong>Universal Application:</strong> Works across all markets and timeframes</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Deviation to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Volatility Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Volatility States:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Low Deviation:</strong> Market consolidation, potential breakout pending</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising Deviation:</strong> Increasing volatility, trending or news-driven</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">High Deviation:</strong> Extreme volatility, potential exhaustion</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling Deviation:</strong> Volatility contraction, consolidation beginning</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Applications:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bollinger Squeeze:</strong> Very low StdDev signals impending volatility</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Risk Sizing:</strong> Adjust position size inversely to StdDev</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Stop Placement:</strong> Set stops at multiples of StdDev</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Target Setting:</strong> Project moves based on StdDev levels</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Volatility Breakout:</strong>
+      <ul>
+        <li>Monitor for historically low standard deviation</li>
+        <li>Prepare for breakout in either direction</li>
+        <li>Enter on expansion with directional confirmation</li>
+      </ul>
+    </li>
+    <li><strong>Mean Reversion:</strong>
+      <ul>
+        <li>Trade back to mean when price exceeds 2 standard deviations</li>
+        <li>Higher probability setups at 3 standard deviations</li>
+        <li>Use with oscillators for timing</li>
+      </ul>
+    </li>
+    <li><strong>Volatility-Based Bands:</strong>
+      <ul>
+        <li>Create bands at ±1, ±2, ±3 standard deviations</li>
+        <li>Trade bounces and breaks of these levels</li>
+        <li>Adjust band width for different markets</li>
+      </ul>
+    </li>
+    <li><strong>Dynamic Position Sizing:</strong> Size = Risk Amount / (StdDev × Multiplier)</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Historical Volatility Ranking:</strong> Compare current to historical StdDev</li>
+    <li><strong>Multi-Timeframe Analysis:</strong> Compare StdDev across timeframes</li>
+    <li><strong>Volatility Cycles:</strong> Identify patterns in StdDev expansion/contraction</li>
+    <li><strong>Correlation Analysis:</strong> Study StdDev relationships across markets</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Mathematically robust and reliable</li>
+    <li>Adapts automatically to market conditions</li>
+    <li>Foundation for many other indicators</li>
+    <li>Excellent for risk management</li>
+    <li>Works in all market conditions</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Assumes normal distribution (markets often aren't)</li>
+    <li>Lagging indicator based on historical data</li>
+    <li>Doesn't predict direction, only magnitude</li>
+    <li>Can remain elevated/depressed for extended periods</li>
+    <li>Sensitive to outliers and gaps</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>Standard Deviation forms the basis for and complements:</p>
+  <ul>
+    <li><strong>Bollinger Bands:</strong> StdDev creates the dynamic bands</li>
+    <li><strong>ATR:</strong> Compare different volatility measures</li>
+    <li><strong>Moving Averages:</strong> Add StdDev bands to any MA</li>
+    <li><strong>Keltner Channels:</strong> Alternative to ATR-based channels</li>
+    <li><strong>Z-Score:</strong> Normalize price moves by StdDev</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Deviation in Rust
-let result = indicators::deviation(&data, 20, 2);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    Standard deviation's power lies in its foundation in probability theory. In a normal distribution, approximately 
+    68% of all data points fall within one standard deviation of the mean, 95% within two, and 99.7% within three. 
+    While financial markets don't follow perfect normal distributions, these principles still provide valuable 
+    frameworks for understanding price behavior and risk.
+  </p>
+  <p>
+    The squaring of deviations in the calculation serves two purposes: it ensures all values are positive (preventing 
+    cancellation of positive and negative deviations) and gives more weight to larger deviations. This makes standard 
+    deviation particularly sensitive to extreme moves, which is exactly what traders need to monitor for risk 
+    management. The square root transformation brings the units back to the original price scale, making the 
+    indicator intuitive to interpret.
+  </p>
+
 </IndicatorLayout>

@@ -1,6 +1,5 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
-import { BacktestChart } from '../components/charts/BacktestChart';
 import { indicators } from '../data/indicator-registry';
 
 // Get featured indicators
@@ -52,13 +51,6 @@ const categoryCount = Object.values(indicators).reduce((acc, indicator) => {
             </div>
           </div>
         ))}
-      </div>
-    </section>
-
-    <section class="mb-12">
-      <h2 class="text-3xl font-bold mb-6">Moving Average Crossover Strategy Demo</h2>
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <BacktestChart client:only="react" />
       </div>
     </section>
 

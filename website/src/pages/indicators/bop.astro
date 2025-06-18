@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'bop';
-const indicatorName = 'Balance Of Power';
-const description = `Technical analysis indicator: Balance Of Power`;
+const indicatorName = 'Balance Of Power (BOP)';
+const description = `The Balance of Power (BOP) indicator measures the strength of buyers versus sellers by analyzing the relationship between closing prices and the high-low range. Developed by Igor Livshin, it quantifies market control by calculating how far prices could push from the open relative to the total range, providing insights into underlying market strength.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "min": 1,
+    "max": 50,
+    "description": "Smoothing period for the BOP values"
   }
 ];
 ---
@@ -23,22 +23,151 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Balance of Power (BOP) indicator, created by Igor Livshin, is a unique oscillator that measures the strength 
+    of buyers versus sellers by examining the ability of each side to push prices to extreme levels. Unlike many 
+    indicators that focus solely on closing prices, BOP analyzes the relationship between the open, high, low, and 
+    close to determine which side—bulls or bears—is in control of the market.
+  </p>
+  <p>
+    The key insight of BOP is that the distance prices travel from the open to the close, relative to the total 
+    trading range, reveals the true balance of power. When buyers are in control, they can push the close near the 
+    high; when sellers dominate, they drive the close toward the low. This makes BOP particularly effective at 
+    identifying hidden strength or weakness not apparent in price action alone.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Balance Of Power helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Balance of Power calculation measures directional price movement:</p>
+  <ol>
+    <li><strong>Calculate Raw BOP:</strong> (Close - Open) / (High - Low)</li>
+    <li><strong>Handle Special Cases:</strong> When High = Low, BOP = 0</li>
+    <li><strong>Apply Smoothing:</strong> Use SMA to smooth the raw values</li>
+    <li><strong>Result Range:</strong> Oscillates between -1 and +1</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Raw BOP = (Close - Open) / (High - Low)<br/>
+      <br/>
+      If High = Low, then BOP = 0<br/>
+      <br/>
+      Smoothed BOP = SMA(Raw BOP, Period)<br/>
+      <br/>
+      Range: -1 to +1<br/>
+      Where:<br/>
+      +1 = Maximum buying power<br/>
+      0 = Equilibrium<br/>
+      -1 = Maximum selling power
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Zero-Centered:</strong> Oscillates around zero for easy trend identification</li>
+    <li><strong>Bounded Range:</strong> -1 to +1 makes readings comparable across markets</li>
+    <li><strong>Volume Independent:</strong> Focuses purely on price action dynamics</li>
+    <li><strong>Early Signals:</strong> Often shows divergences before price reversals</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Balance Of Power to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>BOP Readings</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Value Interpretations:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">+0.5 to +1.0:</strong> Strong buying pressure - Bulls in control</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">0 to +0.5:</strong> Moderate buying pressure</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">0:</strong> Balance between buyers and sellers</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">0 to -0.5:</strong> Moderate selling pressure</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">-0.5 to -1.0:</strong> Strong selling pressure - Bears in control</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Line Cross:</strong> Shift in market control (bullish above, bearish below)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> Price vs BOP divergences often precede reversals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings:</strong> Values near ±1 indicate potential exhaustion</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Trend Confirmation:</strong> Rising BOP confirms uptrends, falling confirms downtrends</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Zero Line Strategy:</strong>
+      <ul>
+        <li>Buy when BOP crosses above zero</li>
+        <li>Sell when BOP crosses below zero</li>
+        <li>Use additional filters to avoid whipsaws</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong>
+      <ul>
+        <li>Bullish: Price makes lower lows, BOP makes higher lows</li>
+        <li>Bearish: Price makes higher highs, BOP makes lower highs</li>
+      </ul>
+    </li>
+    <li><strong>Trend Confirmation:</strong>
+      <ul>
+        <li>Only take long trades when BOP > 0</li>
+        <li>Only take short trades when BOP < 0</li>
+      </ul>
+    </li>
+    <li><strong>Extreme Reversal:</strong> Fade moves when BOP reaches ±0.8 or beyond</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Hidden Divergences:</strong> Identify continuation patterns in trending markets</li>
+    <li><strong>Multiple Timeframes:</strong> Confirm signals across different periods</li>
+    <li><strong>Accumulation/Distribution:</strong> Persistent positive BOP suggests accumulation</li>
+    <li><strong>Pattern Recognition:</strong> BOP patterns often precede price patterns</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Reveals hidden buying/selling pressure</li>
+    <li>Early divergence signals</li>
+    <li>Simple calculation and interpretation</li>
+    <li>Works well in all market conditions</li>
+    <li>Normalized scale allows cross-market comparison</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can produce false signals in choppy markets</li>
+    <li>Requires accurate open price data</li>
+    <li>Less effective with gaps or limit moves</li>
+    <li>May lag in fast-moving markets</li>
+    <li>Best used with other confirming indicators</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>BOP works well when combined with:</p>
+  <ul>
+    <li><strong>Volume Indicators:</strong> Confirm BOP signals with volume analysis</li>
+    <li><strong>Moving Averages:</strong> Use for trend direction while BOP shows strength</li>
+    <li><strong>RSI/Stochastic:</strong> Compare momentum readings with power balance</li>
+    <li><strong>Support/Resistance:</strong> BOP behavior at key levels reveals true strength</li>
+    <li><strong>Candlestick Patterns:</strong> BOP confirms or contradicts candle signals</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Balance Of Power in Rust
-let result = indicators::bop(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Balance of Power indicator's elegance lies in its simplicity. By measuring the ratio of directional movement 
+    (close - open) to total range (high - low), it captures the essence of market control. When buyers are strong, 
+    they can push the close significantly above the open relative to the day's range. Conversely, strong sellers 
+    drive the close below the open.
+  </p>
+  <p>
+    The normalization to a -1 to +1 scale makes BOP universally applicable across different markets and price levels. 
+    This bounded range, combined with smoothing, creates a clean oscillator that filters out noise while preserving 
+    the essential information about who controls the market—a critical factor often hidden in raw price data.
+  </p>
+
 </IndicatorLayout>

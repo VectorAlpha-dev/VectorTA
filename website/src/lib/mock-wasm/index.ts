@@ -1,4 +1,3 @@
-import { OHLCV } from '../utils/data-loader-client';
 
 export class MockTALib {
   // Simple Moving Average

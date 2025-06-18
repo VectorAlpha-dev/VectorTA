@@ -17,13 +17,14 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for MwdxInput<'a> {
     #[inline(always)]
@@ -184,7 +185,12 @@ pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput,
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm = data.iter()
+                .position(|x| !x.is_nan())
+                .map(|i| i + 1)           // prefix length
+                .unwrap_or(len);          // all NaNs → whole vec is prefix
+
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     unsafe {
         match chosen {
@@ -456,39 +462,60 @@ fn mwdx_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    let first_valid   = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+    let warm_prefixes = vec![first_valid + 1; rows];            // rows × constant
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let prm = &combos[row];
+    // 2.  Allocate the big rows × cols matrix *uninitialised* …
+    let mut raw = make_uninit_matrix(rows, cols);
+
+    // … and paint the NaN prefixes so any untouched cells are well-defined.
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm_prefixes) };
+
+    // ---------------------------------------------------------------------------
+    // 3.  Closure that writes ONE row; it receives a &mut [MaybeUninit<f64>]
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let prm    = &combos[row];
         let factor = prm.factor.unwrap();
+
+        // re-run the same factor validation that lived in the old code
+        if factor <= 0.0 || factor.is_nan() || factor.is_infinite() { return; }
         let val2 = (2.0 / factor) - 1.0;
-        if factor <= 0.0 || factor.is_nan() || factor.is_infinite() {
-            return;
-        }
-        if val2 + 1.0 <= 0.0 {
-            return;
-        }
+        if val2 + 1.0 <= 0.0 { return; }
         let fac = 2.0 / (val2 + 1.0);
+
+        // cast just this row to &mut [f64] and crunch it
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => mwdx_row_scalar(data, fac, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => mwdx_row_avx2(data, fac, out_row),
+            Kernel::Avx2   => mwdx_row_avx2  (data, fac, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => mwdx_row_avx512(data, fac, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---------------------------------------------------------------------------
+    // 4.  Drive the whole matrix, in parallel or serial
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // 5.  Every element is now initialised – transmogrify to Vec<f64>
+    let values: Vec<f64> = unsafe {
+        std::mem::transmute::<Vec<MaybeUninit<f64>>, Vec<f64>>(raw)
+    };
 
     Ok(MwdxBatchOutput {
         values,

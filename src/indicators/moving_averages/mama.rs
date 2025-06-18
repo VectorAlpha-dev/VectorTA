@@ -18,7 +18,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,8 +27,8 @@ use thiserror::Error;
 use std::convert::AsRef;
 use std::error::Error;
 use std::f64::consts::PI;
+use std::mem::MaybeUninit;
 
-// Data & params types
 
 #[derive(Debug, Clone)]
 pub enum MamaData<'a> {
@@ -272,8 +272,9 @@ fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
 
 fn mama_scalar_impl(data: &[f64], fast_limit: f64, slow_limit: f64) -> MamaOutput {
     let len = data.len();
-    let mut mama_values = vec![0.0; len];
-    let mut fama_values = vec![0.0; len];
+    let warm = 10;
+    let mut mama_values = alloc_with_nan_prefix(len, warm);
+    let mut fama_values = alloc_with_nan_prefix(len, warm);
 
     let mut smooth_buf = [data[0]; 7];
     let mut detrender_buf = [data[0]; 7];
@@ -631,6 +632,7 @@ fn mama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MamaBatchOutput, MamaError> {
+    // ---------- 0. prelim checks ----------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(MamaError::NotEnoughData { needed: 10, found: 0 });
@@ -641,42 +643,70 @@ fn mama_batch_inner(
             found: data.len(),
         });
     }
+
+    // ---------- 1. matrix allocation ----------
     let rows = combos.len();
     let cols = data.len();
-    let mut mama_values = vec![0.0; rows * cols];
-    let mut fama_values = vec![0.0; rows * cols];
 
-    let do_row = |row: usize, out_mama: &mut [f64], out_fama: &mut [f64]| unsafe {
-        let prm = &combos[row];
-        let fast_limit = prm.fast_limit.unwrap_or(0.5);
-        let slow_limit = prm.slow_limit.unwrap_or(0.05);
-        let output = match kern {
-            Kernel::Scalar => mama_scalar_impl(data, fast_limit, slow_limit),
+    // uninitialised backing buffers
+    let mut raw_mama = make_uninit_matrix(rows, cols);
+    let mut raw_fama = make_uninit_matrix(rows, cols);
+
+    // write quiet-NaN prefixes so the first 10 values line up with streaming MAMA
+    let warm_prefixes = vec![10; rows];
+    unsafe {
+        init_matrix_prefixes(&mut raw_mama, cols, &warm_prefixes);
+        init_matrix_prefixes(&mut raw_fama, cols, &warm_prefixes);
+    }
+
+    // ---------- 2. per-row worker ----------
+    let do_row = |row: usize,
+                  dst_m: &mut [MaybeUninit<f64>],
+                  dst_f: &mut [MaybeUninit<f64>]| unsafe {
+        let prm  = &combos[row];
+        let fast = prm.fast_limit.unwrap_or(0.5);
+        let slow = prm.slow_limit.unwrap_or(0.05);
+
+        // cast each row to `&mut [f64]` once and let the kernel write directly
+        let out_m = core::slice::from_raw_parts_mut(
+            dst_m.as_mut_ptr() as *mut f64,
+            dst_m.len(),
+        );
+        let out_f = core::slice::from_raw_parts_mut(
+            dst_f.as_mut_ptr() as *mut f64,
+            dst_f.len(),
+        );
+
+        match kern {
+            Kernel::Scalar => mama_row_scalar (data, fast, slow, out_m, out_f),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => mama_scalar_impl(data, fast_limit, slow_limit),
+            Kernel::Avx2   => mama_row_avx2   (data, fast, slow, out_m, out_f),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => mama_scalar_impl(data, fast_limit, slow_limit),
+            Kernel::Avx512 => mama_row_avx512 (data, fast, slow, out_m, out_f),
             _ => unreachable!(),
-        };
-        out_mama.copy_from_slice(&output.mama_values);
-        out_fama.copy_from_slice(&output.fama_values);
+        }
     };
 
+    // ---------- 3. run over every row ----------
     if parallel {
-        mama_values
-            .par_chunks_mut(cols)
-            .zip(fama_values.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (mama_slice, fama_slice))| do_row(row, mama_slice, fama_slice));
+        raw_mama.par_chunks_mut(cols)
+                .zip(raw_fama.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, (m_row, f_row))| do_row(row, m_row, f_row));
     } else {
-        for (row, (mama_slice, fama_slice)) in mama_values
-            .chunks_mut(cols)
-            .zip(fama_values.chunks_mut(cols))
-            .enumerate()
+        for (row, (m_row, f_row)) in raw_mama.chunks_mut(cols)
+                                             .zip(raw_fama.chunks_mut(cols))
+                                             .enumerate()
         {
-            do_row(row, mama_slice, fama_slice);
+            do_row(row, m_row, f_row);
         }
     }
+
+    // ---------- 4. transmute to Vec<f64> ----------
+    let mama_values: Vec<f64> = unsafe { std::mem::transmute(raw_mama) };
+    let fama_values: Vec<f64> = unsafe { std::mem::transmute(raw_fama) };
+
+    // ---------- 5. package result ----------
     Ok(MamaBatchOutput {
         mama_values,
         fama_values,

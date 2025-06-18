@@ -21,7 +21,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -30,6 +30,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::f64::consts::PI;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for SinWmaInput<'a> {
     #[inline(always)]
@@ -220,7 +221,8 @@ pub fn sinwma_with_kernel(input: &SinWmaInput, kernel: Kernel) -> Result<SinWmaO
         *w *= inv_sum;
     }
 
-    let mut out = vec![f64::NAN; len];
+    let warm  = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);   
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -587,52 +589,63 @@ fn sinwma_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    let warm: Vec<usize> = combos.iter()
+                                .map(|c| first + c.period.unwrap())
+                                .collect();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    let mut raw = make_uninit_matrix(rows, cols);          // Vec<MaybeUninit<f64>>
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };  // fill per-row NaNs
+
+    // ---------- closure that fills one row ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
+        // build the (normalised) sine-weight vector for this period …
         let mut sines: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
         sines.resize(period, 0.0);
-        let mut sum_sines = 0.0;
+        let mut sum = 0.0;
         for k in 0..period {
-            let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
-            let val = angle.sin();
-            sines[k] = val;
-            sum_sines += val;
+            let a = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
+            let v = a.sin();
+            sines[k] = v;
+            sum += v;
         }
-        let inv_sum = 1.0 / sum_sines;
-        for w in &mut sines[..] {
+        let inv_sum = 1.0 / sum;
+        for w in &mut sines[..] {          // or `for w in sines.iter_mut() {`
             *w *= inv_sum;
         }
+
+        // reinterpret *just this row* as &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
         match kern {
             Kernel::Scalar => sinwma_row_scalar(data, first, period, sines.as_ptr(), out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => sinwma_row_avx2(data, first, period, sines.as_ptr(), out_row),
+            Kernel::Avx2   => sinwma_row_avx2  (data, first, period, sines.as_ptr(), out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => sinwma_row_avx512(data, first, period, sines.as_ptr(), out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---------- run every row directly into `raw` ----------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(r, sl)| do_row(r, sl));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
+        for (r, sl) in raw.chunks_mut(cols).enumerate() {
+            do_row(r, sl);
         }
     }
 
-    Ok(SinWmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    // ---------- transmute to finished matrix ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(SinWmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]

@@ -2,8 +2,8 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'cvi';
-const indicatorName = 'Cvi';
-const description = `Technical analysis indicator: Cvi`;
+const indicatorName = 'Cumulative Volume Index (CVI)';
+const description = `The Cumulative Volume Index (CVI) is a momentum indicator that tracks the cumulative flow of volume into advancing versus declining stocks. It helps identify whether money is flowing into or out of the market by measuring the net difference between up volume and down volume, providing insights into the underlying strength or weakness of market moves.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,7 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Smoothing period for the CVI calculation"
   }
 ];
 ---
@@ -23,22 +23,157 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Cumulative Volume Index (CVI) is a powerful breadth indicator that measures the net flow of volume in the 
+    market. Unlike price-based indicators, CVI focuses on volume dynamics to reveal whether institutional money is 
+    accumulating or distributing positions. By tracking the cumulative difference between advancing volume and 
+    declining volume, it provides unique insights into market internals that price alone cannot reveal.
+  </p>
+  <p>
+    Originally developed for analyzing broad market indices, the CVI has been adapted for individual securities by 
+    comparing up-volume (volume on up days) versus down-volume (volume on down days). This makes it particularly 
+    valuable for confirming price trends, identifying divergences, and spotting potential reversals before they 
+    become apparent in price action. The indicator's cumulative nature helps smooth out daily fluctuations while 
+    maintaining sensitivity to significant volume shifts.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Cvi helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The CVI calculation tracks cumulative volume flow:</p>
+  <ol>
+    <li><strong>Classify Days:</strong> Determine if each day is up (close > previous close) or down</li>
+    <li><strong>Assign Volume:</strong> Add volume to up-volume or down-volume accordingly</li>
+    <li><strong>Calculate Difference:</strong> Net Volume = Up Volume - Down Volume</li>
+    <li><strong>Accumulate:</strong> Add to running total and apply smoothing</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      If Close > Close[1]:<br/>
+      &nbsp;&nbsp;Up_Volume = Volume<br/>
+      &nbsp;&nbsp;Down_Volume = 0<br/>
+      Else:<br/>
+      &nbsp;&nbsp;Up_Volume = 0<br/>
+      &nbsp;&nbsp;Down_Volume = Volume<br/>
+      <br/>
+      Net_Volume = Up_Volume - Down_Volume<br/>
+      <br/>
+      CVI = CVI[1] + Net_Volume<br/>
+      <br/>
+      Smoothed_CVI = EMA(CVI, Period)<br/>
+      <br/>
+      Signal Line = EMA(Smoothed_CVI, Period × 2)
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Volume-Based:</strong> Focuses on money flow rather than price</li>
+    <li><strong>Cumulative Nature:</strong> Builds long-term picture of accumulation/distribution</li>
+    <li><strong>Trend Confirmation:</strong> Validates price moves with volume support</li>
+    <li><strong>Early Divergences:</strong> Often leads price at major turning points</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Cvi to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>CVI Signals</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trend Analysis:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising CVI:</strong> Net accumulation - Bullish volume flow</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling CVI:</strong> Net distribution - Bearish volume flow</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Flat CVI:</strong> Balanced volume - No clear direction</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">CVI Above Signal:</strong> Short-term accumulation</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">CVI Below Signal:</strong> Short-term distribution</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Patterns:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> Price up/CVI down = Bearish, Price down/CVI up = Bullish</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Crossovers:</strong> CVI crossing signal line generates trading signals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Slope Changes:</strong> CVI turning up/down signals flow reversal</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings:</strong> Historically high/low CVI marks potential reversals</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Confirmation:</strong>
+      <ul>
+        <li>Only take long positions when CVI is rising</li>
+        <li>Only take short positions when CVI is falling</li>
+        <li>Exit when CVI diverges from price trend</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong>
+      <ul>
+        <li>Bullish: Price makes lower low, CVI makes higher low</li>
+        <li>Bearish: Price makes higher high, CVI makes lower high</li>
+        <li>Most reliable at major tops and bottoms</li>
+      </ul>
+    </li>
+    <li><strong>Signal Line Cross:</strong>
+      <ul>
+        <li>Buy when CVI crosses above its signal line</li>
+        <li>Sell when CVI crosses below its signal line</li>
+        <li>Filter with price trend for best results</li>
+      </ul>
+    </li>
+    <li><strong>Volume Thrust:</strong> Rapid CVI rise signals strong accumulation phase</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Rate of Change:</strong> Apply ROC to CVI for momentum signals</li>
+    <li><strong>Multi-Timeframe:</strong> Compare daily and weekly CVI for perspective</li>
+    <li><strong>Relative CVI:</strong> Compare individual stock CVI to market CVI</li>
+    <li><strong>CVI Bands:</strong> Add standard deviation bands for overbought/oversold</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Reveals hidden accumulation/distribution</li>
+    <li>Often leads price at turning points</li>
+    <li>Not fooled by price manipulation without volume</li>
+    <li>Works well for confirming breakouts</li>
+    <li>Effective across different market conditions</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Less effective in low-volume markets</li>
+    <li>Can give false signals during consolidation</li>
+    <li>Requires volume data (not available for forex)</li>
+    <li>Cumulative nature means slow to reverse</li>
+    <li>May lag in fast-moving markets</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>CVI works best when combined with:</p>
+  <ul>
+    <li><strong>Price Oscillators:</strong> RSI/MACD for timing entry/exit</li>
+    <li><strong>On-Balance Volume:</strong> Compare different volume approaches</li>
+    <li><strong>Moving Averages:</strong> Use for trend direction, CVI for confirmation</li>
+    <li><strong>Support/Resistance:</strong> CVI behavior at key levels is significant</li>
+    <li><strong>Market Breadth:</strong> Combine with advance/decline for full picture</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Cvi in Rust
-let result = indicators::cvi(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Cumulative Volume Index builds on the principle that volume precedes price. By accumulating the net 
+    difference between up-volume and down-volume, it creates a running total that reflects the overall flow of 
+    money. The mathematical elegance lies in its simplicity - it essentially tracks whether more volume is 
+    associated with rising prices (accumulation) or falling prices (distribution).
+  </p>
+  <p>
+    The smoothing applied to the raw CVI helps filter out daily noise while preserving the underlying trend. The 
+    use of exponential moving averages ensures recent volume flows have more weight than older ones, making the 
+    indicator responsive to current market conditions. The signal line, typically using a period twice the main 
+    smoothing period, provides a baseline for identifying short-term shifts in volume flow within the longer-term trend.
+  </p>
+
 </IndicatorLayout>

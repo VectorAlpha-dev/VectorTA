@@ -2,16 +2,24 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'emd';
-const indicatorName = 'Emd';
-const description = `Technical analysis indicator: Emd`;
+const indicatorName = 'Empirical Mode Decomposition (EMD)';
+const description = `Empirical Mode Decomposition (EMD) is an advanced signal processing technique that decomposes price data into intrinsic mode functions (IMFs), revealing hidden cycles and trends within market data. This adaptive method excels at identifying non-linear and non-stationary patterns that traditional indicators miss, making it powerful for understanding complex market dynamics.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "num_imfs",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 5,
+    "min": 3,
+    "max": 10,
+    "description": "Number of intrinsic mode functions to extract"
+  },
+  {
+    "name": "sifting_threshold",
+    "type": "number",
+    "default": 0.001,
+    "min": 0.0001,
+    "max": 0.01,
+    "description": "Convergence threshold for sifting process"
   }
 ];
 ---
@@ -23,22 +31,171 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    Empirical Mode Decomposition (EMD) represents a revolutionary approach to analyzing financial time series data, 
+    developed by Norden Huang in 1998. Unlike traditional methods that assume data is linear and stationary, EMD 
+    adaptively decomposes complex price movements into a series of intrinsic mode functions (IMFs), each representing 
+    a different oscillatory mode within the data. This makes EMD particularly powerful for financial markets, where 
+    price behavior is inherently non-linear, non-stationary, and contains multiple overlapping cycles.
+  </p>
+  <p>
+    What makes EMD unique is its data-driven approach—it doesn't impose any predetermined basis functions but instead 
+    extracts modes directly from the data itself. Each IMF represents a simple oscillatory mode with a characteristic 
+    timescale, from high-frequency noise to long-term trends. This decomposition allows traders to isolate and analyze 
+    different market dynamics separately, revealing hidden patterns and cycles that are impossible to detect with 
+    conventional indicators. The result is a powerful tool for understanding market structure at multiple scales.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Emd helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>EMD uses an iterative sifting process to extract IMFs:</p>
+  <ol>
+    <li><strong>Identify Extrema:</strong> Find all local maxima and minima in the data</li>
+    <li><strong>Create Envelopes:</strong> Interpolate upper and lower envelopes through extrema</li>
+    <li><strong>Calculate Mean:</strong> Find the mean of upper and lower envelopes</li>
+    <li><strong>Extract Component:</strong> Subtract mean from data to get IMF candidate</li>
+    <li><strong>Sift Iteratively:</strong> Repeat until IMF criteria are satisfied</li>
+    <li><strong>Continue Decomposition:</strong> Extract multiple IMFs until residue remains</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      EMD Decomposition Process:<br/>
+      <br/>
+      Original Signal = IMF₁ + IMF₂ + ... + IMFₙ + Residue<br/>
+      <br/>
+      For each IMF extraction:<br/>
+      1. h = X(t)  // Initialize<br/>
+      2. Find all maxima and minima of h<br/>
+      3. Upper = spline through maxima<br/>
+      4. Lower = spline through minima<br/>
+      5. Mean = (Upper + Lower) / 2<br/>
+      6. h_new = h - Mean<br/>
+      7. If h_new satisfies IMF conditions, save as IMF<br/>
+      8. Else h = h_new, go to step 2<br/>
+      <br/>
+      IMF Conditions:<br/>
+      - Number of extrema and zero crossings differ by at most 1<br/>
+      - Mean of upper and lower envelopes is approximately zero<br/>
+      <br/>
+      Interpretation:<br/>
+      - IMF₁: Highest frequency (noise)<br/>
+      - IMF₂-₃: Short-term oscillations<br/>
+      - IMF₄-₅: Medium-term cycles<br/>
+      - Residue: Long-term trend
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Adaptive Decomposition:</strong> No predetermined basis functions</li>
+    <li><strong>Multi-Scale Analysis:</strong> Reveals cycles at different timescales</li>
+    <li><strong>Non-Linear Capability:</strong> Handles non-linear market behavior</li>
+    <li><strong>Trend Extraction:</strong> Isolates true trend from oscillations</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Emd to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>IMF Analysis</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Component Interpretation:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">High-Frequency IMFs:</strong> Market noise, scalping opportunities</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Mid-Frequency IMFs:</strong> Trading cycles, swing patterns</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Low-Frequency IMFs:</strong> Major market cycles</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Residue:</strong> Primary trend direction</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">IMF Zero Crossings:</strong> Cycle turning points</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">IMF Extrema:</strong> Overbought/oversold levels</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Phase Alignment:</strong> Multiple IMFs in sync</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Trend Acceleration:</strong> Residue slope changes</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Multi-Scale Trading:</strong>
+      <ul>
+        <li>Use residue for primary trend direction</li>
+        <li>Trade mid-frequency IMFs in trend direction</li>
+        <li>Use high-frequency IMFs for precise timing</li>
+        <li>Avoid trades when IMFs show conflicting signals</li>
+      </ul>
+    </li>
+    <li><strong>Cycle Trading:</strong>
+      <ul>
+        <li>Identify dominant cycle from IMFs</li>
+        <li>Buy at cycle lows (IMF minima)</li>
+        <li>Sell at cycle highs (IMF maxima)</li>
+        <li>Use multiple IMFs for confirmation</li>
+      </ul>
+    </li>
+    <li><strong>Noise Filtering:</strong>
+      <ul>
+        <li>Remove high-frequency IMFs to see true trend</li>
+        <li>Trade reconstructed signal without noise</li>
+        <li>Use filtered signal for stop placement</li>
+        <li>Identify support/resistance more clearly</li>
+      </ul>
+    </li>
+    <li><strong>Hilbert-Huang Transform:</strong> Combine EMD with Hilbert spectral analysis</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Ensemble EMD (EEMD):</strong> Add white noise for robustness</li>
+    <li><strong>IMF Energy Analysis:</strong> Measure relative importance of modes</li>
+    <li><strong>Instantaneous Frequency:</strong> Track cycle evolution</li>
+    <li><strong>Mode Mixing Detection:</strong> Identify and correct artifacts</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Reveals hidden market cycles</li>
+    <li>No assumptions about data structure</li>
+    <li>Excellent for non-stationary markets</li>
+    <li>Provides multi-timescale insights</li>
+    <li>Powerful noise filtering capability</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Computationally intensive process</li>
+    <li>End effects can distort recent data</li>
+    <li>Mode mixing in some cases</li>
+    <li>Requires expertise to interpret correctly</li>
+    <li>Not suitable for real-time analysis</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>EMD enhances analysis when combined with:</p>
+  <ul>
+    <li><strong>Fourier Analysis:</strong> EMD for non-stationary, FFT for stationary</li>
+    <li><strong>Wavelets:</strong> Compare multi-scale decompositions</li>
+    <li><strong>Traditional Oscillators:</strong> Apply to individual IMFs</li>
+    <li><strong>Machine Learning:</strong> Use IMFs as features</li>
+    <li><strong>Volatility Measures:</strong> Analyze IMF amplitudes</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Emd in Rust
-let result = indicators::emd(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The mathematical innovation of EMD lies in its empirical approach to signal decomposition. Unlike Fourier analysis 
+    which uses fixed sinusoidal basis functions, or wavelets which use predetermined mother wavelets, EMD derives its 
+    basis functions directly from the data. This makes it uniquely suited to analyzing non-linear and non-stationary 
+    signals like financial time series, where traditional assumptions of linearity and stationarity fail.
+  </p>
+  <p>
+    The sifting process that extracts IMFs is based on the principle that any signal can be decomposed into a series 
+    of zero-mean oscillations with well-defined instantaneous frequencies. By iteratively removing the local mean 
+    (average of upper and lower envelopes), EMD isolates these intrinsic oscillatory modes. The mathematical elegance 
+    is that this process is entirely data-driven—the decomposition adapts to the specific characteristics of each 
+    time series, revealing its natural oscillatory structure without imposing external assumptions.
+  </p>
 </IndicatorLayout>

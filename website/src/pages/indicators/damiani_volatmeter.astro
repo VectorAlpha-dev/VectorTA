@@ -3,15 +3,47 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'damiani_volatmeter';
 const indicatorName = 'Damiani Volatmeter';
-const description = `Technical analysis indicator: Damiani Volatmeter`;
+const description = `The Damiani Volatmeter is a sophisticated volatility indicator that measures market noise levels to filter out low-probability trading signals. Developed by the Damiani brothers, it helps traders identify when market conditions are suitable for trend-following strategies by distinguishing between trending markets and noisy, choppy conditions.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "vis_atr",
     "type": "number",
-    "default": 14,
-    "min": 2,
+    "default": 13,
+    "min": 5,
+    "max": 50,
+    "description": "ATR period for viscosity calculation"
+  },
+  {
+    "name": "vis_std",
+    "type": "number",
+    "default": 20,
+    "min": 5,
+    "max": 50,
+    "description": "Standard deviation period for viscosity"
+  },
+  {
+    "name": "sed_atr",
+    "type": "number",
+    "default": 40,
+    "min": 10,
+    "max": 100,
+    "description": "ATR period for sedimentation calculation"
+  },
+  {
+    "name": "sed_std",
+    "type": "number",
+    "default": 100,
+    "min": 20,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Standard deviation period for sedimentation"
+  },
+  {
+    "name": "threshold",
+    "type": "number",
+    "default": 1.4,
+    "min": 1.0,
+    "max": 2.0,
+    "description": "Threshold level for signal generation"
   }
 ];
 ---
@@ -23,22 +55,156 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Damiani Volatmeter represents a breakthrough in volatility analysis by providing traders with a sophisticated 
+    tool to measure market noise and filter trading signals. Developed by the Damiani brothers, this indicator goes 
+    beyond traditional volatility measures by calculating the ratio between market directional movement and random 
+    noise, helping traders avoid false signals during choppy, directionless market conditions.
+  </p>
+  <p>
+    What makes the Damiani Volatmeter unique is its dual-component approach, measuring both "viscosity" (short-term 
+    market thickness) and "sedimentation" (long-term market stability). When the indicator shows low values, it 
+    suggests the market is too noisy for reliable trend-following, effectively telling traders when NOT to trade. 
+    This negative selection approach can be as valuable as signal generation in preserving capital.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Damiani Volatmeter helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Damiani Volatmeter uses a complex calculation involving multiple volatility measures:</p>
+  <ol>
+    <li><strong>Viscosity Component:</strong> Measures short-term market thickness using ATR and standard deviation</li>
+    <li><strong>Sedimentation Component:</strong> Measures long-term market stability with longer periods</li>
+    <li><strong>Noise Ratio:</strong> Calculates the relationship between directional movement and random noise</li>
+    <li><strong>Threshold Comparison:</strong> Determines if market conditions are suitable for trading</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Viscosity = ATR(vis_atr) / StdDev(vis_std)<br/>
+      Sedimentation = ATR(sed_atr) / StdDev(sed_std)<br/>
+      <br/>
+      Volatmeter = Viscosity - Sedimentation<br/>
+      <br/>
+      If Volatmeter > Threshold:<br/>
+      &nbsp;&nbsp;Market suitable for trend following<br/>
+      Else:<br/>
+      &nbsp;&nbsp;Market too noisy, avoid trading<br/>
+      <br/>
+      Where:<br/>
+      - Higher values = clearer trends<br/>
+      - Lower values = excessive noise<br/>
+      - Threshold typically set at 1.4
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Noise Filter:</strong> Identifies when markets are too choppy to trade</li>
+    <li><strong>Dual Timeframe:</strong> Combines short and long-term volatility analysis</li>
+    <li><strong>Trade Filter:</strong> Acts as a master switch for other indicators</li>
+    <li><strong>Risk Management:</strong> Helps avoid low-probability trades</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Damiani Volatmeter to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Volatmeter Readings</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market Conditions:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Threshold (>1.4):</strong> Clear market direction, safe to trade</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Near Threshold (1.2-1.4):</strong> Transitional phase, use caution</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Threshold (<1.2):</strong> Excessive noise, avoid trading</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Rising Values:</strong> Market becoming more tradeable</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Falling Values:</strong> Increasing market noise</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Rules:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Green Light:</strong> Only take signals when Volatmeter > threshold</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Red Light:</strong> Ignore all signals when below threshold</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Transition Zones:</strong> Reduce position size near threshold</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Confirmation:</strong> Use as filter for other indicators</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Master Filter Strategy:</strong>
+      <ul>
+        <li>Only execute trades when Volatmeter > threshold</li>
+        <li>Ignore all other indicator signals during noisy periods</li>
+        <li>Resume trading when market clears up</li>
+      </ul>
+    </li>
+    <li><strong>Position Sizing:</strong>
+      <ul>
+        <li>Full position: Volatmeter > 1.6</li>
+        <li>Half position: Volatmeter 1.4-1.6</li>
+        <li>No position: Volatmeter < 1.4</li>
+      </ul>
+    </li>
+    <li><strong>Trend Confirmation:</strong>
+      <ul>
+        <li>Enter trends only with Volatmeter confirmation</li>
+        <li>Exit if Volatmeter drops below threshold</li>
+        <li>Use for timing re-entries after pullbacks</li>
+      </ul>
+    </li>
+    <li><strong>Multi-Indicator Filter:</strong> Require Volatmeter approval for all signals</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Dynamic Thresholds:</strong> Adjust threshold based on market conditions</li>
+    <li><strong>Volatility Regimes:</strong> Different settings for different volatility environments</li>
+    <li><strong>Time-Based Filters:</strong> Combine with session/time filters</li>
+    <li><strong>Cross-Market Analysis:</strong> Compare volatmeter readings across correlated markets</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Excellent at filtering out false signals</li>
+    <li>Reduces overtrading in choppy markets</li>
+    <li>Improves win rate by avoiding noise</li>
+    <li>Works across all timeframes and markets</li>
+    <li>Simple binary output (trade/don't trade)</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>May miss early trend entries</li>
+    <li>Can be overly conservative in some markets</li>
+    <li>Requires optimization for different instruments</li>
+    <li>Lags during rapid volatility changes</li>
+    <li>Complex calculation with multiple parameters</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The Damiani Volatmeter works best as a filter for:</p>
+  <ul>
+    <li><strong>Moving Average Crossovers:</strong> Only trade crosses when Volatmeter approves</li>
+    <li><strong>MACD Signals:</strong> Filter MACD signals through Volatmeter</li>
+    <li><strong>Breakout Systems:</strong> Confirm breakouts with low noise readings</li>
+    <li><strong>Oscillators:</strong> Avoid oscillator signals in noisy markets</li>
+    <li><strong>Pattern Recognition:</strong> Validate chart patterns with Volatmeter</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Damiani Volatmeter in Rust
-let result = indicators::damiani_volatmeter(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Damiani Volatmeter's mathematical foundation combines concepts from fluid dynamics (viscosity and 
+    sedimentation) with financial volatility analysis. By using the ratio of Average True Range to Standard 
+    Deviation at different time scales, it effectively measures the "quality" of market movement versus random 
+    noise.
+  </p>
+  <p>
+    The genius of the formula lies in subtracting long-term stability (sedimentation) from short-term thickness 
+    (viscosity). When short-term volatility significantly exceeds long-term volatility in a structured way (high 
+    ATR/StdDev ratio), it indicates directional movement rather than random walk. This approach filters out periods 
+    where price movement lacks conviction, protecting traders from whipsaw losses.
+  </p>
+
 </IndicatorLayout>

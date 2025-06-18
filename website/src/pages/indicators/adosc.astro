@@ -2,16 +2,24 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'adosc';
-const indicatorName = 'Adosc';
-const description = `Technical analysis indicator: Adosc`;
+const indicatorName = 'Chaikin A/D Oscillator';
+const description = `The Chaikin A/D Oscillator is a momentum indicator that measures the momentum of the Accumulation/Distribution Line using MACD methodology. It helps traders identify changes in the momentum of buying and selling pressure by calculating the difference between fast and slow exponential moving averages of the A/D Line.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "fast_period",
     "type": "number",
-    "default": 14,
+    "default": 3,
     "min": 2,
+    "max": 50,
+    "description": "Fast EMA period for the A/D Line"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 10,
+    "min": 5,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Slow EMA period for the A/D Line"
   }
 ];
 ---
@@ -23,22 +31,115 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Chaikin A/D Oscillator, developed by Marc Chaikin, is a momentum indicator derived from the Accumulation/Distribution Line. 
+    It measures the momentum of accumulation and distribution by applying the MACD formula to the A/D Line rather than to price.
+  </p>
+  <p>
+    This oscillator helps traders identify when buying or selling pressure is accelerating or decelerating, potentially signaling 
+    upcoming changes in price direction. It's particularly useful for confirming price movements and identifying divergences.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Adosc helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Chaikin A/D Oscillator is calculated using the following steps:</p>
+  <ol>
+    <li><strong>Calculate the A/D Line:</strong> First, compute the Accumulation/Distribution Line</li>
+    <li><strong>Apply Fast EMA:</strong> Calculate a 3-period EMA of the A/D Line</li>
+    <li><strong>Apply Slow EMA:</strong> Calculate a 10-period EMA of the A/D Line</li>
+    <li><strong>Calculate Oscillator:</strong> Subtract the slow EMA from the fast EMA</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      A/D Line = Previous A/D + Money Flow Volume<br/>
+      Fast EMA = EMA(A/D Line, 3)<br/>
+      Slow EMA = EMA(A/D Line, 10)<br/>
+      Chaikin Oscillator = Fast EMA - Slow EMA
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Zero-Line Oscillator:</strong> Oscillates above and below zero, indicating momentum direction</li>
+    <li><strong>Leading Indicator:</strong> Often changes direction before price, providing early signals</li>
+    <li><strong>Volume-Based:</strong> Incorporates volume data for more reliable signals</li>
+    <li><strong>Momentum Measurement:</strong> Shows the rate of change in accumulation/distribution</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Adosc to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Basic Signals</h3>
+  <ul>
+    <li><strong>Above Zero:</strong> Indicates that accumulation momentum is stronger - bullish bias</li>
+    <li><strong>Below Zero:</strong> Indicates that distribution momentum is stronger - bearish bias</li>
+    <li><strong>Rising Oscillator:</strong> Buying pressure is accelerating</li>
+    <li><strong>Falling Oscillator:</strong> Selling pressure is accelerating</li>
+  </ul>
+
+  <h3>Trading Strategies</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Zero-Line Crossovers:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bullish Signal:</strong> Oscillator crosses above zero</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Bearish Signal:</strong> Oscillator crosses below zero</li>
+      <li>Most reliable when aligned with price trend direction</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Divergences:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bullish Divergence:</strong> Price makes lower lows while oscillator makes higher lows</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Bearish Divergence:</strong> Price makes higher highs while oscillator makes lower highs</li>
+      <li>Strong reversal signals when confirmed by other indicators</li>
+    </ul>
+  </div>
+
+  <h3>Advanced Interpretation</h3>
+  <ul>
+    <li><strong>Trend Confirmation:</strong> Rising prices with positive oscillator values confirm uptrend strength</li>
+    <li><strong>Early Warning:</strong> Changes in oscillator direction often precede price reversals by several days</li>
+    <li><strong>Overbought/Oversold:</strong> Extreme readings can indicate potential reversals, though the oscillator can remain extreme in strong trends</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Combines price and volume for comprehensive analysis</li>
+    <li>Provides early warning signals through momentum changes</li>
+    <li>Effective for identifying divergences</li>
+    <li>Works well in trending markets</li>
+    <li>Simple to interpret with clear signals</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can generate false signals in choppy or ranging markets</li>
+    <li>May lag during rapid price movements</li>
+    <li>Requires volume data, limiting use to instruments with reliable volume</li>
+    <li>Less effective for thinly traded securities</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The Chaikin Oscillator works particularly well when combined with:</p>
+  <ul>
+    <li><strong>Price Patterns:</strong> To confirm breakouts and breakdowns</li>
+    <li><strong>Moving Averages:</strong> For trend direction confirmation</li>
+    <li><strong>RSI or Stochastic:</strong> To identify overbought/oversold conditions</li>
+    <li><strong>Support/Resistance:</strong> For better entry and exit timing</li>
+    <li><strong>MACD:</strong> For additional momentum confirmation</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Adosc in Rust
-let result = indicators::adosc(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Chaikin Oscillator applies the MACD concept to volume analysis rather than price. By using exponential moving averages 
+    of the A/D Line, it smooths out the cumulative volume flow data while maintaining responsiveness to recent changes.
+  </p>
+  <p>
+    The choice of 3 and 10 periods for the EMAs creates a sensitive yet stable oscillator that captures short-term momentum 
+    changes in accumulation/distribution patterns while filtering out noise.
+  </p>
+
 </IndicatorLayout>

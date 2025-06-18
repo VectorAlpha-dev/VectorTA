@@ -16,7 +16,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +25,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 use std::f64::consts::PI;
+use std::mem::MaybeUninit;
 
 // Input and Output Types
 
@@ -177,7 +178,8 @@ pub fn supersmoother_3_pole_with_kernel(
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = vec![f64::NAN; len];
+    let warm   = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     unsafe {
         match chosen {
@@ -554,25 +556,49 @@ fn supersmoother_3_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    let warm: Vec<usize> = combos.iter()
+                                .map(|c| first + c.period.unwrap())
+                                .collect();
+
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 2.  Row-level closure (accepts &mut [MaybeUninit<f64>]) ----
+    let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
+
+        // transmute just this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => supersmoother_3_pole_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            Kernel::Scalar => supersmoother_3_pole_row_scalar(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => supersmoother_3_pole_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            Kernel::Avx2   => supersmoother_3_pole_row_avx2(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => supersmoother_3_pole_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            Kernel::Avx512 => supersmoother_3_pole_row_avx512(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
             _ => unreachable!(),
         }
     };
+
+    // ---------- 3.  Run rows in serial / parallel --------------------------
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------- 4.  Finalise: convert Vec<MaybeUninit<f64>> → Vec<f64> -----
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(SuperSmoother3PoleBatchOutput { values, combos, rows, cols })
 }
 

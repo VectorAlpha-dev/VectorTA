@@ -1,7 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import { IndicatorChart } from '../components/charts/IndicatorChart';
-import { ChartControls } from '../components/charts/ChartControls';
 
 export interface Props {
   indicatorId: string;
@@ -27,42 +26,31 @@ const sampleData = [];
   <div class="max-w-7xl mx-auto">
     <h1 class="text-4xl font-bold mb-4">{indicatorName}</h1>
     
-    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
-      <div class="lg:col-span-3 space-y-6">
-        <!-- Chart -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div id="chart-container">
-            <IndicatorChart
-              client:only="react"
-              indicatorId={indicatorId}
-              data={sampleData}
-              parameters={defaultParams}
-              darkMode={true}
-            />
-          </div>
-        </div>
-        
-        <!-- Documentation -->
-        <div class="prose dark:prose-invert max-w-none">
-          <slot />
+    <div class="space-y-6">
+      <!-- Chart -->
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+        <div id="chart-container">
+          <IndicatorChart
+            client:only="react"
+            indicatorId={indicatorId}
+            data={sampleData}
+            parameters={defaultParams}
+            darkMode={true}
+          />
         </div>
       </div>
       
-      <!-- Controls -->
-      <div class="lg:col-span-1">
-        <div class="sticky top-20">
-          <div id="controls-container">
-            <ChartControls
-              client:only="react"
-              indicatorId={indicatorId}
-              parameters={defaultParams}
-              parameterDefs={parameters}
-              onParameterChange={() => {
-                // This will be handled by a parent component wrapper
-              }}
-            />
-          </div>
-        </div>
+      <!-- Documentation -->
+      <div class="prose prose-lg dark:prose-invert max-w-none 
+        prose-headings:scroll-mt-20 
+        prose-h2:text-2xl prose-h2:font-bold prose-h2:mt-8 prose-h2:mb-4
+        prose-h3:text-xl prose-h3:font-semibold prose-h3:mt-6 prose-h3:mb-3
+        prose-p:text-gray-700 dark:prose-p:text-gray-300 
+        prose-li:text-gray-700 dark:prose-li:text-gray-300
+        prose-code:text-sm prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+        prose-pre:bg-gray-100 dark:prose-pre:bg-gray-800 prose-pre:overflow-x-auto
+        prose-strong:text-gray-900 dark:prose-strong:text-gray-100">
+        <slot />
       </div>
     </div>
   </div>

@@ -2,8 +2,8 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'cg';
-const indicatorName = 'Cg';
-const description = `Technical analysis indicator: Cg`;
+const indicatorName = 'Center of Gravity (CG)';
+const description = `The Center of Gravity (CG) indicator, developed by John Ehlers, is a weighted moving average that uses linear regression principles to identify the balance point of price movements. It provides a smooth, low-lag oscillator that helps traders identify turning points and cyclical behavior in financial markets.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,7 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for center of gravity calculation"
   }
 ];
 ---
@@ -23,22 +23,150 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Center of Gravity (CG) indicator, created by John Ehlers, applies physics concepts to technical analysis by 
+    calculating the balance point or "center of gravity" of price movements over a specified period. Just as physical 
+    objects have a center of gravity where weight is evenly distributed, this indicator finds the balance point of 
+    price action, providing insights into market equilibrium and potential turning points.
+  </p>
+  <p>
+    What makes the CG indicator unique is its use of weighted linear regression, where more recent prices have greater 
+    influence on the calculation. This creates a responsive yet smooth oscillator that effectively filters out market 
+    noise while maintaining minimal lag. The indicator oscillates around a zero line, making it easy to identify when 
+    prices are extended above or below their natural balance point.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Cg helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Center of Gravity calculation uses position-weighted prices:</p>
+  <ol>
+    <li><strong>Weight Assignment:</strong> Each price is multiplied by its position in the lookback period</li>
+    <li><strong>Weighted Sum:</strong> Calculate the sum of weighted prices</li>
+    <li><strong>Normalization:</strong> Divide by the sum of weights to find the center</li>
+    <li><strong>Smoothing:</strong> Apply additional filtering for cleaner signals</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      For i = 0 to Period-1:<br/>
+      &nbsp;&nbsp;Weight[i] = Period - i<br/>
+      &nbsp;&nbsp;WeightedPrice[i] = Price[i] × Weight[i]<br/>
+      <br/>
+      Numerator = Σ(WeightedPrice)<br/>
+      Denominator = Σ(Weight) = Period × (Period + 1) / 2<br/>
+      <br/>
+      CG = -Numerator / Denominator + (Period + 1) / 2<br/>
+      <br/>
+      Signal Line = SMA(CG, Signal_Period)
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Low Lag:</strong> Weighted calculation reduces lag compared to traditional MAs</li>
+    <li><strong>Smooth Output:</strong> Natural filtering eliminates choppy signals</li>
+    <li><strong>Zero-Centered:</strong> Easy identification of bullish/bearish conditions</li>
+    <li><strong>Cycle Detection:</strong> Excellent for identifying market cycles and turning points</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Cg to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Basic Signals</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Signal Types:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Zero Line Cross:</strong> Buy above zero, sell below zero</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Signal Line Cross:</strong> Buy when CG crosses above signal, sell on cross below</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extremes:</strong> Overbought above +2, oversold below -2</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> Price/CG divergences signal potential reversals</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market States:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">CG > 0:</strong> Prices above balance point (bullish bias)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">CG < 0:</strong> Prices below balance point (bearish bias)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">CG Rising:</strong> Momentum building in current direction</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">CG Falling:</strong> Momentum waning, potential reversal</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Momentum Strategy:</strong>
+      <ul>
+        <li>Enter long when CG crosses above zero with rising momentum</li>
+        <li>Enter short when CG crosses below zero with falling momentum</li>
+        <li>Exit on opposite signal or extreme readings</li>
+      </ul>
+    </li>
+    <li><strong>Mean Reversion:</strong>
+      <ul>
+        <li>Buy when CG reaches oversold extremes and turns up</li>
+        <li>Sell when CG reaches overbought extremes and turns down</li>
+      </ul>
+    </li>
+    <li><strong>Cycle Trading:</strong>
+      <ul>
+        <li>Identify regular CG oscillations (cycle period)</li>
+        <li>Buy at cycle lows, sell at cycle highs</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong> Trade divergences between price and CG at extremes</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Dual CG System:</strong> Use fast and slow CG for crossover signals</li>
+    <li><strong>CG Bands:</strong> Add standard deviation bands for dynamic overbought/oversold</li>
+    <li><strong>Filtered CG:</strong> Apply additional smoothing for longer-term trends</li>
+    <li><strong>Multi-Timeframe:</strong> Confirm signals across different timeframes</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Minimal lag compared to traditional moving averages</li>
+    <li>Smooth signals reduce false triggers</li>
+    <li>Excellent for cycle identification</li>
+    <li>Works well in both trending and ranging markets</li>
+    <li>Clear visual interpretation</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can produce false signals in choppy markets</li>
+    <li>Extremes are relative and market-dependent</li>
+    <li>May lag during sharp reversals</li>
+    <li>Period selection significantly affects performance</li>
+    <li>Best used with confirming indicators</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The Center of Gravity works well when combined with:</p>
+  <ul>
+    <li><strong>RSI:</strong> Confirm overbought/oversold conditions</li>
+    <li><strong>MACD:</strong> Validate momentum shifts</li>
+    <li><strong>Support/Resistance:</strong> CG extremes often occur at key levels</li>
+    <li><strong>Volume:</strong> Confirm CG signals with volume analysis</li>
+    <li><strong>Ehlers Indicators:</strong> Combine with other Ehlers tools for complete analysis</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Cg in Rust
-let result = indicators::cg(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Center of Gravity indicator applies the physical concept of center of mass to price data. In physics, the 
+    center of gravity is the point where an object's weight is evenly distributed. John Ehlers adapted this concept 
+    to financial markets by treating price bars as having "weight" based on their position in time, with recent 
+    prices carrying more weight than older ones.
+  </p>
+  <p>
+    The mathematical elegance of the CG lies in its use of linear weighting combined with normalization. This creates 
+    a naturally smooth oscillator that responds quickly to price changes while filtering out market noise. The 
+    position-based weighting (newest = highest weight) ensures the indicator remains responsive, while the 
+    normalization process creates consistent output regardless of price levels, making it suitable for any market.
+  </p>
+
 </IndicatorLayout>

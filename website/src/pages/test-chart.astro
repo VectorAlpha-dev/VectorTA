@@ -1,0 +1,45 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { SimplePriceChart } from '../components/charts/SimplePriceChart';
+import { PriceChart } from '../components/charts/PriceChart';
+---
+
+<BaseLayout title="Chart Test" description="Testing TradingView Charts">
+  <div class="container mx-auto p-8">
+    <h1 class="text-3xl font-bold mb-8">TradingView Chart Test</h1>
+    
+    <div class="space-y-8">
+      <div>
+        <h2 class="text-2xl font-semibold mb-4">Simple Chart (Dummy Data)</h2>
+        <div class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
+          <SimplePriceChart client:load height={400} />
+        </div>
+      </div>
+      
+      <div>
+        <h2 class="text-2xl font-semibold mb-4">Price Chart (CSV Data)</h2>
+        <div class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
+          <PriceChart client:load height={400} />
+        </div>
+      </div>
+      
+      <div>
+        <h2 class="text-2xl font-semibold mb-4">Basic React Test</h2>
+        <div class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
+          <div id="react-test"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</BaseLayout>
+
+<script>
+  // Test if React components are loading
+  console.log('Test chart page loaded');
+  
+  // Check if the chart containers exist
+  setTimeout(() => {
+    const containers = document.querySelectorAll('[data-astro-cid-]');
+    console.log('Found', containers.length, 'Astro components');
+  }, 1000);
+</script>

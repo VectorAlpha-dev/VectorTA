@@ -2,16 +2,31 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'apo';
-const indicatorName = 'Absolute Price Oscillator';
-const description = `Technical analysis indicator: Absolute Price Oscillator`;
+const indicatorName = 'Absolute Price Oscillator (APO)';
+const description = `The Absolute Price Oscillator (APO) is a momentum indicator that measures the difference between two exponential moving averages in absolute price terms. Unlike its percentage-based counterpart (PPO), the APO provides the actual price difference, making it useful for comparing momentum across different time periods of the same security.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "fast_period",
     "type": "number",
-    "default": 14,
+    "default": 12,
     "min": 2,
+    "max": 50,
+    "description": "Period for the fast EMA"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 26,
+    "min": 10,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Period for the slow EMA"
+  },
+  {
+    "name": "ma_type",
+    "type": "string",
+    "default": "EMA",
+    "options": ["SMA", "EMA"],
+    "description": "Type of moving average to use"
   }
 ];
 ---
@@ -23,22 +38,133 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Absolute Price Oscillator (APO) is a momentum indicator that displays the difference between two exponential 
+    moving averages (EMAs) of a security's price in absolute terms. Similar in construction to the MACD indicator, 
+    the APO helps traders identify momentum changes, trend direction, and potential buy/sell signals.
+  </p>
+  <p>
+    Unlike the Percentage Price Oscillator (PPO) which expresses the difference as a percentage, the APO shows the 
+    actual price difference. This makes it particularly useful for analyzing a single security over time, though it 
+    cannot be used to compare momentum across securities with different price levels.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Absolute Price Oscillator helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The APO calculation is straightforward:</p>
+  <ol>
+    <li><strong>Calculate Fast EMA:</strong> Typically a 12-period EMA of closing prices</li>
+    <li><strong>Calculate Slow EMA:</strong> Typically a 26-period EMA of closing prices</li>
+    <li><strong>Calculate APO:</strong> Subtract the slow EMA from the fast EMA</li>
+    <li><strong>Signal Line (optional):</strong> 9-period EMA of the APO values</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      APO = EMA(Close, Fast Period) - EMA(Close, Slow Period)<br/>
+      <br/>
+      Signal Line = EMA(APO, 9)<br/>
+      <br/>
+      Histogram = APO - Signal Line
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Absolute Values:</strong> Shows actual price differences, not percentages</li>
+    <li><strong>Zero-Line Oscillator:</strong> Oscillates above and below zero</li>
+    <li><strong>Trend Indicator:</strong> Positive values indicate uptrend, negative indicate downtrend</li>
+    <li><strong>Momentum Gauge:</strong> Distance from zero indicates momentum strength</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Absolute Price Oscillator to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Basic Signals</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Zero Line Crossovers:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bullish:</strong> APO crosses above zero (fast EMA crosses above slow EMA)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Bearish:</strong> APO crosses below zero (fast EMA crosses below slow EMA)</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Signal Line Crossovers:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bullish:</strong> APO crosses above its signal line</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Bearish:</strong> APO crosses below its signal line</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Divergences:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Bullish Divergence:</strong> Price makes lower lows while APO makes higher lows</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Bearish Divergence:</strong> Price makes higher highs while APO makes lower highs</li>
+    </ul>
+  </div>
+
+  <h3>Advanced Interpretation</h3>
+  <ul>
+    <li><strong>Momentum Strength:</strong> 
+      <ul>
+        <li>Increasing positive values: Strengthening upward momentum</li>
+        <li>Decreasing positive values: Weakening upward momentum</li>
+        <li>Increasing negative values: Strengthening downward momentum</li>
+        <li>Decreasing negative values: Weakening downward momentum</li>
+      </ul>
+    </li>
+    <li><strong>Centerline Pullbacks:</strong> In strong trends, APO pullbacks to zero often present entry opportunities</li>
+    <li><strong>Extreme Readings:</strong> Very high or low APO values may indicate overbought/oversold conditions</li>
+  </ul>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Following:</strong> Trade in direction of APO (long when positive, short when negative)</li>
+    <li><strong>Crossover System:</strong> Enter on signal line crossovers in direction of the trend</li>
+    <li><strong>Divergence Trading:</strong> Look for divergences near support/resistance levels</li>
+    <li><strong>Momentum Confirmation:</strong> Use APO to confirm breakouts from chart patterns</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Simple and easy to interpret</li>
+    <li>Provides clear trend direction signals</li>
+    <li>Shows actual price differences for position sizing</li>
+    <li>Works well in trending markets</li>
+    <li>Can be customized with different MA types and periods</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Cannot compare across securities with different prices</li>
+    <li>Lagging indicator due to moving average basis</li>
+    <li>Can produce whipsaws in ranging markets</li>
+    <li>Absolute values make historical comparisons difficult during price changes</li>
+    <li>Less popular than MACD or PPO</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The APO works well when combined with:</p>
+  <ul>
+    <li><strong>RSI or Stochastic:</strong> For overbought/oversold confirmation</li>
+    <li><strong>Volume Indicators:</strong> To confirm momentum with volume</li>
+    <li><strong>Support/Resistance:</strong> APO signals are more reliable near key levels</li>
+    <li><strong>ADX:</strong> To confirm trend strength when APO shows direction</li>
+    <li><strong>Bollinger Bands:</strong> For volatility context</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Absolute Price Oscillator in Rust
-let result = indicators::apo(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The APO is essentially the MACD line without the signal line and histogram components shown by default. 
+    It represents the convergence and divergence of two moving averages in absolute price terms. When the 
+    fast EMA is above the slow EMA, the oscillator is positive, indicating upward momentum.
+  </p>
+  <p>
+    The choice of 12 and 26 periods comes from the original MACD design, representing approximately two weeks 
+    and one month of trading days. These periods can be adjusted based on trading style and timeframe, with 
+    shorter periods providing more responsive but potentially noisier signals.
+  </p>
+
 </IndicatorLayout>

@@ -20,7 +20,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes, alloc_with_nan_prefix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,6 +28,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for TilsonInput<'a> {
     #[inline(always)]
@@ -223,36 +224,39 @@ pub fn tilson_with_kernel(input: &TilsonInput, kernel: Kernel) -> Result<TilsonO
         other => other,
     };
 
+    let lookback_total = 6 * (period - 1);        // first real value appears here
+    let warm           = first + lookback_total;
+    let mut out        = alloc_with_nan_prefix(len, warm);
+
+    // ----------- run the chosen kernel, filling `out` in-place
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                tilson_scalar(data, period, v_factor, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Scalar | Kernel::ScalarBatch =>
+                tilson_scalar (data, period, v_factor, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                tilson_avx2(data, period, v_factor, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Avx2   | Kernel::Avx2Batch   =>
+                tilson_avx2 (data, period, v_factor, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                tilson_avx512(data, period, v_factor, first, &mut vec![f64::NAN; len])
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch =>
+                tilson_avx512(data, period, v_factor, first, &mut out),
             _ => unreachable!(),
-        }
+        }?;    // <-- OK!
     }
+
+    Ok(TilsonOutput { values: out })
 }
 
 #[inline]
 pub fn tilson_scalar(
-    data: &[f64],
-    period: usize,
-    v_factor: f64,
+    data:        &[f64],
+    period:      usize,
+    v_factor:    f64,
     first_valid: usize,
-    out: &mut [f64],
-) -> Result<TilsonOutput, TilsonError> {
-    let len = data.len();
+    out:         &mut [f64],
+) -> Result<(), TilsonError> {
+    let len            = data.len();
     let lookback_total = 6 * (period - 1);
-
-    let mut values = vec![f64::NAN; len];
+    debug_assert_eq!(len, out.len());
 
     if len == 0 || period == 0 || v_factor.is_nan() || v_factor.is_infinite() || len - first_valid < period {
         return Err(TilsonError::InvalidPeriod { period, data_len: len });
@@ -341,7 +345,7 @@ pub fn tilson_scalar(
 
     let mut idx = start_idx;
     if idx < len {
-        values[idx] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
+        out[idx]    = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
     }
     idx += 1;
 
@@ -354,14 +358,14 @@ pub fn tilson_scalar(
         e6 = k * e5 + one_minus_k * e6;
 
         if idx < len {
-            values[idx] = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
+            out[idx]    = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
         }
 
         today += 1;
         idx += 1;
     }
 
-    Ok(TilsonOutput { values })
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -372,7 +376,7 @@ pub fn tilson_avx512(
     v_factor: f64,
     first_valid: usize,
     out: &mut [f64],
-) -> Result<TilsonOutput, TilsonError> {
+) -> Result<(), TilsonError> {
     tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
@@ -383,7 +387,7 @@ pub fn tilson_avx2(
     v_factor: f64,
     first_valid: usize,
     out: &mut [f64],
-) -> Result<TilsonOutput, TilsonError> {
+) -> Result<(), TilsonError> {
     tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
@@ -395,7 +399,7 @@ pub unsafe fn tilson_avx512_short(
     v_factor: f64,
     first_valid: usize,
     out: &mut [f64],
-) -> Result<TilsonOutput, TilsonError> {
+) -> Result<(), TilsonError> {
     tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
@@ -407,7 +411,7 @@ pub unsafe fn tilson_avx512_long(
     v_factor: f64,
     first_valid: usize,
     out: &mut [f64],
-) -> Result<TilsonOutput, TilsonError> {
+) -> Result<(), TilsonError> {
     tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
@@ -599,28 +603,43 @@ fn tilson_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + 6 * (c.period.unwrap() - 1))
+        .collect();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    // ------------- 1. allocate uninitialised & stamp NaN prefixes
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ------------- 2. worker that fills ONE row -------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period   = combos[row].period.unwrap();
         let v_factor = combos[row].volume_factor.unwrap();
-        tilson_row_scalar(data, first, period, v_factor, out_row)
+
+        // cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+        tilson_row_scalar(data, first, period, v_factor, out_row);
     };
 
+    // ------------- 3. run every row in (parallel) iterator ---
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(TilsonBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    // ------------- 4. transmute to a plain Vec<f64> ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+
+    Ok(TilsonBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]
@@ -631,10 +650,7 @@ pub unsafe fn tilson_row_scalar(
     v_factor: f64,
     out: &mut [f64],
 ) {
-    let result = tilson_scalar(data, period, v_factor, first, out);
-    if let Ok(TilsonOutput { values }) = result {
-        out.copy_from_slice(&values[..out.len()]);
-    }
+    tilson_scalar(data, period, v_factor, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

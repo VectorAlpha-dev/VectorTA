@@ -25,13 +25,14 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for VpwmaInput<'a> {
     #[inline(always)]
@@ -217,8 +218,8 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
     }
     let inv_norm = 1.0 / norm;
 
-    // Initialize all outputs to NaN; we only overwrite from index (first + win_len) onward
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -616,33 +617,50 @@ fn vpwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let mut values = vec![f64::NAN; rows * cols];
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // --- 2.  allocate an uninitialised rows×cols matrix and stamp the prefixes --
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // --- 3.  closure that fills ONE row; it works on &mut [MaybeUninit<f64>] ----
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let win_len = period - 1;
-        let w_ptr = flat_w.as_ptr().add(row * max_p);
-        let inv_n = *inv_norms.get_unchecked(row);
+        let w_ptr  = flat_w.as_ptr().add(row * max_p);
+        let inv_n  = *inv_norms.get_unchecked(row);
+
+        // Cast just this row to &mut [f64] so the row-kernel can write into it.
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
             Kernel::Scalar => vpwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => vpwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2   => vpwma_row_avx2  (data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => vpwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
             _ => unreachable!(),
         }
     };
 
+    // --- 4.  run every row (parallel or serial) ---------------------------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // --- 5.  all elements are initialised; transmute into Vec<f64> --------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(VpwmaBatchOutput {
         values,

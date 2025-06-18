@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'aroon';
-const indicatorName = 'Aroon';
-const description = `Create a new streaming Aroon indicator. The Aroon indicator identifies trend changes and the strength of a trend.`;
+const indicatorName = 'Aroon Indicator';
+const description = `The Aroon Indicator is a technical analysis tool that measures the time between highs and lows over a given period. Developed by Tushar Chande in 1995, it consists of two lines (Aroon Up and Aroon Down) that help identify trend changes, trend strength, and potential consolidation periods.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 25,
+    "min": 10,
+    "max": 100,
+    "description": "Number of periods to look back for highs and lows"
   }
 ];
 ---
@@ -23,22 +23,145 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Aroon Indicator, developed by Tushar Chande in 1995, is a unique technical analysis tool that measures the time 
+    elapsed since the most recent high and low within a given period. Named after the Sanskrit word for "dawn's early light," 
+    the indicator is designed to reveal the beginning of a new trend.
+  </p>
+  <p>
+    Unlike most indicators that focus on price or volume, Aroon focuses on time, making it particularly useful for 
+    identifying when a trend is likely to begin or end. The indicator consists of two lines: Aroon Up (measuring time 
+    since the last high) and Aroon Down (measuring time since the last low), both oscillating between 0 and 100.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Aroon helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>The Aroon Indicator calculates two separate lines:</p>
+  <ol>
+    <li><strong>Aroon Up:</strong> Measures how long ago (in periods) the highest high occurred</li>
+    <li><strong>Aroon Down:</strong> Measures how long ago (in periods) the lowest low occurred</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Aroon Up = ((Period - Periods Since Highest High) / Period) × 100<br/>
+      <br/>
+      Aroon Down = ((Period - Periods Since Lowest Low) / Period) × 100<br/>
+      <br/>
+      Where:<br/>
+      - Period = Lookback period (typically 25)<br/>
+      - Values range from 0 to 100
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Time-Based:</strong> Measures time elapsed rather than price movement</li>
+    <li><strong>Dual Lines:</strong> Separate indicators for uptrend and downtrend strength</li>
+    <li><strong>Bounded Oscillator:</strong> Values always between 0 and 100</li>
+    <li><strong>Early Trend Detection:</strong> Designed to identify trend changes early</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Aroon to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Value Interpretation</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Aroon Values:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">70-100:</strong> Strong trend in that direction</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">50-70:</strong> Trending market</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">30-50:</strong> Consolidating or weak trend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">0-30:</strong> Trend weakness or reversal potential</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Aroon Up > 70 & Aroon Down < 30:</strong> Strong uptrend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Aroon Down > 70 & Aroon Up < 30:</strong> Strong downtrend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Both lines below 50:</strong> Consolidation phase</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Crossovers:</strong> Potential trend changes</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Confirmation:</strong>
+      <ul>
+        <li>Buy when Aroon Up crosses above 50 while Aroon Down is below 50</li>
+        <li>Sell when Aroon Down crosses above 50 while Aroon Up is below 50</li>
+      </ul>
+    </li>
+    <li><strong>Extreme Readings:</strong>
+      <ul>
+        <li>Aroon Up at 100: New high just occurred, strong uptrend</li>
+        <li>Aroon Down at 100: New low just occurred, strong downtrend</li>
+      </ul>
+    </li>
+    <li><strong>Crossover Signals:</strong>
+      <ul>
+        <li>Bullish: Aroon Up crosses above Aroon Down</li>
+        <li>Bearish: Aroon Down crosses above Aroon Up</li>
+      </ul>
+    </li>
+    <li><strong>Consolidation Identification:</strong> Both lines between 0-50 indicate ranging market</li>
+  </ul>
+
+  <h3>Advanced Interpretation</h3>
+  <ul>
+    <li><strong>Parallel Movement:</strong> When both lines move together, indicates strong trending behavior</li>
+    <li><strong>Three-Phase System:</strong>
+      <ol>
+        <li>Aroon Up/Down reaches 100 (new trend emerging)</li>
+        <li>Stays above 70 (trend confirmation)</li>
+        <li>Falls below 50 (trend weakening)</li>
+      </ol>
+    </li>
+    <li><strong>Divergence:</strong> Price making new highs/lows while Aroon fails to reach 100</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Unique time-based approach provides different perspective</li>
+    <li>Clear signals for trend strength and direction</li>
+    <li>Excellent for identifying consolidation periods</li>
+    <li>Works well in trending markets</li>
+    <li>Simple to interpret with bounded values</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can give false signals in choppy markets</li>
+    <li>Lagging indicator by nature</li>
+    <li>Less effective in ranging markets with no clear highs/lows</li>
+    <li>Period selection significantly affects signals</li>
+    <li>Should be combined with other indicators for confirmation</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>The Aroon Indicator works well when combined with:</p>
+  <ul>
+    <li><strong>ADX:</strong> Aroon for direction, ADX for trend strength confirmation</li>
+    <li><strong>Moving Averages:</strong> Use Aroon to time MA crossover trades</li>
+    <li><strong>Support/Resistance:</strong> Aroon signals more reliable near key levels</li>
+    <li><strong>Volume Indicators:</strong> Confirm Aroon signals with volume</li>
+    <li><strong>Oscillators (RSI, Stochastic):</strong> For additional entry/exit timing</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Aroon in Rust
-let result = indicators::aroon(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The Aroon Indicator's mathematical elegance lies in its normalization of time. By converting the number of periods 
+    since a high or low into a 0-100 scale, it makes trends comparable across different timeframes and securities. 
+    The formula essentially measures how "recent" the last extreme price was as a percentage of the lookback period.
+  </p>
+  <p>
+    The choice of 25 periods as the default is based on approximately one month of trading days, providing a good 
+    balance between responsiveness and reliability. The indicator's strength is that it doesn't care about the 
+    magnitude of price movements, only their recency, making it equally effective for volatile and stable instruments.
+  </p>
+
 </IndicatorLayout>

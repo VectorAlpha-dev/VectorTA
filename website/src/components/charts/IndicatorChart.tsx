@@ -1,140 +1,251 @@
+// src/components/charts/IndicatorChart.tsx
 import { useEffect, useRef, useState } from 'react';
-import { createChart, IChartApi, ColorType } from 'lightweight-charts';
-import { talib } from '../../lib/mock-wasm';
-import type { OHLCV } from '../../lib/utils/data-loader-client';
+import {
+  createChart,
+  ColorType,
+  CandlestickSeries,
+  HistogramSeries,
+  LineSeries,
+  type IChartApi,
+  type UTCTimestamp,
+  type CandlestickData,
+} from 'lightweight-charts';
+import { loadCSVData } from '../../lib/utils/csv-data-loader'; // ← this one
 
 interface IndicatorChartProps {
-  indicatorId: string;
-  data: OHLCV[];
-  parameters: Record<string, any>;
-  darkMode?: boolean;
+  height?: number;
+  indicatorData?: number[];
+  indicatorType?: 'line' | 'histogram';
+  indicatorColor?: string;
 }
 
-export function IndicatorChart({ indicatorId, data, parameters, darkMode = false }: IndicatorChartProps) {
-  const chartContainerRef = useRef<HTMLDivElement>(null);
+export function IndicatorChart({
+  height = 500,
+  indicatorData,
+  indicatorType = 'line',
+  indicatorColor = '#3b82f6',
+}: IndicatorChartProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isDark, setIsDark] = useState(false);
+  const [chartData, setChartData] = useState<any[]>([]);
 
+  // Detect theme changes
   useEffect(() => {
-    if (!chartContainerRef.current || !data || data.length === 0) return;
+    const checkTheme = () => {
+      setIsDark(document.documentElement.classList.contains('dark'));
+    };
+    
+    checkTheme();
+    
+    // Watch for theme changes
+    const observer = new MutationObserver(checkTheme);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    
+    return () => observer.disconnect();
+  }, []);
 
-    // Create chart
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: 500,
+  // Load data only once
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        setIsLoading(true);
+        const candles = await loadCSVData('/2018-09-01-2024-Bitfinex_Spot-4h.csv');
+        if (!candles.length) throw new Error('No valid candle data');
+        setChartData(candles);
+      } catch (err) {
+        console.error('Failed to load data', err);
+        setError(err instanceof Error ? err.message : 'Failed to load chart data');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    loadData();
+  }, []);
+
+  // Update chart when theme changes
+  useEffect(() => {
+    if (chartRef.current && !isLoading) {
+      chartRef.current.applyOptions({
+        layout: {
+          background: { type: ColorType.Solid, color: isDark ? '#111827' : '#ffffff' },
+          textColor: isDark ? '#e5e7eb' : '#374151',
+        },
+        grid: {
+          vertLines: { color: isDark ? '#374151' : '#e5e7eb' },
+          horzLines: { color: isDark ? '#374151' : '#e5e7eb' },
+        },
+        rightPriceScale: { borderColor: isDark ? '#374151' : '#e5e7eb' },
+        timeScale: {
+          borderColor: isDark ? '#374151' : '#e5e7eb',
+        },
+      });
+    }
+  }, [isDark]);
+
+  // Create chart
+  useEffect(() => {
+    if (!containerRef.current || chartData.length === 0) return;
+
+    /* Create the chart */
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
       layout: {
-        background: { type: ColorType.Solid, color: darkMode ? '#1a1a1a' : '#ffffff' },
-        textColor: darkMode ? '#d1d5db' : '#333',
+        background: { type: ColorType.Solid, color: isDark ? '#111827' : '#ffffff' },
+        textColor: isDark ? '#e5e7eb' : '#374151',
       },
       grid: {
-        vertLines: { color: darkMode ? '#2a2a2a' : '#e0e0e0' },
-        horzLines: { color: darkMode ? '#2a2a2a' : '#e0e0e0' },
+        vertLines: { color: isDark ? '#374151' : '#e5e7eb' },
+        horzLines: { color: isDark ? '#374151' : '#e5e7eb' },
       },
-      crosshair: {
-        mode: 0,
-      },
-      rightPriceScale: {
-        borderColor: darkMode ? '#2a2a2a' : '#e0e0e0',
-      },
+      crosshair: { mode: 0 },
+      rightPriceScale: { borderColor: isDark ? '#374151' : '#e5e7eb' },
       timeScale: {
-        borderColor: darkMode ? '#2a2a2a' : '#e0e0e0',
+        borderColor: isDark ? '#374151' : '#e5e7eb',
         timeVisible: true,
         secondsVisible: false,
       },
     });
-
     chartRef.current = chart;
 
-    // Add candlestick series
-    const candlestickSeries = chart.addCandlestickSeries({
-      upColor: '#26a69a',
-      downColor: '#ef5350',
+    /* Candles */
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#10b981',
+      downColor: '#ef4444',
+      wickUpColor: '#10b981',
+      wickDownColor: '#ef4444',
       borderVisible: false,
-      wickUpColor: '#26a69a',
-      wickDownColor: '#ef5350',
     });
+    candleSeries.setData(chartData);
 
-    candlestickSeries.setData(data);
+    /* Volume */
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: 'volume' },
+      priceScaleId: '',
+    });
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0 },
+    });
+    volumeSeries.setData(
+      chartData.map((bar) => ({
+        time: bar.time as UTCTimestamp,
+        value: bar.volume ?? 0,
+        color: bar.close >= bar.open ? '#10b98140' : '#ef444440',
+      })),
+    );
 
-    // Calculate and add indicator
-    try {
-      const indicatorData = talib.calculate(indicatorId, data, parameters);
-      
-      if (Array.isArray(indicatorData)) {
-        // Single line indicator
-        addLineSeries(chart, indicatorData, data, 'Indicator', '#2962ff');
-      } else if (typeof indicatorData === 'object') {
-        // Multi-line indicator (like Bollinger Bands, MACD)
-        const colors = ['#2962ff', '#ff6b6b', '#4ecdc4', '#ffe66d'];
-        let colorIndex = 0;
-        
-        Object.entries(indicatorData).forEach(([key, values]) => {
-          if (Array.isArray(values)) {
-            addLineSeries(
-              chart, 
-              values as (number | null)[], 
-              data, 
-              key.charAt(0).toUpperCase() + key.slice(1),
-              colors[colorIndex++ % colors.length]
-            );
-          }
-        });
-      }
-      
-      setIsLoading(false);
-    } catch (error) {
-      console.error('Error calculating indicator:', error);
-      setIsLoading(false);
+    /* Optional indicator */
+    if (indicatorData?.length) {
+      const len = Math.min(indicatorData.length, chartData.length);
+      const base = chartData.slice(-len);
+
+      const series =
+        indicatorType === 'histogram'
+          ? chart.addSeries(HistogramSeries, { priceScaleId: 'left' })
+          : chart.addSeries(LineSeries, {
+              color: indicatorColor,
+              lineWidth: 2,
+              priceScaleId: 'left',
+            });
+
+      series.setData(
+        base.map((bar, i) =>
+          indicatorType === 'histogram'
+            ? {
+                time: bar.time,
+                value: indicatorData[i],
+                color: indicatorData[i] >= 0 ? '#10b981' : '#ef4444',
+              }
+            : { time: bar.time, value: indicatorData[i] },
+        ),
+      );
     }
 
-    // Handle resize
+    chart.timeScale().fitContent();
+
+    /* Resize handler */
     const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      if (containerRef.current && chart) {
+        chart.applyOptions({ width: containerRef.current.clientWidth });
       }
     };
-
     window.addEventListener('resize', handleResize);
 
+    // Cleanup function
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
     };
-  }, [indicatorId, data, parameters, darkMode]);
+  }, [height, indicatorData, indicatorType, indicatorColor, chartData]);
 
-  function addLineSeries(
-    chart: IChartApi,
-    values: (number | null)[],
-    ohlcv: OHLCV[],
-    title: string,
-    color: string
-  ) {
-    const lineSeries = chart.addLineSeries({
-      color,
-      lineWidth: 2,
-      title,
-      crosshairMarkerVisible: true,
-      crosshairMarkerRadius: 5,
-    });
+  const handleScrollToStart = () => {
+    if (chartRef.current && chartData.length > 0) {
+      const firstTime = chartData[0].time;
+      const range = 100; // Show first 100 candles
+      const endTime = chartData[Math.min(range, chartData.length - 1)].time;
+      chartRef.current.timeScale().setVisibleRange({
+        from: firstTime as UTCTimestamp,
+        to: endTime as UTCTimestamp,
+      });
+    }
+  };
 
-    const lineData = values
-      .map((value, index) => ({
-        time: ohlcv[index]?.time,
-        value,
-      }))
-      .filter(item => item.value !== null && item.time !== undefined);
-
-    lineSeries.setData(lineData as any);
-  }
+  const handleScrollToEnd = () => {
+    if (chartRef.current && chartData.length > 0) {
+      const range = 100; // Show last 100 candles
+      const startIndex = Math.max(0, chartData.length - range);
+      const startTime = chartData[startIndex].time;
+      const endTime = chartData[chartData.length - 1].time;
+      chartRef.current.timeScale().setVisibleRange({
+        from: startTime as UTCTimestamp,
+        to: endTime as UTCTimestamp,
+      });
+    }
+  };
 
   return (
-    <div className="relative">
+    <div className="relative w-full">
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-gray-900/80 z-10">
-          <div className="text-gray-600 dark:text-gray-400">Loading chart...</div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500" />
         </div>
       )}
-      <div ref={chartContainerRef} className="w-full" />
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-gray-900/80 z-10">
+          <div className="text-red-500">{error}</div>
+        </div>
+      )}
+      <div ref={containerRef} style={{ height }} />
+      
+      {/* Navigation controls */}
+      {!isLoading && !error && chartData.length > 0 && (
+        <>
+          <button
+            onClick={handleScrollToStart}
+            className="absolute left-2 bottom-12 p-2 bg-white/90 dark:bg-gray-800/90 rounded-full shadow-md hover:shadow-lg transition-all hover:bg-white dark:hover:bg-gray-800 border border-gray-200 dark:border-gray-700 z-10"
+            title="Go to start"
+          >
+            <svg className="w-5 h-5 text-gray-700 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <button
+            onClick={handleScrollToEnd}
+            className="absolute right-20 bottom-12 p-2 bg-white/90 dark:bg-gray-800/90 rounded-full shadow-md hover:shadow-lg transition-all hover:bg-white dark:hover:bg-gray-800 border border-gray-200 dark:border-gray-700 z-10"
+            title="Go to end"
+          >
+            <svg className="w-5 h-5 text-gray-700 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        </>
+      )}
     </div>
   );
 }

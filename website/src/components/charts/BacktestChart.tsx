@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { createChart, IChartApi, ColorType } from 'lightweight-charts';
+import { createChart, ColorType } from 'lightweight-charts';
+import type { IChartApi } from 'lightweight-charts';
 import { talib } from '../../lib/mock-wasm';
 
 export function BacktestChart() {

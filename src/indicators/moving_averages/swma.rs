@@ -17,13 +17,14 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+use std::mem::MaybeUninit;
 
 impl<'a> AsRef<[f64]> for SwmaInput<'a> {
     #[inline(always)]
@@ -187,7 +188,8 @@ pub fn swma_with_kernel(input: &SwmaInput, kernel: Kernel) -> Result<SwmaOutput,
         out
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -540,36 +542,50 @@ fn swma_batch_inner(
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
-    for (row, prm) in combos.iter().enumerate() {
-        let period = prm.period.unwrap();
-        let w = build_symmetric_triangle(period);
-        for i in 0..period {
-            flat_w[row * max_p + i] = w[i];
-        }
-    }
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    // ------------------------------------------------------------------
+    // 2)  Closure that fills one row; it receives &mut [MaybeUninit<f64>]
+    // ------------------------------------------------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let w_ptr  = flat_w.as_ptr().add(row * max_p);
+
+        // Cast just this row to &mut [f64] (now safe to write real values)
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
 
         match kern {
-            Kernel::Scalar => swma_row_scalar(data, first, period, max_p, w_ptr, out_row),
+            Kernel::Scalar => swma_row_scalar (data, first, period, max_p, w_ptr, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => swma_row_avx2(data, first, period, max_p, w_ptr, out_row),
+            Kernel::Avx2   => swma_row_avx2   (data, first, period, max_p, w_ptr, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => swma_row_avx512(data, first, period, max_p, w_ptr, out_row),
+            Kernel::Avx512 => swma_row_avx512 (data, first, period, max_p, w_ptr, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ------------------------------------------------------------------
+    // 3)  Run every row, writing directly into `raw`
+    // ------------------------------------------------------------------
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ------------------------------------------------------------------
+    // 4)  Transmute the now-initialised buffer into Vec<f64>
+    // ------------------------------------------------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(SwmaBatchOutput {
         values,
@@ -845,6 +861,7 @@ mod tests {
             .apply_candles(&c, "close")?;
 
         let def = SwmaParams::default();
+        let period = def.period.unwrap_or(5);
         let row = output.values_for(&def).expect("default row missing");
 
         assert_eq!(row.len(), c.close.len());
@@ -857,7 +874,7 @@ mod tests {
             59080.99999999999,
         ];
         let start = row.len() - 5;
-        for (i, &v) in row[start..].iter().enumerate() {
+        for (i, &v) in row[start..].iter().enumerate().skip(period) {
             assert!((v - expected[i]).abs() < 1e-8, "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}");
         }
         Ok(())

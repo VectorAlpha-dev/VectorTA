@@ -17,7 +17,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 use std::convert::AsRef;
+use std::mem::MaybeUninit;
 
 #[derive(Debug, Clone)]
 pub enum VwmaData<'a> {
@@ -203,7 +204,8 @@ pub fn vwma_with_kernel(input: &VwmaInput, kernel: Kernel) -> Result<VwmaOutput,
         });
     }
 
-    let mut out = vec![f64::NAN; len];
+    let warm   = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -397,6 +399,7 @@ pub fn vwma_batch_par_slice(
     vwma_batch_inner(price, volume, sweep, kern, true)
 }
 
+#[inline]
 fn vwma_batch_inner(
     price: &[f64],
     volume: &[f64],
@@ -404,55 +407,71 @@ fn vwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VwmaBatchOutput, VwmaError> {
+    // ---------- 0. parameter checks ----------
     let combos = expand_grid_vwma(sweep);
     if combos.is_empty() {
         return Err(VwmaError::InvalidPeriod { period: 0, data_len: 0 });
     }
-    let len = price.len();
+
+    let len   = price.len();
     let first = price
         .iter()
         .zip(volume.iter())
         .position(|(&p, &v)| !p.is_nan() && !v.is_nan())
         .ok_or(VwmaError::AllValuesNaN)?;
+
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if len - first < max_p {
         return Err(VwmaError::NotEnoughValidData {
             needed: max_p,
-            valid: len - first,
+            valid : len - first,
         });
     }
+
+    // ---------- 1. allocate matrix as MaybeUninit<f64> + write NaN prefixes ----------
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
+    let warm_prefixes: Vec<usize> =
+        combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    let mut raw = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm_prefixes) };
+
+    // ---------- 2. row worker (fills one row) ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // Cast the `MaybeUninit` slice for this row to a plain `f64` slice.
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => vwma_row_scalar(price, volume, first, period, out_row),
+            Kernel::Scalar => vwma_row_scalar (price, volume, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => vwma_row_avx2(price, volume, first, period, out_row),
+            Kernel::Avx2   => vwma_row_avx2   (price, volume, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => vwma_row_avx512(price, volume, first, period, out_row),
+            Kernel::Avx512 => vwma_row_avx512 (price, volume, first, period, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---------- 3. run every row ----------
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        raw.par_chunks_mut(cols)
+           .enumerate()
+           .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(VwmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+
+    // ---------- 4. transmute to Vec<f64> & return ----------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+    Ok(VwmaBatchOutput { values, combos, rows, cols })
 }
 
 #[inline(always)]

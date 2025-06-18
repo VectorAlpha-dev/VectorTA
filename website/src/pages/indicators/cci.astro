@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'cci';
-const indicatorName = 'Commodity Channel Index';
-const description = `Technical analysis indicator: Commodity Channel Index`;
+const indicatorName = 'Commodity Channel Index (CCI)';
+const description = `The Commodity Channel Index (CCI) is a versatile momentum oscillator developed by Donald Lambert in 1980. Originally designed for commodities, it measures the deviation of price from its statistical mean, helping identify cyclical trends and overbought/oversold conditions across all financial markets.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 20,
+    "min": 10,
+    "max": 50,
+    "description": "Number of periods for typical price average and mean deviation"
   }
 ];
 ---
@@ -23,22 +23,149 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Commodity Channel Index (CCI), developed by Donald Lambert in 1980, is a momentum-based oscillator that 
+    measures how far the current price has deviated from its average price over a given period. Despite its name 
+    suggesting commodity-specific use, the CCI has proven equally effective across stocks, forex, and other markets, 
+    making it one of the most versatile technical indicators.
+  </p>
+  <p>
+    The genius of CCI lies in its statistical approach. By normalizing price deviations using mean absolute deviation, 
+    it creates a scale where approximately 70-80% of values fall between -100 and +100. This makes movements beyond 
+    these thresholds statistically significant, providing clear signals for traders to identify potential turning 
+    points and trend continuations.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Commodity Channel Index identifies cyclical trends in a security. It measures the variation of a security's price from its statistical mean.</p>
+  <h2>How It Works</h2>
+  <p>CCI calculation involves several statistical steps:</p>
+  <ol>
+    <li><strong>Calculate Typical Price:</strong> (High + Low + Close) / 3</li>
+    <li><strong>Calculate SMA:</strong> Simple moving average of Typical Price</li>
+    <li><strong>Calculate Mean Deviation:</strong> Average absolute deviation from SMA</li>
+    <li><strong>Apply Lambert's Constant:</strong> Normalize with 0.015 factor</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Typical Price (TP) = (High + Low + Close) / 3<br/>
+      <br/>
+      SMA = Σ(TP) / n<br/>
+      <br/>
+      Mean Deviation (MD) = Σ|TP - SMA| / n<br/>
+      <br/>
+      CCI = (TP - SMA) / (0.015 × MD)<br/>
+      <br/>
+      Where:<br/>
+      n = period (typically 20)<br/>
+      0.015 = Lambert's constant for scaling
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Unbounded Oscillator:</strong> No fixed upper or lower limits</li>
+    <li><strong>Statistical Basis:</strong> Uses mean deviation for normalization</li>
+    <li><strong>Cyclical Detection:</strong> Identifies market cycles effectively</li>
+    <li><strong>Multi-Purpose:</strong> Works as trend, momentum, and divergence indicator</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Commodity Channel Index to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Traditional Levels</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Key Levels:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Above +100:</strong> Overbought territory (potential sell zone)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">+100 to 0:</strong> Bullish momentum zone</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">0 to -100:</strong> Bearish momentum zone</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below -100:</strong> Oversold territory (potential buy zone)</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">Buy Signal:</strong> CCI crosses above -100 from below</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Sell Signal:</strong> CCI crosses below +100 from above</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Trend Confirmation:</strong> CCI above zero confirms uptrend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Divergences:</strong> Price/CCI divergences signal potential reversals</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Basic Overbought/Oversold:</strong>
+      <ul>
+        <li>Buy when CCI rises above -100 after being below</li>
+        <li>Sell when CCI falls below +100 after being above</li>
+      </ul>
+    </li>
+    <li><strong>Zero Line Cross:</strong>
+      <ul>
+        <li>Buy on cross above zero (momentum shift to bullish)</li>
+        <li>Sell on cross below zero (momentum shift to bearish)</li>
+      </ul>
+    </li>
+    <li><strong>Trend Following (Woodie's CCI):</strong>
+      <ul>
+        <li>Enter long when CCI stays above +100 for 2+ bars</li>
+        <li>Enter short when CCI stays below -100 for 2+ bars</li>
+      </ul>
+    </li>
+    <li><strong>Divergence Trading:</strong> Look for price/CCI divergences at extremes</li>
+  </ul>
+
+  <h3>Advanced Techniques</h3>
+  <ul>
+    <li><strong>Multiple Timeframes:</strong> Use longer CCI for trend, shorter for timing</li>
+    <li><strong>Extreme Readings:</strong> Values beyond ±200 often mark significant tops/bottoms</li>
+    <li><strong>Pattern Recognition:</strong> CCI forms similar patterns to price (H&S, triangles)</li>
+    <li><strong>Turbo CCI:</strong> Use 6-period CCI for scalping opportunities</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Works well in both trending and ranging markets</li>
+    <li>Early signal generation compared to other oscillators</li>
+    <li>Clear overbought/oversold levels</li>
+    <li>Excellent for identifying divergences</li>
+    <li>Statistically grounded methodology</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>Can remain overbought/oversold in strong trends</li>
+    <li>Whipsaws possible around zero line</li>
+    <li>Requires confirmation from other indicators</li>
+    <li>Less effective in low volatility markets</li>
+    <li>Period selection affects signal frequency</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>CCI works best when combined with:</p>
+  <ul>
+    <li><strong>Moving Averages:</strong> Trend filter for CCI signals</li>
+    <li><strong>RSI:</strong> Confirm overbought/oversold conditions</li>
+    <li><strong>Volume:</strong> Validate CCI breakouts with volume</li>
+    <li><strong>Support/Resistance:</strong> CCI extremes often occur at key levels</li>
+    <li><strong>ATR:</strong> Adjust CCI thresholds based on volatility</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Commodity Channel Index in Rust
-let result = indicators::cci(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    The CCI's mathematical foundation rests on statistical principles. Donald Lambert chose the 0.015 constant after 
+    extensive research to ensure that 70-80% of CCI values would fall between -100 and +100. This scaling factor, 
+    combined with the mean absolute deviation normalization, creates a statistically meaningful oscillator where 
+    movements beyond the ±100 thresholds represent significant deviations from the norm.
+  </p>
+  <p>
+    The use of Typical Price (HLC/3) rather than just closing price provides a more comprehensive view of each 
+    period's trading activity. This, combined with the mean deviation calculation, makes CCI particularly effective 
+    at identifying when prices have moved too far from their statistical average—the essence of cyclical analysis.
+  </p>
+
 </IndicatorLayout>

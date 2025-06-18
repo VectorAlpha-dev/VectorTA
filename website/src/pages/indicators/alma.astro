@@ -2,16 +2,32 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'alma';
-const indicatorName = 'Arnaud Legoux Moving Average';
-const description = `Technical analysis indicator: Arnaud Legoux Moving Average`;
+const indicatorName = 'Arnaud Legoux Moving Average (ALMA)';
+const description = `The Arnaud Legoux Moving Average (ALMA) is a sophisticated moving average that uses a Gaussian distribution to weight price data. Created by Arnaud Legoux and Dimitris Kouzis-Loukas, ALMA reduces lag while maintaining smoothness, offering traders a responsive yet stable trend-following indicator.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
+    "default": 9,
     "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "max": 100,
+    "description": "Window size for the moving average"
+  },
+  {
+    "name": "offset",
+    "type": "number",
+    "default": 0.85,
+    "min": 0,
+    "max": 1,
+    "description": "Gaussian center offset (0=beginning, 1=end of window)"
+  },
+  {
+    "name": "sigma",
+    "type": "number",
+    "default": 6,
+    "min": 0.1,
+    "max": 50,
+    "description": "Standard deviation for Gaussian distribution"
   }
 ];
 ---
@@ -23,22 +39,135 @@ const parameters = [
   parameters={parameters}
 >
   <h2>Overview</h2>
-  <p>{description}</p>
+  <p>
+    The Arnaud Legoux Moving Average (ALMA) is an advanced moving average indicator developed by Arnaud Legoux and 
+    Dimitris Kouzis-Loukas in 2009. Unlike traditional moving averages that apply equal or exponentially declining weights, 
+    ALMA uses a Gaussian (normal) distribution to weight price data, creating a unique balance between responsiveness and smoothness.
+  </p>
+  <p>
+    The key innovation of ALMA is its ability to significantly reduce lag compared to traditional moving averages while 
+    maintaining exceptional smoothness. This is achieved through the adjustable offset parameter, which allows traders to 
+    shift the weighting bias toward more recent or historical prices, effectively controlling the indicator's responsiveness.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Arnaud Legoux Moving Average helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
+  <h2>How It Works</h2>
+  <p>ALMA calculates a weighted average using a Gaussian distribution curve:</p>
+  <ol>
+    <li><strong>Define Window:</strong> Select a period (window size) for the calculation</li>
+    <li><strong>Set Offset:</strong> Determine where the peak of the Gaussian curve sits within the window</li>
+    <li><strong>Apply Gaussian Weights:</strong> Calculate weights for each price point based on the Gaussian formula</li>
+    <li><strong>Normalize Weights:</strong> Ensure all weights sum to 1</li>
+    <li><strong>Calculate Weighted Average:</strong> Apply normalized weights to price data</li>
+  </ol>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      Weight[i] = exp(-((i - offset × (period - 1))²) / (2 × sigma²))<br/>
+      <br/>
+      Normalized Weight[i] = Weight[i] / Sum(All Weights)<br/>
+      <br/>
+      ALMA = Σ(Price[i] × Normalized Weight[i])
+    </p>
+  </div>
 
-  <h2>Parameters</h2>
+  <h2>Key Features</h2>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Gaussian Distribution:</strong> Uses bell curve weighting for natural smoothing</li>
+    <li><strong>Adjustable Responsiveness:</strong> Offset parameter controls lag vs smoothness trade-off</li>
+    <li><strong>Superior Smoothness:</strong> Smoother than EMAs while being more responsive</li>
+    <li><strong>Reduced Noise:</strong> Filters out market noise effectively without sacrificing speed</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Arnaud Legoux Moving Average to make informed decisions about entry and exit points.</p>
+  <h2>Interpretation & Trading Signals</h2>
+  
+  <h3>Parameter Effects</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Offset Parameter:</h4>
+    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">0.85 (default):</strong> Balanced between responsiveness and smoothness</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Near 1.0:</strong> More responsive, less lag, but slightly less smooth</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Near 0.0:</strong> More historical focus, smoother but more lag</li>
+    </ul>
+    
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Sigma Parameter:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
+      <li><strong class="text-gray-900 dark:text-gray-100">6 (default):</strong> Standard distribution width</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Lower values:</strong> Narrower distribution, more focused weighting</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Higher values:</strong> Wider distribution, more even weighting</li>
+    </ul>
+  </div>
+
+  <h3>Trading Strategies</h3>
+  <ul>
+    <li><strong>Trend Following:</strong> 
+      <ul>
+        <li>Price above ALMA: Uptrend, consider long positions</li>
+        <li>Price below ALMA: Downtrend, consider short positions</li>
+      </ul>
+    </li>
+    <li><strong>Crossover Signals:</strong>
+      <ul>
+        <li>Price crosses above ALMA: Potential buy signal</li>
+        <li>Price crosses below ALMA: Potential sell signal</li>
+      </ul>
+    </li>
+    <li><strong>Dynamic Support/Resistance:</strong> ALMA often acts as dynamic support in uptrends and resistance in downtrends</li>
+    <li><strong>Multiple ALMA Strategy:</strong> Use fast and slow ALMA periods for crossover signals</li>
+  </ul>
+
+  <h3>Advanced Applications</h3>
+  <ul>
+    <li><strong>Slope Analysis:</strong> The angle of ALMA indicates trend strength</li>
+    <li><strong>Volatility Adaptation:</strong> Adjust sigma based on market volatility</li>
+    <li><strong>Multi-Timeframe:</strong> Compare ALMA across timeframes for confluence</li>
+    <li><strong>Filter for Other Indicators:</strong> Use ALMA as a trend filter for oscillator signals</li>
+  </ul>
+
+  <h2>Practical Application</h2>
+  
+  <h3>Strengths</h3>
+  <ul>
+    <li>Excellent balance between responsiveness and smoothness</li>
+    <li>Highly customizable through three parameters</li>
+    <li>Reduces lag significantly compared to SMA and EMA</li>
+    <li>Filters noise effectively without overshooting</li>
+    <li>Works well in both trending and ranging markets</li>
+  </ul>
+
+  <h3>Limitations</h3>
+  <ul>
+    <li>More complex calculation than traditional MAs</li>
+    <li>Parameter optimization can be subjective</li>
+    <li>May still lag during very rapid price movements</li>
+    <li>Requires understanding of Gaussian distribution concept</li>
+    <li>Not as widely known as traditional moving averages</li>
+  </ul>
+
+  <h2>Combination with Other Indicators</h2>
+  <p>ALMA works particularly well when combined with:</p>
+  <ul>
+    <li><strong>RSI or Stochastic:</strong> ALMA for trend, oscillators for timing</li>
+    <li><strong>Bollinger Bands:</strong> Use ALMA as the middle band for unique perspective</li>
+    <li><strong>MACD:</strong> Replace EMAs with ALMAs for potentially better signals</li>
+    <li><strong>Support/Resistance:</strong> Combine with horizontal levels for confluence</li>
+    <li><strong>Volume Indicators:</strong> Confirm ALMA signals with volume analysis</li>
+  </ul>
 
   <h2>Example Usage</h2>
-  <pre><code class="language-rust">
-// Example of using Arnaud Legoux Moving Average in Rust
-let result = indicators::alma(&data, 14);
-  </code></pre>
+  <p>Code examples will be available once the Rust implementation is complete.</p>
+  </div>
+
+  <h2>Mathematical Background</h2>
+  <p>
+    ALMA's innovation lies in its use of the Gaussian distribution function, which creates a natural weighting scheme 
+    that emphasizes prices around a chosen point (offset) while smoothly decreasing weights for prices further away. 
+    This approach is inspired by signal processing techniques where Gaussian filters are used to reduce noise while 
+    preserving important features.
+  </p>
+  <p>
+    The offset parameter essentially moves the center of the Gaussian bell curve within the lookback window. An offset 
+    of 0.85 means the peak weight is applied to prices at 85% of the way through the window (more recent prices), 
+    creating a forward-weighted average that reduces lag while the Gaussian shape maintains smoothness.
+  </p>
+
 </IndicatorLayout>

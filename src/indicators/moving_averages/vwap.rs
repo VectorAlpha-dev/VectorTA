@@ -22,7 +22,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
@@ -30,6 +30,7 @@ use chrono::{Datelike, NaiveDateTime, Utc};
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+use std::mem::MaybeUninit;
 
 /// VWAP input data
 #[derive(Debug, Clone)]
@@ -274,16 +275,23 @@ pub fn vwap_with_kernel(input: &VwapInput, kernel: Kernel) -> Result<VwapOutput,
         other => other,
     };
 
+    let mut values = alloc_with_nan_prefix(n, 0);
+
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => vwap_scalar(timestamps, volumes, prices, count, unit_char),
+            Kernel::Scalar | Kernel::ScalarBatch =>
+                vwap_scalar(timestamps, volumes, prices, count, unit_char, &mut values)?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => vwap_avx2(timestamps, volumes, prices, count, unit_char),
+            Kernel::Avx2 | Kernel::Avx2Batch =>
+                vwap_avx2(timestamps, volumes, prices, count, unit_char, &mut values)?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => vwap_avx512(timestamps, volumes, prices, count, unit_char),
+            Kernel::Avx512 | Kernel::Avx512Batch =>
+                vwap_avx512(timestamps, volumes, prices, count, unit_char, &mut values)?,
             _ => unreachable!(),
         }
     }
+
+    Ok(VwapOutput { values })
 }
 
 #[inline(always)]
@@ -293,50 +301,42 @@ pub fn vwap_scalar(
     prices: &[f64],
     count: u32,
     unit_char: char,
-) -> Result<VwapOutput, VwapError> {
-    let n = prices.len();
-    let mut vwap_values = vec![f64::NAN; n];
-    let mut current_group_id = -1_i64;
-    let mut volume_sum = 0.0;
-    let mut vol_price_sum = 0.0;
+    out:       &mut [f64],
+) -> Result<(), VwapError> {
+    debug_assert_eq!(out.len(), prices.len(), "output slice length mismatch");
 
-    for i in 0..n {
-        let ts_ms = timestamps[i];
-        let price = prices[i];
-        let volume = volumes[i];
+    let mut current_group_id = -1_i64;
+    let mut volume_sum       = 0.0;
+    let mut vol_price_sum    = 0.0;
+
+    for i in 0..prices.len() {
+        let ts_ms   = timestamps[i];
+        let price   = prices[i];
+        let volume  = volumes[i];
         let group_id = match unit_char {
-            'm' => {
-                let bucket_ms = (count as i64) * 60_000;
-                ts_ms / bucket_ms
-            }
-            'h' => {
-                let bucket_ms = (count as i64) * 3_600_000;
-                ts_ms / bucket_ms
-            }
-            'd' => {
-                let bucket_ms = (count as i64) * 86_400_000;
-                ts_ms / bucket_ms
-            }
-            'M' => floor_to_month(ts_ms, count).map_err(|_| VwapError::MonthConversionError { ts_ms })?,
-            _ => return Err(VwapError::UnsupportedAnchorUnit { unit_char }),
+            'm' => ts_ms / ((count as i64) * 60_000),
+            'h' => ts_ms / ((count as i64) * 3_600_000),
+            'd' => ts_ms / ((count as i64) * 86_400_000),
+            'M' => floor_to_month(ts_ms, count)
+                     .map_err(|_| VwapError::MonthConversionError { ts_ms })?,
+            _   => return Err(VwapError::UnsupportedAnchorUnit { unit_char }),
         };
 
         if group_id != current_group_id {
             current_group_id = group_id;
-            volume_sum = 0.0;
+            volume_sum    = 0.0;
             vol_price_sum = 0.0;
         }
-        volume_sum += volume;
+        volume_sum    += volume;
         vol_price_sum += volume * price;
 
-        vwap_values[i] = if volume_sum > 0.0 {
+        out[i] = if volume_sum > 0.0 {
             vol_price_sum / volume_sum
         } else {
             f64::NAN
         };
     }
-
-    Ok(VwapOutput { values: vwap_values })
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -347,8 +347,9 @@ pub unsafe fn vwap_avx2(
     prices: &[f64],
     count: u32,
     unit_char: char,
-) -> Result<VwapOutput, VwapError> {
-    vwap_scalar(timestamps, volumes, prices, count, unit_char)
+    out: &mut [f64],
+) -> Result<(),  VwapError> {
+    vwap_scalar(timestamps, volumes, prices, count, unit_char, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -359,8 +360,9 @@ pub unsafe fn vwap_avx512(
     prices: &[f64],
     count: u32,
     unit_char: char,
-) -> Result<VwapOutput, VwapError> {
-    vwap_scalar(timestamps, volumes, prices, count, unit_char)
+    out: &mut [f64],
+) -> Result<(),  VwapError> {
+    vwap_scalar(timestamps, volumes, prices, count, unit_char, out)
 }
 
 /// Streaming VWAP (per anchor bucket)
@@ -568,43 +570,55 @@ fn vwap_batch_inner(
     if combos.is_empty() {
         return Err(VwapError::NoData);
     }
+
     let rows = combos.len();
     let cols = prices.len();
-    let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+    let mut raw = make_uninit_matrix(rows, cols);          // Vec<MaybeUninit<f64>>
+
+    // optional: NaN prefixes – none needed, but this exercises the helper
+    let warm: Vec<usize> = vec![0; rows];
+    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+
+    // ---------- 2. closure to fill one row in-place --------------------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let params = combos.get(row).unwrap();
         let (count, unit_char) = parse_anchor(params.anchor.as_deref().unwrap_or("1d"))
-            .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() }).unwrap();
+            .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })
+            .unwrap();
+
+        // cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
         match kern {
-            Kernel::Scalar => {
-                let r = vwap_scalar(timestamps, volumes, prices, count, unit_char).unwrap();
-                out_row.copy_from_slice(&r.values[..cols]);
-            }
+            Kernel::Scalar =>
+                vwap_row_scalar (timestamps, volumes, prices, count, unit_char, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let r = vwap_avx2(timestamps, volumes, prices, count, unit_char).unwrap();
-                out_row.copy_from_slice(&r.values[..cols]);
-            }
+            Kernel::Avx2   =>
+                vwap_row_avx2  (timestamps, volumes, prices, count, unit_char, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let r = vwap_avx512(timestamps, volumes, prices, count, unit_char).unwrap();
-                out_row.copy_from_slice(&r.values[..cols]);
-            }
+            Kernel::Avx512 =>
+                vwap_row_avx512(timestamps, volumes, prices, count, unit_char, out_row),
             _ => unreachable!(),
         }
     };
 
+    // ---------- 3. run every row, writing directly into `raw` ----------------
     if parallel {
-        values
-            .par_chunks_mut(cols)
+        raw.par_chunks_mut(cols)
             .enumerate()
             .for_each(|(row, slice)| do_row(row, slice));
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // ---------- 4. all elements written – turn into Vec<f64> -----------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(VwapBatchOutput {
         values,
@@ -672,8 +686,7 @@ pub unsafe fn vwap_row_scalar(
     unit_char: char,
     out: &mut [f64],
 ) {
-    let res = vwap_scalar(timestamps, volumes, prices, count, unit_char).unwrap();
-    out.copy_from_slice(&res.values);
+    vwap_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -686,7 +699,7 @@ pub unsafe fn vwap_row_avx2(
     unit_char: char,
     out: &mut [f64],
 ) {
-    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out)
+    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -699,7 +712,7 @@ pub unsafe fn vwap_row_avx512(
     unit_char: char,
     out: &mut [f64],
 ) {
-    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out)
+    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -712,7 +725,7 @@ pub unsafe fn vwap_row_avx512_short(
     unit_char: char,
     out: &mut [f64],
 ) {
-    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out)
+    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -725,7 +738,7 @@ pub unsafe fn vwap_row_avx512_long(
     unit_char: char,
     out: &mut [f64],
 ) {
-    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out)
+    vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
 // expand_grid function, not public
