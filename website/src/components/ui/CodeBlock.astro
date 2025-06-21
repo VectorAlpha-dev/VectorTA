@@ -1,0 +1,173 @@
+---
+export interface Props {
+  lang?: string;
+  title?: string;
+  filename?: string;
+  showLineNumbers?: boolean;
+  highlightLines?: number[];
+}
+
+const { 
+  lang = 'rust', 
+  title, 
+  filename,
+  showLineNumbers = true,
+  highlightLines = []
+} = Astro.props;
+
+// Generate unique ID for copy button
+const id = Math.random().toString(36).substring(7);
+---
+
+<div class="code-block group relative rounded-lg border border-border bg-muted/30 overflow-hidden my-6">
+  {(title || filename) && (
+    <div class="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/50">
+      <div class="flex items-center gap-2">
+        {filename && (
+          <span class="text-xs text-muted-foreground font-mono">{filename}</span>
+        )}
+        {title && !filename && (
+          <span class="text-sm font-medium">{title}</span>
+        )}
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-muted-foreground uppercase">{lang}</span>
+        <button
+          id={`copy-${id}`}
+          class="copy-button opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-muted rounded"
+          aria-label="Copy code"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+              d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  )}
+  
+  <div class="relative">
+    {!title && !filename && (
+      <button
+        id={`copy-${id}`}
+        class="copy-button absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-muted rounded z-10"
+        aria-label="Copy code"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+      </button>
+    )}
+    
+    <pre class={`language-${lang} ${showLineNumbers ? 'line-numbers' : ''}`}><code id={`code-${id}`} class={`language-${lang}`}><slot /></code></pre>
+  </div>
+</div>
+
+<script define:vars={{ id }}>
+  // Copy functionality
+  document.getElementById(`copy-${id}`)?.addEventListener('click', async () => {
+    const code = document.getElementById(`code-${id}`)?.textContent || '';
+    
+    try {
+      await navigator.clipboard.writeText(code);
+      
+      // Show success feedback
+      const button = document.getElementById(`copy-${id}`);
+      if (button) {
+        const originalHTML = button.innerHTML;
+        button.innerHTML = `
+          <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+        `;
+        
+        setTimeout(() => {
+          button.innerHTML = originalHTML;
+        }, 2000);
+      }
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  });
+</script>
+
+<style>
+  /* Code block styling */
+  .code-block pre {
+    @apply p-4 overflow-x-auto text-sm;
+    margin: 0;
+  }
+  
+  .code-block code {
+    @apply font-mono;
+    background: none;
+    padding: 0;
+  }
+  
+  /* Syntax highlighting theme */
+  .code-block :global(.token.comment),
+  .code-block :global(.token.prolog),
+  .code-block :global(.token.doctype),
+  .code-block :global(.token.cdata) {
+    @apply text-muted-foreground italic;
+  }
+  
+  .code-block :global(.token.punctuation) {
+    @apply text-muted-foreground;
+  }
+  
+  .code-block :global(.token.property),
+  .code-block :global(.token.tag),
+  .code-block :global(.token.boolean),
+  .code-block :global(.token.number),
+  .code-block :global(.token.constant),
+  .code-block :global(.token.symbol),
+  .code-block :global(.token.deleted) {
+    @apply text-primary;
+  }
+  
+  .code-block :global(.token.selector),
+  .code-block :global(.token.attr-name),
+  .code-block :global(.token.string),
+  .code-block :global(.token.char),
+  .code-block :global(.token.builtin),
+  .code-block :global(.token.inserted) {
+    @apply text-green-500 dark:text-green-400;
+  }
+  
+  .code-block :global(.token.operator),
+  .code-block :global(.token.entity),
+  .code-block :global(.token.url),
+  .code-block :global(.language-css .token.string),
+  .code-block :global(.style .token.string) {
+    @apply text-orange-500 dark:text-orange-400;
+  }
+  
+  .code-block :global(.token.atrule),
+  .code-block :global(.token.attr-value),
+  .code-block :global(.token.keyword) {
+    @apply text-blue-500 dark:text-blue-400;
+  }
+  
+  .code-block :global(.token.function),
+  .code-block :global(.token.class-name) {
+    @apply text-purple-500 dark:text-purple-400;
+  }
+  
+  .code-block :global(.token.regex),
+  .code-block :global(.token.important),
+  .code-block :global(.token.variable) {
+    @apply text-orange-500 dark:text-orange-400;
+  }
+  
+  /* Line numbers */
+  .line-numbers .line-numbers-rows {
+    @apply border-r border-border pr-3 mr-3;
+  }
+  
+  /* Copy button */
+  .copy-button {
+    @apply text-muted-foreground hover:text-foreground;
+  }
+</style>

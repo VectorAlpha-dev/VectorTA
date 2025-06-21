@@ -51,8 +51,8 @@ const parameters = [
       +DM = Current High - Previous High (if positive, else 0)<br/>
       -DM = Previous Low - Current Low (if positive, else 0)<br/>
       <br/>
-      If +DM > -DM and +DM > 0: Use +DM, set -DM = 0<br/>
-      If -DM > +DM and -DM > 0: Use -DM, set +DM = 0<br/>
+      If +DM &gt; -DM and +DM &gt; 0: Use +DM, set -DM = 0<br/>
+      If -DM &gt; +DM and -DM &gt; 0: Use -DM, set +DM = 0<br/>
       If +DM = -DM: Both = 0<br/>
       <br/>
       Smoothed +DM = Previous Smoothed +DM - (Previous Smoothed +DM / Period) + Current +DM<br/>
@@ -66,7 +66,7 @@ const parameters = [
   <h2>Key Features</h2>
   <ul>
     <li><strong>Directional Strength:</strong> Measures bullish vs bearish momentum</li>
-    <li><strong>Normalized Values:</strong> 0-100 scale for easy comparison</li>
+    <li><strong>Normalized Values:</strong&gt; 0-100 scale for easy comparison</li>
     <li><strong>Trend Identification:</strong> Clear view of dominant market direction</li>
     <li><strong>Early Signals:</strong> Crossovers often precede price trend changes</li>
   </ul>
@@ -77,8 +77,8 @@ const parameters = [
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
     <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Directional Dominance:</h4>
     <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">+DI > -DI:</strong> Bullish momentum dominant</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">-DI > +DI:</strong> Bearish momentum dominant</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">+DI &gt; -DI:</strong> Bullish momentum dominant</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"&gt;-DI &gt; +DI:</strong> Bearish momentum dominant</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Wide Spread:</strong> Strong trending conditions</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Narrow Spread:</strong> Weak trend or consolidation</li>
     </ul>
@@ -86,8 +86,8 @@ const parameters = [
     <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
     <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
       <li><strong class="text-gray-900 dark:text-gray-100">+DI Crosses Above -DI:</strong> Bullish signal, uptrend starting</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">-DI Crosses Above +DI:</strong> Bearish signal, downtrend starting</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings (>40):</strong> Strong directional movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"&gt;-DI Crosses Above +DI:</strong> Bearish signal, downtrend starting</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Extreme Readings (&gt;40):</strong> Strong directional movement</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Both DIs Below 20:</strong> Lack of directional movement</li>
     </ul>
   </div>
@@ -103,8 +103,8 @@ const parameters = [
     </li>
     <li><strong>Trend Confirmation:</strong>
       <ul>
-        <li>Only take long positions when +DI > -DI</li>
-        <li>Only take short positions when -DI > +DI</li>
+        <li>Only take long positions when +DI &gt; -DI</li>
+        <li>Only take short positions when -DI &gt; +DI</li>
         <li>Exit when DIs converge (trend weakening)</li>
       </ul>
     </li>

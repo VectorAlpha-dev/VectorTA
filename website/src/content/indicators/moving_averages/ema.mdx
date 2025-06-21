@@ -1,0 +1,339 @@
+---
+title: "Exponential Moving Average (EMA)"
+description: "The Exponential Moving Average is a weighted moving average that gives more importance to recent prices, making it more responsive to new information than the Simple Moving Average."
+category: "moving_averages"
+parameters:
+  - name: "period"
+    type: "number"
+    default: 20
+    min: 1
+    max: 500
+    description: "The number of periods used to calculate the smoothing factor"
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated EMA values. Returns None for periods where calculation isn't possible"
+complexity: "O(n)"
+implementationStatus: "complete"
+seeAlso: ["sma", "dema", "tema", "wma"]
+references:
+  - title: "Exponential Moving Average - Investopedia"
+    url: "https://www.investopedia.com/terms/e/ema.asp"
+  - title: "Technical Analysis of Stock Trends"
+    url: "https://www.amazon.com/Technical-Analysis-Stock-Trends-Tenth/dp/1439898189"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="ema" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+The Exponential Moving Average (EMA) is a type of moving average that places greater weight and significance on the most recent data points. Unlike the Simple Moving Average (SMA) which assigns equal weight to all values, the EMA uses an exponentially decreasing weighting factor for older data points.
+
+This weighting approach makes the EMA more responsive to recent price changes while still maintaining the smoothing characteristics that make moving averages valuable for trend identification. The "exponential" aspect refers to the way older data points decrease in significance exponentially rather than being dropped entirely.
+
+## Interpretation {#interpretation}
+
+### Key Characteristics
+- **Faster Response**: EMA reacts more quickly to price changes than SMA
+- **Trend Confirmation**: Like SMA, but with less lag
+- **Smoothing**: Reduces noise while maintaining sensitivity
+
+### Trading Signals
+- **Price Crossovers**: More timely signals than SMA crossovers
+- **EMA Crossovers**: Short-term EMA crossing long-term EMA
+- **Dynamic Support/Resistance**: Often more accurate than SMA levels
+
+### Popular EMA Periods
+- **12 & 26**: Used in MACD calculation
+- **9**: Signal line in MACD, short-term momentum
+- **21**: Short-term trend
+- **50**: Medium-term trend
+- **200**: Long-term trend
+
+## Calculation {#calculation}
+
+The EMA calculation uses a smoothing factor (α):
+
+```
+α = 2 / (period + 1)
+
+EMA_today = (Price_today × α) + (EMA_yesterday × (1 - α))
+```
+
+Initial EMA value:
+- First EMA value is typically set to the first price
+- Some implementations use SMA of first N periods
+
+Recursive nature:
+- Each new EMA value depends on the previous EMA
+- Creates a smooth, continuous line
+
+## Parameters {#parameters}
+
+### period (default: 20)
+The period determines the smoothing factor and responsiveness:
+
+- **Smoothing Factor**: α = 2 / (period + 1)
+- **Shorter periods (5-15)**: More responsive, more false signals
+- **Medium periods (20-50)**: Balanced approach
+- **Longer periods (50-200)**: Smoother, better for major trends
+
+Weight distribution examples:
+- Period 10: Latest price has ~18.2% weight
+- Period 20: Latest price has ~9.5% weight
+- Period 50: Latest price has ~3.9% weight
+
+## Returns & Output {#returns}
+
+The EMA function returns a vector where:
+- First value: Equal to first input price
+- Subsequent values: Calculated using the EMA formula
+- All values are `Some(f64)` after the first data point
+
+Unlike SMA, EMA can start calculating from the first data point.
+
+## Example Usage {#usage}
+
+### Basic EMA Calculation
+
+<CodeBlock lang="rust">
+use vectorta::indicators::ema;
+
+// Price data
+let prices = vec![22.27, 22.19, 22.08, 22.17, 22.18, 22.13, 22.23, 22.43, 22.24, 22.29];
+
+// Calculate 10-period EMA
+let ema_values = ema(&prices, 10)?;
+
+// All values will have Some(value), starting from the first price
+println!("EMA values: {:?}", ema_values);
+</CodeBlock>
+
+### MACD Implementation Using EMA
+
+<CodeBlock lang="rust">
+use vectorta::indicators::ema;
+
+fn calculate_macd(prices: &[f64]) -> Result<(Vec<Option<f64>>, Vec<Option<f64>>, Vec<Option<f64>>), Error> {
+    // Calculate the two EMAs
+    let ema_12 = ema(prices, 12)?;
+    let ema_26 = ema(prices, 26)?;
+    
+    // Calculate MACD line
+    let macd_line: Vec<Option<f64>> = ema_12.iter()
+        .zip(ema_26.iter())
+        .map(|(fast, slow)| {
+            match (fast, slow) {
+                (Some(f), Some(s)) => Some(f - s),
+                _ => None
+            }
+        })
+        .collect();
+    
+    // Calculate signal line (9-period EMA of MACD)
+    let macd_values: Vec<f64> = macd_line.iter()
+        .filter_map(|&x| x)
+        .collect();
+    let signal_line = ema(&macd_values, 9)?;
+    
+    // Calculate histogram
+    let histogram: Vec<Option<f64>> = macd_line.iter()
+        .zip(signal_line.iter())
+        .map(|(macd, signal)| {
+            match (macd, signal) {
+                (Some(m), Some(s)) => Some(m - s),
+                _ => None
+            }
+        })
+        .collect();
+    
+    Ok((macd_line, signal_line, histogram))
+}
+</CodeBlock>
+
+### Triple EMA Strategy
+
+<CodeBlock lang="rust">
+use vectorta::indicators::ema;
+
+struct TripleEMAStrategy {
+    fast_period: usize,
+    medium_period: usize,
+    slow_period: usize,
+}
+
+impl TripleEMAStrategy {
+    fn generate_signals(&self, prices: &[f64]) -> Vec<TradingSignal> {
+        let fast_ema = ema(prices, self.fast_period).unwrap();
+        let medium_ema = ema(prices, self.medium_period).unwrap();
+        let slow_ema = ema(prices, self.slow_period).unwrap();
+        
+        let mut signals = Vec::new();
+        
+        for i in 1..prices.len() {
+            if let (Some(f1), Some(m1), Some(s1), Some(f0), Some(m0), Some(s0)) = 
+                (fast_ema[i], medium_ema[i], slow_ema[i], 
+                 fast_ema[i-1], medium_ema[i-1], slow_ema[i-1]) {
+                
+                // Strong buy signal: fast > medium > slow and wasn't before
+                if f1 > m1 && m1 > s1 && !(f0 > m0 && m0 > s0) {
+                    signals.push(TradingSignal::StrongBuy(i));
+                }
+                // Strong sell signal: fast < medium < slow and wasn't before
+                else if f1 < m1 && m1 < s1 && !(f0 < m0 && m0 < s0) {
+                    signals.push(TradingSignal::StrongSell(i));
+                }
+            }
+        }
+        
+        signals
+    }
+}
+</CodeBlock>
+
+### EMA Ribbon
+
+<CodeBlock lang="rust">
+use vectorta::indicators::ema;
+
+fn create_ema_ribbon(prices: &[f64], start_period: usize, end_period: usize, step: usize) 
+    -> Vec<Vec<Option<f64>>> {
+    
+    let mut ribbon = Vec::new();
+    
+    for period in (start_period..=end_period).step_by(step) {
+        ribbon.push(ema(prices, period).unwrap());
+    }
+    
+    ribbon
+}
+
+// Create ribbon with EMAs from 10 to 50 in steps of 5
+let ribbon = create_ema_ribbon(&prices, 10, 50, 5);
+
+// Analyze ribbon compression/expansion
+fn analyze_ribbon_state(ribbon: &[Vec<Option<f64>>], index: usize) -> RibbonState {
+    let mut values: Vec<f64> = ribbon.iter()
+        .filter_map(|ema| ema[index])
+        .collect();
+    
+    if values.is_empty() {
+        return RibbonState::Unknown;
+    }
+    
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let range = values.last().unwrap() - values.first().unwrap();
+    let avg = values.iter().sum::<f64>() / values.len() as f64;
+    let compression_ratio = range / avg;
+    
+    if compression_ratio < 0.01 {
+        RibbonState::Compressed
+    } else if compression_ratio > 0.05 {
+        RibbonState::Expanded
+    } else {
+        RibbonState::Normal
+    }
+}
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+### 1. Trend Following
+EMA is excellent for trend-following strategies due to its responsiveness:
+- Entry when price crosses above EMA
+- Exit when price crosses below EMA
+- Use multiple EMAs for confirmation
+
+### 2. MACD Component
+The 12 and 26-period EMAs form the basis of the MACD indicator:
+- MACD Line = 12 EMA - 26 EMA
+- Signal Line = 9 EMA of MACD Line
+
+### 3. Dynamic Stop Loss
+```rust
+fn calculate_ema_stop(prices: &[f64], ema_period: usize, offset_percent: f64) -> Vec<Option<f64>> {
+    let ema_values = ema(prices, ema_period).unwrap();
+    
+    ema_values.iter().map(|&ema_val| {
+        ema_val.map(|val| val * (1.0 - offset_percent / 100.0))
+    }).collect()
+}
+```
+
+### 4. Mean Reversion
+Identify oversold/overbought conditions:
+```rust
+fn calculate_ema_deviation(prices: &[f64], ema_period: usize) -> Vec<Option<f64>> {
+    let ema_values = ema(prices, ema_period).unwrap();
+    
+    prices.iter().zip(ema_values.iter()).map(|(price, ema_val)| {
+        ema_val.map(|ema| ((price - ema) / ema) * 100.0)
+    }).collect()
+}
+```
+
+### 5. Multi-Timeframe Analysis
+Compare EMAs across different timeframes for stronger signals.
+
+## Edge Cases & Errors {#edge-cases}
+
+### Initial Value Sensitivity
+The EMA is sensitive to the starting value:
+```rust
+// Different implementations might use different initial values
+// 1. First price as initial EMA
+// 2. SMA of first N periods as initial EMA
+// 3. Weighted average of first N periods
+```
+
+### Convergence Time
+EMAs with different starting points will converge over time:
+```rust
+// After approximately 3-5 times the period, 
+// different initialization methods produce similar results
+let convergence_point = period * 4;
+```
+
+### NaN Handling
+```rust
+// NaN values will propagate through all subsequent calculations
+let data_with_nan = vec![10.0, 11.0, f64::NAN, 13.0, 14.0];
+let result = ema(&data_with_nan, 3)?;
+// After the NaN, all values will be NaN
+```
+
+### Precision Considerations
+```rust
+// For financial data, maintain sufficient decimal precision
+fn calculate_ema_precise(prices: &[f64], period: usize) -> Vec<f64> {
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let mut ema_values = vec![prices[0]];
+    
+    for i in 1..prices.len() {
+        // Use higher precision for intermediate calculations
+        let ema = prices[i] * alpha + ema_values[i-1] * (1.0 - alpha);
+        ema_values.push((ema * 1000000.0).round() / 1000000.0); // 6 decimal places
+    }
+    
+    ema_values
+}
+```
+
+## References {#references}
+
+1. **Appel, Gerald** (2005). *Technical Analysis: Power Tools for Active Investors*. Financial Times Prentice Hall.
+
+2. **Elder, Alexander** (1993). *Trading for a Living*. John Wiley & Sons.
+
+3. **Wilder, J. Welles** (1978). *New Concepts in Technical Trading Systems*. Trend Research.
+
+4. **Brown, Constance** (1999). *Technical Analysis for the Trading Professional*. McGraw-Hill.
+
+</IndicatorLayout>

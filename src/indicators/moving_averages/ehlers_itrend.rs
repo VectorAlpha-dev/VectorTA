@@ -1260,26 +1260,154 @@ mod tests {
         Ok(())
     }
 
-    fn check_itrend_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        use proptest::prelude::*;
 
-        let strat = (5usize..50, -1000.0f64..1000.0);
-        proptest::test_runner::TestRunner::default().run(&strat, |(len, val)| {
-            let data = vec![val; len];
-            let params = EhlersITrendParams {
-                warmup_bars: Some(1),
-                max_dc_period: Some(10),
-            };
-            let input = EhlersITrendInput::from_slice(&data, params);
-            let out = ehlers_itrend_with_kernel(&input, kernel).unwrap();
-            for &v in &out.values[1..] {
-                prop_assert!((v - val).abs() < 1e-9);
-            }
-            Ok(())
-        })?;
+    #[allow(clippy::float_cmp)]
+    fn check_itrend_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        skip_if_unsupported!(kernel, test_name);
+
+        /* 1 ─ Strategy: pick params first, then a ≥-length vector */
+        let strat =
+            (4usize..=15)                                               // warm-up
+                .prop_flat_map(|warmup| {
+                    ((warmup + 1)..=64).prop_flat_map(move |max_dc| {
+                        (
+                            prop::collection::vec(
+                                (-1e6f64..1e6f64)
+                                    .prop_filter("finite", |x| x.is_finite()),
+                                (warmup + max_dc + 4)..400,            // data len
+                            ),
+                            Just(warmup),
+                            Just(max_dc),
+                            (-1e3f64..1e3f64)
+                                .prop_filter("a≠0", |a| a.is_finite() && *a != 0.0),
+                            -1e3f64..1e3f64,
+                        )
+                    })
+                });
+
+        proptest::test_runner::TestRunner::default().run(&strat,
+            |(data, warmup, max_dc, a, b)| {
+                /* -- build common inputs ----------------------------------------- */
+                let params = EhlersITrendParams {
+                    warmup_bars: Some(warmup),
+                    max_dc_period: Some(max_dc),
+                };
+                let input  = EhlersITrendInput::from_slice(&data, params.clone());
+
+                /* run kernels but never unwrap blindly --------------------------- */
+                let fast = ehlers_itrend_with_kernel(&input, kernel);
+                let slow = ehlers_itrend_with_kernel(&input, Kernel::Scalar);
+
+                match (fast, slow) {
+                    // ➊ identical error kinds
+                    (Err(e1), Err(e2))
+                        if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
+                            return Ok(()),
+                    (Err(e1), Err(e2)) => prop_assert!(false,
+                        "different errors: fast={:?} slow={:?}", e1, e2),
+                    // ➋ disagreement on success / error
+                    (Err(e), Ok(_))   =>
+                        prop_assert!(false, "fast errored {e:?} but scalar succeeded"),
+                    (Ok(_), Err(e))   =>
+                        prop_assert!(false, "scalar errored {e:?} but fast succeeded"),
+                    // ➌ both succeeded ⇒ full invariant suite
+                    (Ok(fast), Ok(reference)) => {
+                        let EhlersITrendOutput { values: out }  = fast;
+                        let EhlersITrendOutput { values: rref } = reference;
+
+                        /* streaming path once ---------------------------------- */
+                        let mut stream = EhlersITrendStream::try_new(params.clone()).unwrap();
+                        let mut s_out  = Vec::with_capacity(data.len());
+                        for &v in &data {
+                            s_out.push(stream.update(v).unwrap_or(f64::NAN));
+                        }
+
+                        /* affine-transformed run once --------------------------- */
+                        let transformed: Vec<f64> =
+                            data.iter().map(|x| a * x + b).collect();
+                        let t_out = ehlers_itrend(&EhlersITrendInput::from_slice(
+                            &transformed, params))?.values;
+
+                        /* iterate from warm-up end ------------------------------ */
+                        let first = data.iter().position(|x| !x.is_nan()).unwrap();
+                        let warm  = first + warmup;
+                        for i in warm..data.len() {
+                            let y  = out[i];
+                            let yr = rref[i];
+                            let ys = s_out[i];
+                            let yt = t_out[i];
+
+                            /* 1️⃣ Window-boundedness -------------------------- */
+                            let start = (i + 1).saturating_sub(max_dc);           // saturate at 0
+                            let look  = &data[start ..= i];
+                            let (lo, hi) = look.iter().fold(
+                                (f64::INFINITY, f64::NEG_INFINITY),
+                                |(l,h), &v| (l.min(v), h.max(v))
+                            );
+                            prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                                "idx {i}: {y} ∉ [{lo}, {hi}]");
+
+                            /* 2️⃣ Warm-up identity (warmup==1) --------------- */
+                            if warmup == 1 && y.is_finite() {
+                                prop_assert!((y - data[i]).abs() <= f64::EPSILON);
+                            }
+
+                            /* 3️⃣ Constant-series invariance ----------------- */
+                            if look.iter().all(|v| *v == look[0]) {
+                                prop_assert!((y - look[0]).abs() <= 1e-9);
+                            }
+
+                            /* 5️⃣ Affine equivariance ------------------------ */
+                            let expected = a * y + b;
+                            let diff     = (yt - expected).abs();
+                            let tol = 1e-9_f64.max(expected.abs() * 1e-9);
+                            let ulp = yt.to_bits().abs_diff(expected.to_bits());
+                            prop_assert!(diff <= tol || ulp <= 8,
+                                "idx {i}: affine mismatch diff={diff:e}  ULP={ulp}");
+
+                            /* 6️⃣ Scalar ≡ fast ------------------------------ */
+                            let ulp = y.to_bits().abs_diff(yr.to_bits());
+                            prop_assert!((y - yr).abs() <= 1e-9 || ulp <= 4,
+                                "idx {i}: fast={y} ref={yr} ULP={ulp}");
+
+                            /* 7️⃣ Streaming parity --------------------------- */
+                            prop_assert!(
+                                (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
+                                "idx {i}: stream mismatch");
+                        }
+
+                        /* 9️⃣ Warm-up sentinel NaNs ------------------------- */
+                            for j in first .. warm {
+                                prop_assert!(
+                                    (out[j] - data[j]).abs() <= f64::EPSILON,
+                                    "warm-up echo failed at idx {j}: out={}, in={}",
+                                    out[j], data[j]
+                                );
+                            }
+                    }
+                }
+
+                Ok(())
+            })
+            .unwrap();
+
+        /* 🔟 Error-path smoke tests --------------------------------------------- */
+        assert!(ehlers_itrend(&EhlersITrendInput::from_slice(
+            &[], EhlersITrendParams::default())).is_err());
+        assert!(ehlers_itrend(&EhlersITrendInput::from_slice(
+            &[f64::NAN; 12], EhlersITrendParams::default())).is_err());
+        assert!(ehlers_itrend(&EhlersITrendInput::from_slice(
+            &[1.0; 5], EhlersITrendParams { warmup_bars: Some(8), max_dc_period: Some(50) })).is_err());
+        assert!(ehlers_itrend(&EhlersITrendInput::from_slice(
+            &[1.0; 5], EhlersITrendParams { warmup_bars: Some(0), max_dc_period: Some(10) })).is_err());
+
         Ok(())
     }
+
 
     macro_rules! generate_all_itrend_tests {
         ($($test_fn:ident),*) => {

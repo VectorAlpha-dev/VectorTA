@@ -2,8 +2,8 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'jsa';
-const indicatorName = 'Jsa';
-const description = `Technical analysis indicator: Jsa`;
+const indicatorName = 'J. Welles Wilder Smoothing Average';
+const description = `The J. Welles Wilder Smoothing Average (JSA) is a specialized exponential smoothing technique developed by J. Welles Wilder Jr., commonly used as a component in indicators like RSI and ATR, providing consistent smoothing with a unique calculation method.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,7 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Smoothing period"
   }
 ];
 ---
@@ -22,23 +22,323 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The J. Welles Wilder Smoothing Average (JSA), also known as Wilder's Smoothing or Modified 
+    Exponential Moving Average, is a unique smoothing technique developed by J. Welles Wilder Jr. 
+    This smoothing method is fundamental to many of Wilder's famous indicators including RSI, 
+    ATR, ADX, and the Parabolic SAR.
+  </p>
+  <p>
+    What makes Wilder's smoothing distinctive is its specific calculation method that creates a 
+    smoothing factor equivalent to a (2×period - 1) EMA. For example, a 14-period Wilder's 
+    smoothing provides smoothing equivalent to a 27-period EMA. This relationship allows for 
+    consistent behavior across different indicators while maintaining the specific characteristics 
+    that Wilder intended for his trading systems.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Jsa helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Smoothing Characteristics</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Consistent lag:</strong> Provides predictable smoothing behavior</li>
+    <li><strong>Noise reduction:</strong> Effectively filters market noise</li>
+    <li><strong>Trend preservation:</strong> Maintains trend direction clarity</li>
+    <li><strong>Stability:</strong> Less reactive to single-bar price spikes</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Jsa to make informed decisions about entry and exit points.</p>
+  <h3>Trading Applications</h3>
+  <ul>
+    <li><strong>Trend identification:</strong> Smooth price action for trend analysis</li>
+    <li><strong>Component smoothing:</strong> Used within RSI, ATR, ADX calculations</li>
+    <li><strong>Signal filtering:</strong> Reduces false signals in choppy markets</li>
+    <li><strong>Support/Resistance:</strong> Creates smooth dynamic levels</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Comparison with Other Averages</h3>
+  <ul>
+    <li><strong>vs SMA:</strong> More responsive but with similar smoothness</li>
+    <li><strong>vs EMA:</strong> More stable, less prone to whipsaws</li>
+    <li><strong>Equivalent EMA:</strong> Period × 2 - 1 (e.g., 14 JSA ≈ 27 EMA)</li>
+    <li><strong>Calculation efficiency:</strong> Uses previous value recursively</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Wilder's Smoothing calculation follows these steps:</p>
+  <ol>
+    <li><strong>Initial value:</strong> Simple average of first 'period' values</li>
+    <li><strong>Smoothing factor:</strong> <code>α = 1 / period</code></li>
+    <li><strong>Recursive calculation:</strong>
+      <ul>
+        <li><code>JSA = α × Current + (1 - α) × Previous_JSA</code></li>
+        <li>Or equivalently: <code>JSA = Previous_JSA + α × (Current - Previous_JSA)</code></li>
+      </ul>
+    </li>
+    <li><strong>Alternative form:</strong>
+      <ul>
+        <li><code>JSA = (Previous_JSA × (period - 1) + Current) / period</code></li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    The key insight is that Wilder used 1/period as the smoothing factor, while standard EMA 
+    uses 2/(period + 1). This makes Wilder's smoothing roughly twice as smooth as an EMA of 
+    the same period, which is why it's particularly effective for volatile indicators like ATR.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>Period (default: 14):</strong> The smoothing period that determines the weight given 
+      to new values. Wilder originally recommended 14 for most applications, which provides a good 
+      balance between responsiveness and stability. Shorter periods (7-10) create more responsive 
+      but noisier results, while longer periods (20-30) provide more stability but increased lag. 
+      The period directly affects the smoothing factor as 1/period.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns an array of smoothed values:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Length:</strong> Same as input array</li>
+    <li><strong>Initial values:</strong> First 'period-1' values use partial calculations</li>
+    <li><strong>Smoothing level:</strong> Equivalent to (2×period - 1) EMA</li>
+    <li><strong>Range:</strong> Within the range of input values</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Jsa in Rust
-let result = indicators::jsa(&data, 14);
+use ta_lib::indicators::jsa;
+
+// Calculate Wilder's Smoothing Average
+let prices = vec![100.0, 102.0, 101.5, 103.0, 104.5, 103.5, 105.0, 106.0, 105.5, 107.0];
+let jsa_values = jsa(&prices, 14)?;
+
+// Manual calculation for understanding
+let mut wilder_avg = vec![0.0; prices.len()];
+let period = 14;
+let alpha = 1.0 / period as f64;
+
+// Initialize with simple average
+let mut sum = 0.0;
+for i in 0..period.min(prices.len()) {
+    sum += prices[i];
+    if i == period - 1 {
+        wilder_avg[i] = sum / period as f64;
+    }
+}
+
+// Calculate remaining values
+for i in period..prices.len() {
+    wilder_avg[i] = alpha * prices[i] + (1.0 - alpha) * wilder_avg[i-1];
+    
+    println!("Price: {:.2}, Wilder's Avg: {:.2}", prices[i], wilder_avg[i]);
+}
+
+// Use in custom RSI calculation
+fn calculate_rsi_with_wilders(prices: &[f64], period: usize) -> Vec<Option<f64>> {
+    let mut gains = vec![];
+    let mut losses = vec![];
+    
+    // Calculate price changes
+    for i in 1..prices.len() {
+        let change = prices[i] - prices[i-1];
+        gains.push(if change > 0.0 { change } else { 0.0 });
+        losses.push(if change < 0.0 { -change } else { 0.0 });
+    }
+    
+    // Apply Wilder's smoothing to gains and losses
+    let avg_gains = jsa(&gains, period)?;
+    let avg_losses = jsa(&losses, period)?;
+    
+    // Calculate RSI
+    let mut rsi = vec![None; prices.len()];
+    for i in period..prices.len() {
+        if let (Some(gain), Some(loss)) = (avg_gains[i-1], avg_losses[i-1]) {
+            if loss != 0.0 {
+                let rs = gain / loss;
+                rsi[i] = Some(100.0 - (100.0 / (1.0 + rs)));
+            } else {
+                rsi[i] = Some(100.0);
+            }
+        }
+    }
+    rsi
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import jsa
+
+# Example usage with price data
+df = pd.DataFrame({
+    'close': [100, 102, 101.5, 103, 104.5, 103.5, 105, 106, 105.5, 107, 108, 107.5, 109]
+})
+
+# Calculate Wilder's Smoothing
+df['jsa_14'] = jsa(df['close'], period=14)
+
+# Compare with EMA
+# Wilder's 14 ≈ EMA 27
+df['ema_27'] = df['close'].ewm(span=27, adjust=False).mean()
+
+# Manual Wilder's calculation for verification
+def wilders_smoothing(data, period):
+    wilder = pd.Series(index=data.index, dtype=float)
+    wilder.iloc[period-1] = data.iloc[:period].mean()
+    
+    for i in range(period, len(data)):
+        wilder.iloc[i] = (wilder.iloc[i-1] * (period - 1) + data.iloc[i]) / period
+    
+    return wilder
+
+df['jsa_manual'] = wilders_smoothing(df['close'], 14)
+
+# Use for trend analysis
+df['jsa_trend'] = np.where(df['jsa_14'] > df['jsa_14'].shift(1), 'Up', 'Down')
+df['price_above_jsa'] = df['close'] > df['jsa_14']
+
+# Crossover signals
+df['bullish_cross'] = df['price_above_jsa'] & ~df['price_above_jsa'].shift(1)
+df['bearish_cross'] = ~df['price_above_jsa'] & df['price_above_jsa'].shift(1)
+
+# ATR-style calculation using Wilder's
+high_low = df['high'] - df['low']
+high_close = abs(df['high'] - df['close'].shift(1))
+low_close = abs(df['low'] - df['close'].shift(1))
+true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+df['atr_wilders'] = jsa(true_range, 14)
+
+print(df[['close', 'jsa_14', 'ema_27', 'jsa_trend', 'bullish_cross']].tail(10))
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Custom Indicator Development</h3>
+  <p>Using Wilder's smoothing in custom indicators:</p>
+  <pre><code class="language-python">
+# Create custom momentum oscillator with Wilder's smoothing
+def wilder_momentum_oscillator(close, fast_period=10, slow_period=21):
+    # Calculate momentum
+    momentum = close.diff()
+    
+    # Apply Wilder's smoothing
+    fast_smooth = jsa(momentum, fast_period)
+    slow_smooth = jsa(momentum, slow_period)
+    
+    # Create oscillator
+    oscillator = fast_smooth - slow_smooth
+    
+    # Normalize to percentage
+    oscillator_pct = oscillator / close * 100
+    
+    return oscillator_pct
+
+# Apply to data
+mom_oscillator = wilder_momentum_oscillator(close)
+
+# Generate signals
+buy_signal = (mom_oscillator > 0) & (mom_oscillator.shift(1) <= 0)
+sell_signal = (mom_oscillator < 0) & (mom_oscillator.shift(1) >= 0)
+
+# Divergence detection
+price_highs = close.rolling(20).max() == close
+oscillator_highs = mom_oscillator.rolling(20).max() == mom_oscillator
+
+bearish_divergence = price_highs & (close > close.shift(20)) & \
+                    oscillator_highs & (mom_oscillator < mom_oscillator.shift(20))
+  </code></pre>
+
+  <h3>2. Volatility-Adjusted Bands</h3>
+  <p>Creating bands using Wilder's smoothing:</p>
+  <pre><code class="language-python">
+# Calculate Wilder's smoothed average
+jsa_center = jsa(close, 20)
+
+# Calculate true range components
+high_low = high - low
+high_close_prev = abs(high - close.shift(1))
+low_close_prev = abs(low - close.shift(1))
+
+# True range
+true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+
+# Wilder's smoothed ATR
+atr_wilder = jsa(true_range, 20)
+
+# Create bands
+multiplier = 2.5
+upper_band = jsa_center + (multiplier * atr_wilder)
+lower_band = jsa_center - (multiplier * atr_wilder)
+
+# Trading signals
+long_entry = (close <= lower_band) & (close > close.shift(1))
+short_entry = (close >= upper_band) & (close < close.shift(1))
+
+# Band squeeze detection
+band_width = (upper_band - lower_band) / jsa_center * 100
+squeeze = band_width < band_width.rolling(50).quantile(0.25)
+  </code></pre>
+
+  <h3>3. Multi-Period Analysis</h3>
+  <p>Using multiple Wilder's periods for confirmation:</p>
+  <pre><code class="language-python">
+# Calculate multiple periods
+jsa_7 = jsa(close, 7)    # Fast
+jsa_14 = jsa(close, 14)  # Medium (Wilder's default)
+jsa_28 = jsa(close, 28)  # Slow
+
+# Trend strength index
+trend_score = pd.Series(0, index=close.index)
+trend_score += (close > jsa_7).astype(int)
+trend_score += (close > jsa_14).astype(int)
+trend_score += (close > jsa_28).astype(int)
+trend_score += (jsa_7 > jsa_14).astype(int)
+trend_score += (jsa_14 > jsa_28).astype(int)
+
+# Strong trend: score >= 4 out of 5
+strong_uptrend = trend_score >= 4
+strong_downtrend = trend_score <= 1
+
+# Perfect alignment
+perfect_bull_alignment = (close > jsa_7) & (jsa_7 > jsa_14) & (jsa_14 > jsa_28) & \
+                        (jsa_7 > jsa_7.shift(1)) & (jsa_14 > jsa_14.shift(1)) & \
+                        (jsa_28 > jsa_28.shift(1))
+
+# Convergence/Divergence
+jsa_spread_1 = jsa_7 - jsa_14
+jsa_spread_2 = jsa_14 - jsa_28
+convergence = (abs(jsa_spread_1) < abs(jsa_spread_1.shift(5))) & \
+              (abs(jsa_spread_2) < abs(jsa_spread_2.shift(5)))
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization:</strong> First period-1 values may be less reliable</li>
+    <li><strong>Lag characteristics:</strong> More lag than standard EMA of same period</li>
+    <li><strong>Recursive calculation:</strong> Errors can compound if not careful</li>
+    <li><strong>Period selection:</strong> Very short periods lose Wilder's intended smoothing</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Use Wilder's original period of 14 as a starting point</li>
+    <li>Remember the EMA equivalence: JSA period × 2 - 1</li>
+    <li>Apply to derived values (like ATR) not just prices</li>
+    <li>Combine with Wilder's other indicators (RSI, ADX) for consistency</li>
+    <li>Allow sufficient warmup period for calculations</li>
+    <li>Use for smoothing volatile indicators or data series</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Wilder, J. W. Jr. (1978). <em>New Concepts in Technical Trading Systems</em></li>
+    <li>Understanding the relationship between Wilder's smoothing and EMA</li>
+    <li>Applications in RSI, ATR, ADX, and Parabolic SAR calculations</li>
+    <li>Comparison with other adaptive smoothing techniques</li>
+  </ul>
 </IndicatorLayout>

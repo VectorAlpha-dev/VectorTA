@@ -2,18 +2,9 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ht_sine';
-const indicatorName = 'Ht Sine';
-const description = `Technical analysis indicator: Ht Sine`;
-const parameters = [
-  {
-    "name": "period",
-    "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
-  }
-];
+const indicatorName = 'Hilbert Transform - SineWave';
+const description = `The Hilbert Transform SineWave indicator generates two sinusoidal outputs - Sine and LeadSine - that oscillate in sync with the dominant market cycle, providing clear visual signals for cycle tops and bottoms with the LeadSine offering advanced warning of cycle turns.`;
+const parameters = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -22,23 +13,293 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Hilbert Transform - SineWave indicator, developed by John Ehlers, transforms the dominant 
+    cycle phase into two smooth sine wave outputs. The primary Sine output represents the current 
+    position within the market cycle, while the LeadSine output is advanced by 45 degrees, providing 
+    early signals of impending cycle turns. These waves oscillate between -1 and +1, making cycle 
+    tops and bottoms visually obvious.
+  </p>
+  <p>
+    What makes this indicator particularly powerful is its ability to adapt to the current market 
+    cycle automatically. Unlike fixed-period oscillators, the SineWave indicator adjusts its 
+    frequency based on the measured dominant cycle, always showing exactly one complete sine wave 
+    per market cycle. The crossovers between Sine and LeadSine provide high-probability turning 
+    point signals when the market is in a cycling mode.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Ht Sine helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Wave Components</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Sine:</strong> Current cycle position as a sine wave (-1 to +1)</li>
+    <li><strong>LeadSine:</strong> Sine wave advanced by 45°, providing early signals</li>
+    <li><strong>Crossovers:</strong> LeadSine crossing Sine indicates cycle turns</li>
+    <li><strong>Extremes:</strong> Values near ±1 indicate cycle peaks/troughs</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Ht Sine to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Buy signal:</strong> LeadSine crosses above Sine (cycle bottom)</li>
+    <li><strong>Sell signal:</strong> LeadSine crosses below Sine (cycle top)</li>
+    <li><strong>Overbought:</strong> Both waves near +1</li>
+    <li><strong>Oversold:</strong> Both waves near -1</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Market Conditions</h3>
+  <ul>
+    <li><strong>Cycling market:</strong> Clear, smooth sine waves with regular crossovers</li>
+    <li><strong>Trending market:</strong> Waves may flatline at extremes or show irregular patterns</li>
+    <li><strong>Transition:</strong> Waves converging indicates potential trend start</li>
+    <li><strong>High reliability:</strong> Wide separation between waves at turns</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The SineWave calculation process:</p>
+  <ol>
+    <li><strong>Calculate Dominant Cycle Phase:</strong> Using Hilbert Transform</li>
+    <li><strong>Measure Dominant Cycle Period:</strong> From phase rate of change</li>
+    <li><strong>Generate Sine Wave:</strong> <code>Sine = sin(Phase)</code></li>
+    <li><strong>Generate LeadSine:</strong> <code>LeadSine = sin(Phase + 45°)</code></li>
+    <li><strong>Normalize Output:</strong> Ensure range is exactly -1 to +1</li>
+    <li><strong>Apply Smoothing:</strong> 3-bar WMA for noise reduction</li>
+  </ol>
+  <p>
+    The 45-degree lead is chosen because it provides optimal advance warning while maintaining 
+    high correlation with actual turns. At this lead angle, the LeadSine crosses zero exactly 
+    when the Sine reaches its maximum rate of change, coinciding with momentum shifts in price.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <p>
+    The Hilbert Transform SineWave has no user-adjustable parameters. The indicator automatically 
+    adapts to the dominant cycle period through the Hilbert Transform process. This self-adaptive 
+    design ensures the indicator always displays exactly one sine wave per dominant market cycle, 
+    regardless of whether that cycle is 10 bars or 40 bars.
+  </p>
+  <p>
+    Fixed internal settings:
+  </p>
+  <ul>
+    <li><strong>Lead angle:</strong> 45 degrees (π/4 radians)</li>
+    <li><strong>Output range:</strong> -1 to +1</li>
+    <li><strong>Smoothing:</strong> 3-bar WMA on final output</li>
+    <li><strong>Initialization:</strong> ~50 bars for Hilbert Transform</li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns two synchronized sine waves:</p>
+  <ul>
+    <li><strong>Sine:</strong> Primary sine wave output</li>
+    <li><strong>LeadSine:</strong> Leading sine wave (45° advanced)</li>
+    <li><strong>Type:</strong> Two arrays of floating-point numbers</li>
+    <li><strong>Range:</strong> -1.0 to +1.0 (normalized)</li>
+    <li><strong>Frequency:</strong> Automatically matches dominant cycle</li>
+    <li><strong>Initial values:</strong> Requires ~50 bars to stabilize</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Ht Sine in Rust
-let result = indicators::ht_sine(&data, 14);
+use ta_lib::indicators::{ht_sine, ht_dcperiod};
+
+// Calculate SineWave indicator
+let (sine, leadsine) = ht_sine(&close_prices)?;
+
+// Detect crossover signals
+for i in 1..sine.len() {
+    if let (Some(sine_curr), Some(sine_prev), Some(lead_curr), Some(lead_prev)) = 
+        (sine.get(i), sine.get(i-1), leadsine.get(i), leadsine.get(i-1)) {
+        
+        // Detect crossovers
+        if lead_prev <= sine_prev && lead_curr > sine_curr {
+            println!("BUY signal at bar {}: LeadSine crossed above Sine", i);
+            println!("  Sine: {:.3}, LeadSine: {:.3}", sine_curr, lead_curr);
+        } else if lead_prev >= sine_prev && lead_curr < sine_curr {
+            println!("SELL signal at bar {}: LeadSine crossed below Sine", i);
+            println!("  Sine: {:.3}, LeadSine: {:.3}", sine_curr, lead_curr);
+        }
+        
+        // Identify extreme readings
+        if sine_curr.abs() > 0.9 {
+            let condition = if *sine_curr > 0.0 { "Overbought" } else { "Oversold" };
+            println!("{} condition at bar {}: Sine = {:.3}", condition, i, sine_curr);
+        }
+        
+        // Measure wave quality (smooth cycling)
+        if i > 10 {
+            let mut smoothness = 0.0;
+            for j in (i-10)..i {
+                let diff = (sine[j] - sine[j-1]).abs();
+                smoothness += diff;
+            }
+            smoothness /= 10.0;
+            
+            if smoothness > 0.15 {
+                println!("Good cycling detected at bar {}: smoothness = {:.3}", i, smoothness);
+            }
+        }
+    }
+}
+
+// Combine with period for complete analysis
+let dc_period = ht_dcperiod(&close_prices)?;
+for i in 50..sine.len() {
+    if let (Some(s), Some(period)) = (sine.get(i), dc_period.get(i)) {
+        // Check if we're at a cycle extreme
+        let cycle_position = (s.asin() / std::f64::consts::PI + 0.5) * period;
+        println!("Bar {}: Sine = {:.3}, Period = {:.1}, Cycle position = {:.1}", 
+                 i, s, period, cycle_position);
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import ht_sine, ht_dcperiod
+
+# Calculate SineWave indicator
+sine, leadsine = ht_sine(df['close'])
+df['sine'] = sine
+df['leadsine'] = leadsine
+
+# Detect crossover signals
+df['crossover_up'] = (df['leadsine'] > df['sine']) & (df['leadsine'].shift(1) <= df['sine'].shift(1))
+df['crossover_down'] = (df['leadsine'] < df['sine']) & (df['leadsine'].shift(1) >= df['sine'].shift(1))
+
+# Generate trading signals
+df['signal'] = 0
+df.loc[df['crossover_up'], 'signal'] = 1    # Buy
+df.loc[df['crossover_down'], 'signal'] = -1  # Sell
+
+# Identify extremes
+df['overbought'] = df['sine'] > 0.9
+df['oversold'] = df['sine'] < -0.9
+
+# Measure wave separation (signal strength)
+df['wave_separation'] = abs(df['sine'] - df['leadsine'])
+df['strong_signal'] = df['wave_separation'] > 0.5
+
+# Calculate wave smoothness (cycle quality)
+df['sine_change'] = df['sine'].diff().abs()
+df['smooth_cycle'] = df['sine_change'].rolling(10).mean() > 0.1
+
+# Combine with period for filtering
+df['dc_period'] = ht_dcperiod(df['close'])
+df['valid_cycle'] = (df['dc_period'] > 10) & (df['dc_period'] < 50)
+
+# Final signals only in cycling markets
+df['filtered_signal'] = df['signal'] * df['valid_cycle'] * df['smooth_cycle']
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Cycle Trading System</h3>
+  <p>Trade based on SineWave crossovers:</p>
+  <pre><code class="language-python">
+# Calculate indicators
+sine, leadsine = ht_sine(close)
+period = ht_dcperiod(close)
+
+# Identify cycling market
+cycling_market = (period > 10) & (period < 40) & (period.rolling(20).std() < 3)
+
+# Generate crossover signals
+buy_cross = (leadsine > sine) & (leadsine.shift(1) <= sine.shift(1))
+sell_cross = (leadsine < sine) & (leadsine.shift(1) >= sine.shift(1))
+
+# Filter signals by market condition
+buy_signal = buy_cross & cycling_market & (sine < 0.5)  # Not overbought
+sell_signal = sell_cross & cycling_market & (sine > -0.5)  # Not oversold
+
+# Stop loss at opposite extreme
+stop_loss_long = sine > 0.9
+stop_loss_short = sine < -0.9
+  </code></pre>
+
+  <h3>2. Momentum Confirmation</h3>
+  <p>Use wave velocity for momentum analysis:</p>
+  <pre><code class="language-python">
+# Calculate wave velocity
+sine, leadsine = ht_sine(close)
+sine_velocity = sine.diff()
+lead_velocity = leadsine.diff()
+
+# Momentum confirmation
+bullish_momentum = (sine_velocity > 0) & (lead_velocity > 0) & (leadsine > sine)
+bearish_momentum = (sine_velocity < 0) & (lead_velocity < 0) & (leadsine < sine)
+
+# Divergence detection
+price_roc = close.pct_change(10)
+sine_roc = sine.diff(10)
+
+bullish_divergence = (price_roc < -0.02) & (sine_roc > 0.5) & (sine < -0.5)
+bearish_divergence = (price_roc > 0.02) & (sine_roc < -0.5) & (sine > 0.5)
+
+# Combined signal
+strong_buy = buy_signal & bullish_momentum & ~bearish_divergence
+strong_sell = sell_signal & bearish_momentum & ~bullish_divergence
+  </code></pre>
+
+  <h3>3. Multi-Indicator Confirmation</h3>
+  <p>Combine with other Hilbert indicators:</p>
+  <pre><code class="language-python">
+# Get all Hilbert indicators
+sine, leadsine = ht_sine(close)
+dc_period = ht_dcperiod(close)
+dc_phase = ht_dcphase(close)
+i_phase, q_phase = ht_phasor(close)
+
+# Comprehensive cycle analysis
+# 1. Valid cycle period
+valid_period = (dc_period > 15) & (dc_period < 35)
+
+# 2. Sine crossover
+sine_buy = (leadsine > sine) & (leadsine.shift(1) <= sine.shift(1))
+
+# 3. Phase confirmation (in accumulation zone)
+phase_buy = (dc_phase > -180) & (dc_phase < -90)
+
+# 4. Phasor momentum (quadrature increasing)
+phasor_buy = q_phase > q_phase.shift(1)
+
+# Combined signal with multiple confirmations
+confirmed_buy = valid_period & sine_buy & phase_buy & phasor_buy
+
+# Signal strength based on agreement
+signal_strength = (
+    valid_period.astype(int) + 
+    sine_buy.astype(int) + 
+    phase_buy.astype(int) + 
+    phasor_buy.astype(int)
+) / 4
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Trending markets:</strong> Waves may flatline at extremes for extended periods</li>
+    <li><strong>Transition periods:</strong> Erratic behavior when market shifts between cycling and trending</li>
+    <li><strong>Whipsaws:</strong> Multiple crossovers in choppy markets</li>
+    <li><strong>Initialization:</strong> Requires ~50 bars for accurate output</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Confirm market is cycling before taking signals</li>
+    <li>Use wave separation as signal quality filter</li>
+    <li>Avoid signals when waves are converging</li>
+    <li>Combine with dominant cycle period for validation</li>
+    <li>Set minimum wave velocity thresholds</li>
+    <li>Use stops at opposite wave extremes</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.</li>
+    <li>Mesa and Sine Wave indicator (MESA) original research</li>
+    <li>Applications of phase-based indicators in trading systems</li>
+  </ul>
 </IndicatorLayout>

@@ -1,0 +1,104 @@
+---
+title: "Ichimoku Cloud"
+description: "A comprehensive indicator that defines support/resistance, trend direction, and momentum."
+category: "trend"
+parameters:
+  - name: "conversion_period"
+    type: "number"
+    default: 9
+    min: 1
+    max: 100
+    description: "Tenkan-sen period"
+  - name: "base_period"
+    type: "number"
+    default: 26
+    min: 1
+    max: 200
+    description: "Kijun-sen period"
+  - name: "span_period"
+    type: "number"
+    default: 52
+    min: 1
+    max: 500
+    description: "Senkou Span B period"
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated Ichimoku Cloud values"
+complexity: "O(n)"
+implementationStatus: "planned"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="ichimoku" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+A comprehensive indicator that defines support/resistance, trend direction, and momentum.
+
+*Note: This is placeholder documentation. Full documentation will be added when the indicator is implemented.*
+
+## Interpretation {#interpretation}
+
+Details about how to interpret Ichimoku Cloud values will be added here.
+
+## Calculation {#calculation}
+
+The mathematical formula and calculation steps for Ichimoku Cloud will be documented here.
+
+## Parameters {#parameters}
+
+### conversion_period (default: 9)
+Tenkan-sen period
+
+- Type: `number`
+- Min: 1
+- Max: 100
+
+### base_period (default: 26)
+Kijun-sen period
+
+- Type: `number`
+- Min: 1
+- Max: 200
+
+### span_period (default: 52)
+Senkou Span B period
+
+- Type: `number`
+- Min: 1
+- Max: 500
+
+
+## Returns & Output {#returns}
+
+The Ichimoku Cloud function returns a vector of optional floating-point values representing the indicator calculations.
+
+## Example Usage {#usage}
+
+<CodeBlock lang="rust">
+use vectorta::indicators::ichimoku;
+
+// Example usage will be added when implemented
+let result = ichimoku(&data, 9, 26, 52)?;
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+Common trading strategies and applications using Ichimoku Cloud will be documented here.
+
+## Edge Cases & Errors {#edge-cases}
+
+Information about edge cases and error handling will be added here.
+
+## References {#references}
+
+Academic and industry references for Ichimoku Cloud will be listed here.
+
+</IndicatorLayout>

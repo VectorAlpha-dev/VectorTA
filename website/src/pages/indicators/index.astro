@@ -1,6 +1,7 @@
 ---
-import BaseLayout from '../../layouts/BaseLayout.astro';
+import DocsLayout from '../../layouts/DocsLayout.astro';
 import { indicators } from '../../data/indicator-registry';
+import { CategoryIcon } from '../../components/ui/CategoryIcon';
 
 // Group indicators by category with proper descriptions
 const categoryDescriptions = {
@@ -9,7 +10,10 @@ const categoryDescriptions = {
   'volatility': 'Measure market volatility and price ranges',
   'volume': 'Analyze trading volume and its relationship with price',
   'moving_averages': 'Smooth price data to identify trends and support/resistance levels',
-  'oscillators': 'Identify cycles, overbought/oversold conditions, and divergences',
+  'statistical': 'Apply statistical analysis to price data',
+  'support_resistance': 'Identify key price levels and stops',
+  'price': 'Transform and analyze price data',
+  'cycles': 'Identify market cycles and periodic patterns',
   'other': 'Specialized indicators and unique analysis tools'
 };
 
@@ -22,7 +26,7 @@ const categorizedIndicators = Object.entries(indicators).reduce((acc, [id, indic
 }, {} as Record<string, any[]>);
 
 // Sort categories by importance and indicators within each category
-const categoryOrder = ['trend', 'momentum', 'oscillators', 'moving_averages', 'volatility', 'volume', 'other'];
+const categoryOrder = ['momentum', 'trend', 'volatility', 'volume', 'moving_averages', 'statistical', 'support_resistance', 'price', 'cycles', 'other'];
 const sortedCategories = categoryOrder
   .filter(cat => categorizedIndicators[cat])
   .map(category => ({
@@ -46,7 +50,7 @@ const totalIndicators = Object.keys(indicators).length;
 const implementedIndicators = 178; // From README
 ---
 
-<BaseLayout 
+<DocsLayout 
   title="Technical Indicators Reference" 
   description="Comprehensive reference for all technical analysis indicators in VectorTA. Browse by category or search for specific indicators."
 >
@@ -105,52 +109,61 @@ const implementedIndicators = 178; // From README
     </div>
 
     <!-- Categories -->
-    <div class="space-y-12">
+    <div class="space-y-6">
       {sortedCategories.map(({ name, description, indicators: categoryIndicators }) => (
-        <section id={name} class="scroll-mt-20">
-          <div class="mb-6">
-            <h2 class="text-2xl font-bold capitalize flex items-center gap-2">
-              <span class="text-primary">
-                {name === 'trend' && '📈'}
-                {name === 'momentum' && '⚡'}
-                {name === 'oscillators' && '〰️'}
-                {name === 'moving_averages' && '📊'}
-                {name === 'volatility' && '📉'}
-                {name === 'volume' && '📊'}
-                {name === 'other' && '🔧'}
+        <section id={name} class="scroll-mt-20 category-section">
+          <button
+            class="w-full text-left mb-4 p-4 bg-muted rounded-lg hover:bg-muted/80 transition-colors category-toggle"
+            data-category={name}
+            aria-expanded="false"
+            aria-controls={`category-${name}`}
+          >
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 transition-transform category-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+                <CategoryIcon category={name} className="w-6 h-6 text-primary" client:load />
+                <h2 class="text-xl font-bold capitalize">
+                  {name.replace(/_/g, ' ')}
+                </h2>
+                <span class="text-sm font-normal text-muted-foreground">({categoryIndicators.length})</span>
+              </div>
+              <span class="text-sm text-muted-foreground hidden sm:block">
+                Click to expand
               </span>
-              {name.replace(/_/g, ' ')}
-              <span class="text-sm font-normal text-muted-foreground">({categoryIndicators.length})</span>
-            </h2>
+            </div>
             {description && (
-              <p class="text-muted-foreground mt-2">{description}</p>
+              <p class="text-muted-foreground mt-2 ml-14">{description}</p>
             )}
-          </div>
+          </button>
           
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {categoryIndicators.map((indicator) => (
-              <a
-                href={`/indicators/${indicator.id}`}
-                class="card hover:shadow-lg transition-all group indicator-card"
-                data-indicator={JSON.stringify({ id: indicator.id, name: indicator.name, category: name })}
-              >
-                <h3 class="font-semibold mb-2 group-hover:text-primary transition-colors">
-                  {indicator.name}
-                </h3>
-                <p class="text-sm text-muted-foreground mb-3 line-clamp-2">
-                  {indicator.description || `Calculate ${indicator.name} for technical analysis`}
-                </p>
-                <div class="flex items-center justify-between text-xs text-muted-foreground">
-                  <span class="font-mono">{indicator.id}</span>
-                  <span class="flex items-center gap-1">
-                    {indicator.parameters?.length || 0} params
-                    <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                    </svg>
-                  </span>
-                </div>
-              </a>
-            ))}
+          <div id={`category-${name}`} class="category-content hidden">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pl-14">
+              {categoryIndicators.map((indicator) => (
+                <a
+                  href={`/indicators/${indicator.id}`}
+                  class="card hover:shadow-lg transition-all group indicator-card"
+                  data-indicator={JSON.stringify({ id: indicator.id, name: indicator.name, category: name })}
+                >
+                  <h3 class="font-semibold mb-2 group-hover:text-primary transition-colors">
+                    {indicator.name}
+                  </h3>
+                  <p class="text-sm text-muted-foreground mb-3 line-clamp-2">
+                    {indicator.description || `Calculate ${indicator.name} for technical analysis`}
+                  </p>
+                  <div class="flex items-center justify-between text-xs text-muted-foreground">
+                    <span class="font-mono">{indicator.id}</span>
+                    <span class="flex items-center gap-1">
+                      {indicator.parameters?.length || 0} params
+                      <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                  </div>
+                </a>
+              ))}
+            </div>
           </div>
         </section>
       ))}
@@ -200,18 +213,53 @@ const implementedIndicators = 178; // From README
   </div>
 
   <script>
+    // Category collapse/expand functionality
+    const categoryToggles = document.querySelectorAll('.category-toggle') as NodeListOf<HTMLButtonElement>;
+    const categoryContents = document.querySelectorAll('.category-content') as NodeListOf<HTMLElement>;
+    
+    categoryToggles.forEach(toggle => {
+      toggle.addEventListener('click', () => {
+        const category = toggle.dataset.category;
+        const content = document.getElementById(`category-${category}`);
+        const chevron = toggle.querySelector('.category-chevron');
+        const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+        
+        if (content) {
+          if (isExpanded) {
+            // Collapse
+            content.classList.add('hidden');
+            toggle.setAttribute('aria-expanded', 'false');
+            chevron?.classList.remove('rotate-90');
+            toggle.querySelector('.hidden.sm\\:block')!.textContent = 'Click to expand';
+          } else {
+            // Expand
+            content.classList.remove('hidden');
+            toggle.setAttribute('aria-expanded', 'true');
+            chevron?.classList.add('rotate-90');
+            toggle.querySelector('.hidden.sm\\:block')!.textContent = 'Click to collapse';
+          }
+        }
+      });
+    });
+
     // Search functionality
     const searchInput = document.getElementById('indicator-search') as HTMLInputElement;
     const indicatorCards = document.querySelectorAll('.indicator-card') as NodeListOf<HTMLElement>;
-    const categories = document.querySelectorAll('section[id]') as NodeListOf<HTMLElement>;
+    const categorySections = document.querySelectorAll('.category-section') as NodeListOf<HTMLElement>;
 
     searchInput?.addEventListener('input', (e) => {
       const query = (e.target as HTMLInputElement).value.toLowerCase();
       
       if (!query) {
-        // Show all cards and categories
+        // Reset to collapsed state
         indicatorCards.forEach(card => card.style.display = '');
-        categories.forEach(cat => cat.style.display = '');
+        categorySections.forEach(section => section.style.display = '');
+        categoryContents.forEach(content => content.classList.add('hidden'));
+        categoryToggles.forEach(toggle => {
+          toggle.setAttribute('aria-expanded', 'false');
+          toggle.querySelector('.category-chevron')?.classList.remove('rotate-90');
+          toggle.querySelector('.hidden.sm\\:block')!.textContent = 'Click to expand';
+        });
         return;
       }
 
@@ -233,12 +281,24 @@ const implementedIndicators = 178; // From README
         }
       });
 
-      // Hide categories with no visible indicators
-      categories.forEach(cat => {
-        if (cat.id && !visibleCategories.has(cat.id)) {
-          cat.style.display = 'none';
+      // Show/hide categories and auto-expand those with matches
+      categorySections.forEach(section => {
+        const categoryName = section.id;
+        if (categoryName && visibleCategories.has(categoryName)) {
+          section.style.display = '';
+          // Auto-expand categories with matches
+          const content = document.getElementById(`category-${categoryName}`);
+          const toggle = section.querySelector('.category-toggle');
+          const chevron = toggle?.querySelector('.category-chevron');
+          if (content && toggle) {
+            content.classList.remove('hidden');
+            toggle.setAttribute('aria-expanded', 'true');
+            chevron?.classList.add('rotate-90');
+            const expandText = toggle.querySelector('.hidden.sm\\:block');
+            if (expandText) expandText.textContent = 'Click to collapse';
+          }
         } else {
-          cat.style.display = '';
+          section.style.display = 'none';
         }
       });
     });
@@ -249,12 +309,68 @@ const implementedIndicators = 178; // From README
         e.preventDefault();
         const href = anchor.getAttribute('href');
         if (href) {
-          document.querySelector(href)?.scrollIntoView({
-            behavior: 'smooth',
-            block: 'start'
-          });
+          const target = document.querySelector(href);
+          if (target) {
+            // Expand the category if it's collapsed
+            const section = target.closest('.category-section');
+            if (section) {
+              const toggle = section.querySelector('.category-toggle') as HTMLButtonElement;
+              const content = section.querySelector('.category-content');
+              const chevron = toggle?.querySelector('.category-chevron');
+              if (content && toggle && content.classList.contains('hidden')) {
+                content.classList.remove('hidden');
+                toggle.setAttribute('aria-expanded', 'true');
+                chevron?.classList.add('rotate-90');
+                const expandText = toggle.querySelector('.hidden.sm\\:block');
+                if (expandText) expandText.textContent = 'Click to collapse';
+              }
+            }
+            
+            target.scrollIntoView({
+              behavior: 'smooth',
+              block: 'start'
+            });
+          }
         }
       });
     });
+
+    // Expand category if linked directly
+    const hash = window.location.hash.slice(1);
+    if (hash) {
+      const section = document.getElementById(hash);
+      if (section) {
+        const toggle = section.querySelector('.category-toggle') as HTMLButtonElement;
+        const content = section.querySelector('.category-content');
+        const chevron = toggle?.querySelector('.category-chevron');
+        if (content && toggle) {
+          content.classList.remove('hidden');
+          toggle.setAttribute('aria-expanded', 'true');
+          chevron?.classList.add('rotate-90');
+          const expandText = toggle.querySelector('.hidden.sm\\:block');
+          if (expandText) expandText.textContent = 'Click to collapse';
+        }
+      }
+    }
   </script>
-</BaseLayout>
+  <style>
+    .category-chevron {
+      transition: transform 0.2s ease-in-out;
+    }
+    
+    .category-content {
+      animation: fadeIn 0.3s ease-in-out;
+    }
+    
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+  </style>
+</DocsLayout>

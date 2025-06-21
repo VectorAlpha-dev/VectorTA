@@ -1,0 +1,61 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { Logo } from '../components/ui/Logo';
+---
+
+<BaseLayout title="Logo Test">
+  <div class="content-container py-16">
+    <h1 class="text-3xl font-bold mb-8">Logo Test Page</h1>
+    
+    <div class="space-y-8">
+      <!-- Test different logo configurations -->
+      <div class="bg-white dark:bg-gray-900 p-8 rounded-lg border">
+        <h2 class="text-xl font-semibold mb-4">Default Logo with text-foreground</h2>
+        <div class="text-foreground">
+          <Logo client:load width={220} showText={true} animated={true} />
+        </div>
+      </div>
+      
+      <div class="bg-gray-100 dark:bg-gray-800 p-8 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">Logo on different background</h2>
+        <div class="text-gray-900 dark:text-gray-100">
+          <Logo client:load width={220} showText={true} animated={false} />
+        </div>
+      </div>
+      
+      <div class="bg-blue-500 p-8 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4 text-white">Logo on colored background</h2>
+        <div class="text-white">
+          <Logo client:load width={220} showText={true} animated={false} />
+        </div>
+      </div>
+      
+      <div class="p-8 rounded-lg border">
+        <h2 class="text-xl font-semibold mb-4">Different sizes</h2>
+        <div class="space-y-4">
+          <div>
+            <p class="text-sm text-muted-foreground mb-2">Small (120px)</p>
+            <Logo client:load width={120} showText={true} animated={false} />
+          </div>
+          <div>
+            <p class="text-sm text-muted-foreground mb-2">Medium (220px)</p>
+            <Logo client:load width={220} showText={true} animated={false} />
+          </div>
+          <div>
+            <p class="text-sm text-muted-foreground mb-2">Large (300px)</p>
+            <Logo client:load width={300} showText={true} animated={false} />
+          </div>
+        </div>
+      </div>
+      
+      <div class="p-8 rounded-lg border">
+        <h2 class="text-xl font-semibold mb-4">Logo without text</h2>
+        <div class="flex gap-4 items-center">
+          <Logo client:load width={48} showText={false} animated={false} />
+          <Logo client:load width={60} showText={false} animated={false} />
+          <Logo client:load width={80} showText={false} animated={false} />
+        </div>
+      </div>
+    </div>
+  </div>
+</BaseLayout>

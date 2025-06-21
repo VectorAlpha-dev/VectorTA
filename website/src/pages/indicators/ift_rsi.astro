@@ -3,7 +3,7 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ift_rsi';
 const indicatorName = 'Inverse Fisher Transform RSI';
-const description = `Technical analysis indicator: Inverse Fisher Transform RSI`;
+const description = `The Inverse Fisher Transform RSI (IFT-RSI) applies the inverse Fisher transform to RSI values, creating an oscillator with enhanced signals that tend to be binary-like, making overbought and oversold conditions more visually apparent and generating clearer trading signals.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,7 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "RSI lookback period"
   }
 ];
 ---
@@ -22,23 +22,308 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Inverse Fisher Transform RSI (IFT-RSI) is an enhanced version of the traditional RSI that 
+    applies the inverse Fisher transform to create a more responsive oscillator. Developed by 
+    John Ehlers, this transformation converts the RSI's smooth oscillations into sharp, almost 
+    binary-like movements that make market turning points much easier to identify.
+  </p>
+  <p>
+    The inverse Fisher transform has the mathematical property of compressing values near the 
+    extremes and expanding values near the center, resulting in an indicator that spends most 
+    of its time near +1 or -1, with rapid transitions between these states. This creates clearer 
+    signals than traditional RSI, reducing the ambiguity often found in oscillator readings and 
+    making overbought/oversold conditions immediately apparent.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Inverse Fisher Transform RSI helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Signal Characteristics</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Near +1 (0.5 to 1.0):</strong> Strong bullish momentum, overbought condition</li>
+    <li><strong>Near -1 (-1.0 to -0.5):</strong> Strong bearish momentum, oversold condition</li>
+    <li><strong>Zero crossings:</strong> Momentum shifts, potential trend changes</li>
+    <li><strong>Rapid transitions:</strong> Sharp moves between extremes signal reversals</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Inverse Fisher Transform RSI to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Buy signal:</strong> IFT-RSI crosses above -0.5 from oversold</li>
+    <li><strong>Sell signal:</strong> IFT-RSI crosses below 0.5 from overbought</li>
+    <li><strong>Strong buy:</strong> IFT-RSI turns up from below -0.9</li>
+    <li><strong>Strong sell:</strong> IFT-RSI turns down from above 0.9</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Advantages over Standard RSI</h3>
+  <ul>
+    <li><strong>Clearer signals:</strong> Binary-like behavior reduces interpretation ambiguity</li>
+    <li><strong>Faster response:</strong> Quicker to identify momentum changes</li>
+    <li><strong>Better extremes:</strong> More time spent at clear overbought/oversold levels</li>
+    <li><strong>Reduced noise:</strong> Transform filters out minor fluctuations</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The IFT-RSI calculation involves multiple steps:</p>
+  <ol>
+    <li><strong>Calculate standard RSI:</strong> Using specified period (typically 14)</li>
+    <li><strong>Normalize RSI:</strong> Convert RSI from 0-100 to -1 to +1 range
+      <ul>
+        <li><code>Normalized = 0.1 * (RSI - 50)</code></li>
+      </ul>
+    </li>
+    <li><strong>Apply Fisher Transform:</strong>
+      <ul>
+        <li><code>Fisher = 0.5 * ln((1 + x) / (1 - x))</code></li>
+        <li>Where x is the normalized RSI value</li>
+      </ul>
+    </li>
+    <li><strong>Apply Inverse Fisher Transform:</strong>
+      <ul>
+        <li><code>IFT = (e^(2*Fisher) - 1) / (e^(2*Fisher) + 1)</code></li>
+      </ul>
+    </li>
+    <li><strong>Smooth output:</strong> Often a 5-period WMA is applied</li>
+  </ol>
+  <p>
+    The double transformation (normalize → Fisher → inverse Fisher) creates the characteristic 
+    sharp transitions and binary-like behavior that makes this indicator so effective for 
+    identifying market extremes.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>Period (default: 14):</strong> The lookback period for the underlying RSI calculation. 
+      Common values range from 5 (very responsive) to 21 (smoother). Shorter periods create more 
+      frequent but potentially less reliable signals, while longer periods generate fewer but 
+      typically stronger signals. The traditional 14-period setting works well for most markets 
+      and timeframes.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns an array of IFT-RSI values:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Range:</strong> -1.0 to +1.0 (mathematical bounds)</li>
+    <li><strong>Typical range:</strong> Most values cluster near -1, 0, or +1</li>
+    <li><strong>Transitions:</strong> Rapid moves between extremes</li>
+    <li><strong>Initial values:</strong> First 'period' values will be null/undefined</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Inverse Fisher Transform RSI in Rust
-let result = indicators::ift_rsi(&data, 14);
+use ta_lib::indicators::ift_rsi;
+
+// Calculate IFT-RSI with 14-period RSI
+let prices = vec![45.15, 45.87, 45.99, 46.15, 46.67, 46.89, 47.12, 47.45, 
+                  47.23, 46.98, 46.87, 47.15, 47.56, 47.89, 48.12];
+let ift_rsi_values = ift_rsi(&prices, 14)?;
+
+// Identify signals
+for i in 1..ift_rsi_values.len() {
+    if let (Some(current), Some(previous)) = (ift_rsi_values[i], ift_rsi_values[i-1]) {
+        // Oversold bounce
+        if previous < -0.5 && current > -0.5 {
+            println!("Buy signal at index {}: IFT-RSI crossed above -0.5 ({:.3})", i, current);
+        }
+        
+        // Overbought reversal
+        if previous > 0.5 && current < 0.5 {
+            println!("Sell signal at index {}: IFT-RSI crossed below 0.5 ({:.3})", i, current);
+        }
+        
+        // Extreme readings
+        if current > 0.9 {
+            println!("Extreme overbought at {}: IFT-RSI = {:.3}", i, current);
+        } else if current < -0.9 {
+            println!("Extreme oversold at {}: IFT-RSI = {:.3}", i, current);
+        }
+        
+        // Momentum shifts
+        if previous < 0.0 && current > 0.0 {
+            println!("Bullish momentum shift at {}: IFT-RSI crossed above zero", i);
+        } else if previous > 0.0 && current < 0.0 {
+            println!("Bearish momentum shift at {}: IFT-RSI crossed below zero", i);
+        }
+    }
+}
+
+// Compare with standard RSI
+let rsi_values = rsi(&prices, 14)?;
+for i in 14..prices.len() {
+    if let (Some(ift), Some(rsi)) = (ift_rsi_values[i], rsi_values[i]) {
+        println!("Index {}: Price={:.2}, RSI={:.1}, IFT-RSI={:.3}", 
+                 i, prices[i], rsi, ift);
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import ift_rsi, rsi
+
+# Example usage with price data
+df = pd.DataFrame({
+    'close': [45.15, 45.87, 45.99, 46.15, 46.67, 46.89, 47.12, 47.45,
+              47.23, 46.98, 46.87, 47.15, 47.56, 47.89, 48.12, 48.45,
+              48.23, 47.95, 47.67, 47.89, 48.15, 48.56, 48.89, 49.12]
+})
+
+# Calculate IFT-RSI
+df['ift_rsi'] = ift_rsi(df['close'], period=14)
+
+# Calculate standard RSI for comparison
+df['rsi'] = rsi(df['close'], period=14)
+
+# Generate trading signals
+df['ift_oversold'] = df['ift_rsi'] < -0.5
+df['ift_overbought'] = df['ift_rsi'] > 0.5
+
+# Buy/Sell signals
+df['buy_signal'] = (df['ift_rsi'] > -0.5) & (df['ift_rsi'].shift(1) <= -0.5)
+df['sell_signal'] = (df['ift_rsi'] < 0.5) & (df['ift_rsi'].shift(1) >= 0.5)
+
+# Extreme reversals
+df['extreme_oversold'] = df['ift_rsi'] < -0.9
+df['extreme_overbought'] = df['ift_rsi'] > 0.9
+
+# Momentum analysis
+df['ift_momentum'] = np.where(df['ift_rsi'] > 0, 'Bullish', 'Bearish')
+df['momentum_shift'] = df['ift_momentum'] != df['ift_momentum'].shift(1)
+
+# Signal strength (distance from zero)
+df['signal_strength'] = abs(df['ift_rsi'])
+
+# Compare IFT-RSI with standard RSI signals
+df['rsi_oversold'] = df['rsi'] < 30
+df['rsi_overbought'] = df['rsi'] > 70
+
+print("Signal Comparison:")
+print(df[['close', 'rsi', 'ift_rsi', 'buy_signal', 'sell_signal']].tail(10))
+
+# Count signals
+ift_signals = df['buy_signal'].sum() + df['sell_signal'].sum()
+rsi_signals = ((df['rsi'] > 30) & (df['rsi'].shift(1) <= 30)).sum() + \
+              ((df['rsi'] < 70) & (df['rsi'].shift(1) >= 70)).sum()
+
+print(f"\nIFT-RSI signals: {ift_signals}")
+print(f"Standard RSI signals: {rsi_signals}")
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Mean Reversion Trading</h3>
+  <p>Trading extreme IFT-RSI readings:</p>
+  <pre><code class="language-python">
+# Calculate IFT-RSI
+ift = ift_rsi(close, 14)
+
+# Define extreme thresholds
+extreme_oversold = -0.9
+extreme_overbought = 0.9
+
+# Mean reversion signals
+# Buy when extremely oversold and turning up
+ift_turning_up = ift > ift.shift(1)
+buy_extreme = (ift < extreme_oversold) & ift_turning_up
+
+# Sell when extremely overbought and turning down
+ift_turning_down = ift < ift.shift(1)
+sell_extreme = (ift > extreme_overbought) & ift_turning_down
+
+# Exit at opposite threshold or zero crossing
+exit_long = (ift > 0.5) | (ift < ift.shift(1) & (ift < 0))
+exit_short = (ift < -0.5) | (ift > ift.shift(1) & (ift > 0))
+
+# Position sizing based on extremity
+position_size = abs(ift) * 100  # 0-100% based on signal strength
+  </code></pre>
+
+  <h3>2. Trend Following with IFT-RSI</h3>
+  <p>Using IFT-RSI for trend confirmation:</p>
+  <pre><code class="language-python">
+# Combine with moving average
+ma_50 = close.rolling(50).mean()
+ma_200 = close.rolling(200).mean()
+
+# IFT-RSI
+ift = ift_rsi(close, 14)
+
+# Trend definition
+uptrend = ma_50 > ma_200
+downtrend = ma_50 < ma_200
+
+# Filtered signals
+# Only buy in uptrends when IFT-RSI confirms
+buy_trend = uptrend & (ift > -0.5) & (ift.shift(1) <= -0.5)
+
+# Only sell in downtrends when IFT-RSI confirms  
+sell_trend = downtrend & (ift < 0.5) & (ift.shift(1) >= 0.5)
+
+# Hold positions while IFT-RSI confirms trend
+hold_long = uptrend & (ift > 0)
+hold_short = downtrend & (ift < 0)
+
+# Exit on IFT-RSI divergence
+exit_divergence = (uptrend & (ift < -0.5)) | (downtrend & (ift > 0.5))
+  </code></pre>
+
+  <h3>3. Multi-Timeframe IFT-RSI</h3>
+  <p>Combining IFT-RSI from multiple timeframes:</p>
+  <pre><code class="language-python">
+# Calculate IFT-RSI on different timeframes
+ift_5m = ift_rsi(close_5m, 14)
+ift_15m = ift_rsi(close_15m, 14)
+ift_1h = ift_rsi(close_1h, 14)
+
+# Align to 5-minute timeframe
+ift_15m_aligned = ift_15m.reindex(close_5m.index, method='ffill')
+ift_1h_aligned = ift_1h.reindex(close_5m.index, method='ffill')
+
+# Multi-timeframe agreement
+all_oversold = (ift_5m < -0.5) & (ift_15m_aligned < -0.3) & (ift_1h_aligned < 0)
+all_overbought = (ift_5m > 0.5) & (ift_15m_aligned > 0.3) & (ift_1h_aligned > 0)
+
+# Strong signals when all timeframes agree
+strong_buy = all_oversold & (ift_5m > ift_5m.shift(1))
+strong_sell = all_overbought & (ift_5m < ift_5m.shift(1))
+
+# Timeframe divergence detection
+tf_divergence = ((ift_5m > 0.5) & (ift_1h_aligned < -0.5)) | \
+                ((ift_5m < -0.5) & (ift_1h_aligned > 0.5))
+
+# Avoid signals during divergence
+filtered_buy = strong_buy & ~tf_divergence
+filtered_sell = strong_sell & ~tf_divergence
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Whipsaws in ranging markets:</strong> Rapid transitions can create false signals</li>
+    <li><strong>Lag in strong trends:</strong> May stay at extremes during sustained moves</li>
+    <li><strong>Initialization period:</strong> Requires RSI period for initial calculation</li>
+    <li><strong>Transform saturation:</strong> Values can stick at ±1 in extreme conditions</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Use additional filters to confirm signals in choppy markets</li>
+    <li>Consider the underlying trend before taking counter-trend trades</li>
+    <li>Monitor the speed of IFT-RSI movements for signal quality</li>
+    <li>Combine with volume or other momentum indicators</li>
+    <li>Be cautious of signals immediately after news events</li>
+    <li>Test different RSI periods for your specific market</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2004). "The Inverse Fisher Transform". <em>Technical Analysis of Stocks & Commodities</em></li>
+    <li>Fisher, R. A. (1915). "Frequency distribution of the values of the correlation coefficient"</li>
+    <li>Comparison of Fisher Transform applications in technical analysis</li>
+    <li>RSI enhancements and transformations in modern trading</li>
+  </ul>
 </IndicatorLayout>

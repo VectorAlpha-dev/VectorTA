@@ -3,15 +3,15 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'kurtosis';
 const indicatorName = 'Kurtosis';
-const description = `Technical analysis indicator: Kurtosis`;
+const description = `Kurtosis is a statistical measure that quantifies the "tailedness" of a price distribution, helping traders identify potential market regime changes, volatility clusters, and extreme price movements that may signal trading opportunities or increased risk.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
+    "default": 20,
+    "min": 10,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for distribution analysis"
   }
 ];
 ---
@@ -22,23 +22,397 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    Kurtosis is a statistical measure from the fourth moment of a distribution that describes the 
+    shape of price return distributions, specifically measuring how much of the variance is due to 
+    extreme deviations versus moderate fluctuations. In financial markets, kurtosis helps identify 
+    periods when prices are more likely to experience extreme movements.
+  </p>
+  <p>
+    A distribution with high kurtosis (leptokurtic) has heavy tails and a sharp peak, indicating 
+    higher probability of extreme price movements. Low kurtosis (platykurtic) suggests a flatter 
+    distribution with fewer extremes. Normal distributions have a kurtosis of 3 (or excess kurtosis 
+    of 0). Traders use kurtosis to assess market risk, identify regime changes, and adjust position 
+    sizing based on the likelihood of tail events.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Kurtosis helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Kurtosis Values</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>High Kurtosis (> 3):</strong> Fat tails, higher risk of extreme moves</li>
+    <li><strong>Normal Kurtosis (≈ 3):</strong> Standard normal distribution behavior</li>
+    <li><strong>Low Kurtosis (< 3):</strong> Thin tails, more predictable price action</li>
+    <li><strong>Excess Kurtosis:</strong> Kurtosis - 3, centered around zero</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Kurtosis to make informed decisions about entry and exit points.</p>
+  <h3>Trading Applications</h3>
+  <ul>
+    <li><strong>Risk assessment:</strong> Higher kurtosis suggests higher tail risk</li>
+    <li><strong>Volatility regimes:</strong> Changes in kurtosis indicate regime shifts</li>
+    <li><strong>Position sizing:</strong> Reduce size during high kurtosis periods</li>
+    <li><strong>Option strategies:</strong> High kurtosis favors long volatility</li>
+    <li><strong>Market timing:</strong> Extreme kurtosis often precedes reversals</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Market Behavior</h3>
+  <ul>
+    <li><strong>Crisis periods:</strong> Kurtosis typically spikes during market stress</li>
+    <li><strong>Quiet markets:</strong> Low kurtosis indicates range-bound conditions</li>
+    <li><strong>Breakout potential:</strong> Rising kurtosis may signal impending moves</li>
+    <li><strong>Distribution changes:</strong> Monitor for shifts in market character</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>Kurtosis calculation involves computing the fourth standardized moment:</p>
+  <ol>
+    <li><strong>Calculate Returns:</strong>
+      <ul>
+        <li>Returns = (Price[i] - Price[i-1]) / Price[i-1]</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Mean and Standard Deviation:</strong>
+      <ul>
+        <li>Mean = Σ(Returns) / n</li>
+        <li>Std Dev = √(Σ(Returns - Mean)² / (n-1))</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Fourth Moment:</strong>
+      <ul>
+        <li>Kurtosis = [n(n+1) / ((n-1)(n-2)(n-3))] × Σ[(Returns - Mean)⁴ / σ⁴]</li>
+        <li>Adjust for sample bias: - [3(n-1)² / ((n-2)(n-3))]</li>
+      </ul>
+    </li>
+    <li><strong>Excess Kurtosis:</strong>
+      <ul>
+        <li>Excess = Kurtosis - 3</li>
+        <li>Positive = Fat tails, Negative = Thin tails</li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    The calculation uses sample kurtosis with bias correction (Fisher's definition). Values are 
+    typically computed on a rolling basis to track changes in distribution shape over time.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>Period (default: 20):</strong> The lookback window for calculating the distribution 
+      statistics. This determines how many price returns are used to compute kurtosis. Shorter 
+      periods (10-15) are more responsive to recent changes but may be noisy. Longer periods 
+      (30-60) provide more stable readings but may miss rapid regime changes. The period should 
+      be long enough to capture meaningful distribution characteristics but short enough to remain 
+      relevant to current market conditions.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns kurtosis values:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Range:</strong> Typically 1.5 to 10+ (can theoretically be infinite)</li>
+    <li><strong>Normal value:</strong> 3.0 for normal distribution</li>
+    <li><strong>Excess kurtosis:</strong> Subtract 3 for zero-centered values</li>
+    <li><strong>Initial values:</strong> First 'period' values will be null/undefined</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Kurtosis in Rust
-let result = indicators::kurtosis(&data, 14);
+use ta_lib::indicators::kurtosis;
+
+// Price data
+let prices = vec![100.0, 101.5, 100.8, 102.3, 103.1, 102.5, 104.2, 103.8, 105.5, 104.9,
+                  106.2, 105.8, 107.3, 108.1, 107.5, 109.2, 110.5, 109.8, 111.3, 112.0];
+
+// Calculate kurtosis with 20-period window
+let kurt_values = kurtosis(&prices, 20)?;
+
+// Risk management based on kurtosis
+for i in 20..prices.len() {
+    if let Some(kurt) = kurt_values[i] {
+        let excess_kurt = kurt - 3.0;  // Convert to excess kurtosis
+        
+        println!("Price: {:.2}, Kurtosis: {:.2}, Excess: {:.2}", 
+                 prices[i], kurt, excess_kurt);
+        
+        // Risk assessment
+        if excess_kurt > 2.0 {
+            println!("  WARNING: High tail risk - Fat tails detected");
+            println!("  Consider: Reducing position size, buying protection");
+        } else if excess_kurt < -1.0 {
+            println!("  Low tail risk - Thin tails, stable conditions");
+            println!("  Consider: Normal position sizing");
+        }
+        
+        // Regime change detection
+        if i > 0 {
+            if let Some(prev_kurt) = kurt_values[i-1] {
+                let kurt_change = kurt - prev_kurt;
+                if kurt_change.abs() > 0.5 {
+                    println!("  REGIME CHANGE: Kurtosis shifted by {:.2}", kurt_change);
+                }
+            }
+        }
+    }
+}
+
+// Calculate rolling statistics for context
+fn calculate_distribution_stats(returns: &[f64]) -> (f64, f64, f64) {
+    let n = returns.len() as f64;
+    let mean = returns.iter().sum::<f64>() / n;
+    
+    let variance = returns.iter()
+        .map(|r| (r - mean).powi(2))
+        .sum::<f64>() / (n - 1.0);
+    
+    let skewness = returns.iter()
+        .map(|r| ((r - mean) / variance.sqrt()).powi(3))
+        .sum::<f64>() * n / ((n - 1.0) * (n - 2.0));
+    
+    (mean, variance.sqrt(), skewness)
+}
+
+// Combine with other measures
+let returns: Vec<f64> = prices.windows(2)
+    .map(|w| (w[1] - w[0]) / w[0])
+    .collect();
+
+let (mean, std_dev, skewness) = calculate_distribution_stats(&returns[..20]);
+println!("\nDistribution Analysis:");
+println!("Mean Return: {:.4}", mean);
+println!("Std Deviation: {:.4}", std_dev);
+println!("Skewness: {:.2}", skewness);
+println!("Kurtosis: {:.2}", kurt_values[20].unwrap_or(0.0));
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import kurtosis
+from scipy import stats
+
+# Example price data
+df = pd.DataFrame({
+    'close': [100, 101.5, 100.8, 102.3, 103.1, 102.5, 104.2, 103.8, 105.5, 104.9,
+              106.2, 105.8, 107.3, 108.1, 107.5, 109.2, 110.5, 109.8, 111.3, 112.0,
+              111.5, 113.2, 114.5, 113.8, 115.3, 116.1, 115.5, 117.2, 118.5, 117.8]
+})
+
+# Calculate returns
+df['returns'] = df['close'].pct_change()
+
+# Calculate kurtosis
+df['kurtosis'] = kurtosis(df['close'], period=20)
+df['excess_kurtosis'] = df['kurtosis'] - 3
+
+# Additional statistical measures
+df['rolling_std'] = df['returns'].rolling(20).std()
+df['rolling_skew'] = df['returns'].rolling(20).skew()
+
+# Volatility regime classification
+df['volatility_regime'] = pd.cut(df['kurtosis'], 
+                                 bins=[0, 2.5, 3.5, 5, np.inf],
+                                 labels=['Low Vol', 'Normal', 'High Vol', 'Extreme'])
+
+# Risk-adjusted position sizing
+base_position_size = 100000  # Base position in dollars
+df['risk_multiplier'] = np.where(df['excess_kurtosis'] > 2, 0.5,  # Half size in fat tails
+                                 np.where(df['excess_kurtosis'] > 1, 0.75,
+                                         np.where(df['excess_kurtosis'] < -1, 1.25,  # Increase in thin tails
+                                                 1.0)))
+df['adjusted_position'] = base_position_size * df['risk_multiplier']
+
+# Kurtosis momentum (rate of change)
+df['kurtosis_momentum'] = df['kurtosis'].diff()
+df['kurtosis_accelerating'] = df['kurtosis_momentum'] > 0
+
+# Identify outlier days
+df['return_z_score'] = (df['returns'] - df['returns'].rolling(20).mean()) / df['rolling_std']
+df['is_outlier'] = abs(df['return_z_score']) > 2.5
+
+# Trading signals based on kurtosis regime
+df['enter_protective'] = (df['excess_kurtosis'] > 2) & (df['excess_kurtosis'].shift(1) <= 2)
+df['exit_protective'] = (df['excess_kurtosis'] < 1) & (df['excess_kurtosis'].shift(1) >= 1)
+
+print("Kurtosis Analysis:")
+print(df[['close', 'returns', 'kurtosis', 'excess_kurtosis', 'volatility_regime', 'risk_multiplier']].tail(10))
+
+# Statistics summary
+print(f"\nCurrent Statistics:")
+print(f"Kurtosis: {df['kurtosis'].iloc[-1]:.2f}")
+print(f"Excess Kurtosis: {df['excess_kurtosis'].iloc[-1]:.2f}")
+print(f"Volatility Regime: {df['volatility_regime'].iloc[-1]}")
+print(f"Risk Multiplier: {df['risk_multiplier'].iloc[-1]:.2f}")
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Dynamic Risk Management</h3>
+  <p>Adjusting positions based on tail risk:</p>
+  <pre><code class="language-python">
+# Calculate kurtosis
+kurt = kurtosis(close, 20)
+excess_kurt = kurt - 3
+
+# Define risk regimes
+low_risk = excess_kurt < 0.5
+normal_risk = (excess_kurt >= 0.5) & (excess_kurt <= 2.0)
+high_risk = excess_kurt > 2.0
+extreme_risk = excess_kurt > 4.0
+
+# Position sizing rules
+position_size = pd.Series(index=close.index)
+base_size = 100  # Base position units
+
+position_size[low_risk] = base_size * 1.2     # 120% in calm markets
+position_size[normal_risk] = base_size * 1.0   # 100% standard
+position_size[high_risk] = base_size * 0.6     # 60% in risky conditions
+position_size[extreme_risk] = base_size * 0.3  # 30% in extreme conditions
+
+# Stop loss adjustment
+atr_value = atr(high, low, close, 14)
+stop_multiplier = pd.Series(2.0, index=close.index)  # Default 2x ATR
+
+stop_multiplier[high_risk] = 3.0    # Wider stops in fat-tail periods
+stop_multiplier[extreme_risk] = 4.0  # Very wide stops in extreme conditions
+
+stop_distance = atr_value * stop_multiplier
+
+# Options overlay strategy
+buy_protection = (excess_kurt > 3) & (excess_kurt.shift(1) <= 3)
+sell_protection = (excess_kurt < 1) & (excess_kurt.shift(1) >= 1)
+
+print("Risk Management Signals:")
+print(f"Current position size: {position_size.iloc[-1]:.0f} units")
+print(f"Stop distance: {stop_distance.iloc[-1]:.2f}")
+print(f"Buy protection: {buy_protection.iloc[-1]}")
+  </code></pre>
+
+  <h3>2. Volatility Trading Strategy</h3>
+  <p>Trading volatility based on distribution changes:</p>
+  <pre><code class="language-python">
+# Calculate kurtosis and related metrics
+kurt = kurtosis(close, 20)
+excess_kurt = kurt - 3
+realized_vol = close.pct_change().rolling(20).std() * np.sqrt(252)
+skewness = close.pct_change().rolling(20).skew()
+
+# Volatility predictions based on kurtosis
+# High kurtosis often precedes volatility expansion
+kurt_percentile = kurt.rolling(252).rank(pct=True)
+vol_forecast = pd.Series(index=close.index)
+
+# Simple model: high kurtosis -> higher future volatility
+vol_forecast = realized_vol.shift(-5).rolling(5).mean()  # 5-day forward vol
+
+# Create signals
+long_vol_signal = (kurt_percentile > 0.9) & (excess_kurt > 2)
+short_vol_signal = (kurt_percentile < 0.1) & (excess_kurt < -0.5)
+
+# Implied vs realized volatility trading
+# Assume we have implied volatility data
+iv = pd.Series(25, index=close.index)  # Placeholder for implied vol
+iv_premium = iv - realized_vol * 100
+
+# Trade when kurtosis suggests mispricing
+buy_options = long_vol_signal & (iv_premium < 0)  # Vol cheap + fat tails coming
+sell_options = short_vol_signal & (iv_premium > 5)  # Vol expensive + thin tails
+
+# Straddle/strangle sizing based on kurtosis
+notional_per_trade = 100000
+option_allocation = notional_per_trade * (excess_kurt / 10).clip(0, 1)
+
+print("Volatility Trading Signals:")
+print(f"Kurtosis percentile: {kurt_percentile.iloc[-1]:.1%}")
+print(f"Long volatility: {long_vol_signal.iloc[-1]}")
+print(f"Option allocation: ${option_allocation.iloc[-1]:,.0f}")
+  </code></pre>
+
+  <h3>3. Regime Detection System</h3>
+  <p>Identifying market regime changes using kurtosis:</p>
+  <pre><code class="language-python">
+# Calculate multiple statistical moments
+kurt = kurtosis(close, 20)
+skew = close.pct_change().rolling(20).skew()
+vol = close.pct_change().rolling(20).std()
+
+# Z-score normalization for regime detection
+kurt_z = (kurt - kurt.rolling(252).mean()) / kurt.rolling(252).std()
+skew_z = (skew - skew.rolling(252).mean()) / skew.rolling(252).std()
+vol_z = (vol - vol.rolling(252).mean()) / vol.rolling(252).std()
+
+# Define market regimes
+regimes = pd.Series('Normal', index=close.index)
+
+# Crash risk regime: High kurtosis + negative skew
+crash_risk = (kurt_z > 1.5) & (skew_z < -1)
+regimes[crash_risk] = 'Crash Risk'
+
+# Melt-up regime: High kurtosis + positive skew
+melt_up = (kurt_z > 1.5) & (skew_z > 1)
+regimes[melt_up] = 'Melt Up'
+
+# Quiet regime: Low kurtosis + low vol
+quiet = (kurt_z < -1) & (vol_z < -0.5)
+regimes[quiet] = 'Quiet'
+
+# Transition periods
+regime_changes = regimes != regimes.shift(1)
+transition_periods = regime_changes.rolling(5).sum() >= 2
+regimes[transition_periods] = 'Transition'
+
+# Strategy allocation based on regime
+allocation = pd.DataFrame(index=close.index)
+allocation['stocks'] = 60  # Base allocation
+
+# Adjust based on regime
+allocation.loc[regimes == 'Normal', 'stocks'] = 60
+allocation.loc[regimes == 'Quiet', 'stocks'] = 80
+allocation.loc[regimes == 'Crash Risk', 'stocks'] = 30
+allocation.loc[regimes == 'Melt Up', 'stocks'] = 50
+allocation.loc[regimes == 'Transition', 'stocks'] = 40
+
+allocation['bonds'] = 40 - (allocation['stocks'] - 60)
+allocation['cash'] = 100 - allocation['stocks'] - allocation['bonds']
+
+# Add alternative assets in high kurtosis
+allocation['alternatives'] = np.where(kurt > 4, 10, 0)
+allocation['stocks'] -= allocation['alternatives']
+
+print("Regime Detection:")
+print(f"Current regime: {regimes.iloc[-1]}")
+print(f"Allocation: Stocks={allocation['stocks'].iloc[-1]}%, " +
+      f"Bonds={allocation['bonds'].iloc[-1]}%, " +
+      f"Cash={allocation['cash'].iloc[-1]}%, " +
+      f"Alts={allocation['alternatives'].iloc[-1]}%")
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Small samples:</strong> Kurtosis estimates unreliable with < 30 observations</li>
+    <li><strong>Outliers:</strong> Single extreme values can dominate kurtosis calculation</li>
+    <li><strong>Non-stationarity:</strong> Changing market conditions affect interpretation</li>
+    <li><strong>Sample bias:</strong> Finite sample corrections still imperfect</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Use minimum 20-30 periods for reliable estimates</li>
+    <li>Compare to historical kurtosis levels, not just absolute values</li>
+    <li>Combine with skewness for complete distribution picture</li>
+    <li>Consider robust kurtosis measures for outlier resistance</li>
+    <li>Monitor kurtosis trends, not just current values</li>
+    <li>Adjust strategies gradually as kurtosis changes</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>DeCarlo, L. T. (1997). "On the meaning and use of kurtosis." Psychological Methods.</li>
+    <li>Westfall, P. H. (2014). "Kurtosis as Peakedness, 1905–2014. R.I.P." The American Statistician.</li>
+    <li>Mandelbrot, B. & Hudson, R. (2004). <em>The (Mis)behavior of Markets</em>. Basic Books.</li>
+    <li>Fat-tailed distributions in finance and risk management applications</li>
+  </ul>
 </IndicatorLayout>

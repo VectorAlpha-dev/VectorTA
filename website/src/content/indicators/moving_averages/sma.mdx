@@ -1,0 +1,269 @@
+---
+title: "Simple Moving Average (SMA)"
+description: "The Simple Moving Average calculates the arithmetic mean of a given set of prices over a specific number of periods. It's one of the most fundamental technical indicators used to smooth price action and identify trends."
+category: "moving_averages"
+parameters:
+  - name: "period"
+    type: "number"
+    default: 20
+    min: 1
+    max: 500
+    description: "The number of periods to calculate the average over"
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated SMA values. Returns None for periods where calculation isn't possible (insufficient data)"
+complexity: "O(n)"
+implementationStatus: "complete"
+seeAlso: ["ema", "wma", "dema", "tema"]
+references:
+  - title: "Technical Analysis of the Financial Markets"
+    url: "https://www.amazon.com/Technical-Analysis-Financial-Markets-Comprehensive/dp/0735200661"
+  - title: "Moving Averages - Investopedia"
+    url: "https://www.investopedia.com/terms/m/movingaverage.asp"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="sma" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+The Simple Moving Average (SMA) is perhaps the most widely used technical indicator in financial analysis. It provides a smoothed representation of price data by calculating the arithmetic mean of a specified number of recent data points. This smoothing effect helps traders identify trends more clearly by filtering out short-term price fluctuations and market noise.
+
+Unlike more complex moving averages, the SMA gives equal weight to all data points within the calculation period, making it a true average in the mathematical sense. This characteristic makes it both easy to understand and compute, but also means it can be slower to respond to recent price changes compared to weighted alternatives.
+
+## Interpretation {#interpretation}
+
+### Trend Identification
+- **Price above SMA**: Generally indicates an uptrend
+- **Price below SMA**: Generally indicates a downtrend
+- **SMA slope**: Rising SMA suggests bullish momentum, falling SMA suggests bearish momentum
+
+### Support and Resistance
+- In uptrends, the SMA often acts as dynamic support
+- In downtrends, the SMA often acts as dynamic resistance
+- Popular periods like 50, 100, and 200 are watched by many traders
+
+### Trading Signals
+- **Golden Cross**: Short-term SMA crosses above long-term SMA (bullish signal)
+- **Death Cross**: Short-term SMA crosses below long-term SMA (bearish signal)
+- **Price crossovers**: Entry/exit signals when price crosses the SMA
+
+## Calculation {#calculation}
+
+The SMA calculation is straightforward:
+
+```
+SMA = (P₁ + P₂ + P₃ + ... + Pₙ) / n
+
+Where:
+- P = Price at each period
+- n = Number of periods
+```
+
+For a rolling window implementation:
+1. Sum the prices for the specified period
+2. Divide by the number of periods
+3. Move forward one period and repeat
+
+## Parameters {#parameters}
+
+### period (default: 20)
+The period parameter determines the number of data points included in the average calculation.
+
+- **Short periods (5-20)**: More responsive to price changes, suitable for short-term trading
+- **Medium periods (20-50)**: Balance between responsiveness and smoothing
+- **Long periods (50-200)**: Greater smoothing, better for identifying long-term trends
+
+Common period values:
+- **9**: Very short-term, often used with other indicators
+- **20**: Default for many applications, good for medium-term trends
+- **50**: Popular intermediate-term moving average
+- **100**: Significant psychological level
+- **200**: Major long-term trend indicator
+
+## Returns & Output {#returns}
+
+The SMA function returns a vector of optional floating-point values:
+
+- **Some(value)**: Contains the calculated SMA for that period
+- **None**: Returned for the first (period - 1) values where insufficient data exists
+
+The output vector has the same length as the input data, maintaining temporal alignment.
+
+## Example Usage {#usage}
+
+### Basic Usage
+
+<CodeBlock lang="rust">
+use vectorta::indicators::sma;
+
+// Price data
+let prices = vec![10.0, 11.0, 12.0, 11.5, 13.0, 14.0, 13.5, 15.0];
+
+// Calculate 3-period SMA
+let sma_values = sma(&prices, 3)?;
+
+// Result: [None, None, Some(11.0), Some(11.5), Some(12.17), Some(12.83), Some(13.5), Some(14.17)]
+</CodeBlock>
+
+### Trend Following Strategy
+
+<CodeBlock lang="rust">
+use vectorta::indicators::sma;
+use vectorta::data::OHLCV;
+
+fn trend_following_signals(data: &[OHLCV], short_period: usize, long_period: usize) -> Vec<Signal> {
+    let closes: Vec<f64> = data.iter().map(|d| d.close).collect();
+    
+    let short_sma = sma(&closes, short_period).unwrap();
+    let long_sma = sma(&closes, long_period).unwrap();
+    
+    let mut signals = Vec::new();
+    
+    for i in 1..closes.len() {
+        if let (Some(short_prev), Some(short_curr), Some(long_prev), Some(long_curr)) = 
+            (short_sma[i-1], short_sma[i], long_sma[i-1], long_sma[i]) {
+            
+            // Golden cross
+            if short_prev <= long_prev && short_curr > long_curr {
+                signals.push(Signal::Buy(i));
+            }
+            // Death cross
+            else if short_prev >= long_prev && short_curr < long_curr {
+                signals.push(Signal::Sell(i));
+            }
+        }
+    }
+    
+    signals
+}
+</CodeBlock>
+
+### Multiple Timeframe Analysis
+
+<CodeBlock lang="rust">
+use vectorta::indicators::sma;
+
+struct MultiTimeframeSMA {
+    fast: Vec<Option<f64>>,
+    medium: Vec<Option<f64>>,
+    slow: Vec<Option<f64>>,
+}
+
+fn calculate_multi_sma(prices: &[f64]) -> MultiTimeframeSMA {
+    MultiTimeframeSMA {
+        fast: sma(prices, 10).unwrap(),
+        medium: sma(prices, 50).unwrap(),
+        slow: sma(prices, 200).unwrap(),
+    }
+}
+
+fn get_market_state(mtf: &MultiTimeframeSMA, index: usize) -> MarketState {
+    match (mtf.fast[index], mtf.medium[index], mtf.slow[index]) {
+        (Some(f), Some(m), Some(s)) => {
+            if f > m && m > s {
+                MarketState::StrongUptrend
+            } else if f < m && m < s {
+                MarketState::StrongDowntrend
+            } else {
+                MarketState::Consolidation
+            }
+        }
+        _ => MarketState::Unknown
+    }
+}
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+### 1. Trend Identification
+The SMA is excellent for identifying the overall direction of the market. Traders often use multiple SMAs of different periods to gauge short, medium, and long-term trends simultaneously.
+
+### 2. Dynamic Support/Resistance
+Price often bounces off major SMAs like the 50-day or 200-day. These levels are watched by many market participants, creating self-fulfilling prophecies.
+
+### 3. Entry/Exit Signals
+- Entry: Buy when price crosses above SMA
+- Exit: Sell when price crosses below SMA
+- Stop Loss: Place stops below SMA in uptrends
+
+### 4. Moving Average Envelopes
+Create bands around the SMA (e.g., ±2%) to identify overbought/oversold conditions:
+
+<CodeBlock lang="rust">
+fn sma_envelope(prices: &[f64], period: usize, percentage: f64) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
+    let sma_values = sma(prices, period).unwrap();
+    let factor = 1.0 + (percentage / 100.0);
+    
+    let upper: Vec<Option<f64>> = sma_values.iter()
+        .map(|&v| v.map(|val| val * factor))
+        .collect();
+        
+    let lower: Vec<Option<f64>> = sma_values.iter()
+        .map(|&v| v.map(|val| val / factor))
+        .collect();
+        
+    (upper, lower)
+}
+</CodeBlock>
+
+### 5. Smoothing Other Indicators
+The SMA is often applied to other indicators to smooth their output:
+
+<CodeBlock lang="rust">
+// Smooth RSI with SMA
+let rsi_values = rsi(prices, 14)?;
+let smoothed_rsi = sma(&rsi_values.iter().filter_map(|&x| x).collect::<Vec<_>>(), 5)?;
+</CodeBlock>
+
+## Edge Cases & Errors {#edge-cases}
+
+### Insufficient Data
+The SMA returns `None` for the first `period - 1` values:
+- With period=20, the first 19 values will be `None`
+- This is mathematically correct as we need sufficient data points
+
+### Empty or Invalid Input
+```rust
+// Empty vector
+let empty: Vec<f64> = vec![];
+let result = sma(&empty, 20); // Returns Ok(vec![])
+
+// Period larger than data
+let small_data = vec![1.0, 2.0, 3.0];
+let result = sma(&small_data, 5); // Returns vec![None, None, None]
+
+// Period of 0
+let result = sma(&prices, 0); // Returns Error
+```
+
+### Handling NaN Values
+If your data contains NaN values, they will propagate through the calculation:
+```rust
+let data_with_nan = vec![10.0, f64::NAN, 12.0, 13.0];
+let result = sma(&data_with_nan, 3); // Some values will be NaN
+```
+
+### Performance Considerations
+- For very large datasets, consider using a rolling window approach
+- Cache SMA values if using them repeatedly
+- Use parallel computation for multiple SMAs
+
+## References {#references}
+
+1. **Murphy, John J.** (1999). *Technical Analysis of the Financial Markets*. New York Institute of Finance.
+
+2. **Pring, Martin J.** (2002). *Technical Analysis Explained*. McGraw-Hill.
+
+3. **Achelis, Steven B.** (2001). *Technical Analysis from A to Z*. McGraw-Hill.
+
+4. **Kirkpatrick, Charles D. & Dahlquist, Julie R.** (2010). *Technical Analysis: The Complete Resource for Financial Market Technicians*. FT Press.
+
+</IndicatorLayout>

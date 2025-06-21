@@ -2,18 +2,9 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ht_dcphase';
-const indicatorName = 'Ht Dcphase';
-const description = `Technical analysis indicator: Ht Dcphase`;
-const parameters = [
-  {
-    "name": "period",
-    "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
-  }
-];
+const indicatorName = 'Hilbert Transform - Dominant Cycle Phase';
+const description = `The Hilbert Transform Dominant Cycle Phase indicator measures the current phase angle of the dominant market cycle, providing traders with precise timing information about where price is within its current cycle from -180° to +180°.`;
+const parameters = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -22,23 +13,270 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Hilbert Transform - Dominant Cycle Phase is an advanced technical indicator that measures 
+    the instantaneous phase angle of the dominant market cycle. Part of John Ehlers' suite of 
+    cycle analysis tools, this indicator tells you exactly where the current price is within its 
+    dominant cycle, expressed as an angle from -180° to +180° (or sometimes 0° to 360°).
+  </p>
+  <p>
+    Think of market cycles as waves that repeat over time. The phase tells you where you are on 
+    the current wave - at the trough (-180°), rising through zero (0°), at the peak (+180°), 
+    or falling back down. This precise phase information allows traders to anticipate cycle turns 
+    and time entries and exits with remarkable accuracy when the market is exhibiting cyclical behavior.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Ht Dcphase helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Phase Angles and Market Position</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>-180° to -90°:</strong> Early cycle, approaching trough (accumulation zone)</li>
+    <li><strong>-90° to 0°:</strong> Rising from trough toward midpoint (early uptrend)</li>
+    <li><strong>0° to +90°:</strong> Rising from midpoint toward peak (late uptrend)</li>
+    <li><strong>+90° to +180°:</strong> Approaching peak (distribution zone)</li>
+    <li><strong>+180° to +90°:</strong> Falling from peak (early downtrend)</li>
+    <li><strong>+90° to 0°:</strong> Falling toward midpoint (late downtrend)</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Ht Dcphase to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Buy zones:</strong> Phase between -180° and -90° (cycle trough area)</li>
+    <li><strong>Sell zones:</strong> Phase between +90° and +180° (cycle peak area)</li>
+    <li><strong>Momentum confirmation:</strong> Phase crossing through 0° confirms trend direction</li>
+    <li><strong>Cycle completion:</strong> Phase wrapping from +180° to -180° indicates new cycle</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Key Characteristics</h3>
+  <ul>
+    <li><strong>Smooth progression:</strong> In trending markets, phase advances steadily</li>
+    <li><strong>Erratic behavior:</strong> In choppy markets, phase may jump erratically</li>
+    <li><strong>Rate of change:</strong> How fast phase advances indicates cycle frequency</li>
+    <li><strong>Phase stability:</strong> Consistent advancement suggests reliable cycles</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Dominant Cycle Phase calculation process:</p>
+  <ol>
+    <li><strong>Price Smoothing:</strong> Apply 4-bar WMA to reduce noise</li>
+    <li><strong>Detrending:</strong> Remove trend using high-pass filter</li>
+    <li><strong>Hilbert Transform:</strong> 
+      <ul>
+        <li>Calculate In-phase component (I)</li>
+        <li>Calculate Quadrature component (Q) - 90° phase shifted</li>
+      </ul>
+    </li>
+    <li><strong>Phase Calculation:</strong> <code>Phase = atan2(Q, I) * (180/π)</code></li>
+    <li><strong>Smoothing:</strong> Apply smoothing to reduce phase jitter</li>
+    <li><strong>Dominant Cycle:</strong> Extract phase of the dominant frequency component</li>
+  </ol>
+  <p>
+    The use of atan2 (arctangent with two arguments) ensures the phase is calculated correctly 
+    in all four quadrants, providing a full -180° to +180° range. The Hilbert Transform's 
+    quadrature component is key to determining the instantaneous phase.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <p>
+    The Hilbert Transform Dominant Cycle Phase typically has no user-adjustable parameters. 
+    The algorithm automatically adapts to the dominant cycle in the data through its mathematical 
+    properties. This self-adaptive nature ensures consistent phase measurements across different 
+    markets and timeframes without requiring optimization.
+  </p>
+  <p>
+    Internal fixed parameters may include:
+  </p>
+  <ul>
+    <li><strong>Smoothing window:</strong> Usually 5-10 bars for phase stabilization</li>
+    <li><strong>Detrending cutoff:</strong> High-pass filter period (typically 48 bars)</li>
+    <li><strong>Output range:</strong> -180° to +180° or 0° to 360° depending on implementation</li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns the dominant cycle phase angle:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Units:</strong> Degrees (°)</li>
+    <li><strong>Range:</strong> -180° to +180° (or 0° to 360° in some implementations)</li>
+    <li><strong>Continuity:</strong> Phase progresses continuously, wrapping at ±180°</li>
+    <li><strong>Initial values:</strong> Requires approximately 50 bars to stabilize</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Ht Dcphase in Rust
-let result = indicators::ht_dcphase(&data, 14);
+use ta_lib::indicators::{ht_dcphase, ht_dcperiod};
+
+// Calculate dominant cycle phase
+let dc_phase = ht_dcphase(&close_prices)?;
+
+// Identify cycle positions
+for i in 50..dc_phase.len() {
+    if let Some(phase) = dc_phase.get(i) {
+        // Identify cycle quadrant
+        let quadrant = match *phase {
+            p if p >= -180.0 && p < -90.0 => "Approaching Trough",
+            p if p >= -90.0 && p < 0.0 => "Rising from Trough",
+            p if p >= 0.0 && p < 90.0 => "Rising to Peak",
+            p if p >= 90.0 && p <= 180.0 => "Approaching Peak",
+            _ => "Unknown"
+        };
+        
+        // Detect phase wrapping (new cycle)
+        if i > 0 {
+            let prev_phase = dc_phase[i-1];
+            if prev_phase > 150.0 && *phase < -150.0 {
+                println!("New cycle started at bar {}", i);
+            }
+        }
+        
+        // Trading zones
+        if *phase >= -180.0 && *phase <= -90.0 {
+            println!("Buy zone at bar {}: phase = {:.1}°", i, phase);
+        } else if *phase >= 90.0 && *phase <= 180.0 {
+            println!("Sell zone at bar {}: phase = {:.1}°", i, phase);
+        }
+    }
+}
+
+// Combine with cycle period for complete analysis
+let dc_period = ht_dcperiod(&close_prices)?;
+for i in 50..dc_phase.len() {
+    if let (Some(phase), Some(period)) = (dc_phase.get(i), dc_period.get(i)) {
+        // Calculate position within cycle (0 to 1)
+        let cycle_position = (*phase + 180.0) / 360.0;
+        
+        // Estimate bars to next trough
+        let bars_to_trough = if *phase < -180.0 + 360.0 {
+            (-180.0 - *phase) / (360.0 / period)
+        } else {
+            (180.0 - *phase) / (360.0 / period)
+        };
+        
+        println!("Phase: {:.1}°, Period: {:.1}, Bars to trough: {:.1}", 
+                 phase, period, bars_to_trough);
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import ht_dcphase, ht_dcperiod
+
+# Calculate dominant cycle phase
+df['dc_phase'] = ht_dcphase(df['close'])
+
+# Identify cycle quadrants
+df['cycle_quadrant'] = pd.cut(df['dc_phase'], 
+                              bins=[-180, -90, 0, 90, 180],
+                              labels=['Trough', 'Rising', 'Rising-Peak', 'Peak'])
+
+# Detect cycle completions
+df['phase_wrapped'] = (df['dc_phase'].shift(1) > 150) & (df['dc_phase'] < -150)
+df['new_cycle'] = df['phase_wrapped'].astype(int)
+
+# Generate trading signals based on phase
+df['phase_signal'] = 0
+df.loc[(df['dc_phase'] >= -180) & (df['dc_phase'] <= -90), 'phase_signal'] = 1  # Buy
+df.loc[(df['dc_phase'] >= 90) & (df['dc_phase'] <= 180), 'phase_signal'] = -1  # Sell
+
+# Calculate phase velocity (rate of change)
+df['phase_velocity'] = df['dc_phase'].diff()
+df['phase_acceleration'] = df['phase_velocity'].diff()
+
+# Identify stable vs unstable cycles
+df['stable_cycle'] = df['phase_velocity'].rolling(10).std() < 10
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Cycle-Based Entry Timing</h3>
+  <p>Time entries at optimal cycle positions:</p>
+  <pre><code class="language-python">
+# Get phase and period
+phase = ht_dcphase(close)
+period = ht_dcperiod(close)
+
+# Define optimal entry zones
+buy_phase_min, buy_phase_max = -180, -90
+sell_phase_min, sell_phase_max = 90, 180
+
+# Generate precise entry signals
+in_buy_zone = (phase >= buy_phase_min) & (phase <= buy_phase_max)
+phase_improving = phase > phase.shift(1)  # Phase advancing
+
+buy_signal = in_buy_zone & phase_improving & (period < 30)  # Cycling market
+
+# Exit when phase reaches opposite zone
+in_sell_zone = (phase >= sell_phase_min) & (phase <= sell_phase_max)
+exit_long = in_sell_zone | (phase < phase.shift(1))  # Phase retreating
+  </code></pre>
+
+  <h3>2. Phase-Based Position Sizing</h3>
+  <p>Adjust position size based on cycle position:</p>
+  <pre><code class="language-python">
+# Calculate position within cycle
+phase = ht_dcphase(close)
+cycle_position = (phase + 180) / 360  # Normalize to 0-1
+
+# Position sizing based on cycle
+# Largest positions at cycle extremes
+position_multiplier = 2 * abs(cycle_position - 0.5)  # 0 at mid-cycle, 1 at extremes
+
+# Risk adjustment
+# Lower risk in middle of cycle (uncertain direction)
+risk_multiplier = 1 - abs(cycle_position - 0.5) * 0.5  # 75% to 100% risk
+
+base_position = 100  # Base position size
+adjusted_position = base_position * position_multiplier * risk_multiplier
+  </code></pre>
+
+  <h3>3. Multi-Timeframe Phase Analysis</h3>
+  <p>Combine phases from different timeframes:</p>
+  <pre><code class="language-python">
+# Calculate phase on multiple timeframes
+phase_15m = ht_dcphase(close_15m)
+phase_1h = ht_dcphase(close_1h)
+phase_4h = ht_dcphase(close_4h)
+
+# Phase alignment score
+def phase_score(phase):
+    # Convert phase to cycle position (0-1)
+    return 1 - abs((phase + 180) / 360 - 0.5) * 2
+
+alignment_score = (phase_score(phase_15m) + 
+                  phase_score(phase_1h) * 2 + 
+                  phase_score(phase_4h) * 3) / 6
+
+# Trade when multiple timeframes align at extremes
+strong_buy = (alignment_score > 0.7) & (phase_4h < -90)
+strong_sell = (alignment_score > 0.7) & (phase_4h > 90)
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Trending markets:</strong> Phase may advance too quickly or slowly in strong trends</li>
+    <li><strong>Choppy markets:</strong> Phase can jump erratically without smooth progression</li>
+    <li><strong>Phase wrapping:</strong> Transitions from +180° to -180° need special handling</li>
+    <li><strong>Initialization:</strong> Requires significant warmup period for accuracy</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Combine with ht_dcperiod for complete cycle analysis</li>
+    <li>Use phase velocity to confirm signal quality</li>
+    <li>Be cautious when phase behavior is erratic</li>
+    <li>Allow 50+ bars for indicator stabilization</li>
+    <li>Handle phase wrapping in signal logic</li>
+    <li>Confirm with price action at predicted turns</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.</li>
+    <li>Phase angle concepts in signal processing</li>
+    <li>Hilbert Transform applications in financial markets</li>
+  </ul>
 </IndicatorLayout>

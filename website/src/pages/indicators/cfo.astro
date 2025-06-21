@@ -77,8 +77,8 @@ const parameters = [
     <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
       <li><strong class="text-gray-900 dark:text-gray-100">Above +3%:</strong> Significantly overbought</li>
       <li><strong class="text-gray-900 dark:text-gray-100">+1% to +3%:</strong> Mildly overbought</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">-1% to +1%:</strong> Neutral zone</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">-3% to -1%:</strong> Mildly oversold</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"&gt;-1% to +1%:</strong> Neutral zone</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"&gt;-3% to -1%:</strong> Mildly oversold</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Below -3%:</strong> Significantly oversold</li>
     </ul>
     
@@ -95,15 +95,15 @@ const parameters = [
   <ul>
     <li><strong>Mean Reversion:</strong>
       <ul>
-        <li>Buy when CFO < -3% and turning up</li>
-        <li>Sell when CFO > +3% and turning down</li>
+        <li>Buy when CFO &lt; -3% and turning up</li>
+        <li>Sell when CFO &gt; +3% and turning down</li>
         <li>Exit at zero line or opposite extreme</li>
       </ul>
     </li>
     <li><strong>Trend Following:</strong>
       <ul>
-        <li>Long positions only when CFO > 0</li>
-        <li>Short positions only when CFO < 0</li>
+        <li>Long positions only when CFO &gt; 0</li>
+        <li>Short positions only when CFO &lt; 0</li>
         <li>Use extremes for profit taking</li>
       </ul>
     </li>

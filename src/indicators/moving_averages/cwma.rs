@@ -215,11 +215,12 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
         weights.push(w);
         norm += w;
     }
-    let inv_norm = 1.0 / norm;
+    let mut inv_norm = 1.0 / norm;
+    inv_norm = inv_norm * (2.0 - norm * inv_norm); 
 
     // Reserve enough NaN prefix so the first computed value
     // aligns with the streaming implementation.
-    let warm = first + period;
+    let warm = first + period - 1 ;
     let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
@@ -257,7 +258,7 @@ pub unsafe fn cwma_scalar(
     out: &mut [f64],
 ) {
     let wlen = weights.len();
-    for i in (first_val + wlen + 1)..data.len() {
+    for i in (first_val + wlen)..data.len() {
         let mut acc = 0.0;
         for (k, &w) in weights.iter().enumerate() {
             acc = data[i - k].mul_add(w, acc);
@@ -281,7 +282,7 @@ pub unsafe fn cwma_avx2(
     let wlen = weights.len();
     let chunks = wlen / STEP;
     let tail = wlen % STEP;
-    let first_out = first_valid + wlen + 1;
+    let first_out = first_valid + wlen;
 
     for i in first_out..data.len() {
         let mut acc = _mm256_setzero_pd();
@@ -368,7 +369,7 @@ pub unsafe fn cwma_avx512_short(
     let wlen = weights.len();
     let chunks = wlen / STEP;
     let tail = wlen % STEP;
-    let first_out = first_valid + wlen + 1;
+    let first_out = first_valid + wlen;
 
     let mut wv: [__m512d; 4] = [_mm512_setzero_pd(); 4];
     if chunks >= 1 {
@@ -533,7 +534,7 @@ impl CwmaStream {
         self.ring[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
-        if !self.found_first || idx < self.first_idx + self.period {
+        if !self.found_first || idx < self.first_idx + self.period - 1 {
             return None;
         }
 
@@ -750,7 +751,7 @@ fn cwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
     // 1. allocate the big matrix as MaybeUninit and write the NaN prefixes
     let mut raw = make_uninit_matrix(rows, cols);
@@ -1297,39 +1298,154 @@ mod tests {
         }
         Ok(())
     }
-
+    #[allow(clippy::float_cmp)]
     fn check_cwma_property(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (
-            proptest::collection::vec(
-                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
-                30..200,
-            ),
-            3usize..30,
-        );
+        /* 1 ─ Strategy: choose period first, then generate a ≥-period finite vector. */
+        let strat = (2usize..=32).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (-1e6f64..1e6f64)                      // 100 % finite values
+                        .prop_filter("finite", |x| x.is_finite()),
+                    period..400,
+                ),
+                Just(period),
+                (-1e3f64..1e3f64)
+                    .prop_filter("finite a", |a| a.is_finite() && *a != 0.0),
+                -1e3f64..1e3f64,                          //  b may be zero
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
-            .run(&strat, |(data, period)| {
-                let params = CwmaParams {
-                    period: Some(period),
-                };
-                let input = CwmaInput::from_slice(&data, params);
-                let CwmaOutput { values: out } = cwma_with_kernel(&input, kernel).unwrap();
+            .run(&strat, |(data, period, a, b)| {
+                let params = CwmaParams { period: Some(period) };
+                let input  = CwmaInput::from_slice(&data, params.clone());
 
-                for i in (period - 1)..data.len() {
-                    let window = &data[i + 1 - period..=i];
-                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
-                    prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+                /* --- run both kernels, but DO NOT unwrap blindly ----------------- */
+                let fast = cwma_with_kernel(&input, kernel);
+                let slow = cwma_with_kernel(&input, Kernel::Scalar);
+
+                match (fast, slow) {
+                    // ➊ Same error kind ⇒ property holds.
+                    (Err(e1), Err(e2))
+                        if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
+                    {
+                        return Ok(());
+                    }
+                    // ➊′ *Different* error kinds → fail explicitly
+                    (Err(e1), Err(e2)) => prop_assert!(
+                        false,
+                        "different errors: fast={:?} slow={:?}",
+                        e1, e2
+                    ),
+
+                    // ➋ Kernels disagree on success / error.
+                    (Err(e1), Ok(_))   =>
+                        prop_assert!(false, "fast errored {e1:?} but scalar succeeded"),
+                    (Ok(_),   Err(e2)) =>
+                        prop_assert!(false, "scalar errored {e2:?} but fast succeeded"),
+
+                    // ➌ Both succeeded – run full invariant suite.
+                    (Ok(fast), Ok(reference)) => {
+                        let CwmaOutput { values: out  } = fast;
+                        let CwmaOutput { values: rref } = reference;
+
+                        /* Pre-compute streaming and affine-transformed outputs once. */
+                        let mut stream = CwmaStream::try_new(params.clone()).unwrap();
+                        let mut s_out  = Vec::with_capacity(data.len());
+                        for &v in &data {
+                            s_out.push(stream.update(v).unwrap_or(f64::NAN));
+                        }
+
+                        let transformed: Vec<f64> =
+                            data.iter().map(|x| a * x + b).collect();
+                        let t_out = cwma(&CwmaInput::from_slice(&transformed, params))?
+                            .values;
+
+                        for i in (period - 1)..data.len() {
+                            /* 1️⃣ Window-boundedness -------------------------------- */
+                            let w = &data[i + 1 - period..=i];
+                            let (lo, hi) = w.iter().fold(
+                                (f64::INFINITY, f64::NEG_INFINITY),
+                                |(l, h), &v| (l.min(v), h.max(v)),
+                            );
+                            let y  = out[i];
+                            let yr = rref[i];
+                            let ys = s_out[i];
+                            let yt = t_out[i];
+
+                            prop_assert!(
+                                y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                                "idx {i}: {y} ∉ [{lo}, {hi}]"
+                            );
+
+                            /* 2️⃣ Period-1 identity -------------------------------- */
+                            if period == 1 && y.is_finite() {
+                                prop_assert!((y - data[i]).abs() <= f64::EPSILON);
+                            }
+
+                            /* 3️⃣ Constant-series invariance ------------------------ */
+                            if w.iter().all(|v| *v == w[0]) {
+                                prop_assert!((y - w[0]).abs() <= 1e-9);
+                            }
+
+                            /* 4️⃣ Monotone preservation ---------------------------- */
+                            if data[..=i].windows(2).all(|p| p[0] <= p[1])
+                                && y.is_finite()
+                                && out[i - 1].is_finite()
+                            {
+                                prop_assert!(y >= out[i - 1] - 1e-12);
+                            }
+
+                             /* 5️⃣ Affine equivariance ------------------------------ */
+                             {
+                                 let expected = a * y + b;
+                                 let diff     = (yt - expected).abs();
+                                 let tol_abs  = 1e-9_f64;                    // tight near zero
+                                 let tol_rel  = expected.abs() * 1e-9;       // scales with magnitude
+                                 let ulp      = yt.to_bits().abs_diff(expected.to_bits());
+                            
+                                 prop_assert!(
+                                     diff <= tol_abs.max(tol_rel) || ulp <= 8,
+                                     "idx {i}: affine mismatch diff={diff:e}  ULP={ulp}"
+                                 );
+                             }
+
+                            /* 6️⃣ Scalar ≡ fast (ULP ≤ 4 or abs ≤ 1e-9) ------------ */
+                            let ulp = y.to_bits().abs_diff(yr.to_bits());
+                            prop_assert!(
+                                (y - yr).abs() <= 1e-9 || ulp <= 4,
+                                "idx {i}: fast={y} ref={yr} ULP={ulp}"
+                            );
+
+                            /* 7️⃣ Streaming parity --------------------------------- */
+                            prop_assert!(
+                                (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
+                                "idx {i}: stream mismatch"
+                            );
+                        }
+
+                        /* 9️⃣ Warm-up sentinel NaNs ------------------------------- */
+                        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
+                        let warm  = first + period - 1;
+                        prop_assert!(out[..warm].iter().all(|v| v.is_nan()));
+                    }
                 }
+
                 Ok(())
             })
             .unwrap();
+
+        /* 🔟 Error-path smoke tests (unchanged) ----------------------------------- */
+        assert!(cwma(&CwmaInput::from_slice(&[], CwmaParams::default())).is_err());
+        assert!(cwma(&CwmaInput::from_slice(&[f64::NAN; 12], CwmaParams::default())).is_err());
+        assert!(cwma(&CwmaInput::from_slice(&[1.0; 5], CwmaParams { period: Some(8) })).is_err());
+        assert!(cwma(&CwmaInput::from_slice(&[1.0; 5], CwmaParams { period: Some(0) })).is_err());
 
         Ok(())
     }

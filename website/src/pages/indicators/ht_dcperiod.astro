@@ -2,18 +2,9 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ht_dcperiod';
-const indicatorName = 'Ht Dcperiod';
-const description = `Technical analysis indicator: Ht Dcperiod`;
-const parameters = [
-  {
-    "name": "period",
-    "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
-  }
-];
+const indicatorName = 'Hilbert Transform - Dominant Cycle Period';
+const description = `The Hilbert Transform Dominant Cycle Period indicator uses advanced signal processing to measure the current dominant cycle length in market data, providing adaptive period measurements that can be used to optimize other indicators in real-time.`;
+const parameters = [];  // Hilbert Transform typically doesn't have user parameters
 ---
 
 <IndicatorLayout
@@ -22,23 +13,262 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Hilbert Transform - Dominant Cycle Period is part of John Ehlers' suite of advanced technical 
+    indicators that apply digital signal processing techniques to financial markets. This indicator 
+    measures the dominant cycle period in market data, essentially identifying how many bars constitute 
+    the current market cycle. Unlike fixed-period indicators, it adapts to changing market conditions 
+    by continuously measuring and updating the cycle length.
+  </p>
+  <p>
+    The indicator uses the Hilbert Transform, a mathematical technique that extracts instantaneous 
+    phase and frequency information from a signal. By analyzing phase changes over time, it can 
+    accurately determine the period of the dominant market cycle. This information is invaluable 
+    for traders who want their indicators to automatically adapt to current market conditions rather 
+    than using fixed lookback periods.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Ht Dcperiod helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Cycle Period Readings</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Short periods (5-10 bars):</strong> Market is in a fast cycle, high volatility</li>
+    <li><strong>Medium periods (10-20 bars):</strong> Normal market cycling</li>
+    <li><strong>Long periods (20-40 bars):</strong> Slow market cycles, trending conditions</li>
+    <li><strong>Very long periods (40+ bars):</strong> Strong trending market with weak cyclical component</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Ht Dcperiod to make informed decisions about entry and exit points.</p>
+  <h3>Practical Applications</h3>
+  <ul>
+    <li><strong>Adaptive indicators:</strong> Use the period output to dynamically adjust other indicators</li>
+    <li><strong>Cycle trading:</strong> Time entries and exits based on cycle length</li>
+    <li><strong>Market regime:</strong> Identify whether market is cycling or trending</li>
+    <li><strong>Volatility proxy:</strong> Shorter cycles often correlate with higher volatility</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Key Insights</h3>
+  <ul>
+    <li><strong>Stable periods:</strong> Consistent readings indicate reliable market cycles</li>
+    <li><strong>Changing periods:</strong> Rapid changes suggest market regime shifts</li>
+    <li><strong>Period clusters:</strong> Common periods (like 10, 20) often represent natural market rhythms</li>
+    <li><strong>Extreme readings:</strong> Very short or long periods may indicate unusual market conditions</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Hilbert Transform Dominant Cycle Period calculation involves several steps:</p>
+  <ol>
+    <li><strong>Smooth Price:</strong> Apply 4-bar WMA: <code>(4*price + 3*price[1] + 2*price[2] + price[3]) / 10</code></li>
+    <li><strong>Detrend:</strong> High-pass filter to remove trend components</li>
+    <li><strong>Compute In-phase (I) and Quadrature (Q):</strong>
+      <ul>
+        <li>I = Detrended price</li>
+        <li>Q = Hilbert Transform of detrended price</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Phase:</strong> <code>Phase = atan(Q/I)</code></li>
+    <li><strong>Measure Phase Change:</strong> Track how phase advances between bars</li>
+    <li><strong>Convert to Period:</strong> <code>Period = 360° / (phase change per bar)</code></li>
+    <li><strong>Smooth Result:</strong> Apply median and smoothing filters for stability</li>
+  </ol>
+  <p>
+    The Hilbert Transform extracts a 90-degree phase-shifted version of the input signal (quadrature), 
+    which combined with the original signal allows calculation of instantaneous phase. The rate of 
+    phase change directly indicates the cycle period.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <p>
+    The Hilbert Transform Dominant Cycle Period typically has no user-adjustable parameters. The 
+    algorithm is designed to be self-adaptive, automatically adjusting its internal calculations 
+    based on the input data. This parameter-free design ensures consistent results across different 
+    markets and timeframes without requiring optimization.
+  </p>
+  <p>
+    Some implementations may include:
+  </p>
+  <ul>
+    <li><strong>Smoothing period:</strong> Controls output smoothing (usually fixed at 5-10 bars)</li>
+    <li><strong>Min/Max limits:</strong> Bounds for valid period readings (typically 5-50)</li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns the measured dominant cycle period:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Units:</strong> Number of bars in the dominant cycle</li>
+    <li><strong>Range:</strong> Typically 5-50 bars (implementation dependent)</li>
+    <li><strong>Smoothing:</strong> Output is smoothed to reduce noise</li>
+    <li><strong>Initial values:</strong> Requires approximately 50 bars to stabilize</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Ht Dcperiod in Rust
-let result = indicators::ht_dcperiod(&data, 14);
+use ta_lib::indicators::{ht_dcperiod, rsi, sma};
+
+// Calculate dominant cycle period
+let dc_periods = ht_dcperiod(&close_prices)?;
+
+// Use for adaptive RSI
+for i in 50..close_prices.len() {
+    if let Some(period) = dc_periods.get(i) {
+        // Adaptive RSI using half the dominant cycle
+        let adaptive_period = (period / 2.0).round() as usize;
+        let adaptive_period = adaptive_period.clamp(5, 25); // Safety bounds
+        
+        // Calculate RSI for the adaptive period
+        let end_idx = i + 1;
+        let start_idx = end_idx.saturating_sub(adaptive_period * 2);
+        let slice = &close_prices[start_idx..end_idx];
+        
+        let rsi_value = rsi(slice, adaptive_period)?;
+        println!("Adaptive RSI[{}]: {}", adaptive_period, rsi_value.last().unwrap());
+    }
+}
+
+// Identify market regime
+for i in 1..dc_periods.len() {
+    if let (Some(curr), Some(prev)) = (dc_periods.get(i), dc_periods.get(i-1)) {
+        if curr > &30.0 {
+            println!("Trending market detected at bar {}", i);
+        } else if curr < &10.0 {
+            println!("Choppy/fast cycling market at bar {}", i);
+        }
+        
+        // Detect regime changes
+        let change_rate = (curr - prev).abs() / prev;
+        if change_rate > 0.2 {
+            println!("Market regime change at bar {}: {:.1} -> {:.1}", i, prev, curr);
+        }
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import ht_dcperiod, rsi, ema
+
+# Calculate dominant cycle period
+df['dc_period'] = ht_dcperiod(df['close'])
+
+# Create adaptive indicators
+def adaptive_rsi(close, dc_period):
+    # Use half the dominant cycle as RSI period
+    period = np.clip(dc_period / 2, 5, 25).round().astype(int)
+    return rsi(close, period)
+
+df['adaptive_rsi'] = adaptive_rsi(df['close'], df['dc_period'])
+
+# Market regime identification
+df['market_regime'] = pd.cut(df['dc_period'], 
+                            bins=[0, 10, 20, 30, 100],
+                            labels=['Fast', 'Normal', 'Slow', 'Trending'])
+
+# Detect cycle period stability
+df['period_change'] = df['dc_period'].pct_change().abs()
+df['stable_cycle'] = df['period_change'].rolling(10).mean() < 0.05
+
+# Generate adaptive moving average
+for i in range(50, len(df)):
+    period = int(df['dc_period'].iloc[i])
+    df.loc[df.index[i], 'adaptive_ma'] = df['close'].iloc[i-period:i].mean()
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Adaptive Indicator Systems</h3>
+  <p>Create indicators that automatically adjust to market conditions:</p>
+  <pre><code class="language-python">
+# Adaptive indicator suite
+dc_period = ht_dcperiod(close)
+
+# Adaptive moving average (full cycle)
+adaptive_ma = pd.Series(index=close.index)
+for i in range(50, len(close)):
+    period = int(dc_period.iloc[i])
+    adaptive_ma.iloc[i] = close.iloc[i-period:i].mean()
+
+# Adaptive RSI (half cycle)
+adaptive_rsi_period = (dc_period / 2).round().astype(int).clip(5, 25)
+adaptive_rsi = rsi(close, adaptive_rsi_period)
+
+# Adaptive Bollinger Bands
+adaptive_bb_period = dc_period.round().astype(int).clip(10, 50)
+adaptive_bb = bollinger_bands(close, adaptive_bb_period)
+  </code></pre>
+
+  <h3>2. Cycle-Based Trading</h3>
+  <p>Time entries and exits based on cycle phase:</p>
+  <pre><code class="language-python">
+# Calculate cycle phase position
+dc_period = ht_dcperiod(close)
+bars_since_low = close.rolling(int(dc_period)).apply(lambda x: len(x) - x.argmin())
+
+# Cycle phase (0 to 1)
+cycle_phase = bars_since_low / dc_period
+
+# Trade cycle extremes
+buy_zone = cycle_phase < 0.25  # First quarter of cycle
+sell_zone = cycle_phase > 0.75  # Last quarter of cycle
+
+# Combine with momentum
+momentum = roc(close, int(dc_period / 4))
+buy_signal = buy_zone & (momentum > 0)
+sell_signal = sell_zone & (momentum < 0)
+  </code></pre>
+
+  <h3>3. Market Regime Detection</h3>
+  <p>Identify and adapt to different market conditions:</p>
+  <pre><code class="language-python">
+# Comprehensive regime detection
+dc_period = ht_dcperiod(close)
+period_stability = dc_period.rolling(20).std()
+
+# Define regimes
+trending = dc_period > 30
+cycling = (dc_period >= 10) & (dc_period <= 30) & (period_stability < 2)
+choppy = (dc_period < 10) | (period_stability > 5)
+
+# Apply different strategies per regime
+position = pd.Series(0, index=close.index)
+
+# Trend following in trending regime
+position[trending] = np.where(close[trending] > sma(close, 50)[trending], 1, -1)
+
+# Mean reversion in cycling regime  
+cycle_position = (close - adaptive_ma) / close.rolling(dc_period).std()
+position[cycling] = np.where(cycle_position[cycling] < -1, 1, 
+                            np.where(cycle_position[cycling] > 1, -1, 0))
+
+# Stay out in choppy regime
+position[choppy] = 0
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization period:</strong> Requires 50+ bars for accurate readings</li>
+    <li><strong>Trend domination:</strong> Strong trends can distort cycle measurements</li>
+    <li><strong>Noise sensitivity:</strong> Very noisy data may produce erratic readings</li>
+    <li><strong>Period limits:</strong> Readings may hit upper/lower bounds in extreme conditions</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Allow adequate warmup period before using readings</li>
+    <li>Smooth the output for more stable adaptive parameters</li>
+    <li>Set reasonable bounds when using for adaptive indicators</li>
+    <li>Combine with other regime detection methods</li>
+    <li>Be cautious during major market events or gaps</li>
+    <li>Validate readings make sense for your timeframe</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.</li>
+    <li>Hilbert Transform theory and applications in signal processing</li>
+    <li>Mesa and Sine Wave indicators (related Hilbert Transform indicators)</li>
+  </ul>
 </IndicatorLayout>

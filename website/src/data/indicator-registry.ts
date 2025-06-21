@@ -3,40 +3,16 @@ export const indicators = {
   "acosc": {
     "id": "acosc",
     "name": "Acceleration Oscillator",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "momentum",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "ad": {
     "id": "ad",
     "name": "Accumulation/Distribution",
     "category": "volume",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "adosc": {
     "id": "adosc",
@@ -46,75 +22,61 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "adx": {
     "id": "adx",
     "name": "Average Directional Index",
-    "category": "trend",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "plus_di",
-      "minus_di"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "adxr": {
     "id": "adxr",
     "name": "Adxr",
-    "category": "trend",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "plus_di",
-      "minus_di"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "alligator": {
     "id": "alligator",
     "name": "Alligator",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "ao": {
     "id": "ao",
@@ -124,16 +86,13 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "apo": {
     "id": "apo",
@@ -143,111 +102,57 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "aroon": {
     "id": "aroon",
     "name": "Aroon",
     "category": "trend",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
+    "parameters": [],
     "description": "Create a new streaming Aroon from `params`.  Extracts `length = params.length.unwrap_or(14)`."
   },
   "aroonosc": {
     "id": "aroonosc",
-    "name": "Aroon Oscillator",
+    "name": "Aroonosc",
     "category": "trend",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "atr": {
     "id": "atr",
     "name": "Average True Range",
     "category": "volatility",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "avgprice": {
     "id": "avgprice",
-    "name": "Avgprice",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
+    "name": "Average Price",
+    "category": "price",
+    "parameters": [],
     "description": "# Average Price"
   },
   "bandpass": {
     "id": "bandpass",
-    "name": "Band Pass Filter",
-    "category": "other",
+    "name": "Bandpass",
+    "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "bollinger_bands": {
     "id": "bollinger_bands",
@@ -258,25 +163,12 @@ export const indicators = {
         "name": "period",
         "type": "number",
         "default": 20,
-        "min": 2,
-        "max": 200,
-        "description": "Moving average period"
-      },
-      {
-        "name": "std_dev",
-        "type": "number",
-        "default": 2,
-        "min": 0.1,
-        "max": 5,
-        "description": "Standard deviation multiplier"
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "bollinger_bands_width": {
     "id": "bollinger_bands_width",
@@ -287,44 +179,19 @@ export const indicators = {
         "name": "period",
         "type": "number",
         "default": 20,
-        "min": 2,
-        "max": 200,
-        "description": "Moving average period"
-      },
-      {
-        "name": "std_dev",
-        "type": "number",
-        "default": 2,
-        "min": 0.1,
-        "max": 5,
-        "description": "Standard deviation multiplier"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
-  },
-  "bop": {
-    "id": "bop",
-    "name": "Balance Of Power",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
+  },
+  "bop": {
+    "id": "bop",
+    "name": "Balance of Power",
+    "category": "trend",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "cci": {
     "id": "cci",
@@ -334,111 +201,84 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "cfo": {
     "id": "cfo",
-    "name": "Chande Forcast Oscillator",
-    "category": "other",
+    "name": "Chaikin Flow Oscillator",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "cg": {
     "id": "cg",
-    "name": "Cg",
-    "category": "other",
+    "name": "Center of Gravity",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "chande": {
     "id": "chande",
-    "name": "Chande",
-    "category": "other",
+    "name": "Chande Indicator",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "chop": {
     "id": "chop",
-    "name": "Chop",
-    "category": "other",
+    "name": "Choppiness Index",
+    "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "cksp": {
     "id": "cksp",
-    "name": "Cksp",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "name": "Chande Kroll Stop",
+    "category": "support_resistance",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "cmo": {
     "id": "cmo",
@@ -448,734 +288,526 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "coppock": {
     "id": "coppock",
     "name": "Coppock Curve",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "k_period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
-        "min": 1,
-        "max": 200,
-        "description": "%D period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "correlation_cycle": {
-    "id": "correlation_cycle",
-    "name": "Correlation Cycle",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "correl_hl": {
-    "id": "correl_hl",
-    "name": "Correl Hl",
-    "category": "statistics",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "cvi": {
-    "id": "cvi",
-    "name": "Cvi",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "damiani_volatmeter": {
-    "id": "damiani_volatmeter",
-    "name": "Damiani Volatmeter",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "decycler": {
-    "id": "decycler",
-    "name": "Decycler",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "dec_osc": {
-    "id": "dec_osc",
-    "name": "Dec Osc",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "deviation": {
-    "id": "deviation",
-    "name": "Deviation",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
         "default": 20,
-        "min": 2,
-        "max": 200,
-        "description": "Moving average period"
-      },
-      {
-        "name": "std_dev",
-        "type": "number",
-        "default": 2,
-        "min": 0.1,
-        "max": 5,
-        "description": "Standard deviation multiplier"
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "devstop": {
-    "id": "devstop",
-    "name": "Devstop",
-    "category": "other",
+  "correl_hl": {
+    "id": "correl_hl",
+    "name": "High-Low Correlation",
+    "category": "statistical",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "di": {
-    "id": "di",
-    "name": "Di",
-    "category": "trend",
+  "correlation_cycle": {
+    "id": "correlation_cycle",
+    "name": "Correlation Cycle",
+    "category": "statistical",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "plus_di",
-      "minus_di"
-    ],
-    "description": ""
+    "description": "Holds the (real, imag, angle, state) computed for the “previous” window,"
   },
-  "dm": {
-    "id": "dm",
-    "name": "Dm",
-    "category": "trend",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "donchian": {
-    "id": "donchian",
-    "name": "Donchian Channels",
+  "cvi": {
+    "id": "cvi",
+    "name": "Cvi",
     "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "dpo": {
-    "id": "dpo",
-    "name": "Detrended Price Oscillator",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "dti": {
-    "id": "dti",
-    "name": "Dti",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "dx": {
-    "id": "dx",
-    "name": "Dx",
+  "damiani_volatmeter": {
+    "id": "damiani_volatmeter",
+    "name": "Damiani Volatmeter",
     "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "plus_di",
-      "minus_di"
+    "description": "Technical analysis indicator"
+  },
+  "dec_osc": {
+    "id": "dec_osc",
+    "name": "Detrended Oscillator",
+    "category": "cycles",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
     ],
-    "description": ""
+    "description": "Technical analysis indicator"
+  },
+  "decycler": {
+    "id": "decycler",
+    "name": "Decycler",
+    "category": "cycles",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "deviation": {
+    "id": "deviation",
+    "name": "Deviation",
+    "category": "volatility",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Input for deviation indicator."
+  },
+  "devstop": {
+    "id": "devstop",
+    "name": "Deviation Stop",
+    "category": "support_resistance",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "di": {
+    "id": "di",
+    "name": "Directional Indicator (+DI/-DI)",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "dm": {
+    "id": "dm",
+    "name": "Directional Movement",
+    "category": "trend",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "donchian": {
+    "id": "donchian",
+    "name": "Donchian Channel",
+    "category": "volatility",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "dpo": {
+    "id": "dpo",
+    "name": "Detrended Price Oscillator",
+    "category": "trend",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "dti": {
+    "id": "dti",
+    "name": "Directional Trend Index",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "dx": {
+    "id": "dx",
+    "name": "Dx",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
   },
   "efi": {
     "id": "efi",
     "name": "Efi",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "emd": {
-    "id": "emd",
-    "name": "Emd",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
-  },
-  "emv": {
-    "id": "emv",
-    "name": "Emv",
     "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "er": {
-    "id": "er",
-    "name": "Er",
-    "category": "other",
+  "emd": {
+    "id": "emd",
+    "name": "Empirical Mode Decomposition",
+    "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
+    "description": "Technical analysis indicator"
+  },
+  "emv": {
+    "id": "emv",
+    "name": "Ease of Movement",
+    "category": "volume",
+    "parameters": [],
+    "description": "Technical analysis indicator"
+  },
+  "er": {
+    "id": "er",
+    "name": "Efficiency Ratio",
+    "category": "trend",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
     ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "eri": {
     "id": "eri",
     "name": "Elder Ray Index",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "fisher": {
     "id": "fisher",
     "name": "Fisher",
-    "category": "other",
+    "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "fosc": {
     "id": "fosc",
-    "name": "Forecast Oscillator",
-    "category": "other",
+    "name": "Fosc",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "gatorosc": {
     "id": "gatorosc",
     "name": "Gatorosc",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "heikin_ashi_candles": {
     "id": "heikin_ashi_candles",
     "name": "Heikin Ashi Candles",
-    "category": "pattern",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "price",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "ht_dcperiod": {
     "id": "ht_dcperiod",
-    "name": "Ht Dcperiod",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ht_dcphase": {
-    "id": "ht_dcphase",
-    "name": "Ht Dcphase",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ht_phasor": {
-    "id": "ht_phasor",
-    "name": "Ht Phasor",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ht_sine": {
-    "id": "ht_sine",
-    "name": "Ht Sine",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ht_trendline": {
-    "id": "ht_trendline",
-    "name": "Ht Trendline",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ht_trendmode": {
-    "id": "ht_trendmode",
-    "name": "Ht Trendmode",
-    "category": "cycle",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ift_rsi": {
-    "id": "ift_rsi",
-    "name": "Inverse Fisher Transform RSI",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "kaufmanstop": {
-    "id": "kaufmanstop",
-    "name": "Kaufmanstop",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "kdj": {
-    "id": "kdj",
-    "name": "Kdj",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "k_period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
-        "min": 1,
-        "max": 200,
-        "description": "%D period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "keltner": {
-    "id": "keltner",
-    "name": "Keltner Channels",
+    "name": "Hilbert Transform - Dominant Cycle Period",
     "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
+    "description": "# Hilbert Transform - Dominant Cycle Period (HT_DCPERIOD)"
+  },
+  "ht_dcphase": {
+    "id": "ht_dcphase",
+    "name": "Hilbert Transform - Dominant Cycle Phase",
+    "category": "volatility",
+    "parameters": [],
+    "description": "# Hilbert Transform - Dominant Cycle Phase (HT_DCPHASE)"
+  },
+  "ht_phasor": {
+    "id": "ht_phasor",
+    "name": "Hilbert Transform - Phasor",
+    "category": "cycles",
+    "parameters": [],
+    "description": "# Hilbert Transform Phasor (HT_PHASOR)"
+  },
+  "ht_sine": {
+    "id": "ht_sine",
+    "name": "Hilbert Transform - SineWave",
+    "category": "moving_averages",
+    "parameters": [],
+    "description": "# Hilbert Transform - SineWave (HT_SINE)"
+  },
+  "ht_trendline": {
+    "id": "ht_trendline",
+    "name": "Hilbert Transform - Instantaneous Trendline",
+    "category": "volatility",
+    "parameters": [],
+    "description": "# HT_TRENDLINE (Hilbert Transform - Instantaneous Trendline)"
+  },
+  "ht_trendmode": {
+    "id": "ht_trendmode",
+    "name": "Hilbert Transform - Trend vs Cycle Mode",
+    "category": "volatility",
+    "parameters": [],
+    "description": "# Hilbert Transform - Trend vs Cycle Mode (HT_TRENDMODE)"
+  },
+  "ift_rsi": {
+    "id": "ift_rsi",
+    "name": "Ift Rsi",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
     ],
-    "description": ""
+    "description": "Technical analysis indicator"
+  },
+  "kaufmanstop": {
+    "id": "kaufmanstop",
+    "name": "Kaufman Stop",
+    "category": "support_resistance",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "kdj": {
+    "id": "kdj",
+    "name": "KDJ Indicator",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "keltner": {
+    "id": "keltner",
+    "name": "Keltner Channel",
+    "category": "volatility",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
   },
   "kst": {
     "id": "kst",
     "name": "Know Sure Thing",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "kurtosis": {
     "id": "kurtosis",
     "name": "Kurtosis",
-    "category": "statistics",
+    "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "kvo": {
     "id": "kvo",
@@ -1185,121 +817,84 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "linearreg_angle": {
     "id": "linearreg_angle",
-    "name": "Linearreg Angle",
-    "category": "statistics",
+    "name": "Linear Regression Angle",
+    "category": "statistical",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "linearreg_intercept": {
     "id": "linearreg_intercept",
-    "name": "Linearreg Intercept",
-    "category": "statistics",
+    "name": "Linear Regression Intercept",
+    "category": "statistical",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "linearreg_slope": {
     "id": "linearreg_slope",
-    "name": "Linearreg Slope",
-    "category": "statistics",
+    "name": "Linear Regression Slope",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "lrsi": {
     "id": "lrsi",
     "name": "Lrsi",
-    "category": "other",
+    "category": "momentum",
+    "parameters": [],
+    "description": "Technical analysis indicator"
+  },
+  "mab": {
+    "id": "mab",
+    "name": "Moving Average Bands",
+    "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "mab": {
-    "id": "mab",
-    "name": "Mab",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "fast_period",
-        "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow period"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "macd": {
     "id": "macd",
@@ -1307,131 +902,77 @@ export const indicators = {
     "category": "momentum",
     "parameters": [
       {
-        "name": "fast_period",
+        "name": "period",
         "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast EMA period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow EMA period"
-      },
-      {
-        "name": "signal_period",
-        "type": "number",
-        "default": 9,
-        "min": 2,
-        "max": 200,
-        "description": "Signal line period"
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "macd",
-      "signal",
-      "histogram"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "marketefi": {
     "id": "marketefi",
     "name": "Marketefi",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "volume",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "mass": {
     "id": "mass",
-    "name": "Mass Index",
-    "category": "volatility",
+    "name": "Mass",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "mean_ad": {
     "id": "mean_ad",
     "name": "Mean Ad",
-    "category": "other",
+    "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "medium_ad": {
     "id": "medium_ad",
     "name": "Medium Ad",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "medprice": {
     "id": "medprice",
-    "name": "Medprice",
-    "category": "price_transform",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "name": "Median Price",
+    "category": "price",
+    "parameters": [],
+    "description": "Source data for medprice indicator."
   },
   "mfi": {
     "id": "mfi",
@@ -1441,149 +982,107 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "midpoint": {
     "id": "midpoint",
     "name": "Midpoint",
-    "category": "price_transform",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "midprice": {
     "id": "midprice",
     "name": "Midprice",
-    "category": "price_transform",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "minmax": {
     "id": "minmax",
     "name": "Minmax",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "trend",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "mom": {
     "id": "mom",
-    "name": "Mom",
+    "name": "Momentum",
     "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "msw": {
     "id": "msw",
-    "name": "Msw",
-    "category": "other",
+    "name": "Mesa Sine Wave",
+    "category": "cycles",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "natr": {
     "id": "natr",
-    "name": "Natr",
+    "name": "Normalized Average True Range",
     "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "nvi": {
     "id": "nvi",
-    "name": "Nvi",
+    "name": "Negative Volume Index",
     "category": "volume",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "obv": {
     "id": "obv",
@@ -1593,94 +1092,59 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "pattern_recognition": {
     "id": "pattern_recognition",
     "name": "Pattern Recognition",
-    "category": "pattern",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
-  },
-  "pfe": {
-    "id": "pfe",
-    "name": "Polarized Fractal Efficiency",
     "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
+    "description": "Technical analysis indicator"
+  },
+  "pfe": {
+    "id": "pfe",
+    "name": "Polarized Fractal Efficiency",
+    "category": "trend",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
     ],
-    "description": ""
+    "description": "Pushes one new price into the stream.  Returns `None` until we have"
   },
   "pivot": {
     "id": "pivot",
     "name": "Pivot Points",
-    "category": "support_resistance",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "volume",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "pma": {
     "id": "pma",
-    "name": "Pma",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "name": "Pivot Moving Average",
+    "category": "moving_averages",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "ppo": {
     "id": "ppo",
@@ -1688,72 +1152,38 @@ export const indicators = {
     "category": "momentum",
     "parameters": [
       {
-        "name": "fast_period",
-        "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "pvi": {
-    "id": "pvi",
-    "name": "Pvi",
-    "category": "volume",
-    "parameters": [
-      {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Update the stream with a new value and return the latest PPO if available."
+  },
+  "pvi": {
+    "id": "pvi",
+    "name": "Positive Volume Index",
+    "category": "volume",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "qstick": {
     "id": "qstick",
     "name": "Qstick",
-    "category": "other",
+    "category": "momentum",
     "parameters": [
       {
-        "name": "k_period",
+        "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
+        "default": 20,
         "min": 1,
-        "max": 200,
-        "description": "%D period"
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "roc": {
     "id": "roc",
@@ -1763,54 +1193,45 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "rocp": {
     "id": "rocp",
-    "name": "Rate of Change Percentage",
+    "name": "Rocp",
     "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "rocr": {
     "id": "rocr",
-    "name": "Rate of Change Ratio",
+    "name": "Rocr",
     "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "rsi": {
     "id": "rsi",
@@ -1820,213 +1241,148 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "rsmk": {
     "id": "rsmk",
-    "name": "Rsmk",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "rsx": {
-    "id": "rsx",
-    "name": "Relative Strength Index - Smoothed",
-    "category": "momentum",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "rvi": {
-    "id": "rvi",
-    "name": "Relative Volatility Index",
+    "name": "Relative Strength Market",
     "category": "other",
     "parameters": [
       {
         "name": "period",
         "type": "number",
         "default": 20,
-        "min": 2,
-        "max": 200,
-        "description": "Moving average period"
-      },
-      {
-        "name": "std_dev",
-        "type": "number",
-        "default": 2,
-        "min": 0.1,
-        "max": 5,
-        "description": "Standard deviation multiplier"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "safezonestop": {
-    "id": "safezonestop",
-    "name": "Safezonestop",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "sar": {
-    "id": "sar",
-    "name": "Parabolic SAR",
-    "category": "trend",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "squeeze_momentum": {
-    "id": "squeeze_momentum",
-    "name": "Squeeze Momentum",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
-  },
-  "srsi": {
-    "id": "srsi",
-    "name": "Srsi",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "k_period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
         "min": 1,
-        "max": 200,
-        "description": "%D period"
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "stc": {
-    "id": "stc",
-    "name": "Schaff Trend Cycle",
+  "rsx": {
+    "id": "rsx",
+    "name": "Relative Strength Index Smoothed",
     "category": "momentum",
     "parameters": [
       {
-        "name": "fast_period",
+        "name": "period",
         "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow period"
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
-  "stddev": {
-    "id": "stddev",
-    "name": "Stddev",
+  "rvi": {
+    "id": "rvi",
+    "name": "Rvi",
     "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
+    "description": "Technical analysis indicator"
+  },
+  "safezonestop": {
+    "id": "safezonestop",
+    "name": "SafeZone Stop",
+    "category": "support_resistance",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
     ],
-    "description": ""
+    "description": "Technical analysis indicator"
+  },
+  "sar": {
+    "id": "sar",
+    "name": "Parabolic SAR",
+    "category": "trend",
+    "parameters": [],
+    "description": "Technical analysis indicator"
+  },
+  "squeeze_momentum": {
+    "id": "squeeze_momentum",
+    "name": "Squeeze Momentum",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "srsi": {
+    "id": "srsi",
+    "name": "Stochastic RSI",
+    "category": "momentum",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "stc": {
+    "id": "stc",
+    "name": "Schaff Trend Cycle",
+    "category": "trend",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
+  },
+  "stddev": {
+    "id": "stddev",
+    "name": "Standard Deviation",
+    "category": "volatility",
+    "parameters": [
+      {
+        "name": "period",
+        "type": "number",
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
+      }
+    ],
+    "description": "Technical analysis indicator"
   },
   "stoch": {
     "id": "stoch",
@@ -2034,27 +1390,15 @@ export const indicators = {
     "category": "momentum",
     "parameters": [
       {
-        "name": "k_period",
+        "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
+        "default": 20,
         "min": 1,
-        "max": 200,
-        "description": "%D period"
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "k",
-      "d"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "stochf": {
     "id": "stochf",
@@ -2062,27 +1406,15 @@ export const indicators = {
     "category": "momentum",
     "parameters": [
       {
-        "name": "k_period",
+        "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "%K period"
-      },
-      {
-        "name": "d_period",
-        "type": "number",
-        "default": 3,
+        "default": 20,
         "min": 1,
-        "max": 200,
-        "description": "%D period"
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "k",
-      "d"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "supertrend": {
     "id": "supertrend",
@@ -2092,56 +1424,45 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "trix": {
     "id": "trix",
-    "name": "Triple Exponential Average",
-    "category": "other",
+    "name": "Trix",
+    "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "tsf": {
     "id": "tsf",
-    "name": "Tsf",
-    "category": "statistics",
+    "name": "Time Series Forecast",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "tsi": {
     "id": "tsi",
@@ -2151,73 +1472,52 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "ttm_trend": {
     "id": "ttm_trend",
     "name": "Ttm Trend",
-    "category": "other",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "ui": {
     "id": "ui",
-    "name": "Ui",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ultosc": {
-    "id": "ultosc",
-    "name": "Ultimate Oscillator",
+    "name": "Ulcer Index",
     "category": "momentum",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
+  },
+  "ultosc": {
+    "id": "ultosc",
+    "name": "Ultimate Oscillator",
+    "category": "momentum",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "utility_functions": {
     "id": "utility_functions",
@@ -2227,16 +1527,13 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "var": {
     "id": "var",
@@ -2246,243 +1543,162 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vi": {
     "id": "vi",
     "name": "Vortex Indicator",
-    "category": "other",
+    "category": "trend",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vidya": {
     "id": "vidya",
     "name": "Variable Index Dynamic Average",
-    "category": "other",
+    "category": "moving_averages",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vlma": {
     "id": "vlma",
-    "name": "Vlma",
-    "category": "other",
+    "name": "Variable Length Moving Average",
+    "category": "moving_averages",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vosc": {
     "id": "vosc",
     "name": "Vosc",
-    "category": "other",
+    "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "voss": {
     "id": "voss",
     "name": "Voss",
-    "category": "other",
+    "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vpci": {
     "id": "vpci",
-    "name": "Vpci",
+    "name": "Volume Price Confirmation Indicator",
     "category": "volume",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "vpt": {
     "id": "vpt",
-    "name": "Vpt",
+    "name": "Volume Price Trend",
     "category": "volume",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "vwmacd": {
     "id": "vwmacd",
     "name": "Vwmacd",
-    "category": "volume",
+    "category": "moving_averages",
     "parameters": [
       {
-        "name": "fast_period",
+        "name": "period",
         "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast EMA period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow EMA period"
-      },
-      {
-        "name": "signal_period",
-        "type": "number",
-        "default": 9,
-        "min": 2,
-        "max": 200,
-        "description": "Signal line period"
+        "default": 20,
+        "min": 1,
+        "max": 500,
+        "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "macd",
-      "signal",
-      "histogram"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "wad": {
     "id": "wad",
     "name": "Wad",
-    "category": "other",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "category": "volume",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "wavetrend": {
     "id": "wavetrend",
-    "name": "WaveTrend",
-    "category": "other",
+    "name": "Wavetrend",
+    "category": "volatility",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Push one new `price`.  Returns `None` (→ “NaN” in the test harness) until"
   },
   "wclprice": {
     "id": "wclprice",
-    "name": "Wclprice",
-    "category": "price_transform",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "name": "Weighted Close Price",
+    "category": "price",
+    "parameters": [],
+    "description": "Technical analysis indicator"
   },
   "willr": {
     "id": "willr",
@@ -2492,871 +1708,30 @@ export const indicators = {
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   },
   "zscore": {
     "id": "zscore",
-    "name": "Zscore",
-    "category": "other",
+    "name": "Z-Score",
+    "category": "statistical",
     "parameters": [
       {
         "name": "period",
         "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
+        "default": 20,
+        "min": 1,
+        "max": 500,
         "description": "Lookback period"
       }
     ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "alma": {
-    "id": "alma",
-    "name": "Arnaud Legoux Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "cwma": {
-    "id": "cwma",
-    "name": "Cwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "dema": {
-    "id": "dema",
-    "name": "Double Exponential Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "edcf": {
-    "id": "edcf",
-    "name": "Edcf",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ehlers_itrend": {
-    "id": "ehlers_itrend",
-    "name": "Ehlers Itrend",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ema": {
-    "id": "ema",
-    "name": "Exponential Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "epma": {
-    "id": "epma",
-    "name": "Epma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "frama": {
-    "id": "frama",
-    "name": "Fractal Adaptive Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "fwma": {
-    "id": "fwma",
-    "name": "Fwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "gaussian": {
-    "id": "gaussian",
-    "name": "Gaussian Filter",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "highpass": {
-    "id": "highpass",
-    "name": "High Pass Filter",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "highpass_2_pole": {
-    "id": "highpass_2_pole",
-    "name": "Highpass 2 Pole",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "hma": {
-    "id": "hma",
-    "name": "Hull Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "hwma": {
-    "id": "hwma",
-    "name": "Henderson Weighted Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "jma": {
-    "id": "jma",
-    "name": "Jurik Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "jsa": {
-    "id": "jsa",
-    "name": "Jsa",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "kama": {
-    "id": "kama",
-    "name": "Kaufman Adaptive Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "upper",
-      "middle",
-      "lower"
-    ],
-    "description": ""
-  },
-  "linreg": {
-    "id": "linreg",
-    "name": "Linreg",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "ma": {
-    "id": "ma",
-    "name": "Ma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "fast_period",
-        "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "maaq": {
-    "id": "maaq",
-    "name": "Maaq",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "fast_period",
-        "type": "number",
-        "default": 12,
-        "min": 2,
-        "max": 200,
-        "description": "Fast period"
-      },
-      {
-        "name": "slow_period",
-        "type": "number",
-        "default": 26,
-        "min": 2,
-        "max": 200,
-        "description": "Slow period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "mama": {
-    "id": "mama",
-    "name": "MESA Adaptive Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "mwdx": {
-    "id": "mwdx",
-    "name": "Mwdx",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "nma": {
-    "id": "nma",
-    "name": "Nma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "pwma": {
-    "id": "pwma",
-    "name": "Pwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "reflex": {
-    "id": "reflex",
-    "name": "Reflex",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "sinwma": {
-    "id": "sinwma",
-    "name": "Sine Weighted Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "sma": {
-    "id": "sma",
-    "name": "Simple Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "smma": {
-    "id": "smma",
-    "name": "Smma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "sqwma": {
-    "id": "sqwma",
-    "name": "Sqwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "srwma": {
-    "id": "srwma",
-    "name": "Srwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "supersmoother": {
-    "id": "supersmoother",
-    "name": "Super Smoother",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "supersmoother_3_pole": {
-    "id": "supersmoother_3_pole",
-    "name": "Supersmoother 3 Pole",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "swma": {
-    "id": "swma",
-    "name": "Symmetric Weighted Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "tema": {
-    "id": "tema",
-    "name": "Triple Exponential Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "tilson": {
-    "id": "tilson",
-    "name": "Tilson",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "trendflex": {
-    "id": "trendflex",
-    "name": "Trendflex",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "trima": {
-    "id": "trima",
-    "name": "Trima",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": "Feed a single new raw price into the TRIMA‐stream."
-  },
-  "vpwma": {
-    "id": "vpwma",
-    "name": "Vpwma",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "vwap": {
-    "id": "vwap",
-    "name": "Volume Weighted Average Price",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": "VWAP input data"
-  },
-  "vwma": {
-    "id": "vwma",
-    "name": "Volume Weighted Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "wilders": {
-    "id": "wilders",
-    "name": "Wilders",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "wma": {
-    "id": "wma",
-    "name": "Weighted Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
-  },
-  "zlema": {
-    "id": "zlema",
-    "name": "Zero Lag Exponential Moving Average",
-    "category": "moving_averages",
-    "parameters": [
-      {
-        "name": "period",
-        "type": "number",
-        "default": 14,
-        "min": 2,
-        "max": 200,
-        "description": "Lookback period"
-      }
-    ],
-    "outputs": [
-      "value"
-    ],
-    "description": ""
+    "description": "Technical analysis indicator"
   }
-} as const;
+};
 
 export type IndicatorId = keyof typeof indicators;

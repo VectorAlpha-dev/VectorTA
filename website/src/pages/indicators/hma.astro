@@ -2,16 +2,16 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'hma';
-const indicatorName = 'Hull Moving Average';
-const description = `Technical analysis indicator: Hull Moving Average`;
+const indicatorName = 'Hull Moving Average (HMA)';
+const description = `The Hull Moving Average is an extremely responsive and smooth moving average that almost eliminates lag while maintaining curve smoothness, developed by Alan Hull to address the age-old dilemma of making a moving average more responsive while maintaining smoothness.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
+    "default": 16,
+    "min": 4,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for the HMA calculation"
   }
 ];
 ---
@@ -22,23 +22,233 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Hull Moving Average (HMA) was developed by Alan Hull in 2005 as an attempt to create a moving 
+    average that is both highly responsive to price changes and maintains smoothness in its curve. 
+    Traditional moving averages face a trade-off between lag and smoothness - the HMA cleverly uses 
+    weighted moving averages and square roots to achieve minimal lag while preserving a smooth line.
+  </p>
+  <p>
+    The HMA accomplishes this seemingly impossible task by using a two-step process that first reduces 
+    lag through weighted calculations, then applies smoothing using the square root of the period. 
+    This innovative approach makes the HMA particularly useful for identifying trend changes early 
+    while filtering out market noise that might create false signals.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Hull Moving Average helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Trend Direction</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Rising HMA:</strong> Indicates upward price momentum</li>
+    <li><strong>Falling HMA:</strong> Indicates downward price momentum</li>
+    <li><strong>HMA turning points:</strong> Often coincide with actual price turning points</li>
+    <li><strong>Slope changes:</strong> Early warning of potential trend reversals</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Hull Moving Average to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Buy signal:</strong> When HMA turns upward (color often changes to green)</li>
+    <li><strong>Sell signal:</strong> When HMA turns downward (color often changes to red)</li>
+    <li><strong>Strong trend:</strong> Steep HMA slope indicates strong momentum</li>
+    <li><strong>Trend weakness:</strong> Flattening HMA suggests momentum loss</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Key Advantages</h3>
+  <ul>
+    <li><strong>Minimal lag:</strong> Responds quickly to price changes</li>
+    <li><strong>Smooth curve:</strong> Reduces whipsaws compared to other fast MAs</li>
+    <li><strong>Clear signals:</strong> Direction changes are easy to identify</li>
+    <li><strong>Versatile:</strong> Works well across different timeframes and markets</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Hull Moving Average uses a unique three-step calculation process:</p>
+  <ol>
+    <li>Calculate WMA of period n/2 and multiply by 2: <code>WMA1 = 2 * WMA(close, n/2)</code></li>
+    <li>Calculate WMA of period n and subtract from step 1: <code>Raw HMA = WMA1 - WMA(close, n)</code></li>
+    <li>Calculate WMA of the result using period sqrt(n): <code>HMA = WMA(Raw HMA, sqrt(n))</code></li>
+  </ol>
+  <p>
+    This process first enhances responsiveness by emphasizing recent prices (step 1), then removes 
+    lag by subtracting the slower average (step 2), and finally smooths the result using the square 
+    root of the period (step 3). The use of WMA (Weighted Moving Average) throughout gives more 
+    importance to recent data.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <h3>Period (default: 16)</h3>
+  <p>
+    The lookback period for the HMA calculation. Unlike simple moving averages, the HMA uses this 
+    period in a complex calculation involving half-periods and square roots.
+  </p>
+  <ul>
+    <li><strong>Short period (9-16):</strong> Very responsive, good for scalping and day trading</li>
+    <li><strong>Medium period (16-25):</strong> Balanced responsiveness, suitable for swing trading</li>
+    <li><strong>Long period (25-50):</strong> Smoother curve, better for position trading</li>
+    <li><strong>Note:</strong> Period should be at least 4 for calculation stability</li>
+  </ul>
+  <p>
+    Hull recommended using a period of 16 as a good balance between responsiveness and smoothness. 
+    The period must be chosen carefully as the calculation uses n/2 and sqrt(n), so very small 
+    periods may cause instability.
+  </p>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The HMA returns a smooth, responsive moving average line:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Length:</strong> Same as input data length</li>
+    <li><strong>Values:</strong> Weighted average prices with minimal lag</li>
+    <li><strong>Initial values:</strong> Null/undefined for approximately sqrt(period) values</li>
+    <li><strong>Characteristics:</strong> Smoother than price but more responsive than traditional MAs</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Hull Moving Average in Rust
-let result = indicators::hma(&data, 14);
+use ta_lib::indicators::hma;
+
+// Calculate Hull Moving Average
+let hma_values = hma(&close_prices, 16)?;
+
+// Detect HMA direction changes for signals
+for i in 2..hma_values.len() {
+    if let (Some(prev2), Some(prev1), Some(curr)) = 
+        (hma_values.get(i-2), hma_values.get(i-1), hma_values.get(i)) {
+        
+        // Check for direction change
+        if prev2 > prev1 && prev1 < curr {
+            println!("HMA turned up at index {} - potential buy signal", i);
+        } else if prev2 < prev1 && prev1 > curr {
+            println!("HMA turned down at index {} - potential sell signal", i);
+        }
+        
+        // Measure slope for trend strength
+        let slope = (curr - prev1) / prev1 * 100.0;
+        if slope.abs() > 0.5 {
+            println!("Strong trend: {:.2}% slope", slope);
+        }
+    }
+}
+
+// Use multiple HMAs for confirmation
+let fast_hma = hma(&close_prices, 9)?;
+let slow_hma = hma(&close_prices, 25)?;
+
+for i in 0..close_prices.len() {
+    if let (Some(fast), Some(slow)) = (fast_hma.get(i), slow_hma.get(i)) {
+        if fast > slow && fast_hma[i-1] <= slow_hma[i-1] {
+            println!("HMA crossover buy signal at index {}", i);
+        }
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import hma
+
+# Calculate HMA
+df['hma'] = hma(df['close'], period=16)
+
+# Detect direction changes
+df['hma_direction'] = np.sign(df['hma'].diff())
+df['hma_turn_up'] = (df['hma_direction'] > 0) & (df['hma_direction'].shift(1) <= 0)
+df['hma_turn_down'] = (df['hma_direction'] < 0) & (df['hma_direction'].shift(1) >= 0)
+
+# Color coding for visualization
+df['hma_color'] = np.where(df['hma'] > df['hma'].shift(1), 'green', 'red')
+
+# Generate trading signals
+df['signal'] = 0
+df.loc[df['hma_turn_up'], 'signal'] = 1
+df.loc[df['hma_turn_down'], 'signal'] = -1
+
+# Measure trend strength
+df['hma_slope'] = df['hma'].pct_change() * 100
+df['strong_trend'] = df['hma_slope'].abs() > 0.5
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Trend Following</h3>
+  <p>Use HMA for responsive trend following:</p>
+  <pre><code class="language-python">
+# Entry on HMA direction change
+long_entry = (hma > hma.shift(1)) & (hma.shift(1) <= hma.shift(2))
+short_entry = (hma < hma.shift(1)) & (hma.shift(1) >= hma.shift(2))
+
+# Exit on opposite direction change
+long_exit = hma < hma.shift(1)
+short_exit = hma > hma.shift(1)
+
+# Position sizing based on slope
+hma_slope = hma.pct_change()
+position_size = np.clip(abs(hma_slope) * 100, 0.5, 2.0)
+  </code></pre>
+
+  <h3>2. Dynamic Support/Resistance</h3>
+  <p>HMA as adaptive support and resistance:</p>
+  <pre><code class="language-python">
+# Use HMA as trailing stop
+hma_16 = hma(close, 16)
+
+# Long positions: stop below HMA
+long_stop = hma_16 * 0.98  # 2% below HMA
+
+# Short positions: stop above HMA  
+short_stop = hma_16 * 1.02  # 2% above HMA
+
+# Tighten stops in strong trends
+slope = hma_16.pct_change()
+stop_distance = np.where(abs(slope) > 0.01, 0.01, 0.02)
+dynamic_stop = hma_16 * (1 - stop_distance * np.sign(position))
+  </code></pre>
+
+  <h3>3. Multi-Timeframe Analysis</h3>
+  <p>Combine different period HMAs:</p>
+  <pre><code class="language-python">
+# Three HMA system
+hma_fast = hma(close, 9)    # Entry timing
+hma_medium = hma(close, 16)  # Trend direction
+hma_slow = hma(close, 25)    # Trend filter
+
+# Bullish alignment
+bullish = (hma_fast > hma_medium) & (hma_medium > hma_slow)
+
+# Momentum measurement
+momentum = (hma_fast - hma_slow) / hma_slow * 100
+
+# Trade only strong momentum
+strong_bullish = bullish & (momentum > 2)
+strong_bearish = ~bullish & (momentum < -2)
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Minimum period:</strong> Period must be at least 4 for stable calculation</li>
+    <li><strong>Initialization:</strong> Requires approximately sqrt(period) bars to stabilize</li>
+    <li><strong>Whipsaws:</strong> Can still occur in ranging markets despite smoothness</li>
+    <li><strong>Overshoot:</strong> May overshoot during extreme price movements</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Use period 16 as starting point (Hull's recommendation)</li>
+    <li>Confirm signals with volume or momentum indicators</li>
+    <li>Allow HMA to stabilize before taking signals</li>
+    <li>Consider market volatility when setting parameters</li>
+    <li>Use multiple timeframes for confirmation</li>
+    <li>Don't use periods less than 4</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Hull, A. (2005). "Hull Moving Average: An Innovative MA." <em>Technical Analysis of Stocks & Commodities</em>.</li>
+    <li>Hull's original work on reducing lag in moving averages</li>
+    <li>Comparison studies between HMA and other moving average types</li>
+    <li>WMA (Weighted Moving Average) calculation methodology</li>
+  </ul>
 </IndicatorLayout>

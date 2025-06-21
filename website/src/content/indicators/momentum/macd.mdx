@@ -1,0 +1,104 @@
+---
+title: "Moving Average Convergence Divergence"
+description: "A trend-following momentum indicator that shows the relationship between two moving averages."
+category: "momentum"
+parameters:
+  - name: "fast_period"
+    type: "number"
+    default: 12
+    min: 2
+    max: 100
+    description: "Fast EMA period"
+  - name: "slow_period"
+    type: "number"
+    default: 26
+    min: 2
+    max: 200
+    description: "Slow EMA period"
+  - name: "signal_period"
+    type: "number"
+    default: 9
+    min: 2
+    max: 50
+    description: "Signal line EMA period"
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated Moving Average Convergence Divergence values"
+complexity: "O(n)"
+implementationStatus: "planned"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="macd" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+A trend-following momentum indicator that shows the relationship between two moving averages.
+
+*Note: This is placeholder documentation. Full documentation will be added when the indicator is implemented.*
+
+## Interpretation {#interpretation}
+
+Details about how to interpret Moving Average Convergence Divergence values will be added here.
+
+## Calculation {#calculation}
+
+The mathematical formula and calculation steps for Moving Average Convergence Divergence will be documented here.
+
+## Parameters {#parameters}
+
+### fast_period (default: 12)
+Fast EMA period
+
+- Type: `number`
+- Min: 2
+- Max: 100
+
+### slow_period (default: 26)
+Slow EMA period
+
+- Type: `number`
+- Min: 2
+- Max: 200
+
+### signal_period (default: 9)
+Signal line EMA period
+
+- Type: `number`
+- Min: 2
+- Max: 50
+
+
+## Returns & Output {#returns}
+
+The Moving Average Convergence Divergence function returns a vector of optional floating-point values representing the indicator calculations.
+
+## Example Usage {#usage}
+
+<CodeBlock lang="rust">
+use vectorta::indicators::macd;
+
+// Example usage will be added when implemented
+let result = macd(&data, 12, 26, 9)?;
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+Common trading strategies and applications using Moving Average Convergence Divergence will be documented here.
+
+## Edge Cases & Errors {#edge-cases}
+
+Information about edge cases and error handling will be added here.
+
+## References {#references}
+
+Academic and industry references for Moving Average Convergence Divergence will be listed here.
+
+</IndicatorLayout>

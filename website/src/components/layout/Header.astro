@@ -1,6 +1,7 @@
 ---
 import { Search } from './Search';
 import ThemeToggle from '../ui/ThemeToggle.astro';
+import { Logo } from '../ui/Logo';
 ---
 
 <header class="fixed top-0 left-0 right-0 z-50 bg-background border-b border-border">
@@ -20,12 +21,21 @@ import ThemeToggle from '../ui/ThemeToggle.astro';
         </button>
         
         <!-- Logo -->
-        <a href="/" class="flex items-center gap-2 font-bold text-xl">
-          <svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-          </svg>
-          <span class="hidden sm:inline">VectorTA</span>
-          <span class="sm:hidden">VTA</span>
+        <a href="/" class="flex items-center h-full">
+          <Logo 
+            client:load
+            width={220} 
+            showText={true} 
+            animated={true} 
+            className="hidden sm:block" 
+          />
+          <Logo 
+            client:load
+            width={48} 
+            showText={false} 
+            animated={true} 
+            className="sm:hidden" 
+          />
         </a>
         
         <!-- Desktop navigation -->
@@ -33,12 +43,8 @@ import ThemeToggle from '../ui/ThemeToggle.astro';
           <a href="/" class="text-muted-foreground hover:text-foreground transition-colors">
             Home
           </a>
-          <a href="/indicators/sma" class="text-muted-foreground hover:text-foreground transition-colors">
+          <a href="/indicators" class="text-muted-foreground hover:text-foreground transition-colors">
             Indicators
-          </a>
-          <a href="#" class="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1">
-            Docs
-            <span class="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full">Soon</span>
           </a>
         </nav>
       </div>

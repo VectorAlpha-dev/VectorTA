@@ -264,24 +264,50 @@
     border-radius: var(--radius);
     transition: all 0.2s ease;
     cursor: pointer;
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    transform: translate(-50%, -50%);
+    transition: width 0.6s, height 0.6s;
+  }
+  
+  .btn:hover::before {
+    width: 300px;
+    height: 300px;
   }
   
   .btn-primary {
     background-color: hsl(var(--primary));
     color: hsl(var(--primary-foreground));
+    box-shadow: 0 4px 14px 0 hsl(var(--primary) / 0.25);
   }
   
   .btn-primary:hover {
     background-color: hsl(var(--primary) / 0.9);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px 0 hsl(var(--primary) / 0.35);
   }
   
   .btn-secondary {
     background-color: hsl(var(--secondary));
     color: hsl(var(--secondary-foreground));
+    box-shadow: 0 4px 14px 0 hsl(var(--secondary) / 0.25);
   }
   
   .btn-secondary:hover {
     background-color: hsl(var(--secondary) / 0.9);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px 0 hsl(var(--secondary) / 0.35);
   }
   
   /* Code blocks */

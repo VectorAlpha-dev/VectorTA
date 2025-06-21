@@ -3,15 +3,15 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'highpass';
 const indicatorName = 'High Pass Filter';
-const description = `Technical analysis indicator: High Pass Filter`;
+const description = `The High Pass Filter is a signal processing technique that removes low-frequency components from price data, emphasizing short-term fluctuations and rapid price changes while filtering out long-term trends.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
+    "default": 48,
+    "min": 5,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Cutoff period for the filter"
   }
 ];
 ---
@@ -22,23 +22,191 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The High Pass Filter is a digital signal processing technique adapted for financial markets that 
+    removes low-frequency (long-term trend) components from price data while preserving high-frequency 
+    (short-term) components. This makes it particularly useful for identifying cycles, oscillations, 
+    and rapid price movements that might be obscured by dominant trends.
+  </p>
+  <p>
+    Developed by John Ehlers as part of his work on applying digital signal processing to trading, 
+    the High Pass Filter acts as the opposite of a moving average. While moving averages smooth out 
+    short-term fluctuations to reveal trends, the High Pass Filter removes trends to reveal 
+    short-term fluctuations and cycles.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The High Pass Filter helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Signal Characteristics</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Zero line crossings:</strong> Indicate potential cycle turns or momentum shifts</li>
+    <li><strong>Peaks and troughs:</strong> Mark cycle highs and lows in detrended data</li>
+    <li><strong>Amplitude:</strong> Larger amplitudes suggest stronger cyclic movements</li>
+    <li><strong>Frequency:</strong> Distance between peaks indicates dominant cycle length</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the High Pass Filter to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Buy signal:</strong> When the filter crosses above zero after a trough</li>
+    <li><strong>Sell signal:</strong> When the filter crosses below zero after a peak</li>
+    <li><strong>Cycle identification:</strong> Regular oscillations reveal market cycles</li>
+    <li><strong>Divergence:</strong> Filter diverging from price can signal potential reversals</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Market Applications</h3>
+  <ul>
+    <li><strong>Cycle trading:</strong> Identify and trade market cycles independent of trend</li>
+    <li><strong>Mean reversion:</strong> Extreme readings often precede price reversions</li>
+    <li><strong>Noise filtering:</strong> Remove trend to focus on shorter-term movements</li>
+    <li><strong>Oscillator input:</strong> Use as input for other cycle-based indicators</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The High Pass Filter uses the following calculation:</p>
+  <ol>
+    <li>Calculate the filter coefficient: <code>α = (cos(√2 * π / period) + sin(√2 * π / period) - 1) / cos(√2 * π / period)</code></li>
+    <li>Apply the filter recursively: <code>HP[i] = (1 - α/2)² * (price[i] - 2*price[i-1] + price[i-2]) + 2*(1-α)*HP[i-1] - (1-α)²*HP[i-2]</code></li>
+    <li>Initialize with zeros for the first two values</li>
+  </ol>
+  <p>
+    The coefficient α determines the cutoff frequency. Lower periods result in less filtering 
+    (more high-frequency content), while higher periods filter out more of the short-term movements.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <h3>Period (default: 48)</h3>
+  <p>
+    The cutoff period determines which frequencies are filtered out. Price movements with periods 
+    longer than this value are attenuated, while shorter period movements pass through.
+  </p>
+  <ul>
+    <li><strong>Short period (5-20):</strong> Preserves very short-term movements, more responsive</li>
+    <li><strong>Medium period (20-50):</strong> Balanced filtering, good for swing trading</li>
+    <li><strong>Long period (50-100):</strong> Removes all but the shortest cycles, very smooth</li>
+  </ul>
+  <p>
+    Ehlers recommends using a period of 48 for daily data to filter out movements longer than 
+    about 2 months while preserving shorter cycles.
+  </p>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The High Pass Filter returns an oscillating series centered around zero:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Range:</strong> Typically oscillates within ±5% of price range</li>
+    <li><strong>Center:</strong> Zero (trends are removed)</li>
+    <li><strong>Initial values:</strong> First two values are typically zero</li>
+    <li><strong>Interpretation:</strong> Positive values indicate price above detrended average, negative below</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using High Pass Filter in Rust
-let result = indicators::highpass(&data, 14);
+use ta_lib::indicators::highpass;
+
+// Calculate High Pass Filter
+let hp_values = highpass(&close_prices, 48)?;
+
+// Identify zero-line crossings
+for i in 1..hp_values.len() {
+    if let (Some(prev), Some(curr)) = (hp_values.get(i-1), hp_values.get(i)) {
+        if prev <= 0.0 && curr > 0.0 {
+            println!("Bullish cycle turn at index {}", i);
+        } else if prev >= 0.0 && curr < 0.0 {
+            println!("Bearish cycle turn at index {}", i);
+        }
+    }
+}
+
+// Measure cycle amplitude
+let amplitude = hp_values.windows(50)
+    .map(|w| w.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap() -
+              w.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap())
+    .collect::<Vec<_>>();
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import highpass
+
+# Calculate High Pass Filter
+df['hp'] = highpass(df['close'], period=48)
+
+# Find cycle peaks and troughs
+df['hp_peak'] = df['hp'].rolling(5).max() == df['hp']
+df['hp_trough'] = df['hp'].rolling(5).min() == df['hp']
+
+# Generate trading signals
+df['signal'] = 0
+df.loc[(df['hp'] > 0) & (df['hp'].shift(1) <= 0), 'signal'] = 1  # Buy
+df.loc[(df['hp'] < 0) & (df['hp'].shift(1) >= 0), 'signal'] = -1  # Sell
+
+# Measure cycle period
+peaks = df[df['hp_peak']].index
+cycle_periods = np.diff(peaks)
+avg_cycle = np.mean(cycle_periods) if len(cycle_periods) > 0 else 0
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Cycle Extraction</h3>
+  <p>Remove trend to analyze pure cycles:</p>
+  <pre><code class="language-python">
+# Extract dominant cycle
+hp = highpass(close, 48)
+# Find cycle period using FFT or autocorrelation
+from scipy import signal
+freqs, power = signal.periodogram(hp.dropna())
+dominant_period = 1 / freqs[np.argmax(power[1:])]  # Skip DC component
+  </code></pre>
+
+  <h3>2. Detrended Analysis</h3>
+  <p>Analyze price movements without trend bias:</p>
+  <pre><code class="language-python">
+# Detrend multiple timeframes
+hp_short = highpass(close, 20)  # Short-term cycles
+hp_medium = highpass(close, 48)  # Medium-term cycles
+hp_long = highpass(close, 100)  # Long-term cycles
+
+# Trade when all align
+bullish = (hp_short > 0) & (hp_medium > 0) & (hp_long > 0)
+  </code></pre>
+
+  <h3>3. Oscillator Enhancement</h3>
+  <p>Use as input to other indicators:</p>
+  <pre><code class="language-python">
+# Create detrended RSI
+hp_price = highpass(close, 48)
+detrended_rsi = rsi(hp_price + close.mean(), 14)  # Add back mean for positive values
+
+# More responsive to cycles than standard RSI
+cycle_signals = (detrended_rsi < 30) | (detrended_rsi > 70)
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization:</strong> First few values may be unstable due to filter startup</li>
+    <li><strong>Lag:</strong> Despite being "high pass," still has some lag in detecting turns</li>
+    <li><strong>Amplitude variation:</strong> Output amplitude varies with market volatility</li>
+    <li><strong>False signals:</strong> Choppy markets can produce many zero-line crosses</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Wait for filter to stabilize (at least 2*period bars)</li>
+    <li>Combine with trend indicators for context</li>
+    <li>Adjust period based on dominant market cycle</li>
+    <li>Use amplitude thresholds to filter weak signals</li>
+    <li>Consider market regime when interpreting signals</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.</li>
+    <li>Digital Signal Processing theory and applications</li>
+    <li>Comparison of High Pass, Band Pass, and Low Pass filters in trading</li>
+  </ul>
 </IndicatorLayout>

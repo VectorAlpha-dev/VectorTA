@@ -2,18 +2,9 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'ht_trendmode';
-const indicatorName = 'Ht Trendmode';
-const description = `Technical analysis indicator: Ht Trendmode`;
-const parameters = [
-  {
-    "name": "period",
-    "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
-  }
-];
+const indicatorName = 'Hilbert Transform - Trend vs Cycle Mode';
+const description = `The Hilbert Transform Trend vs Cycle Mode indicator identifies whether the market is currently trending or cycling by analyzing the dominant cycle phase behavior, outputting 1 for trending markets and 0 for cycling markets.`;
+const parameters = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -22,23 +13,358 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Hilbert Transform - Trend vs Cycle Mode indicator, developed by John Ehlers, provides a 
+    binary classification of market behavior: trending (1) or cycling (0). This indicator analyzes 
+    the rate of change in the dominant cycle phase to determine if the market is exhibiting 
+    directional trending behavior or oscillating in a sideways cycle pattern. This critical 
+    distinction allows traders to apply the appropriate strategy for current market conditions.
+  </p>
+  <p>
+    The indicator works by examining how consistently the phase advances. In a trending market, 
+    the phase advances irregularly or may even stall, as the trend component dominates over cycles. 
+    In a cycling market, the phase advances steadily and predictably. By quantifying this behavior, 
+    the Trend vs Cycle Mode indicator provides an objective measure of market state that can be 
+    used to switch between trend-following and mean-reversion strategies automatically.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Ht Trendmode helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Output Values</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>1 (Trending):</strong> Market is in a directional trend mode</li>
+    <li><strong>0 (Cycling):</strong> Market is in a sideways cycling mode</li>
+    <li><strong>Transitions:</strong> Changes from 0 to 1 or 1 to 0 indicate regime shifts</li>
+    <li><strong>Persistence:</strong> Mode tends to persist for multiple bars</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Ht Trendmode to make informed decisions about entry and exit points.</p>
+  <h3>Market Characteristics</h3>
+  <ul>
+    <li><strong>Trending Mode (1):</strong>
+      <ul>
+        <li>Strong directional movement</li>
+        <li>Cycles are suppressed or irregular</li>
+        <li>Use trend-following strategies</li>
+        <li>Avoid mean reversion trades</li>
+      </ul>
+    </li>
+    <li><strong>Cycling Mode (0):</strong>
+      <ul>
+        <li>Sideways, range-bound movement</li>
+        <li>Regular oscillations present</li>
+        <li>Use mean reversion strategies</li>
+        <li>Avoid trend-following trades</li>
+      </ul>
+    </li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Strategy Selection</h3>
+  <ul>
+    <li><strong>Mode = 1:</strong> Activate breakout systems, moving average crosses, momentum strategies</li>
+    <li><strong>Mode = 0:</strong> Activate oscillators, support/resistance trades, cycle strategies</li>
+    <li><strong>Mode changes:</strong> Often mark significant market turning points</li>
+    <li><strong>Mode persistence:</strong> Stay with appropriate strategy until mode changes</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Trend vs Cycle Mode calculation process:</p>
+  <ol>
+    <li><strong>Calculate Dominant Cycle Phase:</strong> Using Hilbert Transform</li>
+    <li><strong>Measure Phase Advance Rate:</strong> Track how phase changes between bars</li>
+    <li><strong>Compute Phase Stability:</strong> Analyze consistency of phase advancement</li>
+    <li><strong>Apply Trend Detection Logic:</strong>
+      <ul>
+        <li>If phase advance is irregular or stalls → Trending (1)</li>
+        <li>If phase advance is steady and consistent → Cycling (0)</li>
+      </ul>
+    </li>
+    <li><strong>Smooth Output:</strong> Apply median filter to reduce mode flipping</li>
+    <li><strong>Apply Hysteresis:</strong> Prevent rapid mode changes</li>
+  </ol>
+  <p>
+    The key insight is that trending markets disrupt the regular phase advancement seen in cycles. 
+    By detecting this disruption, the indicator can reliably distinguish between the two market states.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <p>
+    The Hilbert Transform Trend vs Cycle Mode has no user-adjustable parameters. The indicator uses 
+    fixed internal thresholds and logic based on extensive research to determine market mode. This 
+    parameter-free design ensures consistent mode detection across all markets and timeframes.
+  </p>
+  <p>
+    Internal settings include:
+  </p>
+  <ul>
+    <li><strong>Phase variance threshold:</strong> Determines trend vs cycle classification</li>
+    <li><strong>Smoothing period:</strong> Typically 5-10 bars to stabilize output</li>
+    <li><strong>Hysteresis band:</strong> Prevents mode flipping on borderline conditions</li>
+    <li><strong>Initialization period:</strong> ~50 bars for Hilbert Transform</li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns a binary mode classification:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of integers (0 or 1)</li>
+    <li><strong>Values:</strong> 0 = Cycling, 1 = Trending</li>
+    <li><strong>Transitions:</strong> Typically smooth, not rapidly switching</li>
+    <li><strong>Persistence:</strong> Mode usually persists for 20+ bars minimum</li>
+    <li><strong>Initial values:</strong> Requires ~50 bars to stabilize</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Ht Trendmode in Rust
-let result = indicators::ht_trendmode(&data, 14);
+use ta_lib::indicators::{ht_trendmode, ht_trendline, ht_sine, rsi, atr};
+
+// Get market mode
+let trend_mode = ht_trendmode(&close_prices)?;
+
+// Track mode changes and duration
+let mut mode_duration = 0;
+let mut current_mode = 0;
+
+for i in 50..trend_mode.len() {
+    if let Some(mode) = trend_mode.get(i) {
+        let mode_int = *mode as i32;
+        
+        // Detect mode change
+        if i > 50 && mode_int != current_mode {
+            println!("Market regime change at bar {}: {} -> {}", 
+                     i, 
+                     if current_mode == 1 { "Trending" } else { "Cycling" },
+                     if mode_int == 1 { "Trending" } else { "Cycling" });
+            println!("Previous mode lasted {} bars", mode_duration);
+            
+            current_mode = mode_int;
+            mode_duration = 1;
+        } else {
+            mode_duration += 1;
+        }
+        
+        // Apply appropriate strategy based on mode
+        if mode_int == 1 {
+            // Trending mode - use trend following
+            let trendline = ht_trendline(&close_prices[..=i])?;
+            if let Some(trend) = trendline.last() {
+                if close_prices[i] > *trend {
+                    println!("Trend mode BUY: Price {:.2} above trendline {:.2}", 
+                             close_prices[i], trend);
+                }
+            }
+        } else {
+            // Cycling mode - use mean reversion
+            let (sine, _) = ht_sine(&close_prices[..=i])?;
+            if let Some(sine_val) = sine.last() {
+                if *sine_val < -0.8 {
+                    println!("Cycle mode BUY: Sine at {:.2} (oversold)", sine_val);
+                } else if *sine_val > 0.8 {
+                    println!("Cycle mode SELL: Sine at {:.2} (overbought)", sine_val);
+                }
+            }
+        }
+    }
+}
+
+// Analyze mode statistics
+let trending_bars = trend_mode.iter().filter(|&&m| m > 0.5).count();
+let cycling_bars = trend_mode.iter().filter(|&&m| m <= 0.5).count();
+let total_bars = trending_bars + cycling_bars;
+
+println!("\nMarket Mode Statistics:");
+println!("Trending: {} bars ({:.1}%)", trending_bars, 
+         trending_bars as f64 / total_bars as f64 * 100.0);
+println!("Cycling: {} bars ({:.1}%)", cycling_bars, 
+         cycling_bars as f64 / total_bars as f64 * 100.0);
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import ht_trendmode, ht_trendline, ht_sine, sma, bollinger_bands
+
+# Calculate market mode
+df['trend_mode'] = ht_trendmode(df['close'])
+
+# Identify mode changes
+df['mode_change'] = df['trend_mode'] != df['trend_mode'].shift(1)
+df['mode_label'] = df['trend_mode'].map({1: 'Trending', 0: 'Cycling'})
+
+# Calculate mode duration
+df['mode_group'] = df['mode_change'].cumsum()
+mode_durations = df.groupby('mode_group')['trend_mode'].agg(['count', 'first'])
+print("Average trending duration:", mode_durations[mode_durations['first'] == 1]['count'].mean())
+print("Average cycling duration:", mode_durations[mode_durations['first'] == 0]['count'].mean())
+
+# Apply mode-specific strategies
+# Trending mode strategy
+df['trendline'] = ht_trendline(df['close'])
+df['trend_signal'] = 0
+df.loc[(df['trend_mode'] == 1) & (df['close'] > df['trendline']), 'trend_signal'] = 1
+df.loc[(df['trend_mode'] == 1) & (df['close'] < df['trendline']), 'trend_signal'] = -1
+
+# Cycling mode strategy
+sine, leadsine = ht_sine(df['close'])
+df['sine'] = sine
+df['cycle_signal'] = 0
+df.loc[(df['trend_mode'] == 0) & (df['sine'] < -0.8), 'cycle_signal'] = 1
+df.loc[(df['trend_mode'] == 0) & (df['sine'] > 0.8), 'cycle_signal'] = -1
+
+# Combined adaptive signal
+df['adaptive_signal'] = df['trend_signal'] + df['cycle_signal']
+
+# Performance analysis by mode
+trending_returns = df[df['trend_mode'] == 1]['returns'].mean()
+cycling_returns = df[df['trend_mode'] == 0]['returns'].mean()
+print(f"Average returns in trending mode: {trending_returns:.4f}")
+print(f"Average returns in cycling mode: {cycling_returns:.4f}")
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Adaptive Strategy Switching</h3>
+  <p>Automatically switch between strategies based on market mode:</p>
+  <pre><code class="language-python">
+# Get market mode
+trend_mode = ht_trendmode(close)
+
+# Define strategies for each mode
+def trend_strategy(close, high, low):
+    # Donchian breakout for trends
+    upper = high.rolling(20).max()
+    lower = low.rolling(20).min()
+    
+    signal = pd.Series(0, index=close.index)
+    signal[close > upper.shift(1)] = 1
+    signal[close < lower.shift(1)] = -1
+    return signal
+
+def cycle_strategy(close):
+    # RSI mean reversion for cycles
+    rsi_val = rsi(close, 14)
+    
+    signal = pd.Series(0, index=close.index)
+    signal[rsi_val < 30] = 1
+    signal[rsi_val > 70] = -1
+    return signal
+
+# Apply appropriate strategy
+final_signal = pd.Series(0, index=close.index)
+
+# When trending
+trend_mask = trend_mode == 1
+final_signal[trend_mask] = trend_strategy(close, high, low)[trend_mask]
+
+# When cycling
+cycle_mask = trend_mode == 0
+final_signal[cycle_mask] = cycle_strategy(close)[cycle_mask]
+
+# Add mode transition rules
+mode_change = trend_mode != trend_mode.shift(1)
+final_signal[mode_change] = 0  # Flatten on mode change
+  </code></pre>
+
+  <h3>2. Risk Management Adaptation</h3>
+  <p>Adjust risk parameters based on market mode:</p>
+  <pre><code class="language-python">
+# Market mode
+trend_mode = ht_trendmode(close)
+
+# Base position size
+base_size = 100
+
+# Volatility
+atr_val = atr(high, low, close, 14)
+
+# Adaptive position sizing
+position_size = pd.Series(base_size, index=close.index)
+
+# Larger positions in trending markets (lower risk of whipsaws)
+position_size[trend_mode == 1] = base_size * 1.5
+
+# Smaller positions in cycling markets (higher whipsaw risk)
+position_size[trend_mode == 0] = base_size * 0.75
+
+# Stop loss adaptation
+stop_distance = pd.Series(index=close.index)
+
+# Wider stops in trends (let profits run)
+stop_distance[trend_mode == 1] = 3 * atr_val
+
+# Tighter stops in cycles (quick reversals expected)
+stop_distance[trend_mode == 0] = 1.5 * atr_val
+
+# Profit target adaptation
+profit_target = pd.Series(index=close.index)
+
+# No fixed target in trends (trail stop)
+profit_target[trend_mode == 1] = np.nan
+
+# Fixed targets in cycles (mean reversion)
+profit_target[trend_mode == 0] = 2 * atr_val
+  </code></pre>
+
+  <h3>3. Multi-Indicator Confirmation</h3>
+  <p>Combine mode with other indicators for robust signals:</p>
+  <pre><code class="language-python">
+# Get all Hilbert indicators
+trend_mode = ht_trendmode(close)
+trendline = ht_trendline(close)
+dc_period = ht_dcperiod(close)
+sine, leadsine = ht_sine(close)
+
+# Mode-specific confirmations
+signal = pd.Series(0, index=close.index)
+
+# Trending mode signals (mode = 1)
+trending = trend_mode == 1
+trend_up = close > trendline
+momentum_up = close > close.rolling(dc_period.astype(int)).mean()
+
+strong_uptrend = trending & trend_up & momentum_up
+signal[strong_uptrend] = 1
+
+# Cycling mode signals (mode = 0)
+cycling = trend_mode == 0
+oversold = sine < -0.8
+turning_up = leadsine > sine
+
+cycle_buy = cycling & oversold & turning_up
+signal[cycle_buy] = 1
+
+# Quality filter - only trade when mode is stable
+mode_stable = trend_mode.rolling(10).std() == 0
+signal = signal * mode_stable
+
+# Exit when mode changes
+mode_change = trend_mode != trend_mode.shift(1)
+signal[mode_change] = 0
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Mode flickering:</strong> Rapid switching in transitional markets</li>
+    <li><strong>Initialization delay:</strong> Requires ~50 bars for accurate mode detection</li>
+    <li><strong>Borderline markets:</strong> Markets between trending and cycling may be misclassified</li>
+    <li><strong>News events:</strong> Sudden volatility can cause temporary mode misreading</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Wait for mode to stabilize before taking signals</li>
+    <li>Use mode duration as a quality filter</li>
+    <li>Flatten positions on mode transitions</li>
+    <li>Combine with volatility filters for confirmation</li>
+    <li>Backtest strategies separately for each mode</li>
+    <li>Monitor mode distribution for market insights</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Ehlers, J. F. (2004). "The Trend Mode Indicator". <em>Technical Analysis of Stocks & Commodities</em>.</li>
+    <li>Market regime detection and adaptive trading systems</li>
+    <li>Phase-based market classification techniques</li>
+  </ul>
 </IndicatorLayout>

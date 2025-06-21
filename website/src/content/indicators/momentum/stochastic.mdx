@@ -1,0 +1,91 @@
+---
+title: "Stochastic Oscillator"
+description: "A momentum indicator comparing a particular closing price to a range of prices over time."
+category: "momentum"
+parameters:
+  - name: "k_period"
+    type: "number"
+    default: 14
+    min: 2
+    max: 100
+    description: "%K period"
+  - name: "d_period"
+    type: "number"
+    default: 3
+    min: 1
+    max: 50
+    description: "%D period (SMA of %K)"
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated Stochastic Oscillator values"
+complexity: "O(n)"
+implementationStatus: "planned"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="stochastic" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+A momentum indicator comparing a particular closing price to a range of prices over time.
+
+*Note: This is placeholder documentation. Full documentation will be added when the indicator is implemented.*
+
+## Interpretation {#interpretation}
+
+Details about how to interpret Stochastic Oscillator values will be added here.
+
+## Calculation {#calculation}
+
+The mathematical formula and calculation steps for Stochastic Oscillator will be documented here.
+
+## Parameters {#parameters}
+
+### k_period (default: 14)
+%K period
+
+- Type: `number`
+- Min: 2
+- Max: 100
+
+### d_period (default: 3)
+%D period (SMA of %K)
+
+- Type: `number`
+- Min: 1
+- Max: 50
+
+
+## Returns & Output {#returns}
+
+The Stochastic Oscillator function returns a vector of optional floating-point values representing the indicator calculations.
+
+## Example Usage {#usage}
+
+<CodeBlock lang="rust">
+use vectorta::indicators::stochastic;
+
+// Example usage will be added when implemented
+let result = stochastic(&data, 14, 3)?;
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+Common trading strategies and applications using Stochastic Oscillator will be documented here.
+
+## Edge Cases & Errors {#edge-cases}
+
+Information about edge cases and error handling will be added here.
+
+## References {#references}
+
+Academic and industry references for Stochastic Oscillator will be listed here.
+
+</IndicatorLayout>

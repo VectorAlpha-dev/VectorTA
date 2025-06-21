@@ -2,16 +2,32 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'kaufmanstop';
-const indicatorName = 'Kaufmanstop';
-const description = `Technical analysis indicator: Kaufmanstop`;
+const indicatorName = 'Kaufman Adaptive Stop';
+const description = `The Kaufman Adaptive Stop is a dynamic stop-loss system that adjusts its distance from price based on market volatility and trend strength, providing tight stops in trends and wider stops in choppy markets to avoid premature exits.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
-    "default": 14,
-    "min": 2,
+    "default": 22,
+    "min": 5,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for volatility calculation"
+  },
+  {
+    "name": "multiplier",
+    "type": "number",
+    "default": 3.0,
+    "min": 1.0,
+    "max": 10.0,
+    "description": "Stop distance multiplier"
+  },
+  {
+    "name": "efficiency_period",
+    "type": "number",
+    "default": 10,
+    "min": 2,
+    "max": 50,
+    "description": "Period for efficiency ratio calculation"
   }
 ];
 ---
@@ -22,23 +38,386 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Kaufman Adaptive Stop is an advanced stop-loss management system developed by Perry Kaufman 
+    that dynamically adjusts stop distances based on market conditions. Unlike fixed percentage or 
+    point-based stops, this system adapts to both volatility and trend strength, providing optimal 
+    protection without sacrificing profitable positions.
+  </p>
+  <p>
+    The indicator combines the Efficiency Ratio (ER) concept with volatility measurement to create 
+    stops that are tight during strong trends (when price movement is efficient) and wider during 
+    choppy markets (when price movement is inefficient). This adaptive behavior significantly reduces 
+    the problem of stops being hit by market noise while still providing protection against adverse 
+    moves.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Kaufmanstop helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Stop Behavior</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Trending markets:</strong> Stops move closer to price for better profit protection</li>
+    <li><strong>Choppy markets:</strong> Stops widen to avoid noise-induced exits</li>
+    <li><strong>Long positions:</strong> Stop line below price, follows upward but never down</li>
+    <li><strong>Short positions:</strong> Stop line above price, follows downward but never up</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Kaufmanstop to make informed decisions about entry and exit points.</p>
+  <h3>Trading Applications</h3>
+  <ul>
+    <li><strong>Stop placement:</strong> Use as actual stop-loss orders</li>
+    <li><strong>Trailing stops:</strong> Automatically trails favorable price movement</li>
+    <li><strong>Position sizing:</strong> Wider stops suggest smaller positions</li>
+    <li><strong>Market regime:</strong> Stop distance indicates market condition</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Key Features</h3>
+  <ul>
+    <li><strong>Adaptive distance:</strong> Adjusts based on efficiency and volatility</li>
+    <li><strong>Ratchet effect:</strong> Only moves in favorable direction</li>
+    <li><strong>Noise filtering:</strong> Reduces false stop-outs in ranging markets</li>
+    <li><strong>Trend protection:</strong> Tightens during strong directional moves</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Kaufman Adaptive Stop calculation process:</p>
+  <ol>
+    <li><strong>Calculate Efficiency Ratio (ER):</strong>
+      <ul>
+        <li>Direction = abs(Close - Close[n periods ago])</li>
+        <li>Volatility = Sum of abs(Close - Close[1]) over n periods</li>
+        <li>ER = Direction / Volatility (0 to 1)</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Adaptive Volatility:</strong>
+      <ul>
+        <li>True Range = max(High-Low, abs(High-Close[1]), abs(Low-Close[1]))</li>
+        <li>ATR = Average True Range over period</li>
+        <li>Adaptive Factor = 1 + (1 - ER) × (multiplier - 1)</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Stop Distance:</strong>
+      <ul>
+        <li>Base Distance = ATR × Adaptive Factor</li>
+        <li>Stop Distance = Base Distance × multiplier</li>
+      </ul>
+    </li>
+    <li><strong>Apply Ratchet Logic:</strong>
+      <ul>
+        <li>Long Stop = max(Previous Stop, Close - Stop Distance)</li>
+        <li>Short Stop = min(Previous Stop, Close + Stop Distance)</li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    The key innovation is using ER to modify the stop distance - when ER is high (trending), 
+    the adaptive factor approaches 1 (tight stops). When ER is low (choppy), the adaptive 
+    factor increases toward the multiplier value (wider stops).
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>Period (default: 22):</strong> The number of bars used to calculate the Average 
+      True Range (ATR) for volatility measurement. Longer periods create more stable stop 
+      distances but may be slower to adapt to volatility changes. Common values range from 
+      10-30, with 22 being approximately one trading month.
+    </li>
+    <li>
+      <strong>Multiplier (default: 3.0):</strong> The base multiplier for stop distance. This 
+      determines how many ATRs away the stop is placed in choppy markets. Higher values provide 
+      more room but reduce profit protection. Values between 2-5 are common, with 3 providing 
+      a good balance for most markets.
+    </li>
+    <li>
+      <strong>Efficiency Period (default: 10):</strong> The period used to calculate the 
+      Efficiency Ratio. This determines how responsive the stop is to changes in market 
+      character. Shorter periods (5-10) make stops more adaptive, while longer periods (15-30) 
+      provide more stable behavior.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns stop levels for each position type:</p>
+  <ul>
+    <li><strong>Long Stop:</strong> Stop level for long positions (below price)</li>
+    <li><strong>Short Stop:</strong> Stop level for short positions (above price)</li>
+    <li><strong>Type:</strong> Two arrays of floating-point numbers</li>
+    <li><strong>Ratchet behavior:</strong> Stops only move favorably, never adversely</li>
+    <li><strong>Initial values:</strong> Requires warmup period for stable calculation</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Kaufmanstop in Rust
-let result = indicators::kaufmanstop(&data, 14);
+use ta_lib::indicators::{kaufman_stop, atr, efficiency_ratio};
+
+// Price data
+let high = vec![102.0, 103.5, 104.0, 103.0, 105.0, 106.5, 105.5, 107.0, 108.0, 107.5];
+let low = vec![99.0, 100.5, 101.0, 100.0, 102.0, 103.5, 102.5, 104.0, 105.0, 104.5];
+let close = vec![101.0, 102.0, 102.5, 101.5, 104.0, 105.0, 104.0, 106.0, 107.0, 106.5];
+
+// Calculate Kaufman Adaptive Stops
+let (long_stops, short_stops) = kaufman_stop(&high, &low, &close, 22, 3.0, 10)?;
+
+// Trading system using adaptive stops
+let mut position = 0; // 0: flat, 1: long, -1: short
+let mut entry_price = 0.0;
+
+for i in 22..close.len() {
+    if let (Some(long_stop), Some(short_stop)) = (long_stops[i], short_stops[i]) {
+        // Entry signals (simplified)
+        if position == 0 {
+            if close[i] > close[i-1] && close[i-1] > close[i-2] {
+                position = 1;
+                entry_price = close[i];
+                println!("Long entry at {}: {:.2}, Stop at {:.2}", i, entry_price, long_stop);
+            } else if close[i] < close[i-1] && close[i-1] < close[i-2] {
+                position = -1;
+                entry_price = close[i];
+                println!("Short entry at {}: {:.2}, Stop at {:.2}", i, entry_price, short_stop);
+            }
+        }
+        
+        // Exit on stop hit
+        if position == 1 && close[i] <= long_stop {
+            let pnl = close[i] - entry_price;
+            println!("Long stopped out at {}: {:.2}, P&L: {:.2}", i, close[i], pnl);
+            position = 0;
+        } else if position == -1 && close[i] >= short_stop {
+            let pnl = entry_price - close[i];
+            println!("Short stopped out at {}: {:.2}, P&L: {:.2}", i, close[i], pnl);
+            position = 0;
+        }
+        
+        // Monitor stop distance
+        let stop_distance_long = close[i] - long_stop;
+        let stop_distance_short = short_stop - close[i];
+        let avg_stop_distance = (stop_distance_long + stop_distance_short) / 2.0;
+        
+        println!("Bar {}: Price={:.2}, AvgStopDist={:.2} ({:.1}%)", 
+                 i, close[i], avg_stop_distance, avg_stop_distance / close[i] * 100.0);
+    }
+}
+
+// Calculate efficiency ratio to understand stop behavior
+let er = efficiency_ratio(&close, 10)?;
+for i in 10..close.len() {
+    if let Some(eff_ratio) = er[i] {
+        let market_state = if eff_ratio > 0.6 { "Strong Trend" } 
+                          else if eff_ratio > 0.3 { "Moderate Trend" } 
+                          else { "Choppy Market" };
+        println!("Bar {}: ER={:.3}, Market: {}", i, eff_ratio, market_state);
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import kaufman_stop, atr, efficiency_ratio
+
+# Example price data
+df = pd.DataFrame({
+    'high': [102, 103.5, 104, 103, 105, 106.5, 105.5, 107, 108, 107.5, 109, 110, 109.5],
+    'low': [99, 100.5, 101, 100, 102, 103.5, 102.5, 104, 105, 104.5, 106, 107, 106.5],
+    'close': [101, 102, 102.5, 101.5, 104, 105, 104, 106, 107, 106.5, 108, 109, 108.5]
+})
+
+# Calculate Kaufman Adaptive Stops
+long_stops, short_stops = kaufman_stop(
+    df['high'], df['low'], df['close'], 
+    period=22, multiplier=3.0, efficiency_period=10
+)
+df['long_stop'] = long_stops
+df['short_stop'] = short_stops
+
+# Calculate stop distances
+df['long_stop_distance'] = df['close'] - df['long_stop']
+df['short_stop_distance'] = df['short_stop'] - df['close']
+df['avg_stop_distance'] = (df['long_stop_distance'] + df['short_stop_distance']) / 2
+df['stop_distance_pct'] = df['avg_stop_distance'] / df['close'] * 100
+
+# Trading signals
+df['trend'] = np.where(df['close'] > df['close'].shift(1), 1, -1)
+
+# Long signals
+df['long_entry'] = (df['trend'] == 1) & (df['close'] > df['long_stop'])
+df['long_exit'] = df['close'] <= df['long_stop']
+
+# Short signals  
+df['short_entry'] = (df['trend'] == -1) & (df['close'] < df['short_stop'])
+df['short_exit'] = df['close'] >= df['short_stop']
+
+# Calculate Efficiency Ratio for analysis
+df['er'] = efficiency_ratio(df['close'], period=10)
+df['market_type'] = pd.cut(df['er'], 
+                           bins=[0, 0.3, 0.6, 1.0], 
+                           labels=['Choppy', 'Moderate', 'Trending'])
+
+# Adaptive position sizing based on stop distance
+account_size = 100000
+risk_per_trade = 0.02  # 2% risk
+df['position_size'] = (account_size * risk_per_trade) / df['avg_stop_distance']
+
+# Analysis
+print("Stop Distance Statistics by Market Type:")
+print(df.groupby('market_type')['stop_distance_pct'].agg(['mean', 'std', 'min', 'max']))
+
+# Visualize stop behavior
+print("\nRecent Data:")
+print(df[['close', 'long_stop', 'short_stop', 'stop_distance_pct', 'er', 'market_type']].tail(10))
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Trend Following with Adaptive Stops</h3>
+  <p>Complete trend following system with Kaufman stops:</p>
+  <pre><code class="language-python">
+# Calculate indicators
+long_stop, short_stop = kaufman_stop(high, low, close, 22, 3.0, 10)
+kama_line = kama(close, 10, 2, 30)  # For entries
+
+# Entry conditions
+kama_rising = kama_line > kama_line.shift(1)
+kama_falling = kama_line < kama_line.shift(1)
+
+long_entry = (close > kama_line) & kama_rising & (close.shift(1) <= kama_line.shift(1))
+short_entry = (close < kama_line) & kama_falling & (close.shift(1) >= kama_line.shift(1))
+
+# Position management
+position = pd.Series(0, index=close.index)
+entry_price = pd.Series(np.nan, index=close.index)
+
+for i in range(1, len(close)):
+    # Carry forward position
+    position.iloc[i] = position.iloc[i-1]
+    
+    # Check for new entries
+    if position.iloc[i] == 0:
+        if long_entry.iloc[i]:
+            position.iloc[i] = 1
+            entry_price.iloc[i] = close.iloc[i]
+        elif short_entry.iloc[i]:
+            position.iloc[i] = -1
+            entry_price.iloc[i] = close.iloc[i]
+    
+    # Check for stop hits
+    elif position.iloc[i] == 1 and close.iloc[i] <= long_stop.iloc[i]:
+        position.iloc[i] = 0  # Exit long
+    elif position.iloc[i] == -1 and close.iloc[i] >= short_stop.iloc[i]:
+        position.iloc[i] = 0  # Exit short
+
+# Calculate returns
+trade_returns = []
+entry_idx = None
+for i in range(len(position)):
+    if position.iloc[i] != 0 and (i == 0 or position.iloc[i-1] == 0):
+        entry_idx = i
+    elif position.iloc[i] == 0 and i > 0 and position.iloc[i-1] != 0:
+        if position.iloc[i-1] == 1:
+            ret = (close.iloc[i] - close.iloc[entry_idx]) / close.iloc[entry_idx]
+        else:
+            ret = (close.iloc[entry_idx] - close.iloc[i]) / close.iloc[entry_idx]
+        trade_returns.append(ret)
+  </code></pre>
+
+  <h3>2. Multi-Timeframe Stop System</h3>
+  <p>Combining stops from different timeframes:</p>
+  <pre><code class="language-python">
+# Calculate stops on multiple timeframes
+# 5-minute for tight stops
+long_stop_5m, short_stop_5m = kaufman_stop(high_5m, low_5m, close_5m, 22, 2.5, 10)
+
+# 15-minute for medium stops
+long_stop_15m, short_stop_15m = kaufman_stop(high_15m, low_15m, close_15m, 22, 3.0, 10)
+
+# 1-hour for disaster stops
+long_stop_1h, short_stop_1h = kaufman_stop(high_1h, low_1h, close_1h, 22, 4.0, 10)
+
+# Align to 5-minute timeframe
+long_stop_15m_aligned = long_stop_15m.reindex(close_5m.index, method='ffill')
+short_stop_15m_aligned = short_stop_15m.reindex(close_5m.index, method='ffill')
+long_stop_1h_aligned = long_stop_1h.reindex(close_5m.index, method='ffill')
+short_stop_1h_aligned = short_stop_1h.reindex(close_5m.index, method='ffill')
+
+# Use closest stop (most conservative)
+final_long_stop = pd.concat([long_stop_5m, long_stop_15m_aligned, long_stop_1h_aligned], axis=1).max(axis=1)
+final_short_stop = pd.concat([short_stop_5m, short_stop_15m_aligned, short_stop_1h_aligned], axis=1).min(axis=1)
+
+# Identify which timeframe is active
+active_long_tf = pd.Series('', index=close_5m.index)
+active_long_tf[final_long_stop == long_stop_5m] = '5m'
+active_long_tf[final_long_stop == long_stop_15m_aligned] = '15m'
+active_long_tf[final_long_stop == long_stop_1h_aligned] = '1h'
+
+# Position sizing based on stop source
+position_multiplier = pd.Series(1.0, index=close_5m.index)
+position_multiplier[active_long_tf == '5m'] = 1.0   # Full size with tight stop
+position_multiplier[active_long_tf == '15m'] = 0.7  # Reduced size with medium stop
+position_multiplier[active_long_tf == '1h'] = 0.5   # Half size with wide stop
+  </code></pre>
+
+  <h3>3. Volatility-Adjusted Trading</h3>
+  <p>Using stop distance for market regime trading:</p>
+  <pre><code class="language-python">
+# Calculate adaptive stops and metrics
+long_stop, short_stop = kaufman_stop(high, low, close, 22, 3.0, 10)
+stop_distance = ((close - long_stop) + (short_stop - close)) / 2
+stop_distance_pct = stop_distance / close * 100
+
+# Define market regimes by stop distance
+tight_stops = stop_distance_pct < stop_distance_pct.rolling(50).quantile(0.25)
+normal_stops = (stop_distance_pct >= stop_distance_pct.rolling(50).quantile(0.25)) & \
+               (stop_distance_pct <= stop_distance_pct.rolling(50).quantile(0.75))
+wide_stops = stop_distance_pct > stop_distance_pct.rolling(50).quantile(0.75)
+
+# Different strategies for different regimes
+# Tight stops = trending market = momentum strategy
+momentum_signal = pd.Series(0, index=close.index)
+roc_20 = close.pct_change(20)
+momentum_signal[tight_stops & (roc_20 > 0.05)] = 1
+momentum_signal[tight_stops & (roc_20 < -0.05)] = -1
+
+# Wide stops = choppy market = mean reversion strategy
+reversion_signal = pd.Series(0, index=close.index)
+bb_upper, bb_middle, bb_lower = bollinger_bands(close, 20, 2)
+reversion_signal[wide_stops & (close < bb_lower)] = 1
+reversion_signal[wide_stops & (close > bb_upper)] = -1
+
+# Combine signals
+final_signal = pd.Series(0, index=close.index)
+final_signal[tight_stops] = momentum_signal[tight_stops]
+final_signal[wide_stops] = reversion_signal[wide_stops]
+
+# Position sizing inversely related to stop distance
+base_size = 100
+position_size = base_size * (2 / stop_distance_pct).clip(0.5, 2.0)
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization:</strong> Stops may be far from price initially</li>
+    <li><strong>Gap risk:</strong> Large gaps can bypass stops entirely</li>
+    <li><strong>Whipsaw markets:</strong> Rapid ER changes can cause stop instability</li>
+    <li><strong>Parameter sensitivity:</strong> Multiplier heavily influences performance</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Allow adequate warmup period before using stops</li>
+    <li>Monitor actual vs expected stop hits for slippage</li>
+    <li>Use limit orders near stops in thin markets</li>
+    <li>Consider scaling out rather than full exit at stops</li>
+    <li>Backtest different multipliers for your market</li>
+    <li>Combine with profit targets for complete system</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Kaufman, P. J. (1995). <em>Smarter Trading</em>. McGraw-Hill.</li>
+    <li>Kaufman, P. J. (2013). <em>Trading Systems and Methods</em>. 5th Edition. Wiley.</li>
+    <li>Adaptive stop-loss techniques and position sizing strategies</li>
+    <li>Risk management in systematic trading</li>
+  </ul>
 </IndicatorLayout>

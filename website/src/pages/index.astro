@@ -3,6 +3,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import { AnimatedCounter } from '../components/ui/AnimatedCounter';
 import ScrollReveal from '../components/ui/ScrollReveal.astro';
 import { WasmDemo } from '../components/demo/WasmDemo';
+import { MABacktester } from '../components/demo/MABacktester';
+import HeroBackground from '../components/ui/HeroBackground.astro';
 
 const implementedIndicators = 178;
 const totalIndicators = 300;
@@ -12,7 +14,8 @@ const totalIndicators = 300;
   <div class="content-container">
     <!-- Hero Section -->
     <ScrollReveal animation="fade">
-      <section class="text-center py-16 mb-12">
+      <section class="relative text-center py-16 mb-12">
+        <HeroBackground />
         <h1 class="text-5xl sm:text-6xl font-bold mb-6 gradient-text">
           VectorTA
         </h1>
@@ -115,8 +118,8 @@ const totalIndicators = 300;
           Experience the Performance
         </h2>
         
-        <div class="max-w-4xl mx-auto">
-          <WasmDemo client:visible />
+        <div class="max-w-6xl mx-auto">
+          <MABacktester client:visible />
         </div>
       </section>
     </ScrollReveal>

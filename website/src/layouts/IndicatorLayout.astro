@@ -1,6 +1,7 @@
 ---
-import BaseLayout from './BaseLayout.astro';
+import DocsLayout from './DocsLayout.astro';
 import { IndicatorChart } from '../components/charts/IndicatorChart';
+import RelatedIndicators from '../components/ui/RelatedIndicators.astro';
 
 export interface Props {
   indicatorId: string;
@@ -35,15 +36,10 @@ const sections = [
 ];
 ---
 
-<BaseLayout title={indicatorName} description={description}>
+<DocsLayout title={indicatorName} description={description}>
   <div class="content-container">
     <header class="mb-8">
       <h1 class="gradient-text">{indicatorName}</h1>
-      {description && (
-        <p class="text-lg text-muted-foreground max-w-3xl">
-          {description}
-        </p>
-      )}
     </header>
     
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -118,11 +114,11 @@ const sections = [
                   <div class="text-sm">
                     <code class="text-xs bg-muted px-1 py-0.5 rounded">{param.name}</code>
                     <span class="text-muted-foreground"> = {param.default}</span>
-                    {param.min !== undefined && param.max !== undefined && (
+                    {param.min !== undefined && param.max !== undefined ? (
                       <div class="text-xs text-muted-foreground mt-0.5">
                         Range: {param.min}–{param.max}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -142,7 +138,9 @@ const sections = [
       </div>
     </div>
   </div>
-</BaseLayout>
+  <!-- Related Indicators -->
+  <RelatedIndicators currentIndicator={indicatorId} />
+</DocsLayout>
 
 <style>
   /* Ensure proper spacing for content */

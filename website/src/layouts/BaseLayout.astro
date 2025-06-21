@@ -2,18 +2,20 @@
 import Header from '../components/layout/Header.astro';
 import Sidebar from '../components/layout/Sidebar.astro';
 import SkipToContent from '../components/ui/SkipToContent.astro';
+import HeaderScrollBehavior from '../components/layout/HeaderScrollBehavior.astro';
 import '../styles/global.css';
 
 export interface Props {
   title: string;
   description?: string;
+  includeSidebar?: boolean;
 }
 
-const { title, description = 'VectorTA - High-performance technical analysis library with 300+ indicators' } = Astro.props;
+const { title, description = 'VectorTA - High-performance technical analysis library with 300+ indicators', includeSidebar = true } = Astro.props;
 ---
 
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -21,31 +23,53 @@ const { title, description = 'VectorTA - High-performance technical analysis lib
     <meta name="description" content={description} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     
+    <!-- Theme color -->
+    <meta name="theme-color" content="#3b82f6" />
+    
+    <!-- Critical theme script - must run before render to prevent flash -->
+    <script is:inline>
+      // This runs immediately to prevent theme flash
+      (function() {
+        const stored = localStorage.getItem('theme');
+        const theme = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.classList.add(theme);
+        
+        // Update theme color meta tag
+        const themeColor = theme === 'dark' ? '#171717' : '#3b82f6';
+        const metaTheme = document.querySelector('meta[name="theme-color"]');
+        if (metaTheme) metaTheme.setAttribute('content', themeColor);
+      })();
+    </script>
+    
     <!-- Preload fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    
-    <!-- Theme color -->
-    <meta name="theme-color" content="#3b82f6" />
   </head>
   <body class="bg-background text-foreground min-h-screen">
     <SkipToContent />
     <Header />
+    <HeaderScrollBehavior />
     
     <!-- Mobile menu backdrop -->
     <div id="mobile-backdrop" class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden" aria-hidden="true"></div>
     
-    <div class="flex">
-      <Sidebar />
-      <main id="main-content" class="flex-1 lg:ml-64 min-w-0" role="main">
-        <div class="px-4 sm:px-6 py-6 sm:py-8">
-          <slot />
-        </div>
+    {includeSidebar ? (
+      <div class="flex">
+        <Sidebar />
+        <main id="main-content" class="flex-1 lg:ml-64 min-w-0" role="main">
+          <div class="px-4 sm:px-6 py-6 sm:py-8">
+            <slot />
+          </div>
+        </main>
+      </div>
+    ) : (
+      <main id="main-content" role="main">
+        <slot />
       </main>
-    </div>
+    )}
     
     <script>
-      // Theme management
+      // Theme management (already handled in head, this is for runtime changes)
       const getPreferredTheme = () => {
         const stored = localStorage.getItem('theme');
         if (stored) return stored;

@@ -12,7 +12,11 @@
       "Bash(do echo \"Processing $file\")",
       "Bash(done)",
       "Bash(node:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(mv:*)",
+      "Bash(pkill:*)",
+      "Bash(npx tsx:*)",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

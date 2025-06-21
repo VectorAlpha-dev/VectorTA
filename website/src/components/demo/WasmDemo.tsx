@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { createChart, IChartApi } from 'lightweight-charts';
+import { createChart } from 'lightweight-charts';
+import type { IChartApi } from 'lightweight-charts';
 import { wasmLoader } from '../../lib/wasm/loader';
 import { PerformanceMonitor } from './PerformanceMonitor';
 import type { WasmModule } from '../../lib/wasm/types';

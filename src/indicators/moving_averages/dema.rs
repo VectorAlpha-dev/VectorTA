@@ -303,23 +303,18 @@ impl DemaStream {
             ema: f64::NAN,
             ema2: f64::NAN,
             filled: 0,
-            nan_fill: 2 * (period - 1),
+            nan_fill: period - 1,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        if self.ema.is_nan() {
-            self.ema = value;
+        if self.filled == 0 {
+            self.ema  = value;
+            self.ema2 = value;
         } else {
-            self.ema = self.ema * self.alpha_1 + value * self.alpha;
-        }
-
-        if self.filled == self.period - 1 {
-            self.ema2 = self.ema;
-            self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
-        } else if self.filled >= self.period {
-            self.ema2 = self.ema2 * self.alpha_1 + self.ema * self.alpha;
+            self.ema  = self.ema * self.alpha_1 + value * self.alpha;
+            self.ema2 = self.ema2 * self.alpha_1 + self.ema  * self.alpha;
         }
         let out = if self.filled >= self.nan_fill {
             (2.0 * self.ema) - self.ema2
@@ -731,42 +726,146 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::float_cmp)]
     fn check_dema_property(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        use float_cmp::approx_eq;
+
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (
-            proptest::collection::vec(
-                (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
-                30..200,
-            ),
-            3usize..30,
-        );
+        /* 1 ─ Strategy: choose period first, then generate a ≥-warm-up finite vector,
+            plus random affine parameters (a ≠ 0, b). */
+        let strat = (1usize..=32).prop_flat_map(|period| {
+            let min_len = 2 * period.max(2);            // enough for DEMA warm-up
+            (
+                prop::collection::vec(
+                    (-1e6f64..1e6f64)
+                        .prop_filter("finite", |x| x.is_finite()),
+                    min_len..400,
+                ),
+                Just(period),
+                (-1e3f64..1e3f64)
+                    .prop_filter("non-zero scale", |a| a.is_finite() && *a != 0.0),
+                -1e3f64..1e3f64,                        // b may be zero
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
-            .run(&strat, |(data, period)| {
-                let params = DemaParams {
-                    period: Some(period),
-                };
-                let input = DemaInput::from_slice(&data, params);
-                let DemaOutput { values: out } = dema_with_kernel(&input, kernel).unwrap();
+            .run(&strat, |(data, period, a, b)| {
+                let params = DemaParams { period: Some(period) };
+                let input  = DemaInput::from_slice(&data, params.clone());
 
-                for i in (period * 2 - 2)..data.len() {
-                    let window = &data[i + 1 - period..=i];
-                    let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y = out[i];
+                /* --- run both kernels (fast & scalar) --------------------------- */
+                let fast = dema_with_kernel(&input, kernel);
+                let slow = dema_with_kernel(&input, Kernel::Scalar);
 
-                    prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
+                match (fast, slow) {
+                    /* ➊ Same error kind ⇒ property holds. */
+                    (Err(e1), Err(e2))
+                        if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
+                        return Ok(()),
+                    /* ➊′ Different error kinds → fail. */
+                    (Err(e1), Err(e2)) =>
+                        prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2),
+                    /* ➋ Kernels disagree on success / error. */
+                    (Err(e1), Ok(_))   =>
+                        prop_assert!(false, "fast errored {e1:?} but scalar succeeded"),
+                    (Ok(_),   Err(e2)) =>
+                        prop_assert!(false, "scalar errored {e2:?} but fast succeeded"),
+
+                    /* ➌ Both succeeded – run invariant suite. */
+                    (Ok(fast), Ok(reference)) => {
+                        let DemaOutput { values: out  } = fast;
+                        let DemaOutput { values: rref } = reference;
+
+                        /* Streaming version (for parity check) */
+                        let mut stream = DemaStream::try_new(params.clone()).unwrap();
+                        let mut s_out  = Vec::with_capacity(data.len());
+                        for &v in &data {
+                            s_out.push(stream.update(v).unwrap_or(f64::NAN));
+                        }
+
+                        /* Affine-transformed run */
+                        let transformed: Vec<f64> =
+                            data.iter().map(|x| a * *x + b).collect();
+                        let t_out = dema(
+                            &DemaInput::from_slice(&transformed, params.clone())
+                        )?.values;
+
+                        /* -------- core invariants -------------------------------- */
+                        let nan_fill = period -1 ;        // streaming warm-up
+                        for i in 0..data.len() {
+                            let y  = out[i];
+                            let yr = rref[i];
+                            let ys = s_out[i];
+                            let yt = t_out[i];
+
+                            /* 1️⃣ Period-1 identity */
+                            if period == 1 && y.is_finite() {
+                                prop_assert!(approx_eq!(f64, y, data[i], ulps = 2));
+                            }
+
+                            /* 2️⃣ Constant-series invariance (when the window is flat) */
+                            let window = &data[i.saturating_sub(period - 1)..=i];
+                            if window.iter().all(|v| *v == window[0]) {
+                                prop_assert!(approx_eq!(f64, y, window[0], epsilon = 1e-9));
+                            }
+
+                            /* 3️⃣ Affine equivariance */
+                            if i >= nan_fill {             // compare only after warm-ups
+                                if y.is_finite() {
+                                    let expected = a * y + b;
+                                    let diff     = (yt - expected).abs();
+                                    let tol      = 1e-9_f64.max(expected.abs() * 1e-9);
+                                    let ulp      = yt.to_bits().abs_diff(expected.to_bits());
+                                    prop_assert!(
+                                        diff <= tol || ulp <= 8,
+                                        "idx {i}: affine mismatch diff={diff:e}  ULP={ulp}"
+                                    );
+                                } else {
+                                    prop_assert_eq!(
+                                        y.to_bits(),
+                                        yt.to_bits(),
+                                        "idx {}: special-value mismatch under affine map",
+                                        i
+                                    );
+                                }
+                            }
+
+                            /* 4️⃣ Scalar ≡ fast (ULP ≤ 4 or abs ≤ 1e-9) */
+                            let ulp = y.to_bits().abs_diff(yr.to_bits());
+                            prop_assert!(
+                                (y - yr).abs() <= 1e-9 || ulp <= 4,
+                                "idx {i}: fast={y} ref={yr} ULP={ulp}"
+                            );
+
+                            /* 5️⃣ Streaming parity (after nan_fill) */
+                            if i >= nan_fill {
+                                prop_assert!(
+                                    (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
+                                    "idx {i}: stream mismatch"
+                                );
+                            }
+                        }
+                    }
                 }
+
                 Ok(())
             })
             .unwrap();
 
+        /* 🔟  Error-path smoke tests (keep suite uniform) ------------------------- */
+        assert!(dema(&DemaInput::from_slice(&[], DemaParams::default())).is_err());
+        assert!(dema(&DemaInput::from_slice(&[f64::NAN; 12], DemaParams::default())).is_err());
+        assert!(dema(&DemaInput::from_slice(&[1.0; 5], DemaParams { period: Some(12) })).is_err());
+        assert!(dema(&DemaInput::from_slice(&[1.0; 5], DemaParams { period: Some(0)  })).is_err());
+
         Ok(())
     }
+
 
     fn check_dema_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -798,7 +897,7 @@ mod tests {
             .iter()
             .zip(&stream_values)
             .enumerate()
-            .skip(600)
+            .skip(period)
         {
             if b.is_nan() && s.is_nan() {
                 continue;

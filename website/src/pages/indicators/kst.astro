@@ -2,16 +2,80 @@
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'kst';
-const indicatorName = 'Know Sure Thing';
-const description = `Technical analysis indicator: Know Sure Thing`;
+const indicatorName = 'Know Sure Thing (KST)';
+const description = `The Know Sure Thing (KST) is a momentum oscillator developed by Martin Pring that combines multiple rate-of-change calculations across different timeframes, providing a smoothed indicator that identifies major trend changes and generates reliable trading signals.`;
 const parameters = [
   {
-    "name": "period",
+    "name": "roc1_period",
     "type": "number",
-    "default": 14,
-    "min": 2,
-    "max": 200,
-    "description": "Lookback period"
+    "default": 10,
+    "min": 5,
+    "max": 50,
+    "description": "First ROC period (shortest)"
+  },
+  {
+    "name": "roc2_period",
+    "type": "number",
+    "default": 15,
+    "min": 10,
+    "max": 75,
+    "description": "Second ROC period"
+  },
+  {
+    "name": "roc3_period",
+    "type": "number",
+    "default": 20,
+    "min": 15,
+    "max": 100,
+    "description": "Third ROC period"
+  },
+  {
+    "name": "roc4_period",
+    "type": "number",
+    "default": 30,
+    "min": 20,
+    "max": 150,
+    "description": "Fourth ROC period (longest)"
+  },
+  {
+    "name": "sma1_period",
+    "type": "number",
+    "default": 10,
+    "min": 3,
+    "max": 30,
+    "description": "First ROC smoothing period"
+  },
+  {
+    "name": "sma2_period",
+    "type": "number",
+    "default": 10,
+    "min": 3,
+    "max": 30,
+    "description": "Second ROC smoothing period"
+  },
+  {
+    "name": "sma3_period",
+    "type": "number",
+    "default": 10,
+    "min": 3,
+    "max": 30,
+    "description": "Third ROC smoothing period"
+  },
+  {
+    "name": "sma4_period",
+    "type": "number",
+    "default": 15,
+    "min": 5,
+    "max": 40,
+    "description": "Fourth ROC smoothing period"
+  },
+  {
+    "name": "signal_period",
+    "type": "number",
+    "default": 9,
+    "min": 3,
+    "max": 30,
+    "description": "Signal line SMA period"
   }
 ];
 ---
@@ -22,23 +86,437 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Know Sure Thing (KST) is a sophisticated momentum oscillator developed by Martin Pring that 
+    addresses the limitations of single-timeframe momentum indicators. By combining four different 
+    rate-of-change (ROC) calculations, each smoothed and weighted according to their timeframe, KST 
+    provides a comprehensive view of market momentum across multiple time horizons.
+  </p>
+  <p>
+    The indicator's name reflects its reliability in identifying significant trend changes. KST excels 
+    at filtering out short-term noise while remaining responsive to meaningful momentum shifts. It's 
+    particularly effective for identifying major market turns and can be used across all timeframes, 
+    from intraday to long-term investing. The signal line crossovers and divergences provide clear, 
+    actionable trading signals.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Know Sure Thing helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Signal Components</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>KST Line:</strong> Weighted sum of four smoothed ROC calculations</li>
+    <li><strong>Signal Line:</strong> 9-period SMA of the KST line</li>
+    <li><strong>Zero Line:</strong> Centerline separating positive and negative momentum</li>
+    <li><strong>Crossovers:</strong> KST crossing signal line generates trading signals</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Know Sure Thing to make informed decisions about entry and exit points.</p>
+  <h3>Trading Signals</h3>
+  <ul>
+    <li><strong>Bullish crossover:</strong> KST crosses above signal line</li>
+    <li><strong>Bearish crossover:</strong> KST crosses below signal line</li>
+    <li><strong>Zero line cross:</strong> Confirms trend direction changes</li>
+    <li><strong>Divergences:</strong> Price vs KST divergences signal reversals</li>
+    <li><strong>Overbought/Oversold:</strong> Extreme readings suggest reversals</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Market Conditions</h3>
+  <ul>
+    <li><strong>Trending markets:</strong> KST above/below zero confirms trend</li>
+    <li><strong>Turning points:</strong> Signal line crosses identify major turns</li>
+    <li><strong>Momentum shifts:</strong> KST slope changes precede price moves</li>
+    <li><strong>Cycle analysis:</strong> Multiple timeframes capture market cycles</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The KST calculation combines four rate-of-change measurements:</p>
+  <ol>
+    <li><strong>Calculate Four ROCs:</strong>
+      <ul>
+        <li>ROC1 = (Close - Close[10 periods ago]) / Close[10 periods ago] × 100</li>
+        <li>ROC2 = (Close - Close[15 periods ago]) / Close[15 periods ago] × 100</li>
+        <li>ROC3 = (Close - Close[20 periods ago]) / Close[20 periods ago] × 100</li>
+        <li>ROC4 = (Close - Close[30 periods ago]) / Close[30 periods ago] × 100</li>
+      </ul>
+    </li>
+    <li><strong>Smooth Each ROC:</strong>
+      <ul>
+        <li>ROCMA1 = SMA(ROC1, 10)</li>
+        <li>ROCMA2 = SMA(ROC2, 10)</li>
+        <li>ROCMA3 = SMA(ROC3, 10)</li>
+        <li>ROCMA4 = SMA(ROC4, 15)</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Weighted Sum:</strong>
+      <ul>
+        <li>KST = (ROCMA1 × 1) + (ROCMA2 × 2) + (ROCMA3 × 3) + (ROCMA4 × 4)</li>
+        <li>Weights emphasize longer timeframes</li>
+      </ul>
+    </li>
+    <li><strong>Calculate Signal Line:</strong>
+      <ul>
+        <li>Signal = SMA(KST, 9)</li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    The weighting scheme (1:2:3:4) gives more importance to longer-term momentum, making KST 
+    particularly effective at identifying major trend changes while filtering out short-term noise.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>ROC Periods (defaults: 10, 15, 20, 30):</strong> The four rate-of-change lookback 
+      periods. These capture momentum across different timeframes. The standard settings work well 
+      for daily charts. For weekly charts, use 10, 13, 15, 20. For monthly charts, use 9, 12, 18, 24. 
+      Maintain the progressive relationship between periods.
+    </li>
+    <li>
+      <strong>SMA Periods (defaults: 10, 10, 10, 15):</strong> Smoothing periods for each ROC. 
+      These reduce noise in the rate-of-change calculations. The fourth period is typically longer 
+      to provide extra smoothing for the longest-term component. Adjust based on desired sensitivity.
+    </li>
+    <li>
+      <strong>Signal Period (default: 9):</strong> The smoothing period for the signal line. 
+      Similar to MACD, 9 is standard but can be adjusted. Shorter periods (5-7) generate more 
+      signals, while longer periods (12-15) reduce whipsaws but may lag at turning points.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns two arrays:</p>
+  <ul>
+    <li><strong>KST values:</strong> The main oscillator line</li>
+    <li><strong>Signal values:</strong> The smoothed signal line</li>
+    <li><strong>Range:</strong> Typically oscillates between -50 and +50</li>
+    <li><strong>Zero-centered:</strong> Positive = bullish momentum, Negative = bearish</li>
+    <li><strong>Initial values:</strong> Requires at least 30 + 15 bars for stable calculation</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Know Sure Thing in Rust
-let result = indicators::kst(&data, 14);
+use ta_lib::indicators::kst;
+
+// Price data
+let close = vec![45.15, 45.25, 45.50, 45.30, 45.65, 45.75, 45.90, 46.10, 46.25, 46.00,
+                 46.35, 46.50, 46.40, 46.65, 46.85, 47.00, 46.90, 47.15, 47.30, 47.20];
+
+// Calculate KST with default parameters
+let (kst_values, signal_values) = kst(&close, 
+    10, 15, 20, 30,  // ROC periods
+    10, 10, 10, 15,  // SMA periods
+    9)?;             // Signal period
+
+// Trading signals
+for i in 45..close.len() {  // Skip warmup period
+    if let (Some(kst), Some(signal)) = (kst_values[i], signal_values[i]) {
+        println!("Price: {:.2}, KST: {:.2}, Signal: {:.2}", close[i], kst, signal);
+        
+        // Crossover detection
+        if i > 0 {
+            if let (Some(prev_kst), Some(prev_signal)) = (kst_values[i-1], signal_values[i-1]) {
+                if prev_kst <= prev_signal && kst > signal {
+                    println!("  BULLISH CROSSOVER at {}", i);
+                } else if prev_kst >= prev_signal && kst < signal {
+                    println!("  BEARISH CROSSOVER at {}", i);
+                }
+            }
+        }
+        
+        // Zero line analysis
+        if kst > 0.0 && signal > 0.0 {
+            println!("  Strong bullish momentum");
+        } else if kst < 0.0 && signal < 0.0 {
+            println!("  Strong bearish momentum");
+        }
+        
+        // Divergence check
+        if i >= 10 {
+            let price_change = (close[i] - close[i-10]) / close[i-10] * 100.0;
+            let kst_change = kst - kst_values[i-10].unwrap_or(0.0);
+            
+            if price_change > 0.0 && kst_change < 0.0 {
+                println!("  WARNING: Bearish divergence");
+            } else if price_change < 0.0 && kst_change > 0.0 {
+                println!("  OPPORTUNITY: Bullish divergence");
+            }
+        }
+    }
+}
+
+// Custom ROC calculation for understanding
+fn calculate_roc(prices: &[f64], period: usize) -> Vec<Option<f64>> {
+    let mut roc = vec![None; prices.len()];
+    
+    for i in period..prices.len() {
+        roc[i] = Some((prices[i] - prices[i - period]) / prices[i - period] * 100.0);
+    }
+    roc
+}
+
+// Implement basic KST manually
+fn manual_kst(close: &[f64]) -> Vec<f64> {
+    let roc1 = calculate_roc(close, 10);
+    let roc2 = calculate_roc(close, 15);
+    let roc3 = calculate_roc(close, 20);
+    let roc4 = calculate_roc(close, 30);
+    
+    // Apply smoothing (simplified - would use SMA in practice)
+    // Then combine with weights
+    let mut kst = vec![0.0; close.len()];
+    
+    for i in 45..close.len() {
+        if let (Some(r1), Some(r2), Some(r3), Some(r4)) = 
+           (roc1[i], roc2[i], roc3[i], roc4[i]) {
+            kst[i] = r1 * 1.0 + r2 * 2.0 + r3 * 3.0 + r4 * 4.0;
+        }
+    }
+    kst
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import kst
+
+# Example price data
+df = pd.DataFrame({
+    'close': [45.15, 45.25, 45.50, 45.30, 45.65, 45.75, 45.90, 46.10, 46.25, 46.00,
+              46.35, 46.50, 46.40, 46.65, 46.85, 47.00, 46.90, 47.15, 47.30, 47.20,
+              47.40, 47.55, 47.35, 47.60, 47.80, 47.70, 47.95, 48.10, 48.00, 48.25]
+})
+
+# Calculate KST with default parameters
+kst_line, signal_line = kst(
+    df['close'], 
+    roc1_period=10, roc2_period=15, roc3_period=20, roc4_period=30,
+    sma1_period=10, sma2_period=10, sma3_period=10, sma4_period=15,
+    signal_period=9
+)
+
+df['kst'] = kst_line
+df['signal'] = signal_line
+
+# Trading signals
+df['kst_signal'] = np.where(df['kst'] > df['signal'], 1, -1)
+df['crossover'] = df['kst_signal'].diff()
+
+# Identify specific signals
+df['bullish_cross'] = df['crossover'] == 2  # -1 to 1
+df['bearish_cross'] = df['crossover'] == -2  # 1 to -1
+
+# Zero line analysis
+df['kst_positive'] = df['kst'] > 0
+df['momentum_zone'] = pd.cut(df['kst'], 
+                             bins=[-np.inf, -20, 0, 20, np.inf],
+                             labels=['Strong Bear', 'Weak Bear', 'Weak Bull', 'Strong Bull'])
+
+# KST slope for momentum acceleration
+df['kst_slope'] = df['kst'].diff()
+df['kst_accelerating'] = df['kst_slope'] > df['kst_slope'].shift(1)
+
+# Divergence detection
+def find_divergences(df, lookback=20):
+    # Find local highs and lows
+    df['price_high'] = df['close'].rolling(lookback).max() == df['close']
+    df['price_low'] = df['close'].rolling(lookback).min() == df['close']
+    df['kst_high'] = df['kst'].rolling(lookback).max() == df['kst']
+    df['kst_low'] = df['kst'].rolling(lookback).min() == df['kst']
+    
+    # Bearish divergence: price makes new high, KST doesn't
+    df['bearish_div'] = df['price_high'] & (df['kst'] < df['kst'].shift(lookback))
+    
+    # Bullish divergence: price makes new low, KST doesn't
+    df['bullish_div'] = df['price_low'] & (df['kst'] > df['kst'].shift(lookback))
+    
+    return df
+
+df = find_divergences(df)
+
+# Signal quality filter
+df['signal_strength'] = abs(df['kst'] - df['signal'])
+df['strong_signal'] = df['signal_strength'] > df['signal_strength'].rolling(50).mean()
+
+print("KST Analysis:")
+print(df[['close', 'kst', 'signal', 'momentum_zone', 'bullish_cross', 'bearish_cross']].tail(15))
+
+# Performance statistics
+bullish_signals = df[df['bullish_cross']].index
+bearish_signals = df[df['bearish_cross']].index
+
+print(f"\nSignal Statistics:")
+print(f"Bullish crossovers: {len(bullish_signals)}")
+print(f"Bearish crossovers: {len(bearish_signals)}")
+print(f"Current momentum zone: {df['momentum_zone'].iloc[-1]}")
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Major Trend Identification</h3>
+  <p>Using KST for long-term trend following:</p>
+  <pre><code class="language-python">
+# Calculate KST
+kst_line, signal_line = kst(close, 10, 15, 20, 30, 10, 10, 10, 15, 9)
+
+# Define trend based on KST position and slope
+kst_above_zero = kst_line > 0
+kst_above_signal = kst_line > signal_line
+kst_rising = kst_line > kst_line.shift(1)
+
+# Major trend definition
+major_uptrend = kst_above_zero & kst_above_signal & kst_rising
+major_downtrend = ~kst_above_zero & ~kst_above_signal & ~kst_rising
+
+# Position management
+position = pd.Series(0, index=close.index)
+
+for i in range(1, len(close)):
+    if major_uptrend.iloc[i] and not major_uptrend.iloc[i-1]:
+        position.iloc[i] = 1  # Enter long
+    elif major_downtrend.iloc[i] and not major_downtrend.iloc[i-1]:
+        position.iloc[i] = -1  # Enter short
+    elif position.iloc[i-1] == 1 and not major_uptrend.iloc[i]:
+        position.iloc[i] = 0  # Exit long
+    elif position.iloc[i-1] == -1 and not major_downtrend.iloc[i]:
+        position.iloc[i] = 0  # Exit short
+    else:
+        position.iloc[i] = position.iloc[i-1]  # Hold position
+
+# Add filters for higher quality signals
+volume_filter = volume > volume.rolling(20).mean()
+volatility_filter = atr(high, low, close, 14) > atr(high, low, close, 14).rolling(50).median()
+
+filtered_entries = position.diff() != 0
+filtered_entries &= volume_filter & volatility_filter
+  </code></pre>
+
+  <h3>2. Divergence Trading Strategy</h3>
+  <p>Trading divergences between price and KST:</p>
+  <pre><code class="language-python">
+# Calculate KST
+kst_line, signal_line = kst(close, 10, 15, 20, 30, 10, 10, 10, 15, 9)
+
+# Find swing points
+from scipy.signal import argrelextrema
+
+# Price swings
+price_peaks = argrelextrema(close.values, np.greater, order=10)[0]
+price_troughs = argrelextrema(close.values, np.less, order=10)[0]
+
+# KST swings
+kst_peaks = argrelextrema(kst_line.values, np.greater, order=10)[0]
+kst_troughs = argrelextrema(kst_line.values, np.less, order=10)[0]
+
+# Detect divergences
+divergence_signals = []
+
+# Regular bearish divergence
+for i in range(1, len(price_peaks)):
+    current_peak = price_peaks[i]
+    prev_peak = price_peaks[i-1]
+    
+    # Find corresponding KST peaks
+    kst_peak_current = min(kst_peaks, key=lambda x: abs(x - current_peak))
+    kst_peak_prev = min(kst_peaks, key=lambda x: abs(x - prev_peak))
+    
+    if (close.iloc[current_peak] > close.iloc[prev_peak] and 
+        kst_line.iloc[kst_peak_current] < kst_line.iloc[kst_peak_prev]):
+        divergence_signals.append({
+            'index': current_peak,
+            'type': 'bearish',
+            'strength': abs(kst_line.iloc[kst_peak_current] - kst_line.iloc[kst_peak_prev])
+        })
+
+# Regular bullish divergence
+for i in range(1, len(price_troughs)):
+    current_trough = price_troughs[i]
+    prev_trough = price_troughs[i-1]
+    
+    # Find corresponding KST troughs
+    kst_trough_current = min(kst_troughs, key=lambda x: abs(x - current_trough))
+    kst_trough_prev = min(kst_troughs, key=lambda x: abs(x - prev_trough))
+    
+    if (close.iloc[current_trough] < close.iloc[prev_trough] and 
+        kst_line.iloc[kst_trough_current] > kst_line.iloc[kst_trough_prev]):
+        divergence_signals.append({
+            'index': current_trough,
+            'type': 'bullish',
+            'strength': abs(kst_line.iloc[kst_trough_current] - kst_line.iloc[kst_trough_prev])
+        })
+
+# Trade only strong divergences
+strong_divergences = [d for d in divergence_signals if d['strength'] > 5]
+  </code></pre>
+
+  <h3>3. Multi-Timeframe KST System</h3>
+  <p>Combining KST from multiple timeframes:</p>
+  <pre><code class="language-python">
+# Daily KST (standard parameters)
+kst_daily, signal_daily = kst(close_daily, 10, 15, 20, 30, 10, 10, 10, 15, 9)
+
+# Weekly KST (adjusted parameters)
+kst_weekly, signal_weekly = kst(close_weekly, 10, 13, 15, 20, 10, 10, 10, 13, 9)
+
+# Monthly KST (long-term parameters)
+kst_monthly, signal_monthly = kst(close_monthly, 9, 12, 18, 24, 6, 6, 6, 9, 9)
+
+# Align to daily timeframe
+kst_weekly_aligned = kst_weekly.reindex(close_daily.index, method='ffill')
+kst_monthly_aligned = kst_monthly.reindex(close_daily.index, method='ffill')
+
+# Multi-timeframe scoring
+mtf_score = pd.Series(0, index=close_daily.index)
+
+# Daily score (weight: 1)
+mtf_score += (kst_daily > signal_daily).astype(int)
+mtf_score += (kst_daily > 0).astype(int)
+
+# Weekly score (weight: 2)
+mtf_score += 2 * (kst_weekly_aligned > signal_weekly.reindex(close_daily.index, method='ffill')).astype(int)
+mtf_score += 2 * (kst_weekly_aligned > 0).astype(int)
+
+# Monthly score (weight: 3)
+mtf_score += 3 * (kst_monthly_aligned > signal_monthly.reindex(close_daily.index, method='ffill')).astype(int)
+mtf_score += 3 * (kst_monthly_aligned > 0).astype(int)
+
+# Trading signals based on score
+strong_bullish = mtf_score >= 10  # Max score is 12
+strong_bearish = mtf_score <= 2
+
+# Entry with confirmation
+entry_long = strong_bullish & (close_daily > sma(close_daily, 50))
+entry_short = strong_bearish & (close_daily < sma(close_daily, 50))
+
+# Position sizing based on alignment
+position_size = mtf_score / 12 * 100  # 0-100% based on alignment
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization period:</strong> Requires significant historical data (45+ bars)</li>
+    <li><strong>Parameter relationships:</strong> ROC periods must maintain proper progression</li>
+    <li><strong>Whipsaws in ranges:</strong> Multiple crossovers in sideways markets</li>
+    <li><strong>Lag at extremes:</strong> May be slow to signal after extended trends</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Use standard parameters for daily charts, adjust for other timeframes</li>
+    <li>Confirm signals with price action (support/resistance breaks)</li>
+    <li>Look for divergences at market extremes for high-probability trades</li>
+    <li>Combine with trend-following indicators for filtering</li>
+    <li>Monitor signal line distance for momentum strength</li>
+    <li>Use zero-line position as trend filter</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Pring, M. J. (1991). <em>Technical Analysis Explained</em>. McGraw-Hill.</li>
+    <li>Pring, M. J. (1992). "Summed Rate of Change (KST)" - <em>Stocks & Commodities Magazine</em></li>
+    <li>Multi-timeframe momentum analysis techniques</li>
+    <li>Rate of Change indicators and momentum oscillators</li>
+  </ul>
 </IndicatorLayout>

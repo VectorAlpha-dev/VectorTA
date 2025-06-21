@@ -3,7 +3,7 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'gaussian';
 const indicatorName = 'Gaussian Filter';
-const description = `Technical analysis indicator: Gaussian Filter`;
+const description = `The Gaussian Filter is a weighted moving average that uses a Gaussian (normal) distribution to weight price data, providing smooth trend identification with minimal lag.`;
 const parameters = [
   {
     "name": "period",
@@ -11,7 +11,15 @@ const parameters = [
     "default": 14,
     "min": 2,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period for the filter"
+  },
+  {
+    "name": "sigma",
+    "type": "number",
+    "default": 1.0,
+    "min": 0.1,
+    "max": 5.0,
+    "description": "Standard deviation for Gaussian distribution"
   }
 ];
 ---
@@ -22,23 +30,173 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Gaussian Filter is a sophisticated smoothing technique that applies a Gaussian (normal) distribution 
+    to weight price data. Unlike simple moving averages that give equal weight to all data points, the 
+    Gaussian Filter assigns the highest weight to the most recent data and progressively lower weights 
+    to older data following a bell curve pattern. This results in a smoother output that responds more 
+    quickly to recent price changes while filtering out market noise.
+  </p>
+  <p>
+    The filter is particularly effective for trend identification and signal smoothing, as it provides 
+    an optimal balance between lag reduction and noise filtering. It's commonly used in digital signal 
+    processing and has been adapted for financial market analysis.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Gaussian Filter helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Trend Identification</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Price above Gaussian Filter:</strong> Indicates an uptrend</li>
+    <li><strong>Price below Gaussian Filter:</strong> Indicates a downtrend</li>
+    <li><strong>Price crossing the filter:</strong> Potential trend change signal</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Gaussian Filter to make informed decisions about entry and exit points.</p>
+  <h3>Signal Quality</h3>
+  <ul>
+    <li><strong>Smooth filter line:</strong> Strong, stable trend</li>
+    <li><strong>Wavy filter line:</strong> Choppy or ranging market</li>
+    <li><strong>Filter slope:</strong> Indicates trend strength and direction</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Trading Applications</h3>
+  <ul>
+    <li><strong>Support/Resistance:</strong> The filter often acts as dynamic support in uptrends and resistance in downtrends</li>
+    <li><strong>Entry signals:</strong> Buy when price crosses above the filter, sell when it crosses below</li>
+    <li><strong>Exit signals:</strong> Close positions when price moves back through the filter</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The Gaussian Filter is calculated using the following steps:</p>
+  <ol>
+    <li>Generate Gaussian weights using the formula: <code>w(i) = exp(-0.5 * ((i - center) / sigma)²)</code></li>
+    <li>Normalize the weights so they sum to 1</li>
+    <li>Apply the weights to the price data: <code>GF = Σ(price[i] * weight[i])</code></li>
+  </ol>
+  <p>
+    The sigma parameter controls the width of the Gaussian bell curve. A larger sigma creates a wider 
+    distribution, giving more weight to older data and producing a smoother output. A smaller sigma 
+    creates a narrower distribution, making the filter more responsive to recent price changes.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <h3>Period (default: 14)</h3>
+  <p>
+    The number of data points used in the filter calculation. A longer period produces a smoother 
+    output but increases lag. Shorter periods are more responsive but may be more prone to false signals.
+  </p>
+  <ul>
+    <li><strong>Short-term (5-10):</strong> More responsive, suitable for scalping or day trading</li>
+    <li><strong>Medium-term (10-20):</strong> Balanced smoothing, good for swing trading</li>
+    <li><strong>Long-term (20-50):</strong> Very smooth, ideal for position trading</li>
+  </ul>
+
+  <h3>Sigma (default: 1.0)</h3>
+  <p>
+    Controls the shape of the Gaussian distribution. Higher values create a wider bell curve, 
+    distributing weights more evenly across the period.
+  </p>
+  <ul>
+    <li><strong>Low sigma (0.5-1.0):</strong> Sharp peak, emphasizes recent data</li>
+    <li><strong>Medium sigma (1.0-2.0):</strong> Balanced weighting</li>
+    <li><strong>High sigma (2.0-3.0):</strong> Flatter curve, more like a simple moving average</li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The Gaussian Filter returns a single array of smoothed values:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Length:</strong> Same as input data length</li>
+    <li><strong>Values:</strong> Smoothed price values following the Gaussian weighted average</li>
+    <li><strong>Initial values:</strong> May be null/undefined for the first (period-1) values</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Gaussian Filter in Rust
-let result = indicators::gaussian(&data, 14);
+use ta_lib::indicators::gaussian;
+
+// Calculate Gaussian Filter with default parameters
+let gf_values = gaussian(&close_prices, 14, 1.0)?;
+
+// Using different sigma for more/less smoothing
+let smooth_gf = gaussian(&close_prices, 20, 2.0)?;  // More smoothing
+let responsive_gf = gaussian(&close_prices, 10, 0.7)?;  // More responsive
+
+// Identify trend direction
+for i in 1..close_prices.len() {
+    if let (Some(price), Some(gf)) = (close_prices.get(i), gf_values.get(i)) {
+        if price > gf && close_prices[i-1] <= gf_values[i-1] {
+            println!("Bullish crossover at index {}", i);
+        }
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import gaussian
+
+# Calculate Gaussian Filter
+df['gaussian'] = gaussian(df['close'], period=14, sigma=1.0)
+
+# Generate trading signals
+df['signal'] = np.where(df['close'] > df['gaussian'], 1, -1)
+df['position'] = df['signal'].diff()
+
+# Find crossover points
+bullish_crosses = df[df['position'] == 2]
+bearish_crosses = df[df['position'] == -2]
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Trend Following</h3>
+  <p>Use the Gaussian Filter as a dynamic trend line:</p>
+  <pre><code class="language-python">
+# Long when price is above filter and filter is rising
+long_condition = (price > gaussian_filter) & (gaussian_filter > gaussian_filter.shift(1))
+  </code></pre>
+
+  <h3>2. Noise Filtering</h3>
+  <p>Apply to other indicators to reduce false signals:</p>
+  <pre><code class="language-python">
+# Smooth RSI with Gaussian Filter
+smoothed_rsi = gaussian(rsi_values, period=5, sigma=1.5)
+  </code></pre>
+
+  <h3>3. Multi-Timeframe Analysis</h3>
+  <p>Use multiple Gaussian Filters for different timeframes:</p>
+  <pre><code class="language-python">
+fast_gf = gaussian(close, 10, 0.8)  # Short-term trend
+slow_gf = gaussian(close, 30, 1.5)  # Long-term trend
+
+# Trade when both align
+bullish = (close > fast_gf) & (fast_gf > slow_gf)
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Insufficient data:</strong> Need at least 'period' number of values</li>
+    <li><strong>Invalid sigma:</strong> Sigma must be positive (typically 0.1 to 5.0)</li>
+    <li><strong>Lag in signals:</strong> Like all moving averages, has inherent lag</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Adjust sigma based on market volatility</li>
+    <li>Use in conjunction with momentum indicators</li>
+    <li>Consider the trade-off between smoothness and responsiveness</li>
+    <li>Test different parameter combinations for your specific market</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
+    <li>Gaussian function and filter theory in signal processing</li>
+    <li>Digital Signal Processing applications in financial markets</li>
+    <li>Comparison of various moving average techniques</li>
+  </ul>
 </IndicatorLayout>

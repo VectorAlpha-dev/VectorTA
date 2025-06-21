@@ -40,7 +40,7 @@ const parameters = [
   <h2>How It Works</h2>
   <p>The CVI calculation tracks cumulative volume flow:</p>
   <ol>
-    <li><strong>Classify Days:</strong> Determine if each day is up (close > previous close) or down</li>
+    <li><strong>Classify Days:</strong> Determine if each day is up (close &gt; previous close) or down</li>
     <li><strong>Assign Volume:</strong> Add volume to up-volume or down-volume accordingly</li>
     <li><strong>Calculate Difference:</strong> Net Volume = Up Volume - Down Volume</li>
     <li><strong>Accumulate:</strong> Add to running total and apply smoothing</li>
@@ -48,7 +48,7 @@ const parameters = [
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
     <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      If Close > Close[1]:<br/>
+      If Close &gt; Close[1]:<br/>
       &nbsp;&nbsp;Up_Volume = Volume<br/>
       &nbsp;&nbsp;Down_Volume = 0<br/>
       Else:<br/>

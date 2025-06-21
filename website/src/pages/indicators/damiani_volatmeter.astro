@@ -84,7 +84,7 @@ const parameters = [
       <br/>
       Volatmeter = Viscosity - Sedimentation<br/>
       <br/>
-      If Volatmeter > Threshold:<br/>
+      If Volatmeter &gt; Threshold:<br/>
       &nbsp;&nbsp;Market suitable for trend following<br/>
       Else:<br/>
       &nbsp;&nbsp;Market too noisy, avoid trading<br/>
@@ -110,16 +110,16 @@ const parameters = [
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
     <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market Conditions:</h4>
     <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Above Threshold (>1.4):</strong> Clear market direction, safe to trade</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Threshold (&gt;1.4):</strong> Clear market direction, safe to trade</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Near Threshold (1.2-1.4):</strong> Transitional phase, use caution</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Below Threshold (<1.2):</strong> Excessive noise, avoid trading</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Threshold (&lt;1.2):</strong> Excessive noise, avoid trading</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Rising Values:</strong> Market becoming more tradeable</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Falling Values:</strong> Increasing market noise</li>
     </ul>
     
     <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Rules:</h4>
     <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Green Light:</strong> Only take signals when Volatmeter > threshold</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Green Light:</strong> Only take signals when Volatmeter &gt; threshold</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Red Light:</strong> Ignore all signals when below threshold</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Transition Zones:</strong> Reduce position size near threshold</li>
       <li><strong class="text-gray-900 dark:text-gray-100">Confirmation:</strong> Use as filter for other indicators</li>
@@ -130,16 +130,16 @@ const parameters = [
   <ul>
     <li><strong>Master Filter Strategy:</strong>
       <ul>
-        <li>Only execute trades when Volatmeter > threshold</li>
+        <li>Only execute trades when Volatmeter &gt; threshold</li>
         <li>Ignore all other indicator signals during noisy periods</li>
         <li>Resume trading when market clears up</li>
       </ul>
     </li>
     <li><strong>Position Sizing:</strong>
       <ul>
-        <li>Full position: Volatmeter > 1.6</li>
+        <li>Full position: Volatmeter &gt; 1.6</li>
         <li>Half position: Volatmeter 1.4-1.6</li>
-        <li>No position: Volatmeter < 1.4</li>
+        <li>No position: Volatmeter &lt; 1.4</li>
       </ul>
     </li>
     <li><strong>Trend Confirmation:</strong>

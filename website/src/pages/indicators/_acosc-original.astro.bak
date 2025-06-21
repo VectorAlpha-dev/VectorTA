@@ -1,0 +1,226 @@
+---
+import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+
+const indicatorId = 'acosc';
+const indicatorName = 'Acceleration/Deceleration Oscillator (AC)';
+const description = `The AC Oscillator measures whether the market's driving force is accelerating or decelerating. Think of it as the "speedometer" of price momentum — it tells you not just which direction the market is moving, but whether it's speeding up or slowing down.`;
+const parameters = [
+  {
+    "name": "fast_period",
+    "type": "number",
+    "default": 5,
+    "min": 2,
+    "max": 50,
+    "description": "Fast moving average period for Awesome Oscillator calculation"
+  },
+  {
+    "name": "slow_period",
+    "type": "number",
+    "default": 34,
+    "min": 10,
+    "max": 200,
+    "description": "Slow moving average period for Awesome Oscillator calculation"
+  },
+  {
+    "name": "signal_period",
+    "type": "number",
+    "default": 5,
+    "min": 2,
+    "max": 20,
+    "description": "Signal line smoothing period"
+  }
+];
+---
+
+<IndicatorLayout
+  indicatorId={indicatorId}
+  indicatorName={indicatorName}
+  description={description}
+  parameters={parameters}
+>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Acceleration/Deceleration Oscillator (AC) is a momentum indicator that provides early signals about potential changes in market direction. 
+    Developed by Bill Williams as part of his Trading Chaos theory, it measures the acceleration and deceleration of the current driving force behind price movements.
+  </p>
+  <p>
+    What makes the AC particularly valuable is its ability to identify turning points before they become apparent in price action. 
+    By measuring the rate of change of momentum (essentially the second derivative of price), it can signal when a trend is losing steam 
+    even while prices continue in the same direction.
+  </p>
+
+  <h2 id="interpretation">Interpretation</h2>
+  <p>
+    The AC oscillates around a zero line, with positive values indicating acceleration and negative values indicating deceleration. 
+    The indicator is typically displayed as a histogram with color coding:
+  </p>
+  <ul>
+    <li><strong>Green bars:</strong> The current bar is higher than the previous bar (momentum is increasing)</li>
+    <li><strong>Red bars:</strong> The current bar is lower than the previous bar (momentum is decreasing)</li>
+  </ul>
+  
+  <h3>Key Signal Patterns</h3>
+  <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Signals:</h4>
+    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300 space-y-2">
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Zero + Green:</strong> Strong bullish momentum accelerating</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Above Zero + Red:</strong> Bullish momentum decelerating (caution)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Zero + Red:</strong> Strong bearish momentum accelerating</li>
+      <li><strong class="text-gray-900 dark:text-gray-100">Below Zero + Green:</strong> Bearish momentum decelerating (potential reversal)</li>
+    </ul>
+  </div>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The AC is calculated in three steps:</p>
+  
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
+      1. Calculate Median Price = (High + Low) / 2<br/>
+      2. Calculate Awesome Oscillator (AO):<br/>
+      &nbsp;&nbsp;&nbsp;AO = SMA(Median Price, 5) - SMA(Median Price, 34)<br/>
+      3. Calculate AC:<br/>
+      &nbsp;&nbsp;&nbsp;AC = AO - SMA(AO, 5)
+    </p>
+  </div>
+  
+  <p>
+    The indicator essentially measures the difference between the Awesome Oscillator and its 5-period moving average, 
+    providing insight into whether momentum itself is accelerating or decelerating.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <div class="overflow-x-auto">
+    <table class="min-w-full">
+      <thead>
+        <tr class="border-b border-gray-200 dark:border-gray-700">
+          <th class="text-left py-2">Parameter</th>
+          <th class="text-left py-2">Default</th>
+          <th class="text-left py-2">Range</th>
+          <th class="text-left py-2">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-gray-200 dark:border-gray-700">
+          <td class="py-2"><code>fast_period</code></td>
+          <td class="py-2">5</td>
+          <td class="py-2">2–50</td>
+          <td class="py-2 text-sm text-muted-foreground">Fast moving average period for Awesome Oscillator calculation</td>
+        </tr>
+        <tr class="border-b border-gray-200 dark:border-gray-700">
+          <td class="py-2"><code>slow_period</code></td>
+          <td class="py-2">34</td>
+          <td class="py-2">10–200</td>
+          <td class="py-2 text-sm text-muted-foreground">Slow moving average period for Awesome Oscillator calculation</td>
+        </tr>
+        <tr class="border-b border-gray-200 dark:border-gray-700">
+          <td class="py-2"><code>signal_period</code></td>
+          <td class="py-2">5</td>
+          <td class="py-2">2–20</td>
+          <td class="py-2 text-sm text-muted-foreground">Signal line smoothing period</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>
+    The AC indicator returns a single time series of values representing the acceleration/deceleration at each time point:
+  </p>
+  <ul>
+    <li><strong>Positive values:</strong> Indicate the driving force is accelerating</li>
+    <li><strong>Negative values:</strong> Indicate the driving force is decelerating</li>
+    <li><strong>Zero crossings:</strong> Signal potential momentum shifts</li>
+  </ul>
+  <p>
+    The output array will have the same length as the input data, with initial values being <code>null</code> 
+    until enough data is available for calculation (typically the first 38 values).
+  </p>
+
+  <h2 id="usage">Example Usage</h2>
+  <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
+    <p class="text-sm text-gray-600 dark:text-gray-400 mb-2">Rust example:</p>
+    <pre class="font-mono text-sm text-gray-800 dark:text-gray-200"><code>use vectorta::indicators::acosc;
+
+// Your price data (High, Low, Close arrays)
+let high_prices = vec![/* your high price data */];
+let low_prices = vec![/* your low price data */];
+
+// Calculate AC with default parameters
+let ac_values = acosc(&high_prices, &low_prices, 5, 34, 5)?;
+
+// Use the values for trading decisions
+for (i, ac) in ac_values.iter().enumerate() {
+    if let Some(value) = ac {
+        println!("AC at {}: {:.4}", i, value);
+    }
+}</code></pre>
+  </div>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  
+  <h3>1. Trend Confirmation</h3>
+  <p>
+    Use AC to confirm the strength of existing trends. When AC is above zero and showing green bars, 
+    it confirms strong bullish momentum. This can be used to time entries or add to positions.
+  </p>
+  
+  <h3>2. Early Reversal Detection</h3>
+  <p>
+    Watch for divergences between price and AC. If price makes new highs but AC shows lower highs, 
+    it suggests the uptrend is losing momentum and may reverse soon.
+  </p>
+  
+  <h3>3. Entry and Exit Timing</h3>
+  <p>Following Bill Williams' rules:</p>
+  <ul>
+    <li><strong>Buy signal:</strong> Two consecutive green bars above zero, or three consecutive green bars below zero</li>
+    <li><strong>Sell signal:</strong> Two consecutive red bars below zero, or three consecutive red bars above zero</li>
+  </ul>
+  
+  <h3>4. Filtering False Breakouts</h3>
+  <p>
+    Use AC to validate breakouts. A price breakout accompanied by accelerating momentum (increasing AC values) 
+    is more likely to continue than one with decelerating momentum.
+  </p>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  
+  <h3>Common Errors</h3>
+  <ul>
+    <li>
+      <strong>Not Enough Data:</strong> AC requires at least <code>slow_period + signal_period - 1</code> data points 
+      (default: 38 points) to produce the first valid value. Calling with less data will return an error.
+    </li>
+    <li>
+      <strong>Invalid Parameters:</strong> Parameters must be positive integers with <code>fast_period &lt; slow_period</code>. 
+      Violating this will return a parameter validation error.
+    </li>
+    <li>
+      <strong>Empty Data:</strong> Passing empty arrays will return an <code>EmptyData</code> error.
+    </li>
+  </ul>
+  
+  <h3>Special Considerations</h3>
+  <ul>
+    <li>The indicator can produce many false signals in ranging markets</li>
+    <li>Best used in conjunction with other indicators from the Williams system</li>
+    <li>Color changes are as important as the actual values</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>
+      <a href="https://www.investopedia.com/terms/a/acceleration-deceleration-indicator.asp" target="_blank" rel="noopener">
+        Investopedia: Acceleration/Deceleration Indicator
+      </a>
+    </li>
+    <li>
+      Williams, Bill. "Trading Chaos: Maximize Profits with Proven Technical Techniques" (2nd Edition)
+    </li>
+    <li>
+      <a href="https://www.metatrader5.com/en/terminal/help/indicators/bw_indicators/ao" target="_blank" rel="noopener">
+        MetaTrader 5: Bill Williams' Indicators
+      </a>
+    </li>
+  </ul>
+</IndicatorLayout>

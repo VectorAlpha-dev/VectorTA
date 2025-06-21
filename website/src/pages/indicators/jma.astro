@@ -3,15 +3,31 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 
 const indicatorId = 'jma';
 const indicatorName = 'Jurik Moving Average';
-const description = `Technical analysis indicator: Jurik Moving Average`;
+const description = `The Jurik Moving Average (JMA) is a proprietary adaptive moving average that provides exceptional smoothness with minimal lag, using advanced digital signal processing techniques to adapt to market volatility and price action in real-time.`;
 const parameters = [
   {
     "name": "period",
     "type": "number",
     "default": 14,
-    "min": 2,
+    "min": 1,
     "max": 200,
-    "description": "Lookback period"
+    "description": "Lookback period (length)"
+  },
+  {
+    "name": "phase",
+    "type": "number",
+    "default": 0,
+    "min": -100,
+    "max": 100,
+    "description": "Phase shift parameter"
+  },
+  {
+    "name": "power",
+    "type": "number",
+    "default": 2,
+    "min": 0.5,
+    "max": 10,
+    "description": "Power/smoothing factor"
   }
 ];
 ---
@@ -22,23 +38,296 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2>Overview</h2>
-  <p>{description}</p>
+  <h2 id="overview">Overview</h2>
+  <p>
+    The Jurik Moving Average (JMA) is a sophisticated adaptive moving average developed by Mark Jurik 
+    that achieves the seemingly impossible combination of extreme smoothness and minimal lag. Using 
+    proprietary digital signal processing algorithms, JMA adapts to market conditions in real-time, 
+    providing traders with a responsive yet stable trend-following tool.
+  </p>
+  <p>
+    Unlike traditional moving averages that must trade off between smoothness and lag, JMA uses 
+    advanced filtering techniques to preserve important price movements while eliminating market 
+    noise. The result is a moving average that stays close to price during trends but doesn't 
+    overshoot during rapid movements, making it ideal for both trend following and precise 
+    entry/exit timing.
+  </p>
 
-  <h2>How it works</h2>
-  <p>The Jurik Moving Average helps traders identify potential trading opportunities by analyzing price patterns and market conditions.</p>
-
-  <h2>Parameters</h2>
+  <h2 id="interpretation">Interpretation</h2>
+  <h3>Signal Characteristics</h3>
   <ul>
-    <li><strong>period</strong>: Lookback period (default: 14)</li>
+    <li><strong>Smooth trends:</strong> JMA provides exceptionally smooth trend indication</li>
+    <li><strong>Minimal lag:</strong> Responds quickly to genuine price changes</li>
+    <li><strong>Noise reduction:</strong> Filters out market noise effectively</li>
+    <li><strong>No overshoot:</strong> Avoids the overshoot common in other low-lag MAs</li>
   </ul>
 
-  <h2>Interpretation</h2>
-  <p>Traders use the Jurik Moving Average to make informed decisions about entry and exit points.</p>
+  <h3>Trading Applications</h3>
+  <ul>
+    <li><strong>Trend direction:</strong> Rising JMA indicates uptrend, falling indicates downtrend</li>
+    <li><strong>Dynamic support/resistance:</strong> Price tends to respect JMA levels</li>
+    <li><strong>Crossover signals:</strong> Price crossing JMA generates reliable signals</li>
+    <li><strong>Momentum gauge:</strong> Slope of JMA indicates trend strength</li>
+  </ul>
 
-  <h2>Example Usage</h2>
+  <h3>Advantages</h3>
+  <ul>
+    <li><strong>Superior smoothing:</strong> Smoother than EMA with less lag than SMA</li>
+    <li><strong>Adaptive behavior:</strong> Automatically adjusts to market volatility</li>
+    <li><strong>Reduced whipsaws:</strong> Fewer false signals in choppy markets</li>
+    <li><strong>Professional grade:</strong> Used by institutional traders</li>
+  </ul>
+
+  <h2 id="calculation">Calculation</h2>
+  <p>The JMA calculation uses a complex proprietary algorithm that includes:</p>
+  <ol>
+    <li><strong>Volatility measurement:</strong> Analyze recent price volatility</li>
+    <li><strong>Adaptive filtering:</strong> Adjust filter coefficients based on market conditions</li>
+    <li><strong>Phase correction:</strong> Apply phase parameter for lead/lag adjustment</li>
+    <li><strong>Power transformation:</strong> Apply power factor for smoothness control</li>
+    <li><strong>Digital filtering:</strong> Multi-stage filtering process</li>
+    <li><strong>Output smoothing:</strong> Final smoothing without adding lag</li>
+  </ol>
+  <p>
+    While the exact algorithm is proprietary, the general approach involves adaptive Kalman-like 
+    filtering with volatility bands that dynamically adjust the smoothing factor. The phase 
+    parameter allows shifting the average forward or backward in time, while the power parameter 
+    controls the aggressiveness of the smoothing.
+  </p>
+
+  <h2 id="parameters">Parameters</h2>
+  <ul>
+    <li>
+      <strong>Period (default: 14):</strong> The lookback period or length of the moving average. 
+      Shorter periods (7-10) provide more responsive signals but may generate more whipsaws. 
+      Longer periods (20-50) create smoother trends but with increased lag. The optimal period 
+      depends on your trading timeframe and market volatility.
+    </li>
+    <li>
+      <strong>Phase (default: 0):</strong> Controls the phase shift of the average, ranging from 
+      -100 to +100. Negative values create lag (smoother), positive values reduce lag (more responsive). 
+      A phase of 0 provides balanced performance. Values around +50 can help identify turns earlier, 
+      while -50 creates a smoother, more reliable trend indicator.
+    </li>
+    <li>
+      <strong>Power (default: 2):</strong> The smoothing power factor, typically between 1 and 3. 
+      Higher values increase smoothing but may introduce more lag. A power of 2 provides a good 
+      balance for most applications. Values below 2 create a more responsive average, while values 
+      above 2 prioritize smoothness.
+    </li>
+  </ul>
+
+  <h2 id="returns">Returns & Output</h2>
+  <p>The indicator returns an array of JMA values:</p>
+  <ul>
+    <li><strong>Type:</strong> Array of floating-point numbers</li>
+    <li><strong>Length:</strong> Same as input array</li>
+    <li><strong>Initial values:</strong> First few values use adaptive initialization</li>
+    <li><strong>Characteristics:</strong> Smooth with minimal lag and no overshoot</li>
+    <li><strong>Range:</strong> Follows price range, no fixed bounds</li>
+  </ul>
+
+  <h2 id="usage">Example Usage</h2>
+  <h3>Rust Implementation</h3>
   <pre><code class="language-rust">
-// Example of using Jurik Moving Average in Rust
-let result = indicators::jma(&data, 14);
+use ta_lib::indicators::jma;
+
+// Calculate JMA with default parameters
+let prices = vec![100.0, 102.0, 101.5, 103.0, 104.5, 103.5, 105.0, 106.0, 105.5, 107.0];
+let jma_values = jma(&prices, 14, 0, 2)?;
+
+// Calculate with different phase settings
+let jma_lead = jma(&prices, 14, 50, 2)?;    // Leading (reduced lag)
+let jma_lag = jma(&prices, 14, -50, 2)?;    // Lagging (smoother)
+
+// Identify trend and signals
+for i in 1..jma_values.len() {
+    if let (Some(current), Some(previous)) = (jma_values[i], jma_values[i-1]) {
+        // Trend direction
+        if current > previous {
+            println!("Uptrend at index {}: JMA rising from {:.2} to {:.2}", 
+                     i, previous, current);
+        } else if current < previous {
+            println!("Downtrend at index {}: JMA falling from {:.2} to {:.2}", 
+                     i, previous, current);
+        }
+        
+        // Price crossovers
+        if prices[i-1] <= previous && prices[i] > current {
+            println!("Bullish crossover at {}: Price crossed above JMA", i);
+        } else if prices[i-1] >= previous && prices[i] < current {
+            println!("Bearish crossover at {}: Price crossed below JMA", i);
+        }
+        
+        // Trend strength (slope)
+        let slope = (current - previous) / previous * 100.0;
+        if slope.abs() > 0.5 {
+            println!("Strong trend at {}: {:.2}% slope", i, slope);
+        }
+    }
+}
+
+// Compare different settings
+for i in 0..prices.len() {
+    if let (Some(std), Some(lead), Some(lag)) = 
+        (jma_values[i], jma_lead[i], jma_lag[i]) {
+        println!("Index {}: Price={:.2}, JMA={:.2}, Lead={:.2}, Lag={:.2}", 
+                 i, prices[i], std, lead, lag);
+    }
+}
   </code></pre>
+
+  <h3>Python Integration</h3>
+  <pre><code class="language-python">
+import pandas as pd
+import numpy as np
+from ta_lib import jma
+
+# Example usage with price data
+df = pd.DataFrame({
+    'close': [100, 102, 101.5, 103, 104.5, 103.5, 105, 106, 105.5, 107, 108, 107.5, 109]
+})
+
+# Calculate JMA with different settings
+df['jma_standard'] = jma(df['close'], period=14, phase=0, power=2)
+df['jma_fast'] = jma(df['close'], period=7, phase=50, power=1.5)
+df['jma_smooth'] = jma(df['close'], period=21, phase=-50, power=3)
+
+# Trading signals
+df['jma_trend'] = np.where(df['jma_standard'] > df['jma_standard'].shift(1), 1, -1)
+df['price_above_jma'] = df['close'] > df['jma_standard']
+
+# Crossover signals
+df['bullish_cross'] = df['price_above_jma'] & ~df['price_above_jma'].shift(1)
+df['bearish_cross'] = ~df['price_above_jma'] & df['price_above_jma'].shift(1)
+
+# JMA slope for trend strength
+df['jma_slope'] = df['jma_standard'].pct_change() * 100
+df['strong_trend'] = abs(df['jma_slope']) > 0.5
+
+# Dual JMA strategy
+df['jma_diff'] = df['jma_fast'] - df['jma_smooth']
+df['momentum_bullish'] = df['jma_diff'] > 0
+df['momentum_cross_up'] = df['momentum_bullish'] & ~df['momentum_bullish'].shift(1)
+df['momentum_cross_down'] = ~df['momentum_bullish'] & df['momentum_bullish'].shift(1)
+
+# Advanced: JMA bands
+jma_values = df['jma_standard']
+df['jma_upper'] = jma_values + 2 * df['close'].rolling(14).std()
+df['jma_lower'] = jma_values - 2 * df['close'].rolling(14).std()
+
+print(df[['close', 'jma_standard', 'jma_slope', 'bullish_cross', 'bearish_cross']].tail(10))
+  </code></pre>
+
+  <h2 id="use-cases">Common Use Cases</h2>
+  <h3>1. Trend Following System</h3>
+  <p>Using JMA for smooth trend identification:</p>
+  <pre><code class="language-python">
+# Calculate JMA
+jma_trend = jma(close, period=21, phase=0, power=2)
+
+# Define trend
+uptrend = jma_trend > jma_trend.shift(1)
+downtrend = jma_trend < jma_trend.shift(1)
+
+# Entry conditions
+jma_slope = jma_trend.pct_change() * 100
+strong_uptrend = uptrend & (jma_slope > 0.3)
+strong_downtrend = downtrend & (jma_slope < -0.3)
+
+# Generate signals
+buy_signal = (close > jma_trend) & strong_uptrend & (close.shift(1) <= jma_trend.shift(1))
+sell_signal = (close < jma_trend) & strong_downtrend & (close.shift(1) >= jma_trend.shift(1))
+
+# Trail stops using JMA
+stop_loss_long = jma_trend - atr(high, low, close, 14) * 1.5
+stop_loss_short = jma_trend + atr(high, low, close, 14) * 1.5
+  </code></pre>
+
+  <h3>2. Multi-Timeframe JMA Analysis</h3>
+  <p>Combining JMA from different timeframes:</p>
+  <pre><code class="language-python">
+# Calculate JMA on multiple timeframes
+jma_5m = jma(close_5m, 14, 0, 2)
+jma_15m = jma(close_15m, 14, 0, 2)
+jma_1h = jma(close_1h, 14, 0, 2)
+
+# Resample to align
+jma_15m_aligned = jma_15m.reindex(close_5m.index, method='ffill')
+jma_1h_aligned = jma_1h.reindex(close_5m.index, method='ffill')
+
+# Trend alignment scoring
+trend_5m = np.where(close_5m > jma_5m, 1, -1)
+trend_15m = np.where(close_5m > jma_15m_aligned, 1, -1)
+trend_1h = np.where(close_5m > jma_1h_aligned, 1, -1)
+
+alignment_score = (trend_5m + trend_15m + trend_1h) / 3
+
+# Trade only with strong alignment
+strong_bull_alignment = alignment_score >= 0.66  # At least 2 of 3 bullish
+strong_bear_alignment = alignment_score <= -0.66  # At least 2 of 3 bearish
+
+# Entry with confirmation
+entry_long = strong_bull_alignment & (close_5m > jma_5m) & (close_5m.shift(1) <= jma_5m.shift(1))
+entry_short = strong_bear_alignment & (close_5m < jma_5m) & (close_5m.shift(1) >= jma_5m.shift(1))
+  </code></pre>
+
+  <h3>3. JMA Envelope Trading</h3>
+  <p>Creating dynamic envelopes with JMA:</p>
+  <pre><code class="language-python">
+# Calculate adaptive JMA
+jma_base = jma(close, 14, 0, 2)
+
+# Measure volatility
+volatility = close.rolling(14).std()
+atr_value = atr(high, low, close, 14)
+
+# Create adaptive envelopes
+envelope_multiplier = np.minimum(volatility / close * 100, 3)  # Cap at 3%
+upper_envelope = jma_base * (1 + envelope_multiplier / 100)
+lower_envelope = jma_base * (1 - envelope_multiplier / 100)
+
+# Mean reversion signals
+oversold = close < lower_envelope
+overbought = close > upper_envelope
+
+# Confirm with JMA direction
+jma_rising = jma_base > jma_base.shift(1)
+jma_falling = jma_base < jma_base.shift(1)
+
+# Trade signals
+buy_reversion = oversold & jma_rising  # Buy oversold in uptrend
+sell_reversion = overbought & jma_falling  # Sell overbought in downtrend
+
+# Breakout signals (opposite logic)
+buy_breakout = (close > upper_envelope) & jma_rising & (close.shift(1) <= upper_envelope.shift(1))
+sell_breakout = (close < lower_envelope) & jma_falling & (close.shift(1) >= lower_envelope.shift(1))
+  </code></pre>
+
+  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h3>Common Issues</h3>
+  <ul>
+    <li><strong>Initialization period:</strong> JMA requires several bars to stabilize</li>
+    <li><strong>Parameter sensitivity:</strong> Extreme phase values can create instability</li>
+    <li><strong>Computational complexity:</strong> More CPU intensive than simple MAs</li>
+    <li><strong>Proprietary nature:</strong> Exact implementation may vary between platforms</li>
+  </ul>
+
+  <h3>Best Practices</h3>
+  <ul>
+    <li>Start with default parameters (14, 0, 2) and adjust gradually</li>
+    <li>Use phase parameter carefully - extreme values can distort signals</li>
+    <li>Combine with volume indicators for confirmation</li>
+    <li>Test different power settings for your specific market</li>
+    <li>Allow adequate warmup period before taking signals</li>
+    <li>Monitor JMA slope for trend strength assessment</li>
+  </ul>
+
+  <h2 id="references">References</h2>
+  <ul>
+    <li>Jurik, M. "Jurik Moving Average (JMA)" - Jurik Research and Consulting</li>
+    <li>Comparison studies of adaptive moving averages</li>
+    <li>Digital signal processing applications in financial markets</li>
+    <li>Performance analysis: JMA vs EMA, DEMA, T3, and other advanced MAs</li>
+  </ul>
 </IndicatorLayout>

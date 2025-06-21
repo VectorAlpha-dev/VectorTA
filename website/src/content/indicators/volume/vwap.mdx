@@ -1,0 +1,67 @@
+---
+title: "Volume Weighted Average Price"
+description: "The average price weighted by volume, often used as a trading benchmark."
+category: "volume"
+parameters:
+  []
+returns:
+  type: "Vec<Option<f64>>"
+  description: "A vector of calculated Volume Weighted Average Price values"
+complexity: "O(n)"
+implementationStatus: "planned"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="vwap" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+The average price weighted by volume, often used as a trading benchmark.
+
+*Note: This is placeholder documentation. Full documentation will be added when the indicator is implemented.*
+
+## Interpretation {#interpretation}
+
+Details about how to interpret Volume Weighted Average Price values will be added here.
+
+## Calculation {#calculation}
+
+The mathematical formula and calculation steps for Volume Weighted Average Price will be documented here.
+
+## Parameters {#parameters}
+
+This indicator has no configurable parameters.
+
+## Returns & Output {#returns}
+
+The Volume Weighted Average Price function returns a vector of optional floating-point values representing the indicator calculations.
+
+## Example Usage {#usage}
+
+<CodeBlock lang="rust">
+use vectorta::indicators::vwap;
+
+// Example usage will be added when implemented
+let result = vwap(&data)?;
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+Common trading strategies and applications using Volume Weighted Average Price will be documented here.
+
+## Edge Cases & Errors {#edge-cases}
+
+Information about edge cases and error handling will be added here.
+
+## References {#references}
+
+Academic and industry references for Volume Weighted Average Price will be listed here.
+
+</IndicatorLayout>

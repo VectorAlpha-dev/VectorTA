@@ -1,0 +1,497 @@
+---
+title: "Bollinger Bands"
+description: "Bollinger Bands are a volatility indicator that creates a band of three lines which are plotted in relation to a security's price. The middle band is a simple moving average, with upper and lower bands adjusted for volatility."
+category: "volatility"
+parameters:
+  - name: "period"
+    type: "number"
+    default: 20
+    min: 2
+    max: 500
+    description: "The number of periods for the moving average and standard deviation"
+  - name: "std_dev"
+    type: "number"
+    default: 2.0
+    min: 0.1
+    max: 5.0
+    description: "Number of standard deviations for the bands"
+returns:
+  type: "{ upper: Vec<Option<f64>>, middle: Vec<Option<f64>>, lower: Vec<Option<f64>> }"
+  description: "Three vectors containing the upper band, middle band (SMA), and lower band values"
+complexity: "O(n)"
+implementationStatus: "complete"
+seeAlso: ["keltner_channels", "atr", "donchian_channels", "standard_deviation"]
+references:
+  - title: "Bollinger on Bollinger Bands"
+    url: "https://www.amazon.com/Bollinger-Bands-John/dp/0071373683"
+  - title: "Bollinger Bands - Official Website"
+    url: "https://www.bollingerbands.com"
+---
+
+import { IndicatorLayout } from '../../../layouts/IndicatorLayout.astro';
+import { CodeBlock } from '../../../components/ui/CodeBlock.astro';
+
+<IndicatorLayout 
+  indicatorId="bollinger_bands" 
+  indicatorName={frontmatter.title}
+  description={frontmatter.description}
+  parameters={frontmatter.parameters}
+>
+
+## Overview {#overview}
+
+Bollinger Bands, developed by John Bollinger in the 1980s, are a technical analysis tool that combines a moving average with standard deviation to create a dynamic envelope around price action. This envelope expands during periods of high volatility and contracts during periods of low volatility, making it an adaptive indicator that adjusts to market conditions.
+
+The bands consist of three lines:
+- **Middle Band**: A simple moving average (typically 20 periods)
+- **Upper Band**: Middle band + (Standard Deviation × Multiplier)
+- **Lower Band**: Middle band - (Standard Deviation × Multiplier)
+
+This design allows traders to visualize both trend direction (via the middle band) and volatility (via the width between bands) in a single indicator.
+
+## Interpretation {#interpretation}
+
+### Band Characteristics
+- **Wide Bands**: High volatility, potential for large price movements
+- **Narrow Bands**: Low volatility, potential breakout setup (squeeze)
+- **Price at Upper Band**: Potential overbought condition
+- **Price at Lower Band**: Potential oversold condition
+
+### Trading Signals
+- **Band Touches**: Not automatic buy/sell signals, need confirmation
+- **Band Walks**: Strong trends can "walk" along a band
+- **Squeeze**: Bands at narrowest point often precede significant moves
+- **Expansion**: Rapid band expansion confirms breakout
+
+### %B Indicator
+Position of price relative to the bands:
+```
+%B = (Price - Lower Band) / (Upper Band - Lower Band)
+```
+- %B > 1: Price above upper band
+- %B < 0: Price below lower band
+- %B = 0.5: Price at middle band
+
+### BandWidth Indicator
+Measures the width between bands:
+```
+BandWidth = (Upper Band - Lower Band) / Middle Band
+```
+
+## Calculation {#calculation}
+
+Step-by-step calculation:
+
+1. **Calculate the Middle Band**
+   ```
+   Middle Band = SMA(Close, period)
+   ```
+
+2. **Calculate Standard Deviation**
+   ```
+   StdDev = √(Σ(Close - SMA)² / period)
+   ```
+
+3. **Calculate Upper and Lower Bands**
+   ```
+   Upper Band = Middle Band + (StdDev × std_dev_multiplier)
+   Lower Band = Middle Band - (StdDev × std_dev_multiplier)
+   ```
+
+## Parameters {#parameters}
+
+### period (default: 20)
+The lookback period for both the moving average and standard deviation:
+
+- **Shorter periods (10-15)**: More sensitive, follows price closely
+- **Standard (20)**: Bollinger's recommendation, widely used
+- **Longer periods (30-50)**: Smoother bands, fewer whipsaws
+
+### std_dev (default: 2.0)
+The number of standard deviations for band placement:
+
+- **1.0**: ~68% of price action within bands
+- **2.0**: ~95% of price action within bands (standard)
+- **2.5-3.0**: ~99% of price action within bands
+- **Fractional values**: Fine-tuning for specific markets
+
+Common combinations:
+- **(20, 2)**: Standard Bollinger Bands
+- **(10, 1.9)**: Short-term trading
+- **(50, 2.1)**: Longer-term analysis
+
+## Returns & Output {#returns}
+
+The function returns three vectors of equal length:
+- **upper**: Upper band values
+- **middle**: Middle band (SMA) values  
+- **lower**: Lower band values
+
+Each vector contains:
+- `None` for the first `period - 1` values
+- `Some(value)` for subsequent calculated values
+
+All three bands maintain temporal alignment with input data.
+
+## Example Usage {#usage}
+
+### Basic Bollinger Bands Calculation
+
+<CodeBlock lang="rust">
+use vectorta::indicators::bollinger_bands;
+
+// Price data
+let prices = vec![
+    20.0, 20.5, 21.0, 20.8, 21.5, 22.0, 21.8, 22.5, 
+    22.2, 21.9, 22.3, 22.8, 23.0, 22.7, 23.2, 23.5
+];
+
+// Calculate standard Bollinger Bands (20, 2)
+let bands = bollinger_bands(&prices, 20, 2.0)?;
+
+// Access the three bands
+for i in 0..prices.len() {
+    if let (Some(upper), Some(middle), Some(lower)) = 
+        (bands.upper[i], bands.middle[i], bands.lower[i]) {
+        
+        println!("Price: {:.2}, Upper: {:.2}, Middle: {:.2}, Lower: {:.2}", 
+                 prices[i], upper, middle, lower);
+    }
+}
+</CodeBlock>
+
+### Bollinger Band Squeeze Strategy
+
+<CodeBlock lang="rust">
+use vectorta::indicators::{bollinger_bands, atr};
+
+struct BollingerSqueezeStrategy {
+    bb_period: usize,
+    bb_std_dev: f64,
+    atr_period: usize,
+    squeeze_threshold: f64, // Percentage
+}
+
+impl BollingerSqueezeStrategy {
+    fn detect_squeeze(&self, prices: &[f64], highs: &[f64], lows: &[f64]) -> Vec<SqueezeSignal> {
+        let bands = bollinger_bands(prices, self.bb_period, self.bb_std_dev).unwrap();
+        let atr_values = atr(highs, lows, prices, self.atr_period).unwrap();
+        let mut signals = Vec::new();
+        
+        // Calculate BandWidth
+        let bandwidth: Vec<Option<f64>> = bands.upper.iter()
+            .zip(bands.lower.iter())
+            .zip(bands.middle.iter())
+            .map(|((upper, lower), middle)| {
+                match (upper, lower, middle) {
+                    (Some(u), Some(l), Some(m)) if *m > 0.0 => {
+                        Some((u - l) / m * 100.0)
+                    },
+                    _ => None
+                }
+            })
+            .collect();
+        
+        // Find squeeze conditions
+        let mut in_squeeze = false;
+        
+        for i in 1..bandwidth.len() {
+            if let (Some(bw), Some(prev_bw), Some(atr)) = 
+                (bandwidth[i], bandwidth[i-1], atr_values[i]) {
+                
+                // Entering squeeze
+                if !in_squeeze && bw < self.squeeze_threshold {
+                    in_squeeze = true;
+                    signals.push(SqueezeSignal::Enter(i));
+                }
+                
+                // Exiting squeeze with expansion
+                if in_squeeze && bw > prev_bw * 1.2 {
+                    in_squeeze = false;
+                    
+                    // Determine direction based on price position
+                    let price = prices[i];
+                    let middle = bands.middle[i].unwrap();
+                    
+                    if price > middle {
+                        signals.push(SqueezeSignal::FireLong(i));
+                    } else {
+                        signals.push(SqueezeSignal::FireShort(i));
+                    }
+                }
+            }
+        }
+        
+        signals
+    }
+}
+</CodeBlock>
+
+### %B and BandWidth Indicators
+
+<CodeBlock lang="rust">
+use vectorta::indicators::bollinger_bands;
+
+struct BollingerMetrics {
+    percent_b: Vec<Option<f64>>,
+    bandwidth: Vec<Option<f64>>,
+}
+
+fn calculate_bollinger_metrics(prices: &[f64], period: usize, std_dev: f64) 
+    -> Result<BollingerMetrics, Error> {
+    
+    let bands = bollinger_bands(prices, period, std_dev)?;
+    let mut percent_b = Vec::with_capacity(prices.len());
+    let mut bandwidth = Vec::with_capacity(prices.len());
+    
+    for i in 0..prices.len() {
+        match (bands.upper[i], bands.middle[i], bands.lower[i]) {
+            (Some(upper), Some(middle), Some(lower)) => {
+                // Calculate %B
+                let pb = if upper != lower {
+                    (prices[i] - lower) / (upper - lower)
+                } else {
+                    0.5 // When bands converge, price is at middle
+                };
+                percent_b.push(Some(pb));
+                
+                // Calculate BandWidth
+                let bw = if middle > 0.0 {
+                    (upper - lower) / middle
+                } else {
+                    0.0
+                };
+                bandwidth.push(Some(bw));
+            },
+            _ => {
+                percent_b.push(None);
+                bandwidth.push(None);
+            }
+        }
+    }
+    
+    Ok(BollingerMetrics { percent_b, bandwidth })
+}
+
+// Trading rules using %B
+fn generate_percent_b_signals(metrics: &BollingerMetrics) -> Vec<Signal> {
+    let mut signals = Vec::new();
+    
+    for i in 1..metrics.percent_b.len() {
+        if let (Some(pb), Some(prev_pb)) = (metrics.percent_b[i], metrics.percent_b[i-1]) {
+            // Oversold bounce
+            if prev_pb < 0.0 && pb > 0.0 {
+                signals.push(Signal::Buy(i, "Bounce from below lower band".to_string()));
+            }
+            // Overbought reversal
+            else if prev_pb > 1.0 && pb < 1.0 {
+                signals.push(Signal::Sell(i, "Reversal from above upper band".to_string()));
+            }
+        }
+    }
+    
+    signals
+}
+</CodeBlock>
+
+### Multiple Bollinger Bands
+
+<CodeBlock lang="rust">
+use vectorta::indicators::bollinger_bands;
+
+struct MultipleBollingerBands {
+    inner: BollingerBandsResult,
+    outer: BollingerBandsResult,
+}
+
+fn create_multiple_bands(prices: &[f64], period: usize) -> Result<MultipleBollingerBands, Error> {
+    Ok(MultipleBollingerBands {
+        inner: bollinger_bands(prices, period, 1.0)?,
+        outer: bollinger_bands(prices, period, 2.0)?,
+    })
+}
+
+fn analyze_band_position(bands: &MultipleBollingerBands, index: usize, price: f64) -> BandPosition {
+    match (
+        bands.outer.upper[index],
+        bands.inner.upper[index],
+        bands.inner.lower[index],
+        bands.outer.lower[index],
+    ) {
+        (Some(ou), Some(iu), Some(il), Some(ol)) => {
+            if price > ou {
+                BandPosition::AboveOuterUpper
+            } else if price > iu {
+                BandPosition::BetweenUpperBands
+            } else if price < ol {
+                BandPosition::BelowOuterLower
+            } else if price < il {
+                BandPosition::BetweenLowerBands
+            } else {
+                BandPosition::InsideInnerBands
+            }
+        },
+        _ => BandPosition::Unknown
+    }
+}
+</CodeBlock>
+
+### Dynamic Bollinger Bands
+
+<CodeBlock lang="rust">
+use vectorta::indicators::{bollinger_bands, atr};
+
+fn calculate_dynamic_bollinger_bands(
+    prices: &[f64], 
+    highs: &[f64], 
+    lows: &[f64],
+    base_period: usize
+) -> Result<BollingerBandsResult, Error> {
+    
+    // Use ATR to adjust the standard deviation multiplier
+    let atr_values = atr(highs, lows, prices, base_period)?;
+    
+    // Calculate volatility-adjusted bands
+    let base_bands = bollinger_bands(prices, base_period, 2.0)?;
+    let mut adjusted_upper = Vec::with_capacity(prices.len());
+    let mut adjusted_lower = Vec::with_capacity(prices.len());
+    
+    for i in 0..prices.len() {
+        match (base_bands.upper[i], base_bands.middle[i], base_bands.lower[i], atr_values[i]) {
+            (Some(upper), Some(middle), Some(lower), Some(atr)) => {
+                // Adjust band width based on ATR
+                let avg_price = (highs[i] + lows[i]) / 2.0;
+                let atr_ratio = atr / avg_price;
+                let adjustment = 1.0 + (atr_ratio * 10.0); // Scale factor
+                
+                let band_width = upper - middle;
+                adjusted_upper.push(Some(middle + band_width * adjustment));
+                adjusted_lower.push(Some(middle - band_width * adjustment));
+            },
+            _ => {
+                adjusted_upper.push(None);
+                adjusted_lower.push(None);
+            }
+        }
+    }
+    
+    Ok(BollingerBandsResult {
+        upper: adjusted_upper,
+        middle: base_bands.middle,
+        lower: adjusted_lower,
+    })
+}
+</CodeBlock>
+
+## Common Use Cases {#use-cases}
+
+### 1. Volatility Analysis
+Bollinger Bands excel at visualizing market volatility:
+- Expanding bands indicate increasing volatility
+- Contracting bands suggest decreasing volatility
+- Band width can be used to filter trades
+
+### 2. Mean Reversion Trading
+Classic strategy for ranging markets:
+- Buy when price touches lower band in uptrend
+- Sell when price touches upper band in downtrend
+- Use middle band as profit target
+
+### 3. Breakout Trading
+The Bollinger Squeeze:
+- Identify periods of low volatility (narrow bands)
+- Wait for bands to start expanding
+- Trade in direction of the breakout
+
+### 4. Trend Following
+Using bands in trending markets:
+- In uptrends, price walks along upper band
+- In downtrends, price walks along lower band
+- Middle band acts as trailing stop
+
+### 5. Pattern Recognition
+Bollinger Bands help identify:
+- Double bottoms that fall below lower band
+- Double tops that rise above upper band
+- W-bottoms and M-tops patterns
+
+## Edge Cases & Errors {#edge-cases}
+
+### Low Volatility Periods
+```rust
+// When standard deviation approaches zero
+let flat_prices = vec![50.0; 100];
+let bands = bollinger_bands(&flat_prices, 20, 2.0)?;
+// Upper and lower bands will converge to middle band
+```
+
+### High Volatility Spikes
+```rust
+// Sudden price spikes can cause band expansion
+fn detect_band_explosion(bands: &BollingerBandsResult, threshold: f64) -> Vec<usize> {
+    let mut explosions = Vec::new();
+    
+    for i in 1..bands.upper.len() {
+        if let (Some(u1), Some(l1), Some(u0), Some(l0)) = 
+            (bands.upper[i], bands.lower[i], bands.upper[i-1], bands.lower[i-1]) {
+            
+            let width_current = u1 - l1;
+            let width_previous = u0 - l0;
+            
+            if width_current > width_previous * threshold {
+                explosions.push(i);
+            }
+        }
+    }
+    
+    explosions
+}
+```
+
+### Different Standard Deviation Calculations
+```rust
+// Population vs Sample standard deviation
+fn calculate_std_dev_population(values: &[f64], mean: f64) -> f64 {
+    let variance = values.iter()
+        .map(|v| (v - mean).powi(2))
+        .sum::<f64>() / values.len() as f64;
+    variance.sqrt()
+}
+
+fn calculate_std_dev_sample(values: &[f64], mean: f64) -> f64 {
+    let variance = values.iter()
+        .map(|v| (v - mean).powi(2))
+        .sum::<f64>() / (values.len() - 1) as f64;
+    variance.sqrt()
+}
+```
+
+### Numerical Precision
+```rust
+// For very small or very large prices
+fn normalize_bands_for_precision(
+    bands: BollingerBandsResult, 
+    price_scale: f64
+) -> BollingerBandsResult {
+    // Scale bands to maintain precision
+    BollingerBandsResult {
+        upper: bands.upper.iter().map(|&v| v.map(|x| x / price_scale)).collect(),
+        middle: bands.middle.iter().map(|&v| v.map(|x| x / price_scale)).collect(),
+        lower: bands.lower.iter().map(|&v| v.map(|x| x / price_scale)).collect(),
+    }
+}
+```
+
+## References {#references}
+
+1. **Bollinger, John** (2001). *Bollinger on Bollinger Bands*. McGraw-Hill.
+
+2. **Bollinger, John** (2010). *The Squeeze and Squeeze Variations*. Bollinger Capital Management.
+
+3. **Lien, Kathy** (2009). *Day Trading and Swing Trading the Currency Market*. John Wiley & Sons.
+   - Application of Bollinger Bands in forex markets
+
+4. **Kirkpatrick, Charles & Dahlquist, Julie** (2010). *Technical Analysis: The Complete Resource*. FT Press.
+   - Statistical properties and backtesting results
+
+</IndicatorLayout>

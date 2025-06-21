@@ -908,35 +908,138 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::float_cmp)]
     fn check_edcf_property(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
-        let strat = (
-            proptest::collection::vec((-1e6f64..1e6).prop_filter("f", |x| x.is_finite()), 40..200),
-            3usize..30,
-        );
-        proptest::test_runner::TestRunner::default().run(&strat, |(data, period)| {
-            prop_assume!(data.len() >= 2 * period);
-            let input = EdcfInput::from_slice(
-                &data,
-                EdcfParams {
-                    period: Some(period),
-                },
-            );
-            let out = edcf_with_kernel(&input, kernel).unwrap().values;
-            for i in (2 * period)..data.len() {
-                let window = &data[i + 1 - period..=i];
-                let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-                let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let y = out[i];
-                prop_assert!(y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9));
-            }
-            Ok(())
-        })?;
+
+        /* ─ 1. Strategy ─────────────────────────────────────────────────────────── */
+        // choose period first (3‥=30), then a ≥-2·period finite vector
+        let strat = (3usize..=30).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                    2 * period..400,
+                ),
+                Just(period),
+                // affine parameters: non-zero scale, arbitrary shift
+                (-1e3f64..1e3f64).prop_filter("a≠0", |a| a.abs() > 1e-12),
+                -1e3f64..1e3f64,
+            )
+        });
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period, a, b)| {
+                /* ─ 2. Run kernels safely (don’t unwrap blindly) ─────────────────── */
+                let params = EdcfParams { period: Some(period) };
+                let input  = EdcfInput::from_slice(&data, params.clone());
+
+                let fast = edcf_with_kernel(&input, kernel);
+                let slow = edcf_with_kernel(&input, Kernel::Scalar);
+
+                match (fast, slow) {
+                    /* ➊ Same-kind error ⇒ property holds */
+                    (Err(e1), Err(e2))
+                        if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
+                    { return Ok(()); }
+
+                    /* ➊′ Different error kinds → fail */
+                    (Err(e1), Err(e2)) =>
+                        prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2),
+
+                    /* ➋ Kernels disagree on success/error */
+                    (Err(e), Ok(_))   =>
+                        prop_assert!(false, "fast errored {e:?} but scalar succeeded"),
+                    (Ok(_),  Err(e))  =>
+                        prop_assert!(false, "scalar errored {e:?} but fast succeeded"),
+
+                    /* ➌ Both succeeded – full invariant suite */
+                    (Ok(fast), Ok(reference)) => {
+                        let EdcfOutput { values: out  } = fast;
+                        let EdcfOutput { values: rref } = reference;
+
+                        /* pre-compute streaming and affine-transformed outputs */
+                        let mut stream = EdcfStream::try_new(params.clone()).unwrap();
+                        let mut s_out  = Vec::with_capacity(data.len());
+                        for &v in &data { s_out.push(stream.update(v).unwrap_or(f64::NAN)); }
+
+                        let transformed: Vec<f64> = data.iter().map(|x| a * x + b).collect();
+                        let t_out = edcf(
+                            &EdcfInput::from_slice(&transformed, params.clone())
+                        )?.values;
+
+                        let warm = 2 * period;     // first usable index
+
+                        for i in warm..data.len() {
+                            let win   = &data[i + 1 - period..=i];
+                            let (lo, hi) = win.iter()
+                                .fold((f64::INFINITY, f64::NEG_INFINITY),
+                                    |(l,h), &v| (l.min(v), h.max(v)));
+                            let y  = out[i];
+                            let yr = rref[i];
+                            let ys = s_out[i];
+                            let yt = t_out[i];
+
+                            /* 1️⃣ Window-boundedness */
+                            prop_assert!(
+                                y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+                                "idx {i}: {y} ∉ [{lo}, {hi}]"
+                            );
+
+                            /* 2️⃣ Constant-series ⇒ all NaN */
+                            if win.iter().all(|v| *v == win[0]) {
+                                prop_assert!(y.is_nan(), "idx {i}: expected NaN on constant series");
+                            }
+
+                            /* 3️⃣ Affine equivariance (scale & translation) */
+                            if y.is_finite() && yt.is_finite() {
+                                let expect = a * y + b;
+                                let diff   = (yt - expect).abs();
+                                let tol    = 1e-9_f64.max(expect.abs() * 1e-9);
+                                let ulp    = yt.to_bits().abs_diff(expect.to_bits());
+                                prop_assert!(
+                                    diff <= tol || ulp <= 8,
+                                    "idx {i}: affine mismatch diff={diff:e}  ULP={ulp}"
+                                );
+                            }
+
+                            /* 4️⃣ SIMD ≡ scalar (ULP ≤ 4 or abs ≤ 1e-9) */
+                            let ulp = y.to_bits().abs_diff(yr.to_bits());
+                            prop_assert!(
+                                (y - yr).abs() <= 1e-9 || ulp <= 4,
+                                "idx {i}: fast={y} ref={yr} ULP={ulp}"
+                            );
+
+                            /* 5️⃣ Streaming parity */
+                            prop_assert!(
+                                (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
+                                "idx {i}: stream mismatch"
+                            );
+                        }
+
+                        /* 6️⃣ Warm-up NaNs */
+                        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
+                        let warm_expected = first + warm;
+                        prop_assert!(out[..warm_expected].iter().all(|v| v.is_nan()));
+                    }
+                }
+
+                Ok(())
+            })?;
+
+        /* 🔟 Error-path smoke tests (uniform across indicators) */
+        assert!(edcf(&EdcfInput::from_slice(&[], EdcfParams::default())).is_err());
+        assert!(edcf(&EdcfInput::from_slice(&[f64::NAN; 12], EdcfParams::default())).is_err());
+        assert!(edcf(&EdcfInput::from_slice(&[1.0; 5], EdcfParams { period: Some(8) })).is_err());
+        assert!(edcf(&EdcfInput::from_slice(&[1.0; 5], EdcfParams { period: Some(0) })).is_err());
+
         Ok(())
     }
+
+
 
     fn check_edcf_invalid_kernel(
         test_name: &str,
