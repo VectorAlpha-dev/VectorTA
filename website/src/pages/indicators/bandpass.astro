@@ -51,8 +51,7 @@ const parameters = [
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      α = (cos(2π/Period) + sin(2π/Period) - 1) / cos(2π/Period)<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> α = (cos(2π/Period) + sin(2π/Period) - 1) / cos(2π/Period)<br/>
       <br/>
       HP[i] = (1 - α/2)² × (Price[i] - 2×Price[i-1] + Price[i-2]) + <br/>
       &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;2×(1 - α) × HP[i-1] - (1 - α)² × HP[i-2]<br/>
@@ -77,20 +76,16 @@ const parameters = [
   
   <h3>Signal Generation</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Basic Signals:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Zero Crossovers:</strong> Buy when filter crosses above zero, sell when below</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Peak/Trough:</strong> Peaks indicate cycle highs, troughs indicate cycle lows</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Amplitude:</strong> Large amplitudes suggest strong cyclical movement</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Phase:</strong> Regular oscillations indicate stable market cycles</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Basic Signals:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Zero Crossovers:</strong> Buy when filter crosses above zero, sell when below</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Peak/Trough:</strong> Peaks indicate cycle highs, troughs indicate cycle lows</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Amplitude:</strong> Large amplitudes suggest strong cyclical movement</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Phase:</strong> Regular oscillations indicate stable market cycles</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Advanced Signals:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Cycle Confirmation:</strong> Multiple consecutive peaks/troughs at regular intervals</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Phase Shift:</strong> Changes in cycle timing may signal trend changes</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Amplitude Divergence:</strong> Decreasing amplitude with rising prices suggests weakness</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Frequency Stability:</strong> Consistent cycle periods indicate reliable signals</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Advanced Signals:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Cycle Confirmation:</strong> Multiple consecutive peaks/troughs at regular intervals</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Phase Shift:</strong> Changes in cycle timing may signal trend changes</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Amplitude Divergence:</strong> Decreasing amplitude with rising prices suggests weakness</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Frequency Stability:</strong> Consistent cycle periods indicate reliable signals</li>
     </ul>
   </div>
 

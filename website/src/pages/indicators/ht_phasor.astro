@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_phasor';
 const indicatorName = 'Hilbert Transform - Phasor';
 const description = `The Hilbert Transform Phasor indicator decomposes price data into two components - In-phase and Quadrature - that together form a phasor rotating in the complex plane, providing a powerful method for analyzing market cycles and their instantaneous characteristics.`;
-const parameters = [];  // Hilbert Transform indicators are typically parameter-free
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -107,199 +114,25 @@ const parameters = [];  // Hilbert Transform indicators are typically parameter-
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::ht_phasor;
-use std::f64::consts::PI;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate phasor components
-let (in_phase, quadrature) = ht_phasor(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Analyze phasor characteristics
-for i in 50..in_phase.len() {
-    if let (Some(i_val), Some(q_val)) = (in_phase.get(i), quadrature.get(i)) {
-        // Calculate phasor magnitude (cycle amplitude)
-        let magnitude = (i_val.powi(2) + q_val.powi(2)).sqrt();
-        
-        // Calculate phasor angle (cycle phase)
-        let phase = q_val.atan2(*i_val) * 180.0 / PI;
-        
-        // Detect strong cycles
-        if magnitude > 0.02 * close_prices[i] {  // 2% of price
-            println!("Strong cycle at bar {}: magnitude = {:.4}, phase = {:.1}°", 
-                     i, magnitude, phase);
-        }
-        
-        // Calculate rotation rate (cycle frequency)
-        if i > 0 {
-            let prev_phase = quadrature[i-1].atan2(in_phase[i-1]) * 180.0 / PI;
-            let phase_change = phase - prev_phase;
-            
-            // Handle phase wrapping
-            let phase_change = if phase_change > 180.0 { 
-                phase_change - 360.0 
-            } else if phase_change < -180.0 { 
-                phase_change + 360.0 
-            } else { 
-                phase_change 
-            };
-            
-            let period = 360.0 / phase_change.abs();
-            println!("Instantaneous period: {:.1} bars", period);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Cycle Strength Analysis</h3> <p>Measure and trade based on cycle strength:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Detect phasor patterns
-for i in 2..in_phase.len() {
-    if let (Some(i0), Some(q0), Some(i1), Some(q1), Some(i2), Some(q2)) = 
-        (in_phase.get(i-2), quadrature.get(i-2),
-         in_phase.get(i-1), quadrature.get(i-1),
-         in_phase.get(i), quadrature.get(i)) {
-        
-        // Calculate phasor velocity
-        let velocity_i = i2 - i1;
-        let velocity_q = q2 - q1;
-        
-        // Calculate phasor acceleration  
-        let accel_i = (i2 - i1) - (i1 - i0);
-        let accel_q = (q2 - q1) - (q1 - q0);
-        
-        // Detect cycle transitions
-        if velocity_i * accel_i < 0.0 && velocity_q * accel_q < 0.0 {
-            println!("Potential cycle transition at bar {}", i);
-        }
-    }
-}
-  </code></pre>
+  <h3>2. Phasor Rotation Trading</h3> <p>Trade based on phasor rotation patterns:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_phasor
+  <h3>3. Phasor Divergence Detection</h3> <p>Identify divergences between price and phasor:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate phasor components
-in_phase, quadrature = ht_phasor(df['close'])
-df['in_phase'] = in_phase
-df['quadrature'] = quadrature
-
-# Calculate phasor characteristics
-df['phasor_magnitude'] = np.sqrt(df['in_phase']**2 + df['quadrature']**2)
-df['phasor_phase'] = np.arctan2(df['quadrature'], df['in_phase']) * 180 / np.pi
-
-# Normalize magnitude as percentage of price
-df['phasor_strength'] = df['phasor_magnitude'] / df['close'] * 100
-
-# Calculate instantaneous period from phase change
-df['phase_change'] = df['phasor_phase'].diff()
-
-# Handle phase wrapping
-df['phase_change'] = df['phase_change'].apply(
-    lambda x: x - 360 if x > 180 else (x + 360 if x < -180 else x)
-)
-
-df['instant_period'] = 360 / df['phase_change'].abs()
-
-# Identify cycle characteristics
-df['strong_cycle'] = df['phasor_strength'] > 2  # > 2% of price
-df['stable_cycle'] = df['instant_period'].rolling(10).std() < 2
-
-# Generate signals based on phasor position
-# Buy when phasor in lower half and moving up
-df['phasor_buy'] = (df['quadrature'] < 0) & (df['quadrature'] > df['quadrature'].shift(1))
-
-# Sell when phasor in upper half and moving down  
-df['phasor_sell'] = (df['quadrature'] > 0) & (df['quadrature'] < df['quadrature'].shift(1))
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Cycle Strength Analysis</h3>
-  <p>Measure and trade based on cycle strength:</p>
-  <pre><code class="language-python">
-# Calculate phasor components
-i, q = ht_phasor(close)
-
-# Cycle strength (magnitude)
-cycle_strength = np.sqrt(i**2 + q**2)
-strength_pct = cycle_strength / close * 100
-
-# Define strength thresholds
-strong_cycle = strength_pct > 2
-weak_cycle = strength_pct < 0.5
-
-# Trade only during strong cycles
-cycle_phase = np.arctan2(q, i)
-in_buy_zone = (cycle_phase < -np.pi/2) & (cycle_phase > -np.pi)
-
-buy_signal = strong_cycle & in_buy_zone
-no_trade = weak_cycle  # Avoid trading in weak cycles
-  </code></pre>
-
-  <h3>2. Phasor Rotation Trading</h3>
-  <p>Trade based on phasor rotation patterns:</p>
-  <pre><code class="language-python">
-# Track phasor rotation
-i, q = ht_phasor(close)
-
-# Calculate angular velocity
-angle = np.arctan2(q, i)
-angular_velocity = angle.diff()
-
-# Correct for phase wrapping
-angular_velocity = angular_velocity.apply(
-    lambda x: x - 2*np.pi if x > np.pi else (x + 2*np.pi if x < -np.pi else x)
-)
-
-# Smooth rotation = good cycle
-rotation_quality = angular_velocity.rolling(5).std()
-smooth_rotation = rotation_quality < 0.2
-
-# Trade when rotation is smooth and in right quadrant
-# Quadrant 3: Buy zone (i < 0, q < 0)
-in_q3 = (i < 0) & (q < 0)
-buy_signal = smooth_rotation & in_q3 & (angular_velocity > 0)
-
-# Quadrant 1: Sell zone (i > 0, q > 0)
-in_q1 = (i > 0) & (q > 0)
-sell_signal = smooth_rotation & in_q1 & (angular_velocity > 0)
-  </code></pre>
-
-  <h3>3. Phasor Divergence Detection</h3>
-  <p>Identify divergences between price and phasor:</p>
-  <pre><code class="language-python">
-# Calculate phasor magnitude
-i, q = ht_phasor(close)
-magnitude = np.sqrt(i**2 + q**2)
-
-# Find peaks and troughs
-from scipy.signal import argrelextrema
-price_peaks = argrelextrema(close.values, np.greater, order=5)[0]
-price_troughs = argrelextrema(close.values, np.less, order=5)[0]
-
-mag_peaks = argrelextrema(magnitude.values, np.greater, order=5)[0]
-mag_troughs = argrelextrema(magnitude.values, np.less, order=5)[0]
-
-# Detect divergences
-# Bearish: Higher price peak, lower magnitude peak
-bearish_div = []
-for i in range(1, len(price_peaks)):
-    if price_peaks[i] in mag_peaks:
-        price_higher = close.iloc[price_peaks[i]] > close.iloc[price_peaks[i-1]]
-        mag_lower = magnitude.iloc[price_peaks[i]] < magnitude.iloc[price_peaks[i-1]]
-        if price_higher and mag_lower:
-            bearish_div.append(price_peaks[i])
-
-# Bullish: Lower price trough, higher magnitude trough  
-bullish_div = []
-for i in range(1, len(price_troughs)):
-    if price_troughs[i] in mag_troughs:
-        price_lower = close.iloc[price_troughs[i]] < close.iloc[price_troughs[i-1]]
-        mag_higher = magnitude.iloc[price_troughs[i]] > magnitude.iloc[price_troughs[i-1]]
-        if price_lower and mag_higher:
-            bullish_div.append(price_troughs[i])
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Initialization period:</strong> Requires ~50 bars for stable output</li>

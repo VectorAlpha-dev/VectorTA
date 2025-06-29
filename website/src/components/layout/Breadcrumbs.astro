@@ -23,7 +23,7 @@ segments.forEach((segment, index) => {
     label = 'Indicators';
   } else if (segments[0] === 'indicators' && index === 1) {
     // This is an indicator ID, try to get its name
-    const indicator = indicators[segment];
+    const indicator = indicators[segment as keyof typeof indicators];
     if (indicator) {
       label = indicator.name;
     }

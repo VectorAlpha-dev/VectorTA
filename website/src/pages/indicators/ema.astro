@@ -41,7 +41,7 @@ const parameters = [
   <h2>How It Works</h2>
   <p>The EMA calculation uses a smoothing factor to weight recent prices:</p>
   <ol>
-    <li><strong>Calculate Multiplier:</strong&gt; 2 / (Period + 1)</li>
+    <li><strong>Calculate Multiplier:</strong> 2 / (Period + 1)</li>
     <li><strong>Apply Weighting:</strong> Current price gets highest weight</li>
     <li><strong>Recursive Calculation:</strong> Each EMA incorporates all previous values</li>
     <li><strong>Exponential Decay:</strong> Older prices have exponentially less influence</li>
@@ -49,8 +49,7 @@ const parameters = [
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      Multiplier (α) = 2 / (Period + 1)<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> Multiplier (α) = 2 / (Period + 1)<br/>
       <br/>
       EMA Calculation:<br/>
       EMA[today] = (Price[today] × α) + (EMA[yesterday] × (1 - α))<br/>
@@ -83,20 +82,16 @@ const parameters = [
   
   <h3>Basic EMA Signals</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trend Direction:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Rising EMA:</strong> Uptrend in progress</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Falling EMA:</strong> Downtrend in progress</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Flat EMA:</strong> Consolidation or ranging market</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">EMA Slope Change:</strong> Potential trend reversal</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Trend Direction:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Rising EMA:</strong> Uptrend in progress</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Falling EMA:</strong> Downtrend in progress</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Flat EMA:</strong> Consolidation or ranging market</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> EMA Slope Change:</strong> Potential trend reversal</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Price Relationship:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Price Above EMA:</strong> Bullish bias, potential support</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Price Below EMA:</strong> Bearish bias, potential resistance</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Price Crosses EMA:</strong> Momentum shift signal</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">EMA as Dynamic S/R:</strong> Acts as moving support/resistance</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Price Relationship:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Price Above EMA:</strong> Bullish bias, potential support</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Price Below EMA:</strong> Bearish bias, potential resistance</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Price Crosses EMA:</strong> Momentum shift signal</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> EMA as Dynamic S/R:</strong> Acts as moving support/resistance</li>
     </ul>
   </div>
 

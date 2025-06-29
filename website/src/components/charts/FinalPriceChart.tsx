@@ -10,7 +10,7 @@ import { loadCSVData, getDataSubset } from '../../lib/utils/csv-data-loader';
 
 export function FinalPriceChart({ height = 500 }: { height?: number }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi>();
+  const chartRef = useRef<IChartApi | null>(null);
   const [status, setStatus] = useState('initialising…');
 
   useEffect(() => {
@@ -38,7 +38,7 @@ export function FinalPriceChart({ height = 500 }: { height?: number }) {
         wickDownColor: '#ef4444',
         borderVisible: false,
       });
-      candle.setData(candles);
+      candle.setData(candles as any);
 
       const volume = chart.addSeries(HistogramSeries, {
         priceFormat: { type: 'volume' },
@@ -50,7 +50,7 @@ export function FinalPriceChart({ height = 500 }: { height?: number }) {
           time: c.time,
           value: c.volume ?? 0,
           color: c.close >= c.open ? '#10b98140' : '#ef444440',
-        })),
+        })) as any,
       );
 
       chart.timeScale().fitContent();

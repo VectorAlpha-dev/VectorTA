@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_sine';
 const indicatorName = 'Hilbert Transform - SineWave';
 const description = `The Hilbert Transform SineWave indicator generates two sinusoidal outputs - Sine and LeadSine - that oscillate in sync with the dominant market cycle, providing clear visual signals for cycle tops and bottoms with the LeadSine offering advanced warning of cycle turns.`;
-const parameters = [];  // Hilbert Transform indicators are typically parameter-free
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -100,183 +107,25 @@ const parameters = [];  // Hilbert Transform indicators are typically parameter-
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::{ht_sine, ht_dcperiod};
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate SineWave indicator
-let (sine, leadsine) = ht_sine(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Detect crossover signals
-for i in 1..sine.len() {
-    if let (Some(sine_curr), Some(sine_prev), Some(lead_curr), Some(lead_prev)) = 
-        (sine.get(i), sine.get(i-1), leadsine.get(i), leadsine.get(i-1)) {
-        
-        // Detect crossovers
-        if lead_prev <= sine_prev && lead_curr > sine_curr {
-            println!("BUY signal at bar {}: LeadSine crossed above Sine", i);
-            println!("  Sine: {:.3}, LeadSine: {:.3}", sine_curr, lead_curr);
-        } else if lead_prev >= sine_prev && lead_curr < sine_curr {
-            println!("SELL signal at bar {}: LeadSine crossed below Sine", i);
-            println!("  Sine: {:.3}, LeadSine: {:.3}", sine_curr, lead_curr);
-        }
-        
-        // Identify extreme readings
-        if sine_curr.abs() > 0.9 {
-            let condition = if *sine_curr > 0.0 { "Overbought" } else { "Oversold" };
-            println!("{} condition at bar {}: Sine = {:.3}", condition, i, sine_curr);
-        }
-        
-        // Measure wave quality (smooth cycling)
-        if i > 10 {
-            let mut smoothness = 0.0;
-            for j in (i-10)..i {
-                let diff = (sine[j] - sine[j-1]).abs();
-                smoothness += diff;
-            }
-            smoothness /= 10.0;
-            
-            if smoothness > 0.15 {
-                println!("Good cycling detected at bar {}: smoothness = {:.3}", i, smoothness);
-            }
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Cycle Trading System</h3> <p>Trade based on SineWave crossovers:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Combine with period for complete analysis
-let dc_period = ht_dcperiod(&close_prices)?;
-for i in 50..sine.len() {
-    if let (Some(s), Some(period)) = (sine.get(i), dc_period.get(i)) {
-        // Check if we're at a cycle extreme
-        let cycle_position = (s.asin() / std::f64::consts::PI + 0.5) * period;
-        println!("Bar {}: Sine = {:.3}, Period = {:.1}, Cycle position = {:.1}", 
-                 i, s, period, cycle_position);
-    }
-}
-  </code></pre>
+  <h3>2. Momentum Confirmation</h3> <p>Use wave velocity for momentum analysis:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_sine, ht_dcperiod
+  <h3>3. Multi-Indicator Confirmation</h3> <p>Combine with other Hilbert indicators:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate SineWave indicator
-sine, leadsine = ht_sine(df['close'])
-df['sine'] = sine
-df['leadsine'] = leadsine
-
-# Detect crossover signals
-df['crossover_up'] = (df['leadsine'] > df['sine']) & (df['leadsine'].shift(1) <= df['sine'].shift(1))
-df['crossover_down'] = (df['leadsine'] < df['sine']) & (df['leadsine'].shift(1) >= df['sine'].shift(1))
-
-# Generate trading signals
-df['signal'] = 0
-df.loc[df['crossover_up'], 'signal'] = 1    # Buy
-df.loc[df['crossover_down'], 'signal'] = -1  # Sell
-
-# Identify extremes
-df['overbought'] = df['sine'] > 0.9
-df['oversold'] = df['sine'] < -0.9
-
-# Measure wave separation (signal strength)
-df['wave_separation'] = abs(df['sine'] - df['leadsine'])
-df['strong_signal'] = df['wave_separation'] > 0.5
-
-# Calculate wave smoothness (cycle quality)
-df['sine_change'] = df['sine'].diff().abs()
-df['smooth_cycle'] = df['sine_change'].rolling(10).mean() > 0.1
-
-# Combine with period for filtering
-df['dc_period'] = ht_dcperiod(df['close'])
-df['valid_cycle'] = (df['dc_period'] > 10) & (df['dc_period'] < 50)
-
-# Final signals only in cycling markets
-df['filtered_signal'] = df['signal'] * df['valid_cycle'] * df['smooth_cycle']
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Cycle Trading System</h3>
-  <p>Trade based on SineWave crossovers:</p>
-  <pre><code class="language-python">
-# Calculate indicators
-sine, leadsine = ht_sine(close)
-period = ht_dcperiod(close)
-
-# Identify cycling market
-cycling_market = (period > 10) & (period < 40) & (period.rolling(20).std() < 3)
-
-# Generate crossover signals
-buy_cross = (leadsine > sine) & (leadsine.shift(1) <= sine.shift(1))
-sell_cross = (leadsine < sine) & (leadsine.shift(1) >= sine.shift(1))
-
-# Filter signals by market condition
-buy_signal = buy_cross & cycling_market & (sine < 0.5)  # Not overbought
-sell_signal = sell_cross & cycling_market & (sine > -0.5)  # Not oversold
-
-# Stop loss at opposite extreme
-stop_loss_long = sine > 0.9
-stop_loss_short = sine < -0.9
-  </code></pre>
-
-  <h3>2. Momentum Confirmation</h3>
-  <p>Use wave velocity for momentum analysis:</p>
-  <pre><code class="language-python">
-# Calculate wave velocity
-sine, leadsine = ht_sine(close)
-sine_velocity = sine.diff()
-lead_velocity = leadsine.diff()
-
-# Momentum confirmation
-bullish_momentum = (sine_velocity > 0) & (lead_velocity > 0) & (leadsine > sine)
-bearish_momentum = (sine_velocity < 0) & (lead_velocity < 0) & (leadsine < sine)
-
-# Divergence detection
-price_roc = close.pct_change(10)
-sine_roc = sine.diff(10)
-
-bullish_divergence = (price_roc < -0.02) & (sine_roc > 0.5) & (sine < -0.5)
-bearish_divergence = (price_roc > 0.02) & (sine_roc < -0.5) & (sine > 0.5)
-
-# Combined signal
-strong_buy = buy_signal & bullish_momentum & ~bearish_divergence
-strong_sell = sell_signal & bearish_momentum & ~bullish_divergence
-  </code></pre>
-
-  <h3>3. Multi-Indicator Confirmation</h3>
-  <p>Combine with other Hilbert indicators:</p>
-  <pre><code class="language-python">
-# Get all Hilbert indicators
-sine, leadsine = ht_sine(close)
-dc_period = ht_dcperiod(close)
-dc_phase = ht_dcphase(close)
-i_phase, q_phase = ht_phasor(close)
-
-# Comprehensive cycle analysis
-# 1. Valid cycle period
-valid_period = (dc_period > 15) & (dc_period < 35)
-
-# 2. Sine crossover
-sine_buy = (leadsine > sine) & (leadsine.shift(1) <= sine.shift(1))
-
-# 3. Phase confirmation (in accumulation zone)
-phase_buy = (dc_phase > -180) & (dc_phase < -90)
-
-# 4. Phasor momentum (quadrature increasing)
-phasor_buy = q_phase > q_phase.shift(1)
-
-# Combined signal with multiple confirmations
-confirmed_buy = valid_period & sine_buy & phase_buy & phasor_buy
-
-# Signal strength based on agreement
-signal_strength = (
-    valid_period.astype(int) + 
-    sine_buy.astype(int) + 
-    phase_buy.astype(int) + 
-    phasor_buy.astype(int)
-) / 4
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Trending markets:</strong> Waves may flatline at extremes for extended periods</li>

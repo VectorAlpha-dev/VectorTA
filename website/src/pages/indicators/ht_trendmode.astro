@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_trendmode';
 const indicatorName = 'Hilbert Transform - Trend vs Cycle Mode';
 const description = `The Hilbert Transform Trend vs Cycle Mode indicator identifies whether the market is currently trending or cycling by analyzing the dominant cycle phase behavior, outputting 1 for trending markets and 0 for cycling markets.`;
-const parameters = [];  // Hilbert Transform indicators are typically parameter-free
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -114,234 +121,25 @@ const parameters = [];  // Hilbert Transform indicators are typically parameter-
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::{ht_trendmode, ht_trendline, ht_sine, rsi, atr};
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Get market mode
-let trend_mode = ht_trendmode(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Track mode changes and duration
-let mut mode_duration = 0;
-let mut current_mode = 0;
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Adaptive Strategy Switching</h3> <p>Automatically switch between strategies based on market mode:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-for i in 50..trend_mode.len() {
-    if let Some(mode) = trend_mode.get(i) {
-        let mode_int = *mode as i32;
-        
-        // Detect mode change
-        if i > 50 && mode_int != current_mode {
-            println!("Market regime change at bar {}: {} -> {}", 
-                     i, 
-                     if current_mode == 1 { "Trending" } else { "Cycling" },
-                     if mode_int == 1 { "Trending" } else { "Cycling" });
-            println!("Previous mode lasted {} bars", mode_duration);
-            
-            current_mode = mode_int;
-            mode_duration = 1;
-        } else {
-            mode_duration += 1;
-        }
-        
-        // Apply appropriate strategy based on mode
-        if mode_int == 1 {
-            // Trending mode - use trend following
-            let trendline = ht_trendline(&close_prices[..=i])?;
-            if let Some(trend) = trendline.last() {
-                if close_prices[i] > *trend {
-                    println!("Trend mode BUY: Price {:.2} above trendline {:.2}", 
-                             close_prices[i], trend);
-                }
-            }
-        } else {
-            // Cycling mode - use mean reversion
-            let (sine, _) = ht_sine(&close_prices[..=i])?;
-            if let Some(sine_val) = sine.last() {
-                if *sine_val < -0.8 {
-                    println!("Cycle mode BUY: Sine at {:.2} (oversold)", sine_val);
-                } else if *sine_val > 0.8 {
-                    println!("Cycle mode SELL: Sine at {:.2} (overbought)", sine_val);
-                }
-            }
-        }
-    }
-}
+  <h3>2. Risk Management Adaptation</h3> <p>Adjust risk parameters based on market mode:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Analyze mode statistics
-let trending_bars = trend_mode.iter().filter(|&&m| m > 0.5).count();
-let cycling_bars = trend_mode.iter().filter(|&&m| m <= 0.5).count();
-let total_bars = trending_bars + cycling_bars;
+  <h3>3. Multi-Indicator Confirmation</h3> <p>Combine mode with other indicators for robust signals:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-println!("\nMarket Mode Statistics:");
-println!("Trending: {} bars ({:.1}%)", trending_bars, 
-         trending_bars as f64 / total_bars as f64 * 100.0);
-println!("Cycling: {} bars ({:.1}%)", cycling_bars, 
-         cycling_bars as f64 / total_bars as f64 * 100.0);
-  </code></pre>
-
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_trendmode, ht_trendline, ht_sine, sma, bollinger_bands
-
-# Calculate market mode
-df['trend_mode'] = ht_trendmode(df['close'])
-
-# Identify mode changes
-df['mode_change'] = df['trend_mode'] != df['trend_mode'].shift(1)
-df['mode_label'] = df['trend_mode'].map({1: 'Trending', 0: 'Cycling'})
-
-# Calculate mode duration
-df['mode_group'] = df['mode_change'].cumsum()
-mode_durations = df.groupby('mode_group')['trend_mode'].agg(['count', 'first'])
-print("Average trending duration:", mode_durations[mode_durations['first'] == 1]['count'].mean())
-print("Average cycling duration:", mode_durations[mode_durations['first'] == 0]['count'].mean())
-
-# Apply mode-specific strategies
-# Trending mode strategy
-df['trendline'] = ht_trendline(df['close'])
-df['trend_signal'] = 0
-df.loc[(df['trend_mode'] == 1) & (df['close'] > df['trendline']), 'trend_signal'] = 1
-df.loc[(df['trend_mode'] == 1) & (df['close'] < df['trendline']), 'trend_signal'] = -1
-
-# Cycling mode strategy
-sine, leadsine = ht_sine(df['close'])
-df['sine'] = sine
-df['cycle_signal'] = 0
-df.loc[(df['trend_mode'] == 0) & (df['sine'] < -0.8), 'cycle_signal'] = 1
-df.loc[(df['trend_mode'] == 0) & (df['sine'] > 0.8), 'cycle_signal'] = -1
-
-# Combined adaptive signal
-df['adaptive_signal'] = df['trend_signal'] + df['cycle_signal']
-
-# Performance analysis by mode
-trending_returns = df[df['trend_mode'] == 1]['returns'].mean()
-cycling_returns = df[df['trend_mode'] == 0]['returns'].mean()
-print(f"Average returns in trending mode: {trending_returns:.4f}")
-print(f"Average returns in cycling mode: {cycling_returns:.4f}")
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Adaptive Strategy Switching</h3>
-  <p>Automatically switch between strategies based on market mode:</p>
-  <pre><code class="language-python">
-# Get market mode
-trend_mode = ht_trendmode(close)
-
-# Define strategies for each mode
-def trend_strategy(close, high, low):
-    # Donchian breakout for trends
-    upper = high.rolling(20).max()
-    lower = low.rolling(20).min()
-    
-    signal = pd.Series(0, index=close.index)
-    signal[close > upper.shift(1)] = 1
-    signal[close < lower.shift(1)] = -1
-    return signal
-
-def cycle_strategy(close):
-    # RSI mean reversion for cycles
-    rsi_val = rsi(close, 14)
-    
-    signal = pd.Series(0, index=close.index)
-    signal[rsi_val < 30] = 1
-    signal[rsi_val > 70] = -1
-    return signal
-
-# Apply appropriate strategy
-final_signal = pd.Series(0, index=close.index)
-
-# When trending
-trend_mask = trend_mode == 1
-final_signal[trend_mask] = trend_strategy(close, high, low)[trend_mask]
-
-# When cycling
-cycle_mask = trend_mode == 0
-final_signal[cycle_mask] = cycle_strategy(close)[cycle_mask]
-
-# Add mode transition rules
-mode_change = trend_mode != trend_mode.shift(1)
-final_signal[mode_change] = 0  # Flatten on mode change
-  </code></pre>
-
-  <h3>2. Risk Management Adaptation</h3>
-  <p>Adjust risk parameters based on market mode:</p>
-  <pre><code class="language-python">
-# Market mode
-trend_mode = ht_trendmode(close)
-
-# Base position size
-base_size = 100
-
-# Volatility
-atr_val = atr(high, low, close, 14)
-
-# Adaptive position sizing
-position_size = pd.Series(base_size, index=close.index)
-
-# Larger positions in trending markets (lower risk of whipsaws)
-position_size[trend_mode == 1] = base_size * 1.5
-
-# Smaller positions in cycling markets (higher whipsaw risk)
-position_size[trend_mode == 0] = base_size * 0.75
-
-# Stop loss adaptation
-stop_distance = pd.Series(index=close.index)
-
-# Wider stops in trends (let profits run)
-stop_distance[trend_mode == 1] = 3 * atr_val
-
-# Tighter stops in cycles (quick reversals expected)
-stop_distance[trend_mode == 0] = 1.5 * atr_val
-
-# Profit target adaptation
-profit_target = pd.Series(index=close.index)
-
-# No fixed target in trends (trail stop)
-profit_target[trend_mode == 1] = np.nan
-
-# Fixed targets in cycles (mean reversion)
-profit_target[trend_mode == 0] = 2 * atr_val
-  </code></pre>
-
-  <h3>3. Multi-Indicator Confirmation</h3>
-  <p>Combine mode with other indicators for robust signals:</p>
-  <pre><code class="language-python">
-# Get all Hilbert indicators
-trend_mode = ht_trendmode(close)
-trendline = ht_trendline(close)
-dc_period = ht_dcperiod(close)
-sine, leadsine = ht_sine(close)
-
-# Mode-specific confirmations
-signal = pd.Series(0, index=close.index)
-
-# Trending mode signals (mode = 1)
-trending = trend_mode == 1
-trend_up = close > trendline
-momentum_up = close > close.rolling(dc_period.astype(int)).mean()
-
-strong_uptrend = trending & trend_up & momentum_up
-signal[strong_uptrend] = 1
-
-# Cycling mode signals (mode = 0)
-cycling = trend_mode == 0
-oversold = sine < -0.8
-turning_up = leadsine > sine
-
-cycle_buy = cycling & oversold & turning_up
-signal[cycle_buy] = 1
-
-# Quality filter - only trade when mode is stable
-mode_stable = trend_mode.rolling(10).std() == 0
-signal = signal * mode_stable
-
-# Exit when mode changes
-mode_change = trend_mode != trend_mode.shift(1)
-signal[mode_change] = 0
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Mode flickering:</strong> Rapid switching in transitional markets</li>

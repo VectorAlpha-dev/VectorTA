@@ -95,7 +95,7 @@ use my_project::indicators::{
     maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqData, MaaqInput},
     mab::{mab as mab_raw, MabInput},
     macd::{macd as macd_raw, MacdInput},
-    mama::{mama_with_kernel, MamaBatchBuilder, MamaData, MamaInput},
+    mama::{mama as mama_raw, MamaInput},
     marketefi::{marketefi as marketfi_raw, MarketefiInput},
     mass::{mass as mass_raw, MassInput},
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
@@ -107,16 +107,16 @@ use my_project::indicators::{
     minmax::{minmax as minmax_raw, MinmaxInput},
     mom::{mom as mom_raw, MomInput},
     msw::{msw as msw_raw, MswInput},
-    mwdx::{mwdx_with_kernel, MwdxBatchBuilder, MwdxData, MwdxInput},
+    mwdx::{mwdx as mwdx_raw, MwdxInput},
     natr::{natr as natr_raw, NatrInput},
-    nma::{nma_with_kernel, NmaBatchBuilder, NmaData, NmaInput},
+    nma::{nma as nma_raw, NmaInput},
     pivot::{pivot as pivot_raw, PivotInput},
     pma::{pma as pma_raw, PmaInput},
     ppo::{ppo as ppo_raw, PpoInput},
     pvi::{pvi as pvi_raw, PviInput},
-    pwma::{pwma_with_kernel, PwmaBatchBuilder, PwmaData, PwmaInput},
+    pwma::{pwma as pwma_raw, PwmaInput},
     qstick::{qstick as qstick_raw, QstickInput},
-    reflex::{reflex_with_kernel, ReflexBatchBuilder, ReflexData, ReflexInput},
+    reflex::{reflex as reflex_raw, ReflexInput},
     roc::{roc as roc_raw, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
     rocr::{rocr as rocr_raw, RocrInput},
@@ -124,28 +124,25 @@ use my_project::indicators::{
     rvi::{rvi as rvi_raw, RviInput},
     safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
     sar::{sar as sar_raw, SarInput},
-    sinwma::{sinwma_with_kernel, SinWmaBatchBuilder, SinWmaData, SinWmaInput},
-    sma::{sma_with_kernel, SmaBatchBuilder, SmaData, SmaInput},
-    smma::{smma_with_kernel, SmmaBatchBuilder, SmmaData, SmmaInput},
+    sinwma::{sinwma as sinwma_raw, SinWmaInput},
+    sma::{sma as sma_raw, SmaInput},
+    smma::{smma as smma_raw, SmmaInput},
     squeeze_momentum::{squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumInput},
-    sqwma::{sqwma_with_kernel, SqwmaBatchBuilder, SqwmaData, SqwmaInput},
+    sqwma::{sqwma as sqwma_raw, SqwmaInput},
     srsi::{srsi as srsi_raw, SrsiInput},
-    srwma::{srwma_with_kernel, SrwmaBatchBuilder, SrwmaData, SrwmaInput},
+    srwma::{srwma as srwma_raw, SrwmaInput},
     stc::{stc as stc_raw, StcInput},
     stddev::{stddev as stddev_raw, StdDevInput},
     stochf::{stochf as stochf_raw, StochfInput},
-    supersmoother::{
-        supersmoother_with_kernel, SuperSmootherBatchBuilder, SuperSmootherData, SuperSmootherInput,
-    },
+    supersmoother::{supersmoother as supersmoother_raw, SuperSmootherInput},
     supersmoother_3_pole::{
-        supersmoother_3_pole_with_kernel, SuperSmoother3PoleBatchBuilder, SuperSmoother3PoleData,
-        SuperSmoother3PoleInput,
+        supersmoother_3_pole as supersmoother_3_pole_raw, SuperSmoother3PoleInput,
     },
-    swma::{swma_with_kernel, SwmaBatchBuilder, SwmaData, SwmaInput},
-    tema::{tema_with_kernel, TemaBatchBuilder, TemaData, TemaInput},
-    tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonData, TilsonInput},
-    trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexData, TrendFlexInput},
-    trima::{trima_with_kernel, TrimaBatchBuilder, TrimaData, TrimaInput},
+    swma::{swma as swma_raw, SwmaInput},
+    tema::{tema as tema_raw, TemaInput},
+    tilson::{tilson as tilson_raw, TilsonInput},
+    trendflex::{trendflex as trendflex_raw, TrendFlexInput},
+    trima::{trima as trima_raw, TrimaInput},
     trix::{trix as trix_raw, TrixInput},
     tsi::{tsi as tsi_raw, TsiInput},
     ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
@@ -159,17 +156,17 @@ use my_project::indicators::{
     voss::{voss as voss_raw, VossInput},
     vpci::{vpci as vpci_raw, VpciInput},
     vpt::{vpt as vpt_raw, VptInput},
-    vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaData, VpwmaInput},
-    vwap::{vwap_with_kernel, VwapBatchBuilder, VwapData, VwapInput},
-    vwma::{vwma_with_kernel, VwmaBatchBuilder, VwmaData, VwmaInput},
+    vpwma::{vpwma as vpwma_raw, VpwmaInput},
+    vwap::{vwap as vwap_raw, VwapInput},
+    vwma::{vwma as vwma_raw, VwmaInput},
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
     wad::{wad as wad_raw, WadInput},
     wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
     wclprice::{wclprice as wclprice_raw, WclpriceInput},
-    wilders::{wilders_with_kernel, WildersBatchBuilder, WildersData, WildersInput},
+    wilders::{wilders as wilders_raw, WildersInput},
     willr::{willr as willr_raw, WillrInput},
-    wma::{wma_with_kernel, WmaBatchBuilder, WmaData, WmaInput},
-    zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaData, ZlemaInput},
+    wma::{wma as wma_raw, WmaInput},
+    zlema::{zlema as zlema_raw, ZlemaInput},
     zscore::{zscore as zscore_raw, ZscoreInput},
 };
 
@@ -706,6 +703,7 @@ bench_wrappers! {
     (lrsi_bench, lrsi_raw, LrsiInputS),
     (mab_bench, mab_raw, MabInputS),
     (macd_bench, macd_raw, MacdInputS),
+    (mama_bench, mama_raw, MamaInputS),
     (marketfi_bench, marketfi_raw, MarketefiInputS),
     (mass_bench, mass_raw, MassInputS),
     (mean_ad_bench, mean_ad_raw, MeanAdInputS),
@@ -717,12 +715,16 @@ bench_wrappers! {
     (minmax_bench, minmax_raw, MinmaxInputS),
     (mom_bench, mom_raw, MomInputS),
     (msw_bench, msw_raw, MswInputS),
+    (mwdx_bench, mwdx_raw, MwdxInputS),
     (natr_bench, natr_raw, NatrInputS),
+    (nma_bench, nma_raw, NmaInputS),
     (pivot_bench, pivot_raw, PivotInputS),
     (pma_bench, pma_raw, PmaInputS),
     (ppo_bench, ppo_raw, PpoInputS),
     (pvi_bench, pvi_raw, PviInputS),
+    (pwma_bench, pwma_raw, PwmaInputS),
     (qstick_bench, qstick_raw, QstickInputS),
+    (reflex_bench, reflex_raw, ReflexInputS),
     (roc_bench, roc_raw, RocInputS),
     (rocp_bench, rocp_raw, RocpInputS),
     (rocr_bench, rocr_raw, RocrInputS),
@@ -730,11 +732,23 @@ bench_wrappers! {
     (rvi_bench, rvi_raw, RviInputS),
     (safezonestop_bench, safezonestop_raw, SafeZoneStopInputS),
     (sar_bench, sar_raw, SarInputS),
+    (sinwma_bench, sinwma_raw, SinWmaInputS),
+    (sma_bench, sma_raw, SmaInputS),
+    (smma_bench, smma_raw, SmmaInputS),
     (squeeze_momentum_bench, squeeze_momentum_raw, SqueezeMomentumInputS),
+    (sqwma_bench, sqwma_raw, SqwmaInputS),
     (srsi_bench, srsi_raw, SrsiInputS),
+    (srwma_bench, srwma_raw, SrwmaInputS),
     (stc_bench, stc_raw, StcInputS),
     (stddev_bench, stddev_raw, StdDevInputS),
     (stochf_bench, stochf_raw, StochfInputS),
+    (supersmoother_bench, supersmoother_raw, SuperSmootherInputS),
+    (supersmoother_3_pole_bench, supersmoother_3_pole_raw, SuperSmoother3PoleInputS),
+    (swma_bench, swma_raw, SwmaInputS),
+    (tema_bench, tema_raw, TemaInputS),
+    (tilson_bench, tilson_raw, TilsonInputS),
+    (trendflex_bench, trendflex_raw, TrendFlexInputS),
+    (trima_bench, trima_raw, TrimaInputS),
     (trix_bench, trix_raw, TrixInputS),
     (tsi_bench, tsi_raw, TsiInputS),
     (ttm_trend_bench, ttm_trend_raw, TtmTrendInputS),
@@ -748,11 +762,17 @@ bench_wrappers! {
     (voss_bench, voss_raw, VossInputS),
     (vpci_bench, vpci_raw, VpciInputS),
     (vpt_bench, vpt_raw, VptInputS),
+    (vpwma_bench, vpwma_raw, VpwmaInputS),
+    (vwap_bench, vwap_raw, VwapInputS),
+    (vwma_bench, vwma_raw, VwmaInputS),
     (vwmacd_bench, vwmacd_raw, VwmacdInputS),
     (wad_bench, wad_raw, WadInputS),
     (wavetrend_bench, wavetrend_raw, WavetrendInputS),
     (wclprice_bench, wclprice_raw, WclpriceInputS),
+    (wilders_bench, wilders_raw, WildersInputS),
     (willr_bench, willr_raw, WillrInputS),
+    (wma_bench, wma_raw, WmaInputS),
+    (zlema_bench, zlema_raw, ZlemaInputS),
     (zscore_bench, zscore_raw, ZscoreInputS),
 }
 
@@ -820,7 +840,6 @@ bench_scalars!(
     linearreg_slope_bench     => LinearRegSlopeInputS,
     lrsi_bench                => LrsiInputS,
 
-    maaq_bench => MaaqInputS,
     mab_bench  => MabInputS,
     macd_bench => MacdInputS,
     mama_bench => MamaInputS,
@@ -915,6 +934,7 @@ make_kernel_wrappers!(jma, jma_with_kernel, JmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(jsa, jsa_with_kernel, JsaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(kama, kama_with_kernel, KamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(linreg, linreg_with_kernel, LinRegInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(maaq, maaq_with_kernel, MaaqInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -974,6 +994,7 @@ make_batch_wrappers!(jma_batch, JmaBatchBuilder, JmaInputS; ScalarBatch, Avx2Bat
 make_batch_wrappers!(jsa_batch, JsaBatchBuilder, JsaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(kama_batch, KamaBatchBuilder, KamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(linreg_batch, LinRegBatchBuilder, LinRegInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(maaq_batch, MaaqBatchBuilder, MaaqInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1102,6 +1123,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    maaq_batch => MaaqInputS; Some(227);
+    maaq_batch_scalarbatch,
+    maaq_batch_avx2batch,
+    maaq_batch_avx512batch,
+);
+
+bench_variants!(
     alma => AlmaInputS; None;
     alma_scalar,
     alma_avx2,
@@ -1227,6 +1255,13 @@ bench_variants!(
     linreg_avx512,
 );
 
+bench_variants!(
+    maaq => MaaqInputS; None;
+    maaq_scalar,
+    maaq_avx2,
+    maaq_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1264,5 +1299,7 @@ criterion_main!(
     benches_kama,
     benches_kama_batch,
     benches_linreg,
-    benches_linreg_batch
+    benches_linreg_batch,
+    benches_maaq,
+    benches_maaq_batch
 );

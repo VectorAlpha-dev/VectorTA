@@ -44,7 +44,7 @@ import { TestComponent } from '../components/TestComponent';
           },
         });
 
-        const candlestickSeries = chart.addCandlestickSeries();
+        const candlestickSeries = (chart as any).addCandlestickSeries();
         
         // Simple data
         const data = [

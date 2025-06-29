@@ -13,7 +13,9 @@ async function cacheSampleData() {
     
     // Try to load a CSV file
     let csvContent;
+    let csvPath;
     const possiblePaths = [
+      './public/2018-09-01-2024-Bitfinex_Spot-4h.csv',
       './2018-09-01-2024-Bitfinex_Spot-4h.csv',
       '../src/data/10kCandles.csv',
       '../../src/data/10kCandles.csv'
@@ -22,6 +24,7 @@ async function cacheSampleData() {
     for (const path of possiblePaths) {
       try {
         csvContent = await readFile(path, 'utf-8');
+        csvPath = path;
         console.log(`Found CSV file at: ${path}`);
         break;
       } catch (e) {

@@ -101,90 +101,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::highpass;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate High Pass Filter
-let hp_values = highpass(&close_prices, 48)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify zero-line crossings
-for i in 1..hp_values.len() {
-    if let (Some(prev), Some(curr)) = (hp_values.get(i-1), hp_values.get(i)) {
-        if prev <= 0.0 && curr > 0.0 {
-            println!("Bullish cycle turn at index {}", i);
-        } else if prev >= 0.0 && curr < 0.0 {
-            println!("Bearish cycle turn at index {}", i);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Cycle Extraction</h3> <p>Remove trend to analyze pure cycles:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Measure cycle amplitude
-let amplitude = hp_values.windows(50)
-    .map(|w| w.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap() -
-              w.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap())
-    .collect::<Vec<_>>();
-  </code></pre>
+  <h3>2. Detrended Analysis</h3> <p>Analyze price movements without trend bias:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import highpass
+  <h3>3. Oscillator Enhancement</h3> <p>Use as input to other indicators:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate High Pass Filter
-df['hp'] = highpass(df['close'], period=48)
-
-# Find cycle peaks and troughs
-df['hp_peak'] = df['hp'].rolling(5).max() == df['hp']
-df['hp_trough'] = df['hp'].rolling(5).min() == df['hp']
-
-# Generate trading signals
-df['signal'] = 0
-df.loc[(df['hp'] > 0) & (df['hp'].shift(1) <= 0), 'signal'] = 1  # Buy
-df.loc[(df['hp'] < 0) & (df['hp'].shift(1) >= 0), 'signal'] = -1  # Sell
-
-# Measure cycle period
-peaks = df[df['hp_peak']].index
-cycle_periods = np.diff(peaks)
-avg_cycle = np.mean(cycle_periods) if len(cycle_periods) > 0 else 0
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Cycle Extraction</h3>
-  <p>Remove trend to analyze pure cycles:</p>
-  <pre><code class="language-python">
-# Extract dominant cycle
-hp = highpass(close, 48)
-# Find cycle period using FFT or autocorrelation
-from scipy import signal
-freqs, power = signal.periodogram(hp.dropna())
-dominant_period = 1 / freqs[np.argmax(power[1:])]  # Skip DC component
-  </code></pre>
-
-  <h3>2. Detrended Analysis</h3>
-  <p>Analyze price movements without trend bias:</p>
-  <pre><code class="language-python">
-# Detrend multiple timeframes
-hp_short = highpass(close, 20)  # Short-term cycles
-hp_medium = highpass(close, 48)  # Medium-term cycles
-hp_long = highpass(close, 100)  # Long-term cycles
-
-# Trade when all align
-bullish = (hp_short > 0) & (hp_medium > 0) & (hp_long > 0)
-  </code></pre>
-
-  <h3>3. Oscillator Enhancement</h3>
-  <p>Use as input to other indicators:</p>
-  <pre><code class="language-python">
-# Create detrended RSI
-hp_price = highpass(close, 48)
-detrended_rsi = rsi(hp_price + close.mean(), 14)  # Add back mean for positive values
-
-# More responsive to cycles than standard RSI
-cycle_signals = (detrended_rsi < 30) | (detrended_rsi > 70)
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Initialization:</strong> First few values may be unstable due to filter startup</li>

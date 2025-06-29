@@ -279,64 +279,128 @@ pub fn maaq_scalar(
     period: usize,
     fast_p: usize,
     slow_p: usize,
-    first: usize,
+    first: usize,          // kept for API compatibility; still unused
     out: &mut [f64],
-) -> Result<MaaqOutput, MaaqError> {
-    let len = data.len();
-    let fast_sc = 2.0 / (fast_p as f64 + 1.0);
-    let slow_sc = 2.0 / (slow_p as f64 + 1.0);
+) -> Result<(), MaaqError> {
+    let len      = data.len();
+    let fast_sc  = 2.0 / (fast_p  as f64 + 1.0);
+    let slow_sc  = 2.0 / (slow_p  as f64 + 1.0);
 
+    // pre-compute absolute price differences
     let mut diff = vec![0.0; len];
     for i in 1..len {
         diff[i] = (data[i] - data[i - 1]).abs();
     }
 
-    for i in 0..period {
-        out[i] = data[i];
-    }
+    // warm-up: the first `period` outputs equal the raw prices
+    out[..period].copy_from_slice(&data[..period]);
 
-    let mut rolling_sum = 0.0;
-    for &value in &diff[..period] {
-        rolling_sum += value;
-    }
+    // rolling sum of |Δprice|
+    let mut rolling_sum = diff[..period].iter().sum::<f64>();
 
     for i in period..len {
+        // slide the window
         rolling_sum += diff[i];
         rolling_sum -= diff[i - period];
 
-        let noise = rolling_sum;
-        let signal = (data[i] - data[i - period]).abs();
-        let ratio = if noise.abs() < f64::EPSILON {
-            0.0
-        } else {
-            signal / noise
-        };
+        // efficiency ratio ER = |price[i] − price[i-period]| / Σ|Δprice|
+        let noise   = rolling_sum;
+        let signal  = (data[i] - data[i - period]).abs();
+        let ratio   = if noise.abs() < f64::EPSILON { 0.0 } else { signal / noise };
 
-        let sc = ratio.mul_add(fast_sc, slow_sc);
+        // smoothing constant SC  = (ratio * fast_sc + slow_sc)²   ← no mul_add
+        let sc   = ratio * fast_sc + slow_sc;
         let temp = sc * sc;
 
-        let prev_val = out[i - 1];
+        // adaptive EMA update
+        let prev_val  = out[i - 1];
         out[i] = prev_val + temp * (data[i] - prev_val);
     }
-
-    Ok(MaaqOutput {
-        values: out.to_vec(),
-    })
+    Ok(())
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn maaq_avx2(
-    data: &[f64],
+    data:  &[f64],
     period: usize,
     fast_p: usize,
     slow_p: usize,
-    first: usize,
-    out: &mut [f64],
-) -> Result<MaaqOutput, MaaqError> {
-    // Stub: call scalar implementation
-    maaq_scalar(data, period, fast_p, slow_p, first, out)
+    _first: usize,          // kept for API compatibility; still unused
+    out:   &mut [f64],
+) -> Result<(), MaaqError> {
+    // ------ safety & basic checks ------------------------------------------------------------
+    let len = data.len();
+    assert_eq!(len, out.len(), "output slice length must match input");
+
+    // ------ 1 · pre-compute constants --------------------------------------------------------
+    let fast_sc = 2.0 / (fast_p as f64 + 1.0);
+    let slow_sc = 2.0 / (slow_p as f64 + 1.0);
+
+    // ------ 2 · rolling-window buffers -------------------------------------------------------
+    // diff[0] starts as 0.0 so scalar & SIMD paths have identical initial sums
+    let mut diffs    = vec![0.0f64; period];
+    let mut vol_sum  = 0.0;
+
+    // fill slots 1‥period-1 (|Δprice| between successive bars)
+    for i in 1..period {
+        let d = (data[i] - data[i - 1]).abs();
+        diffs[i] = d;
+        vol_sum += d;
+    }
+
+    // seed output with raw prices for the warm-up area
+    out[..period].copy_from_slice(&data[..period]);
+    let mut prev_val = data[period - 1];
+
+    // ------ 3 · first computable point (index = period) -------------------------------------
+    // ❶ insert newest |Δ| BEFORE computing ER₀ so window now covers period bars
+    let new_diff = (data[period] - data[period - 1]).abs();
+    diffs[0] = new_diff;
+    vol_sum += new_diff;
+
+    let er0 = if vol_sum > f64::EPSILON {
+        (data[period] - data[0]).abs() / vol_sum
+    } else {
+        0.0
+    };
+    let mut sc = fast_sc.mul_add(er0, slow_sc); // (fast_sc * ER) + slow_sc
+    sc *= sc;                                   // square once
+    prev_val  = sc.mul_add(data[period] - prev_val, prev_val);
+    out[period] = prev_val;
+
+    let mut idx = 1;            // ring-buffer head: oldest diff is now at slot 1
+
+    // ------ 4 · main streaming loop ----------------------------------------------------------
+    for i in (period + 1)..len {
+        // roll window: drop oldest |Δ|, add newest |Δ|
+        vol_sum -= diffs[idx];
+        let nd = (data[i] - data[i - 1]).abs();
+        diffs[idx] = nd;
+        vol_sum += nd;
+        idx += 1;
+        if idx == period { idx = 0; }
+
+        // efficiency ratio
+        let er = if vol_sum > f64::EPSILON {
+            (data[i] - data[i - period]).abs() / vol_sum
+        } else {
+            0.0
+        };
+
+        // adaptive smoothing constant (squared)
+        let mut sc = fast_sc.mul_add(er, slow_sc);
+        sc *= sc;
+
+        // EMA-style update using fused multiply-add
+        prev_val = sc.mul_add(data[i] - prev_val, prev_val);
+        out[i]   = prev_val;
+    }
+
+    Ok(())
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -347,39 +411,9 @@ pub fn maaq_avx512(
     slow_p: usize,
     first: usize,
     out: &mut [f64],
-) -> Result<MaaqOutput, MaaqError> {
-    // Stub: call scalar implementation
-    if period <= 32 {
-        maaq_avx512_short(data, period, fast_p, slow_p, first, out)
-    } else {
-        maaq_avx512_long(data, period, fast_p, slow_p, first, out)
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn maaq_avx512_short(
-    data: &[f64],
-    period: usize,
-    fast_p: usize,
-    slow_p: usize,
-    first: usize,
-    out: &mut [f64],
-) -> Result<MaaqOutput, MaaqError> {
-    maaq_scalar(data, period, fast_p, slow_p, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn maaq_avx512_long(
-    data: &[f64],
-    period: usize,
-    fast_p: usize,
-    slow_p: usize,
-    first: usize,
-    out: &mut [f64],
-) -> Result<MaaqOutput, MaaqError> {
-    maaq_scalar(data, period, fast_p, slow_p, first, out)
+) -> Result<(), MaaqError> {
+    maaq_avx2(data, period, fast_p, slow_p, first, out)?;
+    Ok(())
 }
 
 // Streaming/Stateful MaaqStream
@@ -720,36 +754,7 @@ unsafe fn maaq_row_scalar(
     slow_p: usize,
     out: &mut [f64],
 ) {
-    let len = data.len();
-    let fast_sc = 2.0 / (fast_p as f64 + 1.0);
-    let slow_sc = 2.0 / (slow_p as f64 + 1.0);
-
-    let mut diff = vec![0.0; len];
-    for i in 1..len {
-        diff[i] = (data[i] - data[i - 1]).abs();
-    }
-    for i in 0..period {
-        out[i] = data[i];
-    }
-    let mut rolling_sum = 0.0;
-    for &value in &diff[..period] {
-        rolling_sum += value;
-    }
-    for i in period..len {
-        rolling_sum += diff[i];
-        rolling_sum -= diff[i - period];
-        let noise = rolling_sum;
-        let signal = (data[i] - data[i - period]).abs();
-        let ratio = if noise.abs() < f64::EPSILON {
-            0.0
-        } else {
-            signal / noise
-        };
-        let sc = ratio.mul_add(fast_sc, slow_sc);
-        let temp = sc * sc;
-        let prev_val = out[i - 1];
-        out[i] = prev_val + temp * (data[i] - prev_val);
-    }
+    maaq_scalar(data, period, fast_p, slow_p, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -762,7 +767,7 @@ unsafe fn maaq_row_avx2(
     slow_p: usize,
     out: &mut [f64],
 ) {
-    maaq_row_scalar(data, first, period, fast_p, slow_p, out)
+   maaq_avx2(data, period, fast_p, slow_p, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -775,11 +780,7 @@ pub unsafe fn maaq_row_avx512(
     slow_p: usize,
     out: &mut [f64],
 ) {
-    if period <= 32 {
-        maaq_row_avx512_short(data, first, period, fast_p, slow_p, out);
-    } else {
-        maaq_row_avx512_long(data, first, period, fast_p, slow_p, out);
-    }
+    maaq_avx2(data, period, fast_p, slow_p, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

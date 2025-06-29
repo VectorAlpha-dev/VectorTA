@@ -1,6 +1,6 @@
 ---
 title: "Acceleration/Deceleration Oscillator"
-description: "The AC Oscillator measures whether the market's driving force is accelerating or decelerating. Think of it as the 'speedometer' of price momentum — it tells you not just which direction the market is moving, but whether it's speeding up or slowing down."
+description: "The AC Oscillator measures whether the market's driving force is accelerating or decelerating."
 category: "oscillators"
 parameters:
   - name: "fast_period"
@@ -35,33 +35,13 @@ seeAlso: ["awesome-oscillator", "fractals", "alligator"]
 ---
 
 import { Code } from 'astro:components';
-import SignalPattern from '../../components/indicators/SignalPattern.astro';
 import FormulaBlock from '../../components/indicators/FormulaBlock.astro';
+import ParameterTable from '../../components/indicators/ParameterTable.astro';
 
 ## Overview
 
-The Acceleration/Deceleration Oscillator (AC) is a momentum indicator that provides early signals about potential changes in market direction. Developed by Bill Williams as part of his Trading Chaos theory, it measures the acceleration and deceleration of the current driving force behind price movements.
+The Acceleration/Deceleration Oscillator (AC) is a momentum indicator developed by Bill Williams as part of his Trading Chaos theory. It measures the acceleration and deceleration of the current driving force behind price movements.
 
-What makes the AC particularly valuable is its ability to identify turning points before they become apparent in price action. By measuring the rate of change of momentum (essentially the second derivative of price), it can signal when a trend is losing steam even while prices continue in the same direction.
-
-## Interpretation
-
-The AC oscillates around a zero line, with positive values indicating acceleration and negative values indicating deceleration. The indicator is typically displayed as a histogram with color coding:
-
-- **Green bars:** The current bar is higher than the previous bar (momentum is increasing)
-- **Red bars:** The current bar is lower than the previous bar (momentum is decreasing)
-
-### Key Signal Patterns
-
-<SignalPattern
-  title="Trading Signals"
-  signals={[
-    { condition: "Above Zero + Green", description: "Strong bullish momentum accelerating", action: "buy" },
-    { condition: "Above Zero + Red", description: "Bullish momentum decelerating (caution)", action: "caution" },
-    { condition: "Below Zero + Red", description: "Strong bearish momentum accelerating", action: "sell" },
-    { condition: "Below Zero + Green", description: "Bearish momentum decelerating (potential reversal)", action: "caution" }
-  ]}
-/>
 
 ## Calculation
 
@@ -111,32 +91,9 @@ for (i, ac) in ac_values.iter().enumerate() {
 }
 </Code>
 
-## Common Use Cases
 
-### 1. Trend Confirmation
-Use AC to confirm the strength of existing trends. When AC is above zero and showing green bars, it confirms strong bullish momentum. This can be used to time entries or add to positions.
+## Performance Characteristics
 
-### 2. Early Reversal Detection
-Watch for divergences between price and AC. If price makes new highs but AC shows lower highs, it suggests the uptrend is losing momentum and may reverse soon.
-
-### 3. Entry and Exit Timing
-Following Bill Williams' rules:
-- **Buy signal:** Two consecutive green bars above zero, or three consecutive green bars below zero
-- **Sell signal:** Two consecutive red bars below zero, or three consecutive red bars above zero
-
-### 4. Filtering False Breakouts
-Use AC to validate breakouts. A price breakout accompanied by accelerating momentum (increasing AC values) is more likely to continue than one with decelerating momentum.
-
-## Edge Cases & Errors
-
-### Common Errors
-
-- **Not Enough Data:** AC requires at least `slow_period + signal_period - 1` data points (default: 38 points) to produce the first valid value
-- **Invalid Parameters:** Parameters must be positive integers with `fast_period < slow_period`
-- **Empty Data:** Passing empty arrays will return an `EmptyData` error
-
-### Special Considerations
-
-- The indicator can produce many false signals in ranging markets
-- Best used in conjunction with other indicators from the Williams system
-- Color changes are as important as the actual values
+- **Time Complexity:** O(n) where n is the number of data points
+- **Space Complexity:** O(n) for storing intermediate calculations
+- **Minimum Data Required:** slow_period + signal_period - 1 points (default: 38)

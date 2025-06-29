@@ -10,13 +10,16 @@ import {
   type UTCTimestamp,
   type CandlestickData,
 } from 'lightweight-charts';
-import { loadCSVData } from '../../lib/utils/csv-data-loader'; // ← this one
+import { loadCSVData, getDataSubset } from '../../lib/utils/csv-data-loader'; // ← this one
+import { ExportButton } from '../export/ExportButton';
 
 interface IndicatorChartProps {
   height?: number;
   indicatorData?: number[];
   indicatorType?: 'line' | 'histogram';
   indicatorColor?: string;
+  indicatorId?: string;
+  parameters?: Record<string, any>;
 }
 
 export function IndicatorChart({
@@ -24,6 +27,8 @@ export function IndicatorChart({
   indicatorData,
   indicatorType = 'line',
   indicatorColor = '#3b82f6',
+  indicatorId = 'indicator',
+  parameters = {},
 }: IndicatorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -55,9 +60,28 @@ export function IndicatorChart({
     const loadData = async () => {
       try {
         setIsLoading(true);
-        const candles = await loadCSVData('/2018-09-01-2024-Bitfinex_Spot-4h.csv');
+        // First try to load the cached JSON data for better performance
+        try {
+          const base = import.meta.env.BASE_URL || '/';
+          const jsonPath = `${base}data/sample-ohlcv.json`;
+          console.log('Trying to load JSON from:', jsonPath);
+          const response = await fetch(jsonPath);
+          if (response.ok) {
+            const candles = await response.json();
+            setChartData(candles);
+            return;
+          }
+        } catch (jsonError) {
+          console.log('JSON load failed, trying CSV:', jsonError);
+        }
+        
+        // Fallback to CSV if JSON is not available
+        const candles = await loadCSVData('2018-09-01-2024-Bitfinex_Spot-4h.csv');
         if (!candles.length) throw new Error('No valid candle data');
-        setChartData(candles);
+        
+        // Use a subset for performance (last 1000 candles)
+        const subset = getDataSubset(candles, 1000);
+        setChartData(subset);
       } catch (err) {
         console.error('Failed to load data', err);
         setError(err instanceof Error ? err.message : 'Failed to load chart data');
@@ -223,7 +247,7 @@ export function IndicatorChart({
       )}
       <div ref={containerRef} style={{ height }} />
       
-      {/* Navigation controls */}
+      {/* Navigation controls and Export buttons */}
       {!isLoading && !error && chartData.length > 0 && (
         <>
           <button
@@ -244,6 +268,35 @@ export function IndicatorChart({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
           </button>
+          
+          {/* Export buttons */}
+          <div className="absolute top-2 right-2 flex gap-2 z-10">
+            {indicatorData && (
+              <ExportButton
+                data={{
+                  ohlcv: chartData,
+                  [indicatorId]: indicatorData,
+                  parameters
+                }}
+                filename={`${indicatorId}-data`}
+                format="json"
+                className="text-sm"
+              />
+            )}
+            <ExportButton
+              data={chartData}
+              filename="ohlcv-data"
+              format="csv"
+              className="text-sm"
+            />
+            <ExportButton
+              data={null}
+              filename={`${indicatorId}-chart`}
+              format="image"
+              chartRef={chartRef}
+              className="text-sm"
+            />
+          </div>
         </>
       )}
     </div>

@@ -2,11 +2,11 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { AnimatedCounter } from '../components/ui/AnimatedCounter';
 import ScrollReveal from '../components/ui/ScrollReveal.astro';
-import { WasmDemo } from '../components/demo/WasmDemo';
 import { MABacktester } from '../components/demo/MABacktester';
 import HeroBackground from '../components/ui/HeroBackground.astro';
+import { indicators } from '../data/indicator-registry';
 
-const implementedIndicators = 178;
+const implementedIndicators = Object.keys(indicators).length;
 const totalIndicators = 300;
 ---
 
@@ -26,14 +26,14 @@ const totalIndicators = 300;
         
         <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
           <a 
-            href="/indicators" 
+            href={`${import.meta.env.BASE_URL}indicators`}
             class="btn btn-primary text-lg px-8 py-3"
             aria-label="Browse all technical indicators"
           >
             Browse Indicators
           </a>
           <a 
-            href="#demo" 
+            href={`${import.meta.env.BASE_URL}demo`}
             class="btn btn-secondary text-lg px-8 py-3"
             aria-label="Try the interactive demo"
           >
@@ -159,7 +159,7 @@ const totalIndicators = 300;
         
         <div class="mt-12 text-center">
           <a 
-            href="/indicators" 
+            href={`${import.meta.env.BASE_URL}indicators`}
             class="btn btn-primary"
             aria-label="Explore the complete indicator reference"
           >

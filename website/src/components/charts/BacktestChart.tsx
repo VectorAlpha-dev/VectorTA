@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType } from 'lightweight-charts';
-import type { IChartApi } from 'lightweight-charts';
 import { talib } from '../../lib/mock-wasm';
 
 export function BacktestChart() {
@@ -42,7 +41,7 @@ export function BacktestChart() {
     });
 
     // Add candlestick series
-    const candlestickSeries = chart.addCandlestickSeries({
+    const candlestickSeries = (chart as any).addCandlestickSeries({
       upColor: '#26a69a',
       downColor: '#ef5350',
     });
@@ -55,13 +54,13 @@ export function BacktestChart() {
     const sma50 = talib.sma(closes, 50);
 
     // Add SMA lines
-    const sma20Series = chart.addLineSeries({
+    const sma20Series = (chart as any).addLineSeries({
       color: '#2962ff',
       lineWidth: 2,
       title: 'SMA 20',
     });
 
-    const sma50Series = chart.addLineSeries({
+    const sma50Series = (chart as any).addLineSeries({
       color: '#ff6b6b',
       lineWidth: 2,
       title: 'SMA 50',

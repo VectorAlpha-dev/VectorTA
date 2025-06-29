@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_dcphase';
 const indicatorName = 'Hilbert Transform - Dominant Cycle Phase';
 const description = `The Hilbert Transform Dominant Cycle Phase indicator measures the current phase angle of the dominant market cycle, providing traders with precise timing information about where price is within its current cycle from -180° to +180°.`;
-const parameters = [];  // Hilbert Transform indicators are typically parameter-free
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -103,157 +110,25 @@ const parameters = [];  // Hilbert Transform indicators are typically parameter-
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::{ht_dcphase, ht_dcperiod};
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate dominant cycle phase
-let dc_phase = ht_dcphase(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify cycle positions
-for i in 50..dc_phase.len() {
-    if let Some(phase) = dc_phase.get(i) {
-        // Identify cycle quadrant
-        let quadrant = match *phase {
-            p if p >= -180.0 && p < -90.0 => "Approaching Trough",
-            p if p >= -90.0 && p < 0.0 => "Rising from Trough",
-            p if p >= 0.0 && p < 90.0 => "Rising to Peak",
-            p if p >= 90.0 && p <= 180.0 => "Approaching Peak",
-            _ => "Unknown"
-        };
-        
-        // Detect phase wrapping (new cycle)
-        if i > 0 {
-            let prev_phase = dc_phase[i-1];
-            if prev_phase > 150.0 && *phase < -150.0 {
-                println!("New cycle started at bar {}", i);
-            }
-        }
-        
-        // Trading zones
-        if *phase >= -180.0 && *phase <= -90.0 {
-            println!("Buy zone at bar {}: phase = {:.1}°", i, phase);
-        } else if *phase >= 90.0 && *phase <= 180.0 {
-            println!("Sell zone at bar {}: phase = {:.1}°", i, phase);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Cycle-Based Entry Timing</h3> <p>Time entries at optimal cycle positions:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Combine with cycle period for complete analysis
-let dc_period = ht_dcperiod(&close_prices)?;
-for i in 50..dc_phase.len() {
-    if let (Some(phase), Some(period)) = (dc_phase.get(i), dc_period.get(i)) {
-        // Calculate position within cycle (0 to 1)
-        let cycle_position = (*phase + 180.0) / 360.0;
-        
-        // Estimate bars to next trough
-        let bars_to_trough = if *phase < -180.0 + 360.0 {
-            (-180.0 - *phase) / (360.0 / period)
-        } else {
-            (180.0 - *phase) / (360.0 / period)
-        };
-        
-        println!("Phase: {:.1}°, Period: {:.1}, Bars to trough: {:.1}", 
-                 phase, period, bars_to_trough);
-    }
-}
-  </code></pre>
+  <h3>2. Phase-Based Position Sizing</h3> <p>Adjust position size based on cycle position:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_dcphase, ht_dcperiod
+  <h3>3. Multi-Timeframe Phase Analysis</h3> <p>Combine phases from different timeframes:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate dominant cycle phase
-df['dc_phase'] = ht_dcphase(df['close'])
-
-# Identify cycle quadrants
-df['cycle_quadrant'] = pd.cut(df['dc_phase'], 
-                              bins=[-180, -90, 0, 90, 180],
-                              labels=['Trough', 'Rising', 'Rising-Peak', 'Peak'])
-
-# Detect cycle completions
-df['phase_wrapped'] = (df['dc_phase'].shift(1) > 150) & (df['dc_phase'] < -150)
-df['new_cycle'] = df['phase_wrapped'].astype(int)
-
-# Generate trading signals based on phase
-df['phase_signal'] = 0
-df.loc[(df['dc_phase'] >= -180) & (df['dc_phase'] <= -90), 'phase_signal'] = 1  # Buy
-df.loc[(df['dc_phase'] >= 90) & (df['dc_phase'] <= 180), 'phase_signal'] = -1  # Sell
-
-# Calculate phase velocity (rate of change)
-df['phase_velocity'] = df['dc_phase'].diff()
-df['phase_acceleration'] = df['phase_velocity'].diff()
-
-# Identify stable vs unstable cycles
-df['stable_cycle'] = df['phase_velocity'].rolling(10).std() < 10
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Cycle-Based Entry Timing</h3>
-  <p>Time entries at optimal cycle positions:</p>
-  <pre><code class="language-python">
-# Get phase and period
-phase = ht_dcphase(close)
-period = ht_dcperiod(close)
-
-# Define optimal entry zones
-buy_phase_min, buy_phase_max = -180, -90
-sell_phase_min, sell_phase_max = 90, 180
-
-# Generate precise entry signals
-in_buy_zone = (phase >= buy_phase_min) & (phase <= buy_phase_max)
-phase_improving = phase > phase.shift(1)  # Phase advancing
-
-buy_signal = in_buy_zone & phase_improving & (period < 30)  # Cycling market
-
-# Exit when phase reaches opposite zone
-in_sell_zone = (phase >= sell_phase_min) & (phase <= sell_phase_max)
-exit_long = in_sell_zone | (phase < phase.shift(1))  # Phase retreating
-  </code></pre>
-
-  <h3>2. Phase-Based Position Sizing</h3>
-  <p>Adjust position size based on cycle position:</p>
-  <pre><code class="language-python">
-# Calculate position within cycle
-phase = ht_dcphase(close)
-cycle_position = (phase + 180) / 360  # Normalize to 0-1
-
-# Position sizing based on cycle
-# Largest positions at cycle extremes
-position_multiplier = 2 * abs(cycle_position - 0.5)  # 0 at mid-cycle, 1 at extremes
-
-# Risk adjustment
-# Lower risk in middle of cycle (uncertain direction)
-risk_multiplier = 1 - abs(cycle_position - 0.5) * 0.5  # 75% to 100% risk
-
-base_position = 100  # Base position size
-adjusted_position = base_position * position_multiplier * risk_multiplier
-  </code></pre>
-
-  <h3>3. Multi-Timeframe Phase Analysis</h3>
-  <p>Combine phases from different timeframes:</p>
-  <pre><code class="language-python">
-# Calculate phase on multiple timeframes
-phase_15m = ht_dcphase(close_15m)
-phase_1h = ht_dcphase(close_1h)
-phase_4h = ht_dcphase(close_4h)
-
-# Phase alignment score
-def phase_score(phase):
-    # Convert phase to cycle position (0-1)
-    return 1 - abs((phase + 180) / 360 - 0.5) * 2
-
-alignment_score = (phase_score(phase_15m) + 
-                  phase_score(phase_1h) * 2 + 
-                  phase_score(phase_4h) * 3) / 6
-
-# Trade when multiple timeframes align at extremes
-strong_buy = (alignment_score > 0.7) & (phase_4h < -90)
-strong_sell = (alignment_score > 0.7) & (phase_4h > 90)
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Trending markets:</strong> Phase may advance too quickly or slowly in strong trends</li>

@@ -16,7 +16,7 @@ export function SimpleChart() {
       },
     });
 
-    const candlestickSeries = chart.addCandlestickSeries();
+    const candlestickSeries = (chart as any).addCandlestickSeries();
 
     // Generate dummy data
     const data = [];

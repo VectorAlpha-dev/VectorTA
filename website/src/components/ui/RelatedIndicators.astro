@@ -9,7 +9,7 @@ export interface Props {
 const { currentIndicator } = Astro.props;
 
 // Get current indicator info
-const current = indicators[currentIndicator];
+const current = indicators[currentIndicator as keyof typeof indicators];
 if (!current) return null;
 
 // Find related indicators
@@ -30,7 +30,7 @@ const related = Object.entries(indicators)
     return commonWords.length > 0;
   })
   .slice(0, 6)
-  .map(([id, indicator]) => ({ id, ...indicator }));
+  .map(([id, indicator]) => ({ ...indicator, id }));
 
 if (related.length === 0) return null;
 ---

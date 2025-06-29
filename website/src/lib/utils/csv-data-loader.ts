@@ -21,9 +21,17 @@ export async function loadCSVData(
   filePath: string,
 ): Promise<CandlestickData[]> {
   /* ─── 1. Fetch ──────────────────────────────────────────────────────────── */
-  const res = await fetch(filePath);
+  // Add base path if the file path doesn't start with http
+  let fullPath = filePath;
+  if (!filePath.startsWith('http') && !filePath.startsWith('/')) {
+    // Always use the base path (Astro requires it even in dev mode)
+    const base = import.meta.env.BASE_URL || '/';
+    fullPath = base.endsWith('/') ? `${base}${filePath}` : `${base}/${filePath}`;
+  }
+  
+  const res = await fetch(fullPath);
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} while fetching ${filePath}`);
+    throw new Error(`HTTP ${res.status} while fetching ${fullPath}`);
   }
   const csvText = await res.text();
 

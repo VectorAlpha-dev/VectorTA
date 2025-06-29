@@ -176,65 +176,73 @@ export function MABacktester() {
     }
     
     if (chartContainerRef.current) {
-      const chart = createChart(chartContainerRef.current, {
-        width: chartContainerRef.current.clientWidth,
-        height: 400,
-        layout: {
-          background: { type: ColorType.Solid, color: 'transparent' },
-          textColor: '#9ca3af',
-        },
-        grid: {
-          vertLines: { color: 'rgba(156, 163, 175, 0.1)' },
-          horzLines: { color: 'rgba(156, 163, 175, 0.1)' },
-        },
-        timeScale: {
-          borderColor: 'rgba(156, 163, 175, 0.2)',
-        },
-        rightPriceScale: {
-          borderColor: 'rgba(156, 163, 175, 0.2)',
-        },
-      });
-      
-      chartRef.current = chart;
-      
-      // Add candlestick series
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: '#22c55e',
-        downColor: '#ef4444',
-        borderVisible: false,
-        wickUpColor: '#22c55e',
-        wickDownColor: '#ef4444',
-      });
-      candleSeries.setData(priceData);
-      
-      // Add moving averages
-      const shortMASeries = chart.addLineSeries({
-        color: '#3b82f6',
-        lineWidth: 2,
-        title: `MA ${shortPeriod}`,
-      });
-      shortMASeries.setData(shortMA.filter(d => d.value !== null));
-      
-      const longMASeries = chart.addLineSeries({
-        color: '#8b5cf6',
-        lineWidth: 2,
-        title: `MA ${longPeriod}`,
-      });
-      longMASeries.setData(longMA.filter(d => d.value !== null));
-      
-      // Add markers for trades
-      const markers = signals.map(signal => ({
-        time: signal.time,
-        position: signal.type === 'buy' ? 'belowBar' : 'aboveBar',
-        color: signal.type === 'buy' ? '#22c55e' : '#ef4444',
-        shape: signal.type === 'buy' ? 'arrowUp' : 'arrowDown',
-        text: signal.type === 'buy' ? 'BUY' : 'SELL',
-      }));
-      
-      candleSeries.setMarkers(markers as any);
-      
-      // Fit content
-      chart.timeScale().fitContent();
+      try {
+        const chart = createChart(chartContainerRef.current, {
+          width: chartContainerRef.current.clientWidth,
+          height: 400,
+          layout: {
+            background: { type: ColorType.Solid, color: 'transparent' },
+            textColor: '#9ca3af',
+          },
+          grid: {
+            vertLines: { color: 'rgba(156, 163, 175, 0.1)' },
+            horzLines: { color: 'rgba(156, 163, 175, 0.1)' },
+          },
+          timeScale: {
+            borderColor: 'rgba(156, 163, 175, 0.2)',
+          },
+          rightPriceScale: {
+            borderColor: 'rgba(156, 163, 175, 0.2)',
+          },
+        });
+        
+        chartRef.current = chart;
+        
+        // Add candlestick series
+        if (chart && typeof (chart as any).addCandlestickSeries === 'function') {
+          const candleSeries = (chart as any).addCandlestickSeries({
+            upColor: '#22c55e',
+            downColor: '#ef4444',
+            borderVisible: false,
+            wickUpColor: '#22c55e',
+            wickDownColor: '#ef4444',
+          });
+          candleSeries.setData(priceData);
+          
+          // Add moving averages
+          const shortMASeries = (chart as any).addLineSeries({
+            color: '#3b82f6',
+            lineWidth: 2,
+            title: `MA ${shortPeriod}`,
+          });
+          shortMASeries.setData(shortMA.filter(d => d.value !== null));
+          
+          const longMASeries = (chart as any).addLineSeries({
+            color: '#8b5cf6',
+            lineWidth: 2,
+            title: `MA ${longPeriod}`,
+          });
+          longMASeries.setData(longMA.filter(d => d.value !== null));
+          
+          // Add markers for trades
+          const markers = signals.map(signal => ({
+            time: signal.time,
+            position: signal.type === 'buy' ? 'belowBar' : 'aboveBar',
+            color: signal.type === 'buy' ? '#22c55e' : '#ef4444',
+            shape: signal.type === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: signal.type === 'buy' ? 'BUY' : 'SELL',
+          }));
+          
+          candleSeries.setMarkers(markers as any);
+          
+          // Fit content
+          chart.timeScale().fitContent();
+        } else {
+          console.error('Chart API does not support addCandlestickSeries');
+        }
+      } catch (error) {
+        console.error('Error creating chart:', error);
+      }
     }
     
     setIsCalculating(false);

@@ -84,12 +84,12 @@ export function PriceChart({ darkMode = false, height = 500 }: PriceChartProps) 
       console.log('PriceChart: Available methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(chart)));
       
       // Add candlestick series - checking if method exists
-      if (typeof chart.addCandlestickSeries !== 'function') {
+      if (typeof (chart as any).addCandlestickSeries !== 'function') {
         console.error('PriceChart: addCandlestickSeries is not a function. Chart methods:', Object.keys(chart));
         throw new Error('Chart API mismatch - addCandlestickSeries not found');
       }
       
-      const candlestickSeries = chart.addCandlestickSeries({
+      const candlestickSeries = (chart as any).addCandlestickSeries({
         upColor: '#10b981',
         downColor: '#ef4444',
         borderVisible: false,
@@ -104,7 +104,7 @@ export function PriceChart({ darkMode = false, height = 500 }: PriceChartProps) 
       console.log('PriceChart: Set candlestick data');
 
       // Add volume series
-      const volumeSeries = chart.addHistogramSeries({
+      const volumeSeries = (chart as any).addHistogramSeries({
         color: '#6366f1',
         priceFormat: {
           type: 'volume',

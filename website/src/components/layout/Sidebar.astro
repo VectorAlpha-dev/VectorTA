@@ -3,22 +3,27 @@ import { indicators } from '../../data/indicator-registry';
 
 // Get all indicators sorted alphabetically by name
 const sortedIndicators = Object.entries(indicators)
-  .map(([id, indicator]) => ({ id, ...indicator }))
+  .map(([id, indicator]) => ({ ...indicator, id }))
   .sort((a, b) => a.name.localeCompare(b.name));
 
 const currentPath = Astro.url.pathname;
+
+// Use Astro's built-in base URL support
+// BASE_URL includes trailing slash, so we need to handle paths carefully
+const base = import.meta.env.BASE_URL;
 ---
 
 <aside 
   id="sidebar"
   class="fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-card border-r border-border overflow-y-auto z-40 lg:z-30 -translate-x-full lg:translate-x-0"
 >
-  <nav class="p-4 space-y-6">
+  <nav class="p-4 space-y-6" id="sidebar-nav">
     <!-- Home link -->
     <a 
-      href="/" 
-      class={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors font-medium ${
-        currentPath === '/' 
+      href={base} 
+      data-nav-item
+      class={`nav-item flex items-center gap-2 px-3 py-2 rounded-lg transition-colors font-medium ${
+        currentPath === base || currentPath === base.slice(0, -1)
           ? 'bg-primary text-primary-foreground' 
           : 'hover:bg-muted text-muted-foreground hover:text-foreground'
       }`}
@@ -36,16 +41,15 @@ const currentPath = Astro.url.pathname;
       </h3>
       <div class="space-y-1">
         {sortedIndicators.map(indicator => {
-          const indicatorPath = `/indicators/${indicator.id}`;
+          // Remove trailing slash from base if present
+          const baseUrl = base.endsWith('/') ? base.slice(0, -1) : base;
+          const indicatorPath = `${baseUrl}/indicators/${indicator.id}`;
           const isActive = currentPath === indicatorPath;
-          // Debug DI indicator
-          if (indicator.id === 'di') {
-            console.log('DI indicator - currentPath:', currentPath, 'indicatorPath:', indicatorPath, 'isActive:', isActive);
-          }
           return (
             <a 
               href={indicatorPath}
-              class={`block px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              data-nav-item
+              class={`nav-item block px-3 py-1.5 text-sm rounded-lg transition-colors ${
                 isActive
                   ? 'bg-primary/10 text-primary font-medium' 
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted'
@@ -91,4 +95,132 @@ const currentPath = Astro.url.pathname;
   #sidebar::-webkit-scrollbar-thumb:hover {
     background-color: hsl(var(--muted-foreground) / 0.3);
   }
+  
+  /* Keyboard focus styles */
+  .nav-item:focus {
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: -2px;
+  }
+  
+  .nav-item.keyboard-focused {
+    background-color: hsl(var(--muted)) !important;
+    color: hsl(var(--foreground)) !important;
+  }
 </style>
+
+<script>
+  // Keyboard navigation for sidebar
+  document.addEventListener('DOMContentLoaded', () => {
+    const sidebar = document.getElementById('sidebar');
+    const navItems = Array.from(document.querySelectorAll('[data-nav-item]'));
+    let currentIndex = -1;
+    
+    // Find current active item based on URL
+    function findActiveIndex() {
+      const activeItem = navItems.find(item => 
+        item.classList.contains('bg-primary') || 
+        item.classList.contains('bg-primary/10')
+      );
+      return activeItem ? navItems.indexOf(activeItem) : -1;
+    }
+    
+    // Initialize current index
+    currentIndex = findActiveIndex();
+    
+    // Remove keyboard focus class when using mouse
+    navItems.forEach(item => {
+      item.addEventListener('mouseenter', () => {
+        navItems.forEach(i => i.classList.remove('keyboard-focused'));
+      });
+    });
+    
+    // Global keyboard navigation - works regardless of what has focus
+    document.addEventListener('keydown', (e) => {
+      // Only handle arrow keys when not in an input field
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+      
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // If we lost track of position, find it again
+        if (currentIndex === -1) {
+          currentIndex = findActiveIndex();
+          if (currentIndex === -1) currentIndex = 0; // Default to first item
+        }
+        
+        // Check if a nav item currently has keyboard focus
+        const currentlyFocused = navItems.findIndex(item => 
+          item.classList.contains('keyboard-focused') || item === document.activeElement
+        );
+        
+        if (currentlyFocused !== -1) {
+          currentIndex = currentlyFocused;
+        }
+        
+        // Remove all focus states
+        navItems.forEach(item => {
+          item.classList.remove('keyboard-focused');
+          (item as HTMLElement).blur();
+        });
+        
+        // Move to next/previous item
+        if (e.key === 'ArrowDown') {
+          currentIndex = (currentIndex + 1) % navItems.length;
+        } else if (e.key === 'ArrowUp') {
+          currentIndex = currentIndex <= 0 ? navItems.length - 1 : currentIndex - 1;
+        }
+        
+        const focusedItem = navItems[currentIndex];
+        if (focusedItem) {
+          focusedItem.classList.add('keyboard-focused');
+          (focusedItem as HTMLElement).focus();
+          
+          // Scroll item into view if needed
+          const itemRect = focusedItem.getBoundingClientRect();
+          const sidebarRect = sidebar!.getBoundingClientRect();
+          
+          if (itemRect.bottom > sidebarRect.bottom - 20) {
+            focusedItem.scrollIntoView({ block: 'end', behavior: 'smooth' });
+          } else if (itemRect.top < sidebarRect.top + 20) {
+            focusedItem.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          }
+        }
+        
+        return false; // Prevent any other handlers
+      } else if (e.key === 'Enter') {
+        // If a nav item has focus or keyboard focus, navigate to it
+        const focusedItem = navItems.find(item => 
+          item.classList.contains('keyboard-focused') || item === document.activeElement
+        );
+        if (focusedItem) {
+          (focusedItem as HTMLElement).click();
+        }
+      }
+    }, true); // Use capture phase to ensure we get the event first
+    
+    // Update current index when clicking items
+    navItems.forEach((item, index) => {
+      item.addEventListener('click', () => {
+        currentIndex = index;
+        // Remove keyboard focus on click
+        navItems.forEach(i => i.classList.remove('keyboard-focused'));
+      });
+      
+      // Prevent focus ring on click, only show on keyboard navigation
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+      });
+    });
+    
+    // Handle focus events to ensure keyboard nav always works
+    navItems.forEach((item, index) => {
+      item.addEventListener('focus', () => {
+        // Update index when an item receives focus
+        if (!item.classList.contains('keyboard-focused')) {
+          currentIndex = index;
+        }
+      });
+    });
+  });
+</script>

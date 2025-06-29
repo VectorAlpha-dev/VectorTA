@@ -64,8 +64,8 @@ const parameters = [
 
   <h3>Trading Signals</h3>
   <ul>
-    <li><strong>J > 100:</strong> Extreme overbought condition, potential reversal</li>
-    <li><strong>J < 0:</strong> Extreme oversold condition, potential bounce</li>
+    <li><strong>J  &gt; 100:</strong> Extreme overbought condition, potential reversal</li>
+    <li><strong>J &lt; 0:</strong> Extreme oversold condition, potential bounce</li>
     <li><strong>K crosses above D:</strong> Bullish signal, especially below 20</li>
     <li><strong>K crosses below D:</strong> Bearish signal, especially above 80</li>
     <li><strong>J line reversals:</strong> Early warning of momentum shifts</li>
@@ -108,8 +108,8 @@ const parameters = [
     </li>
   </ol>
   <p>
-    The mathematical relationship J = 3K - 2D ensures that when K > D (bullish momentum), 
-    J will be even higher, providing an early signal. Conversely, when K < D (bearish momentum), 
+    The mathematical relationship J = 3K - 2D ensures that when K &gt; D (bullish momentum), 
+    J will be even higher, providing an early signal. Conversely, when K &lt; D (bearish momentum), 
     J will be even lower. This amplification makes J particularly sensitive to momentum changes.
   </p>
 
@@ -145,277 +145,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::kdj;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Price data (high, low, close)
-let high = vec![105.0, 106.0, 107.5, 106.5, 108.0, 109.0, 108.5, 110.0, 111.0, 110.5];
-let low = vec![102.0, 103.0, 104.0, 103.5, 105.0, 106.0, 105.5, 107.0, 108.0, 107.5];
-let close = vec![104.0, 105.0, 106.0, 105.5, 107.0, 108.0, 107.5, 109.0, 110.0, 109.5];
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Calculate KDJ
-let (k_values, d_values, j_values) = kdj(&high, &low, &close, 9, 3, 3)?;
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. J-Line Extreme Trading</h3> <p>Trading based on J-line extremes:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Trading logic
-for i in 9..close.len() {
-    if let (Some(k), Some(d), Some(j)) = (k_values[i], d_values[i], j_values[i]) {
-        // Extreme readings
-        if j > 100.0 {
-            println!("Extreme overbought at {}: J={:.2}, consider short", i, j);
-        } else if j < 0.0 {
-            println!("Extreme oversold at {}: J={:.2}, consider long", i, j);
-        }
-        
-        // Crossover signals
-        if i > 0 {
-            if let (Some(k_prev), Some(d_prev)) = (k_values[i-1], d_values[i-1]) {
-                if k_prev <= d_prev && k > d {
-                    println!("Bullish crossover at {}: K={:.2} crossed above D={:.2}", i, k, d);
-                } else if k_prev >= d_prev && k < d {
-                    println!("Bearish crossover at {}: K={:.2} crossed below D={:.2}", i, k, d);
-                }
-            }
-        }
-        
-        // J line momentum
-        if i > 1 {
-            if let Some(j_prev) = j_values[i-1] {
-                let j_momentum = j - j_prev;
-                if j_momentum.abs() > 10.0 {
-                    let direction = if j_momentum > 0.0 { "bullish" } else { "bearish" };
-                    println!("Strong {} momentum at {}: J changed by {:.2}", direction, i, j_momentum);
-                }
-            }
-        }
-        
-        // Zone analysis
-        let zone = if k > 80.0 && d > 80.0 { "Overbought" }
-                  else if k < 20.0 && d < 20.0 { "Oversold" }
-                  else { "Neutral" };
-        
-        println!("Bar {}: K={:.2}, D={:.2}, J={:.2}, Zone: {}", i, k, d, j, zone);
-    }
-}
+  <h3>2. KDJ Crossover System</h3> <p>Trading crossovers with zone confirmation:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Divergence detection
-fn detect_kdj_divergence(prices: &[f64], j_values: &[Option<f64>], lookback: usize) -> Vec<bool> {
-    let mut divergences = vec![false; prices.len()];
-    
-    for i in lookback..prices.len() {
-        if let Some(j_current) = j_values[i] {
-            // Find recent high/low
-            let price_high = prices[(i-lookback)..=i].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let price_low = prices[(i-lookback)..=i].iter().cloned().fold(f64::INFINITY, f64::min);
-            
-            let j_high = j_values[(i-lookback)..=i].iter()
-                .filter_map(|&x| x)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let j_low = j_values[(i-lookback)..=i].iter()
-                .filter_map(|&x| x)
-                .fold(f64::INFINITY, f64::min);
-            
-            // Bearish divergence: price high but J not confirming
-            if prices[i] == price_high && j_current < j_high - 5.0 {
-                divergences[i] = true;
-                println!("Bearish divergence at {}: Price at high but J lower", i);
-            }
-            
-            // Bullish divergence: price low but J not confirming
-            if prices[i] == price_low && j_current > j_low + 5.0 {
-                divergences[i] = true;
-                println!("Bullish divergence at {}: Price at low but J higher", i);
-            }
-        }
-    }
-    divergences
-}
-  </code></pre>
+  <h3>3. KDJ Divergence Trading</h3> <p>Trading divergences between price and J-line:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import kdj
-
-# Example price data
-df = pd.DataFrame({
-    'high': [105, 106, 107.5, 106.5, 108, 109, 108.5, 110, 111, 110.5, 112, 113, 112.5],
-    'low': [102, 103, 104, 103.5, 105, 106, 105.5, 107, 108, 107.5, 109, 110, 109.5],
-    'close': [104, 105, 106, 105.5, 107, 108, 107.5, 109, 110, 109.5, 111, 112, 111.5]
-})
-
-# Calculate KDJ
-k, d, j = kdj(df['high'], df['low'], df['close'], k_period=9, d_period=3, j_period=3)
-df['k'] = k
-df['d'] = d
-df['j'] = j
-
-# Trading signals
-# Extreme readings
-df['j_extreme_high'] = df['j'] > 100
-df['j_extreme_low'] = df['j'] < 0
-
-# Crossovers
-df['k_above_d'] = df['k'] > df['d']
-df['bullish_cross'] = df['k_above_d'] & ~df['k_above_d'].shift(1)
-df['bearish_cross'] = ~df['k_above_d'] & df['k_above_d'].shift(1)
-
-# Zone classification
-df['zone'] = pd.cut(df['k'], bins=[0, 20, 80, 100], labels=['Oversold', 'Neutral', 'Overbought'])
-
-# J line momentum
-df['j_momentum'] = df['j'].diff()
-df['j_acceleration'] = df['j_momentum'].diff()
-
-# Strong signals
-df['strong_buy'] = df['bullish_cross'] & (df['k'] < 20) & (df['j'] < 0)
-df['strong_sell'] = df['bearish_cross'] & (df['k'] > 80) & (df['j'] > 100)
-
-# Divergence detection
-def find_divergences(df, lookback=10):
-    df['price_high'] = df['close'].rolling(lookback).max() == df['close']
-    df['price_low'] = df['close'].rolling(lookback).min() == df['close']
-    df['j_high'] = df['j'].rolling(lookback).max() == df['j']
-    df['j_low'] = df['j'].rolling(lookback).min() == df['j']
-    
-    # Bearish divergence: price makes new high but J doesn't
-    df['bearish_div'] = df['price_high'] & (df['j'] < df['j'].rolling(lookback).max() - 5)
-    
-    # Bullish divergence: price makes new low but J doesn't
-    df['bullish_div'] = df['price_low'] & (df['j'] > df['j'].rolling(lookback).min() + 5)
-    
-    return df
-
-df = find_divergences(df)
-
-# Signal quality filter
-df['signal_quality'] = abs(df['k'] - df['d'])  # Larger separation = stronger signal
-
-print("KDJ Analysis:")
-print(df[['close', 'k', 'd', 'j', 'zone', 'strong_buy', 'strong_sell']].tail(10))
-
-# Statistics
-print(f"\nJ-line statistics:")
-print(f"Max J: {df['j'].max():.2f}")
-print(f"Min J: {df['j'].min():.2f}")
-print(f"J > 100 occurrences: {df['j_extreme_high'].sum()}")
-print(f"J < 0 occurrences: {df['j_extreme_low'].sum()}")
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. J-Line Extreme Trading</h3>
-  <p>Trading based on J-line extremes:</p>
-  <pre><code class="language-python">
-# Calculate KDJ
-k, d, j = kdj(high, low, close, 9, 3, 3)
-
-# Define extreme thresholds
-j_overbought = 100
-j_oversold = 0
-
-# Entry signals based on J extremes
-long_entry = (j < j_oversold) & (j > j.shift(1))  # J turns up from extreme oversold
-short_entry = (j > j_overbought) & (j < j.shift(1))  # J turns down from extreme overbought
-
-# Exit signals
-long_exit = (j > 80) | (k < d)  # Exit when overbought or bearish cross
-short_exit = (j < 20) | (k > d)  # Exit when oversold or bullish cross
-
-# Position sizing based on J extreme
-j_extreme_distance = np.where(j < 0, abs(j), np.where(j > 100, j - 100, 0))
-position_size = np.minimum(j_extreme_distance / 20 * 100, 100)  # Max 100% at J = -20 or 120
-
-# Filter by market condition
-atr_val = atr(high, low, close, 14)
-volatility_filter = atr_val > atr_val.rolling(50).mean()  # Trade only in volatile markets
-
-final_long = long_entry & volatility_filter
-final_short = short_entry & volatility_filter
-  </code></pre>
-
-  <h3>2. KDJ Crossover System</h3>
-  <p>Trading crossovers with zone confirmation:</p>
-  <pre><code class="language-python">
-# Calculate KDJ
-k, d, j = kdj(high, low, close, 9, 3, 3)
-
-# Define zones
-oversold_zone = 20
-overbought_zone = 80
-
-# Crossover signals with zone filter
-bullish_cross = (k > d) & (k.shift(1) <= d.shift(1))
-bearish_cross = (k < d) & (k.shift(1) >= d.shift(1))
-
-# Quality crossovers only in extreme zones
-quality_buy = bullish_cross & (k < oversold_zone)
-quality_sell = bearish_cross & (k > overbought_zone)
-
-# J-line confirmation
-j_confirms_buy = (j < 10) & (j > j.shift(1))  # J rising from low
-j_confirms_sell = (j > 90) & (j < j.shift(1))  # J falling from high
-
-# Final signals with confirmation
-confirmed_buy = quality_buy & j_confirms_buy
-confirmed_sell = quality_sell & j_confirms_sell
-
-# Trail stop using K line
-long_stop = k.rolling(10).min() - 5  # Stop below recent K low
-short_stop = k.rolling(10).max() + 5  # Stop above recent K high
-
-# Exit on opposite crossover or stop hit
-exit_long = bearish_cross | (k < long_stop)
-exit_short = bullish_cross | (k > short_stop)
-  </code></pre>
-
-  <h3>3. KDJ Divergence Trading</h3>
-  <p>Trading divergences between price and J-line:</p>
-  <pre><code class="language-python">
-# Calculate KDJ
-k, d, j = kdj(high, low, close, 14, 3, 3)
-
-# Find swing highs and lows
-from scipy.signal import argrelextrema
-
-# Price swings
-price_highs_idx = argrelextrema(close.values, np.greater, order=5)[0]
-price_lows_idx = argrelextrema(close.values, np.less, order=5)[0]
-
-# J-line swings
-j_highs_idx = argrelextrema(j.values, np.greater, order=5)[0]
-j_lows_idx = argrelextrema(j.values, np.less, order=5)[0]
-
-# Detect divergences
-divergence_signals = pd.Series(0, index=close.index)
-
-# Bearish divergence: higher price high, lower J high
-for i in range(1, len(price_highs_idx)):
-    current_idx = price_highs_idx[i]
-    prev_idx = price_highs_idx[i-1]
-    
-    if current_idx in j_highs_idx and prev_idx in j_highs_idx:
-        if close.iloc[current_idx] > close.iloc[prev_idx] and j.iloc[current_idx] < j.iloc[prev_idx]:
-            divergence_signals.iloc[current_idx] = -1  # Bearish divergence
-
-# Bullish divergence: lower price low, higher J low
-for i in range(1, len(price_lows_idx)):
-    current_idx = price_lows_idx[i]
-    prev_idx = price_lows_idx[i-1]
-    
-    if current_idx in j_lows_idx and prev_idx in j_lows_idx:
-        if close.iloc[current_idx] < close.iloc[prev_idx] and j.iloc[current_idx] > j.iloc[prev_idx]:
-            divergence_signals.iloc[current_idx] = 1  # Bullish divergence
-
-# Confirm with KD position
-bullish_div_confirmed = (divergence_signals == 1) & (k < 30) & (k > d)
-bearish_div_confirmed = (divergence_signals == -1) & (k > 70) & (k < d)
-
-# Set stops at recent extremes
-div_stop_long = low.rolling(10).min()
-div_stop_short = high.rolling(10).max()
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>J-line extremes:</strong> J can reach values far beyond 0-100 range</li>

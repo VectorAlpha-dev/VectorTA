@@ -21,7 +21,11 @@ export function WasmDemo({ initialIndicator = 'sma' }: WasmDemoProps) {
     signalPeriod: 9
   });
   const [isCalculating, setIsCalculating] = useState(false);
-  const [performanceMetrics, setPerformanceMetrics] = useState(null);
+  const [performanceMetrics, setPerformanceMetrics] = useState<{
+    executionTime: number;
+    operationsPerSecond: number;
+    dataPointsProcessed: number;
+  } | null>(null);
   const [chart, setChart] = useState<IChartApi | null>(null);
   const [error, setError] = useState<string | null>(null);
 

@@ -34,11 +34,11 @@ export async function loadSampleData(size: 'small' | 'medium' | 'large' = 'small
   });
   
   // Skip header row if it exists
-  const dataRows = parsed.data.filter((row: any[]) => 
-    row.length >= 6 && !isNaN(Number(row[0]))
+  const dataRows = (parsed.data as any[]).filter((row: any) => 
+    Array.isArray(row) && row.length >= 6 && !isNaN(Number(row[0]))
   );
   
-  return dataRows.map((row: any[]) => ({
+  return dataRows.map((row: any) => ({
     time: Math.floor(Number(row[0]) / 1000), // Convert ms to seconds
     open: parseFloat(row[1]),
     high: parseFloat(row[2]),

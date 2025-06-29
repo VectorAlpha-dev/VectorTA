@@ -2,9 +2,10 @@
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import { indicators } from '../../data/indicator-registry';
 import { CategoryIcon } from '../../components/ui/CategoryIcon';
+import { IndicatorGrid } from '../../components/ui/IndicatorGrid';
 
 // Group indicators by category with proper descriptions
-const categoryDescriptions = {
+const categoryDescriptions: Record<string, string> = {
   'momentum': 'Measure the rate of price change and identify overbought/oversold conditions',
   'trend': 'Identify and follow market trends and their strength',
   'volatility': 'Measure market volatility and price ranges',
@@ -21,7 +22,7 @@ const categoryDescriptions = {
 const categorizedIndicators = Object.entries(indicators).reduce((acc, [id, indicator]) => {
   const category = indicator.category || 'other';
   if (!acc[category]) acc[category] = [];
-  acc[category].push({ id, ...indicator });
+  acc[category].push({ ...indicator, id });
   return acc;
 }, {} as Record<string, any[]>);
 
@@ -47,7 +48,8 @@ Object.keys(categorizedIndicators).forEach(cat => {
 });
 
 const totalIndicators = Object.keys(indicators).length;
-const implementedIndicators = 178; // From README
+const targetIndicators = 300; // Target number of indicators
+const implementedIndicators = totalIndicators; // All indicators in registry are implemented
 ---
 
 <DocsLayout 
@@ -68,16 +70,32 @@ const implementedIndicators = 178; // From README
           <p class="text-sm text-muted-foreground">Implemented</p>
         </div>
         <div class="text-center">
-          <p class="text-3xl font-bold text-muted-foreground">{totalIndicators - implementedIndicators}</p>
+          <p class="text-3xl font-bold text-muted-foreground">{targetIndicators - implementedIndicators}</p>
           <p class="text-sm text-muted-foreground">Coming Soon</p>
         </div>
       </div>
     </header>
 
+    <!-- Advanced Filter and Grid -->
+    <div id="advanced-view" class="hidden">
+      <IndicatorGrid client:load indicators={indicators} />
+    </div>
+
+    <!-- Toggle between views -->
+    <div class="text-center mb-8">
+      <button 
+        id="toggle-view"
+        class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
+      >
+        Switch to Advanced View
+      </button>
+    </div>
+
     <!-- Search Bar -->
-    <div class="mb-8">
-      <div class="max-w-2xl mx-auto">
-        <div class="relative">
+    <div id="simple-view">
+      <div class="mb-8">
+        <div class="max-w-2xl mx-auto">
+          <div class="relative">
           <input
             type="text"
             id="indicator-search"
@@ -91,10 +109,10 @@ const implementedIndicators = 178; // From README
         <p class="text-sm text-muted-foreground mt-2 text-center">
           Try searching for "momentum", "RSI", or "moving average"
         </p>
+        </div>
       </div>
-    </div>
-
-    <!-- Quick Links -->
+    
+      <!-- Quick Links -->
     <div class="mb-12">
       <div class="flex flex-wrap justify-center gap-2">
         {sortedCategories.map(({ name }) => (
@@ -107,9 +125,10 @@ const implementedIndicators = 178; // From README
         ))}
       </div>
     </div>
+    </div>
 
     <!-- Categories -->
-    <div class="space-y-6">
+    <div id="categories-container" class="space-y-6">
       {sortedCategories.map(({ name, description, indicators: categoryIndicators }) => (
         <section id={name} class="scroll-mt-20 category-section">
           <button
@@ -142,7 +161,7 @@ const implementedIndicators = 178; // From README
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pl-14">
               {categoryIndicators.map((indicator) => (
                 <a
-                  href={`/indicators/${indicator.id}`}
+                  href={`${import.meta.env.BASE_URL}indicators/${indicator.id}`}
                   class="card hover:shadow-lg transition-all group indicator-card"
                   data-indicator={JSON.stringify({ id: indicator.id, name: indicator.name, category: name })}
                 >
@@ -213,6 +232,29 @@ const implementedIndicators = 178; // From README
   </div>
 
   <script>
+    // View toggle functionality
+    const toggleBtn = document.getElementById('toggle-view') as HTMLButtonElement;
+    const simpleView = document.getElementById('simple-view');
+    const categoriesContainer = document.getElementById('categories-container');
+    const advancedView = document.getElementById('advanced-view');
+    let isAdvancedView = false;
+
+    toggleBtn?.addEventListener('click', () => {
+      isAdvancedView = !isAdvancedView;
+      
+      if (isAdvancedView) {
+        simpleView?.classList.add('hidden');
+        categoriesContainer?.classList.add('hidden');
+        advancedView?.classList.remove('hidden');
+        toggleBtn.textContent = 'Switch to Simple View';
+      } else {
+        simpleView?.classList.remove('hidden');
+        categoriesContainer?.classList.remove('hidden');
+        advancedView?.classList.add('hidden');
+        toggleBtn.textContent = 'Switch to Advanced View';
+      }
+    });
+
     // Category collapse/expand functionality
     const categoryToggles = document.querySelectorAll('.category-toggle') as NodeListOf<HTMLButtonElement>;
     const categoryContents = document.querySelectorAll('.category-content') as NodeListOf<HTMLElement>;

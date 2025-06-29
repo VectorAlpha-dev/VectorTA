@@ -1,5 +1,6 @@
 ---
 import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
+import { CodeExport } from '../../components/export/CodeExport';
 
 const indicatorId = 'acosc';
 const indicatorName = 'Acceleration/Deceleration Oscillator (AC)';
@@ -40,160 +41,43 @@ const parameters = [
 >
   <h2 id="overview">Overview</h2>
   <p>
-    The Acceleration/Deceleration Oscillator (AC) is a leading momentum indicator developed by 
+    The Acceleration/Deceleration Oscillator (AC) is a momentum indicator developed by 
     Bill Williams as part of his Trading Chaos theory. It measures the acceleration and deceleration 
-    of the current driving force (momentum) in the market. By calculating the difference between the 
-    Awesome Oscillator and its 5-period simple moving average, AC provides early warning signals of 
-    potential changes in market direction.
-  </p>
-  <p>
-    The key insight behind AC is that momentum changes before price changes, and acceleration changes 
-    before momentum changes. This makes AC a third-derivative indicator that can identify potential 
-    turning points very early. The indicator oscillates around zero, with positive values indicating 
-    accelerating upward momentum and negative values indicating accelerating downward momentum. Williams 
-    considered this one of the most important indicators in his trading system.
+    of the current driving force behind price movements.
   </p>
 
-  <h2 id="interpretation">Interpretation</h2>
-  <h3>Signal Types</h3>
-  <ul>
-    <li><strong>Zero line crossings:</strong> Basic trend direction signals</li>
-    <li><strong>Color changes:</strong> Green bars show increasing momentum, red bars show decreasing</li>
-    <li><strong>Three consecutive bars:</strong> Strong signals when same color</li>
-    <li><strong>Divergences:</strong> When AC diverges from price action</li>
-    <li><strong>Twin peaks:</strong> Double tops/bottoms in the indicator</li>
-  </ul>
-
-  <h3>Trading Rules (Bill Williams)</h3>
-  <ul>
-    <li><strong>Buy signal:</strong> AC above zero + 2 green bars, or AC below zero + 3 green bars</li>
-    <li><strong>Sell signal:</strong> AC below zero + 2 red bars, or AC above zero + 3 red bars</li>
-    <li><strong>Acceleration:</strong> Consecutive bars of same color indicate strengthening momentum</li>
-    <li><strong>Deceleration:</strong> Color changes indicate weakening momentum</li>
-  </ul>
-
-  <h3>Market Conditions</h3>
-  <ul>
-    <li><strong>Trending:</strong> AC stays on one side of zero with consistent colors</li>
-    <li><strong>Reversing:</strong> AC crosses zero line with momentum</li>
-    <li><strong>Consolidating:</strong> AC oscillates around zero with frequent color changes</li>
-    <li><strong>Momentum shifts:</strong> Early warning through deceleration patterns</li>
-  </ul>
 
   <h2 id="calculation">Calculation</h2>
-  <p>The AC calculation builds on the Awesome Oscillator:</p>
+  <p>The AC is calculated in three steps:</p>
   <ol>
-    <li><strong>Calculate Median Price:</strong>
-      <ul>
-        <li>Median Price = (High + Low) / 2</li>
-      </ul>
-    </li>
-    <li><strong>Calculate Awesome Oscillator (AO):</strong>
-      <ul>
-        <li>AO = SMA(Median Price, 5) - SMA(Median Price, 34)</li>
-      </ul>
-    </li>
-    <li><strong>Calculate AC:</strong>
-      <ul>
-        <li>AC = AO - SMA(AO, 5)</li>
-      </ul>
-    </li>
-    <li><strong>Determine Bar Colors:</strong>
-      <ul>
-        <li>Green: Current AC > Previous AC</li>
-        <li>Red: Current AC &lt; Previous AC</li>
-      </ul>
-    </li>
+    <li>Calculate Median Price = (High + Low) / 2</li>
+    <li>Calculate Awesome Oscillator (AO) = SMA(Median Price, 5) - SMA(Median Price, 34)</li>
+    <li>Calculate AC = AO - SMA(AO, 5)</li>
   </ol>
-  <p>
-    The AC essentially measures the rate of change of the Awesome Oscillator, providing a 
-    second-order derivative of price that reveals subtle shifts in market momentum before 
-    they become apparent in price action.
-  </p>
 
-  <h2 id="parameters">Parameters</h2>
-  <ul>
-    <li>
-      <strong>Fast Period (default: 5):</strong> The period for the fast SMA in the Awesome 
-      Oscillator calculation. Bill Williams specifically chose 5 to represent a market week. 
-      Changing this affects the indicator's sensitivity to short-term momentum changes.
-    </li>
-    <li>
-      <strong>Slow Period (default: 34):</strong> The period for the slow SMA in the Awesome 
-      Oscillator calculation. Williams chose 34 as it's a Fibonacci number representing 
-      approximately 1.5 months of trading. This captures the intermediate trend.
-    </li>
-    <li>
-      <strong>Signal Period (default: 5):</strong> The smoothing period applied to the AO to 
-      create the signal line. This determines how quickly AC responds to momentum changes. 
-      The default of 5 provides a good balance between responsiveness and reliability.
-    </li>
-  </ul>
 
   <h2 id="returns">Returns & Output</h2>
-  <p>The indicator returns an array of AC values:</p>
+  <p>The indicator returns an array of AC values representing the acceleration/deceleration at each time point.</p>
   <ul>
-    <li><strong>AC values:</strong> The acceleration/deceleration oscillator values</li>
-    <li><strong>Direction:</strong> Positive/negative indicating momentum direction</li>
-    <li><strong>Magnitude:</strong> Distance from zero indicates strength</li>
-    <li><strong>Rate of change:</strong> Bar-to-bar changes show acceleration</li>
-    <li><strong>Typical range:</strong> Usually between -0.01 and +0.01 for forex</li>
+    <li><strong>Positive values:</strong> Indicate the driving force is accelerating</li>
+    <li><strong>Negative values:</strong> Indicate the driving force is decelerating</li>
+    <li><strong>Zero crossings:</strong> Signal potential momentum shifts</li>
   </ul>
-
-  <h2 id="usage">Example Usage</h2>
-  <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-// Rust implementation example will be added here
-  </code></pre>
-
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-# Python implementation example will be added here
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Bill Williams Trading System</h3>
-  <p>Complete implementation of Williams' AC trading rules:</p>
-  <pre><code class="language-python">
-# Python implementation example will be added here
-  </code></pre>
-
-  <h3>2. Momentum Acceleration Strategy</h3>
-  <p>Trading based on momentum acceleration patterns:</p>
-  <pre><code class="language-python">
-# Python implementation example will be added here
-  </code></pre>
-
-  <h3>3. AC Divergence Trading</h3>
-  <p>Advanced divergence detection and trading:</p>
-  <pre><code class="language-python">
-# Python implementation example will be added here
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
-  <h3>Common Issues</h3>
+  
+  <div class="not-prose">
+    <div class="card mt-8">
+      <CodeExport 
+        client:load 
+        indicatorId={indicatorId} 
+        parameters={parameters.reduce((acc, p) => ({ ...acc, [p.name]: p.default }), {})} 
+      />
+    </div>
+  </div>
+  
+  <h2 id="performance">Performance Characteristics</h2>
   <ul>
-    <li><strong>Whipsaws:</strong> Frequent color changes in ranging markets</li>
-    <li><strong>Lag:</strong> AC can lag during strong trends despite being "leading"</li>
-    <li><strong>False signals:</strong> Many signals in choppy conditions</li>
-    <li><strong>Scale differences:</strong> AC values vary greatly between markets</li>
-  </ul>
-
-  <h3>Best Practices</h3>
-  <ul>
-    <li>Always use with other Bill Williams indicators for confirmation</li>
-    <li>Pay attention to the number of consecutive colored bars</li>
-    <li>Consider market context - AC works best in trending markets</li>
-    <li>Use proper position sizing as AC can generate many signals</li>
-    <li>Backtest the specific bar count rules for your market</li>
-    <li>Monitor AC histogram patterns, not just individual values</li>
-  </ul>
-
-  <h2 id="references">References</h2>
-  <ul>
-    <li>Williams, B. (1995). <em>Trading Chaos</em>. John Wiley & Sons.</li>
-    <li>Williams, B. (2004). <em>Trading Chaos: Second Edition</em>. John Wiley & Sons.</li>
-    <li>The Profitunity Trading System and AC indicator applications</li>
-    <li>Momentum analysis and acceleration/deceleration concepts in trading</li>
+    <li><strong>Time Complexity:</strong> O(n) where n is the number of data points</li>
+    <li><strong>Space Complexity:</strong> O(n) for storing intermediate calculations</li>
+    <li><strong>Minimum Data Required:</strong> slow_period + signal_period - 1 points (default: 38)</li>
   </ul>
 </IndicatorLayout>

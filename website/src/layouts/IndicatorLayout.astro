@@ -2,6 +2,10 @@
 import DocsLayout from './DocsLayout.astro';
 import { IndicatorChart } from '../components/charts/IndicatorChart';
 import RelatedIndicators from '../components/ui/RelatedIndicators.astro';
+import { PerformanceChart } from '../components/performance/PerformanceChart';
+import { PerformanceMetrics } from '../components/performance/PerformanceMetrics';
+import { ComparisonMatrix } from '../components/performance/ComparisonMatrix';
+import { CodeExport } from '../components/export/CodeExport';
 
 export interface Props {
   indicatorId: string;
@@ -20,7 +24,7 @@ const defaultParams = parameters.reduce((acc, p) => ({
 
 // For now, we'll use empty data array to avoid parsing errors
 // This will be replaced with real data when WASM is ready
-const sampleData = [];
+const sampleData: any[] = [];
 
 // Create a table of contents from the sections
 const sections = [
@@ -57,9 +61,7 @@ const sections = [
             <IndicatorChart
               client:only="react"
               indicatorId={indicatorId}
-              data={sampleData}
               parameters={defaultParams}
-              darkMode={true}
             />
           </div>
           <div class="mt-4 p-4 bg-muted rounded-lg">
@@ -73,6 +75,30 @@ const sections = [
         <!-- Documentation Content -->
         <div class="prose prose-lg dark:prose-invert prose-content">
           <slot />
+        </div>
+        
+        <!-- Performance Section -->
+        <div class="space-y-6 mt-8">
+          <div class="card">
+            <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+              <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Performance Benchmarks
+            </h2>
+            <PerformanceMetrics client:load indicatorId={indicatorId} />
+          </div>
+          
+          <div class="card">
+            <h3 class="text-lg font-semibold mb-4">Performance Comparison</h3>
+            <PerformanceChart client:load indicatorId={indicatorId} />
+          </div>
+          
+          <div class="card">
+            <h3 class="text-lg font-semibold mb-4">Feature Comparison</h3>
+            <ComparisonMatrix client:load />
+          </div>
+          
         </div>
       </div>
       

@@ -5,9 +5,15 @@ async function scanIndicators() {
   const indicators = {};
   
   try {
-    // Scan indicators from parent directory's Rust source
+    // Check if we have access to parent directory
     const srcPath = '../src/indicators';
-    const files = await readdir(srcPath);
+    let files;
+    try {
+      files = await readdir(srcPath);
+    } catch (error) {
+      console.log('Parent directory not accessible, using existing registry');
+      return; // Exit early if we can't access parent directory
+    }
     
     for (const file of files) {
       if (file.endsWith('.rs') && file !== 'mod.rs') {

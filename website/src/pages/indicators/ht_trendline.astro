@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_trendline';
 const indicatorName = 'Hilbert Transform - Instantaneous Trendline';
 const description = `The Hilbert Transform Instantaneous Trendline is a smooth, adaptive moving average that uses the dominant cycle period to create a trend-following line with minimal lag, automatically adjusting to market conditions without whipsaws.`;
-const parameters = [];  // Hilbert Transform indicators are typically parameter-free
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform indicators are typically parameter-free
 ---
 
 <IndicatorLayout
@@ -99,198 +106,25 @@ const parameters = [];  // Hilbert Transform indicators are typically parameter-
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::{ht_trendline, ht_dcperiod, ht_trendmode};
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate Instantaneous Trendline
-let trendline = ht_trendline(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Basic trend following signals
-for i in 1..close_prices.len() {
-    if let (Some(price), Some(trend), Some(prev_trend)) = 
-        (close_prices.get(i), trendline.get(i), trendline.get(i-1)) {
-        
-        // Detect crossovers
-        if close_prices[i-1] <= trendline[i-1] && price > trend {
-            println!("Bullish crossover at bar {}: Price {:.2} crossed above {:.2}", 
-                     i, price, trend);
-        } else if close_prices[i-1] >= trendline[i-1] && price < trend {
-            println!("Bearish crossover at bar {}: Price {:.2} crossed below {:.2}", 
-                     i, price, trend);
-        }
-        
-        // Measure trend strength
-        let trend_slope = (trend - prev_trend) / prev_trend * 100.0;
-        if trend_slope.abs() > 0.5 {
-            let direction = if trend_slope > 0.0 { "up" } else { "down";
-            println!("Strong trend {} at bar {}: {:.2}% slope", direction, i, trend_slope);
-        }
-        
-        // Identify pullback opportunities
-        let distance = (price - trend) / trend * 100.0;
-        if distance.abs() < 0.5 && trend_slope > 0.2 {
-            println!("Pullback buy opportunity at bar {}: Price near rising trendline", i);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Adaptive Trend Following</h3> <p>Trade with the trend using adaptive signals:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Combine with other HT indicators
-let dc_period = ht_dcperiod(&close_prices)?;
-let trend_mode = ht_trendmode(&close_prices)?;
+  <h3>2. Mean Reversion from Trendline</h3> <p>Trade reversions to the adaptive trendline:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-for i in 50..close_prices.len() {
-    if let (Some(trend), Some(period), Some(mode)) = 
-        (trendline.get(i), dc_period.get(i), trend_mode.get(i)) {
-        
-        // Analyze trendline behavior
-        println!("Bar {}: Trendline = {:.2}, Period = {:.1}, Mode = {}", 
-                 i, trend, period, if *mode > 0.0 { "Trending" } else { "Cycling" });
-        
-        // Adaptive behavior analysis
-        let effective_alpha = 2.0 / (period + 1.0);
-        let equivalent_ema_period = (2.0 / effective_alpha) - 1.0;
-        println!("  Adaptive smoothing equivalent to {:.1}-period EMA", equivalent_ema_period);
-    }
-}
-  </code></pre>
+  <h3>3. Multi-Timeframe Trend Analysis</h3> <p>Combine trendlines from multiple timeframes:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_trendline, ht_dcperiod, ht_trendmode
-
-# Calculate Instantaneous Trendline
-df['trendline'] = ht_trendline(df['close'])
-
-# Generate crossover signals
-df['above_trend'] = df['close'] > df['trendline']
-df['bullish_cross'] = df['above_trend'] & ~df['above_trend'].shift(1)
-df['bearish_cross'] = ~df['above_trend'] & df['above_trend'].shift(1)
-
-# Calculate trend slope
-df['trend_slope'] = df['trendline'].pct_change() * 100
-df['trend_direction'] = np.where(df['trend_slope'] > 0, 1, -1)
-
-# Measure distance from trendline
-df['distance_pct'] = (df['close'] - df['trendline']) / df['trendline'] * 100
-
-# Identify pullback opportunities
-df['pullback_buy'] = (
-    (df['distance_pct'] > -1) & 
-    (df['distance_pct'] < 0.5) & 
-    (df['trend_slope'] > 0.1) &
-    (df['trend_slope'].rolling(5).mean() > 0.1)
-)
-
-df['pullback_sell'] = (
-    (df['distance_pct'] < 1) & 
-    (df['distance_pct'] > -0.5) & 
-    (df['trend_slope'] < -0.1) &
-    (df['trend_slope'].rolling(5).mean() < -0.1)
-)
-
-# Combine with cycle analysis
-df['dc_period'] = ht_dcperiod(df['close'])
-df['trend_mode'] = ht_trendmode(df['close'])
-
-# Analyze adaptive behavior
-df['effective_alpha'] = 2 / (df['dc_period'] + 1)
-df['ema_equivalent'] = (2 / df['effective_alpha']) - 1
-
-print(f"Trendline adapts between {df['ema_equivalent'].min():.1f} and {df['ema_equivalent'].max():.1f} period EMA equivalent")
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Adaptive Trend Following</h3>
-  <p>Trade with the trend using adaptive signals:</p>
-  <pre><code class="language-python">
-# Calculate indicators
-trendline = ht_trendline(close)
-trend_mode = ht_trendmode(close)
-
-# Trend following rules
-uptrend = close > trendline
-downtrend = close < trendline
-
-# Entry signals with trend mode filter
-# Only take signals when in trending mode
-trending_market = trend_mode > 0
-
-buy_signal = uptrend & (close.shift(1) <= trendline.shift(1)) & trending_market
-sell_signal = downtrend & (close.shift(1) >= trendline.shift(1)) & trending_market
-
-# Trail stops using trendline
-long_stop = trendline * 0.98  # 2% below trendline
-short_stop = trendline * 1.02  # 2% above trendline
-
-# Exit on trendline violation
-exit_long = close < trendline
-exit_short = close > trendline
-  </code></pre>
-
-  <h3>2. Mean Reversion from Trendline</h3>
-  <p>Trade reversions to the adaptive trendline:</p>
-  <pre><code class="language-python">
-# Calculate distance from trendline
-trendline = ht_trendline(close)
-distance = (close - trendline) / trendline * 100
-
-# Define extreme distances (adaptive based on volatility)
-volatility = close.pct_change().rolling(20).std() * 100
-upper_band = 2 * volatility
-lower_band = -2 * volatility
-
-# Mean reversion signals
-oversold = distance < lower_band
-overbought = distance > upper_band
-
-# Confirm with trendline direction
-trend_up = trendline > trendline.shift(1)
-trend_down = trendline < trendline.shift(1)
-
-# Trade signals
-buy_reversion = oversold & trend_up  # Buy dips in uptrend
-sell_reversion = overbought & trend_down  # Sell rallies in downtrend
-
-# Target: Return to trendline
-profit_target = trendline
-  </code></pre>
-
-  <h3>3. Multi-Timeframe Trend Analysis</h3>
-  <p>Combine trendlines from multiple timeframes:</p>
-  <pre><code class="language-python">
-# Calculate trendlines on different timeframes
-trendline_5m = ht_trendline(close_5m)
-trendline_15m = ht_trendline(close_15m)
-trendline_1h = ht_trendline(close_1h)
-
-# Resample to align timeframes
-trendline_15m_resampled = trendline_15m.reindex(close_5m.index, method='ffill')
-trendline_1h_resampled = trendline_1h.reindex(close_5m.index, method='ffill')
-
-# Trend alignment
-all_up = (close_5m > trendline_5m) & \
-         (close_5m > trendline_15m_resampled) & \
-         (close_5m > trendline_1h_resampled)
-
-all_down = (close_5m < trendline_5m) & \
-           (close_5m < trendline_15m_resampled) & \
-           (close_5m < trendline_1h_resampled)
-
-# Trade only with full alignment
-strong_buy = all_up & (close_5m.shift(1) <= trendline_5m.shift(1))
-strong_sell = all_down & (close_5m.shift(1) >= trendline_5m.shift(1))
-
-# Measure trend consistency
-trend_score = (
-    (close_5m > trendline_5m).astype(int) +
-    (close_5m > trendline_15m_resampled).astype(int) +
-    (close_5m > trendline_1h_resampled).astype(int)
-) / 3
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Initialization period:</strong> Requires ~50 bars for accurate adaptation</li>

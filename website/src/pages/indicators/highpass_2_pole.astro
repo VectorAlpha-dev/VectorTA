@@ -22,213 +22,46 @@ const parameters = [
   description={description}
   parameters={parameters}
 >
-  <h2 id="overview">Overview</h2>
+  <h2>Overview</h2>
   <p>
-    The 2-Pole High Pass Filter is an enhanced version of the standard high pass filter that uses 
-    a second-order (2-pole) design to achieve a steeper frequency response curve. This results in 
-    better separation between the frequencies you want to keep (high frequencies/short-term movements) 
-    and those you want to remove (low frequencies/long-term trends).
-  </p>
-  <p>
-    Developed by John Ehlers, the 2-Pole design provides approximately 12 dB/octave rolloff compared 
-    to 6 dB/octave for a single-pole filter. This means it more effectively removes trend components 
-    while preserving the cycle information traders need for timing entries and exits. The filter is 
-    particularly useful in markets with strong trends that might otherwise obscure shorter-term cycles.
+    The 2-Pole High Pass Filter removes low-frequency components from price data to isolate short-term 
+    cycles. With sharper attenuation than standard high-pass filters (-12 dB/octave roll-off), it provides 
+    superior separation between trend and cycle components. The default 48-bar cutoff period passes cycles 
+    shorter than 48 bars while strongly attenuating longer-term trends, making it ideal for cycle analysis 
+    and identifying market turning points.
   </p>
 
-  <h2 id="interpretation">Interpretation</h2>
-  <h3>Signal Characteristics</h3>
+  <h2>Parameters</h2>
   <ul>
-    <li><strong>Sharper cutoff:</strong> Better separation between trend and cycle components</li>
-    <li><strong>Cleaner output:</strong> Less trend leakage compared to 1-pole filter</li>
-    <li><strong>Zero crossings:</strong> More reliable cycle identification points</li>
-    <li><strong>Amplitude preservation:</strong> Better maintains cycle amplitude after filtering</li>
-  </ul>
-
-  <h3>Trading Signals</h3>
-  <ul>
-    <li><strong>Cycle turns:</strong> Zero-line crossings indicate cycle phase changes</li>
-    <li><strong>Momentum shifts:</strong> Rate of change in filter output shows momentum</li>
-    <li><strong>Divergence:</strong> Filter diverging from price action signals potential reversals</li>
-    <li><strong>Cycle strength:</strong> Amplitude indicates strength of cyclic component</li>
-  </ul>
-
-  <h3>Advantages Over 1-Pole</h3>
-  <ul>
-    <li><strong>Better trend removal:</strong> More complete elimination of long-term trends</li>
-    <li><strong>Cleaner cycles:</strong> Less contamination from adjacent frequencies</li>
-    <li><strong>Improved timing:</strong> More precise cycle turn identification</li>
-    <li><strong>Reduced whipsaws:</strong> Fewer false signals in trending markets</li>
-  </ul>
-
-  <h2 id="calculation">Calculation</h2>
-  <p>The 2-Pole High Pass Filter calculation involves:</p>
-  <ol>
-    <li>Calculate the angular frequency: <code>ω = 2π / period</code></li>
-    <li>Compute filter coefficients:
+    <li>
+      <strong>period</strong> (number): Cutoff period in bars. Default: 48, Range: 5-200
       <ul>
-        <li><code>a1 = 2 * cos(1.414 * ω)</code></li>
-        <li><code>a2 = -1</code></li>
-        <li><code>c = (1 - sin(1.414 * ω)) / cos(1.414 * ω)</code></li>
+        <li>Shorter periods (20-30) = aggressive filtering, only very short cycles pass</li>
+        <li>Longer periods (60-125) = gentle filtering, more cycles preserved</li>
+        <li>Must be ≥ 5 for stable results</li>
       </ul>
     </li>
-    <li>Apply the recursive filter: <code>HP[i] = c² * (price[i] - 2*price[i-1] + price[i-2]) + a1*HP[i-1] + a2*HP[i-2]</code></li>
-  </ol>
-  <p>
-    The 1.414 factor (√2) provides critical damping, preventing oscillation while maintaining 
-    optimal frequency response. This gives the best balance between sharpness of cutoff and 
-    stability of output.
-  </p>
-
-  <h2 id="parameters">Parameters</h2>
-  <h3>Period (default: 48)</h3>
-  <p>
-    The cutoff period determines the boundary between filtered and passed frequencies. 
-    Components with periods longer than this value are strongly attenuated.
-  </p>
-  <ul>
-    <li><strong>Short period (10-30):</strong> Preserves more frequencies, less filtering</li>
-    <li><strong>Medium period (30-60):</strong> Balanced for swing trading cycles</li>
-    <li><strong>Long period (60-100):</strong> Strong trend removal, only short cycles remain</li>
-  </ul>
-  <p>
-    Due to the sharper cutoff, the 2-pole filter can use a shorter period than the 1-pole 
-    version while achieving similar trend removal. A period of 48 effectively removes 
-    components longer than about 10 weeks on daily data.
-  </p>
-
-  <h2 id="returns">Returns & Output</h2>
-  <p>The 2-Pole High Pass Filter output characteristics:</p>
-  <ul>
-    <li><strong>Type:</strong> Array of floating-point numbers</li>
-    <li><strong>Center:</strong> Oscillates around zero (detrended)</li>
-    <li><strong>Range:</strong> Typically ±3-5% of average price</li>
-    <li><strong>Initial values:</strong> First few values may be unstable during filter startup</li>
-    <li><strong>Smoothness:</strong> Smoother than 1-pole due to additional filtering</li>
   </ul>
 
-  <h2 id="usage">Example Usage</h2>
+  <h2>Returns</h2>
+  <p>
+    Array of filtered values representing detrended price movements:
+  </p>
+  <ul>
+    <li><strong>Positive values:</strong> Price above trend</li>
+    <li><strong>Negative values:</strong> Price below trend</li>
+    <li><strong>Zero crossings:</strong> Potential cycle turning points</li>
+    <li><strong>Initial values:</strong> 0.0 until filter stabilizes (≈2-3x period)</li>
+  </ul>
+
+  <h2>Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::highpass_2_pole;
-
-// Calculate 2-Pole High Pass Filter
-let hp2_values = highpass_2_pole(&close_prices, 48)?;
-
-// Compare with 1-pole filter
-let hp1_values = highpass(&close_prices, 48)?;
-
-// Measure improvement in trend removal
-for i in 100..close_prices.len() {
-    if let (Some(hp1), Some(hp2)) = (hp1_values.get(i), hp2_values.get(i)) {
-        let trend_leakage_1pole = hp1.abs() / close_prices[i];
-        let trend_leakage_2pole = hp2.abs() / close_prices[i];
-        
-        println!("Trend removal improvement: {:.2}%", 
-                 (1.0 - trend_leakage_2pole/trend_leakage_1pole) * 100.0);
-    }
-}
-
-// Identify clean cycle turns
-let mut cycle_turns = Vec::new();
-for i in 1..hp2_values.len() {
-    if let (Some(prev), Some(curr)) = (hp2_values.get(i-1), hp2_values.get(i)) {
-        if (prev < 0.0 && curr >= 0.0) || (prev > 0.0 && curr <= 0.0) {
-            cycle_turns.push(i);
-        }
-    }
-}
+  <pre><code class="language-rust"> // Rust implementation example will be added here
   </code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import highpass_2_pole, highpass
-
-# Calculate both filters for comparison
-df['hp_1pole'] = highpass(df['close'], period=48)
-df['hp_2pole'] = highpass_2_pole(df['close'], period=48)
-
-# Analyze cycle clarity improvement
-df['cycle_clarity'] = df['hp_2pole'].abs() / df['hp_1pole'].abs()
-print(f"Average clarity improvement: {df['cycle_clarity'].mean():.2f}x")
-
-# Generate cleaner trading signals
-df['signal_2pole'] = 0
-df.loc[(df['hp_2pole'] > 0) & (df['hp_2pole'].shift(1) <= 0), 'signal_2pole'] = 1
-df.loc[(df['hp_2pole'] < 0) & (df['hp_2pole'].shift(1) >= 0), 'signal_2pole'] = -1
-
-# Measure cycle period with better accuracy
-from scipy.signal import find_peaks
-peaks, _ = find_peaks(df['hp_2pole'], distance=10)
-cycle_periods = np.diff(peaks)
-dominant_cycle = np.median(cycle_periods)
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
   </code></pre>
 
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Precise Cycle Trading</h3>
-  <p>Trade cycles with minimal trend interference:</p>
-  <pre><code class="language-python">
-# 2-pole for cycle extraction
-hp2 = highpass_2_pole(close, 48)
-
-# Trade cycle extremes
-percentile_80 = np.percentile(hp2.dropna(), 80)
-percentile_20 = np.percentile(hp2.dropna(), 20)
-
-sell_signal = hp2 > percentile_80
-buy_signal = hp2 < percentile_20
-  </code></pre>
-
-  <h3>2. Multi-Filter Analysis</h3>
-  <p>Combine multiple 2-pole filters for different cycles:</p>
-  <pre><code class="language-python">
-# Extract different cycle components
-short_cycle = highpass_2_pole(close, 20)  # 1-month cycles
-medium_cycle = highpass_2_pole(close, 48)  # 2-3 month cycles
-long_cycle = highpass_2_pole(close, 100)  # 5-month cycles
-
-# Trade when cycles align
-aligned_long = (short_cycle > 0) & (medium_cycle > 0) & (long_cycle > 0)
-aligned_short = (short_cycle < 0) & (medium_cycle < 0) & (long_cycle < 0)
-  </code></pre>
-
-  <h3>3. Cycle Strength Measurement</h3>
-  <p>Quantify cycle strength for position sizing:</p>
-  <pre><code class="language-python">
-# Measure cycle amplitude
-hp2 = highpass_2_pole(close, 48)
-cycle_amplitude = hp2.rolling(20).std()
-
-# Normalize for position sizing
-cycle_strength = cycle_amplitude / cycle_amplitude.rolling(100).mean()
-position_size = np.clip(cycle_strength, 0.5, 2.0)  # 50% to 200% of base size
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
-  <h3>Common Issues</h3>
-  <ul>
-    <li><strong>Filter startup:</strong> Requires more initialization time than 1-pole (about 3*period)</li>
-    <li><strong>Overshoot:</strong> Can occasionally overshoot at sharp price transitions</li>
-    <li><strong>Parameter sensitivity:</strong> More sensitive to period selection than 1-pole</li>
-    <li><strong>Computation:</strong> Slightly more computationally intensive</li>
-  </ul>
-
-  <h3>Best Practices</h3>
-  <ul>
-    <li>Allow adequate warmup period (at least 3*period bars)</li>
-    <li>Test different periods to find optimal cycle isolation</li>
-    <li>Combine with volatility filters to normalize amplitude</li>
-    <li>Use in conjunction with trend indicators for context</li>
-    <li>Monitor filter stability in highly volatile conditions</li>
-  </ul>
-
-  <h2 id="references">References</h2>
-  <ul>
-    <li>Ehlers, J. F. (2001). <em>Rocket Science for Traders</em>. John Wiley & Sons.</li>
-    <li>Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.</li>
-    <li>Digital filter design theory and Butterworth filter characteristics</li>
-    <li>Comparison of filter orders and their frequency responses</li>
-  </ul>
+  <p class="text-sm text-muted-foreground mt-8"> Reference: Ehlers, J. F. (2013). <em>Cycle Analytics for Traders</em>. John Wiley & Sons.
+  </p>
 </IndicatorLayout>

@@ -55,8 +55,7 @@ const parameters = [
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      True Range = Max(High - Low, |High - Close[1]|, |Low - Close[1]|)<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> True Range = Max(High - Low, |High - Close[1]|, |Low - Close[1]|)<br/>
       <br/>
       ATR = Average(True Range, Period)<br/>
       <br/>
@@ -86,20 +85,16 @@ const parameters = [
   
   <h3>Stop Management</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Stop Behavior:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Widening Stops:</strong> Market becoming more volatile</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Tightening Stops:</strong> Market calming, trend maturing</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Flat Stops:</strong> Price consolidating or retracing</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Stop Hit:</strong> Exit signal, trend potentially ending</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Stop Behavior:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Widening Stops:</strong> Market becoming more volatile</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Tightening Stops:</strong> Market calming, trend maturing</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Flat Stops:</strong> Price consolidating or retracing</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Stop Hit:</strong> Exit signal, trend potentially ending</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Applications:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Entry Confirmation:</strong> Enter when price clears DevStop</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Position Management:</strong> Use as trailing stop</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Trend Strength:</strong> Distance from stop indicates strength</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Re-entry:</strong> Re-enter if price reclaims DevStop</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Trading Applications:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Entry Confirmation:</strong> Enter when price clears DevStop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Position Management:</strong> Use as trailing stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Trend Strength:</strong> Distance from stop indicates strength</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Re-entry:</strong> Re-enter if price reclaims DevStop</li>
     </ul>
   </div>
 

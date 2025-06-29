@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ad';
 const indicatorName = 'Accumulation/Distribution Line (A/D)';
 const description = `The Accumulation/Distribution Line (A/D) is a volume-based indicator designed to measure the cumulative flow of money into and out of a security. It helps traders identify whether a stock is being accumulated (bought) or distributed (sold) by comparing price and volume movements.`;
-const parameters = [];
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];
 ---
 
 <IndicatorLayout
@@ -32,8 +39,7 @@ const parameters = [];
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      MFM = [(Close - Low) - (High - Close)] / (High - Low)<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> MFM = [(Close - Low) - (High - Close)] / (High - Low)<br/>
       MFV = MFM × Volume<br/>
       A/D = Previous A/D + MFV
     </p>
@@ -58,16 +64,12 @@ const parameters = [];
 
   <h3>Divergence Signals</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Bullish Divergence:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li>Price makes lower lows while A/D makes higher lows</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Bullish Divergence:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li>Price makes lower lows while A/D makes higher lows</li>
       <li>Suggests underlying buying pressure despite falling prices</li>
       <li>Often precedes bullish reversals</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Bearish Divergence:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li>Price makes higher highs while A/D makes lower highs</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Bearish Divergence:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li>Price makes higher highs while A/D makes lower highs</li>
       <li>Indicates distribution despite rising prices</li>
       <li>Often precedes bearish reversals</li>
     </ul>

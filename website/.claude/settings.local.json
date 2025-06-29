@@ -16,7 +16,13 @@
       "Bash(mv:*)",
       "Bash(pkill:*)",
       "Bash(npx tsx:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(comm:*)",
+      "Bash(chmod:*)",
+      "Bash(git checkout:*)",
+      "Bash(rg:*)",
+      "Bash(./fix-html-syntax.sh:*)",
+      "Bash(git add:*)"
     ],
     "deny": []
   }

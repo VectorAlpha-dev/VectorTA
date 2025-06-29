@@ -62,8 +62,7 @@ const parameters = [
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      ATR = Average True Range(Period)<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> ATR = Average True Range(Period)<br/>
       <br/>
       Preliminary Long Stop = High - (Multiplier × ATR)<br/>
       Preliminary Short Stop = Low + (Multiplier × ATR)<br/>
@@ -92,20 +91,16 @@ const parameters = [
   
   <h3>Stop Levels</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Trading Rules:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Long Position:</strong> Exit when price crosses below long stop</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Short Position:</strong> Exit when price crosses above short stop</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Entry Signal:</strong> When price crosses above/below opposite stop</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Stop Distance:</strong> Wider in volatile markets, tighter in calm markets</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Trading Rules:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Long Position:</strong> Exit when price crosses below long stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Short Position:</strong> Exit when price crosses above short stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Entry Signal:</strong> When price crosses above/below opposite stop</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Stop Distance:</strong> Wider in volatile markets, tighter in calm markets</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Market Conditions:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Trending:</strong> Stops trail smoothly in trend direction</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Volatile:</strong> Stops widen to avoid premature exits</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Ranging:</strong> Stops may generate whipsaws</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Breakout:</strong> Stops confirm breakout when crossed</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Market Conditions:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Trending:</strong> Stops trail smoothly in trend direction</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Volatile:</strong> Stops widen to avoid premature exits</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Ranging:</strong> Stops may generate whipsaws</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Breakout:</strong> Stops confirm breakout when crossed</li>
     </ul>
   </div>
 

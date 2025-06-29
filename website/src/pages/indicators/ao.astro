@@ -46,14 +46,13 @@ const parameters = [
   <p>The Awesome Oscillator calculation is straightforward:</p>
   <ol>
     <li><strong>Calculate Median Price:</strong> (High + Low) / 2 for each bar</li>
-    <li><strong>Calculate Fast SMA:</strong&gt; 5-period simple moving average of median price</li>
-    <li><strong>Calculate Slow SMA:</strong&gt; 34-period simple moving average of median price</li>
+    <li><strong>Calculate Fast SMA:</strong> 5-period simple moving average of median price</li>
+    <li><strong>Calculate Slow SMA:</strong> 34-period simple moving average of median price</li>
     <li><strong>Calculate AO:</strong> Fast SMA - Slow SMA</li>
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      Median Price = (High + Low) / 2<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> Median Price = (High + Low) / 2<br/>
       AO = SMA(Median Price, 5) - SMA(Median Price, 34)<br/>
       <br/>
       Bar Color:<br/>
@@ -74,22 +73,16 @@ const parameters = [
   
   <h3>Basic Signals</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Zero Line Cross:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Bullish:</strong> AO crosses above zero line</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Bearish:</strong> AO crosses below zero line</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Zero Line Cross:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Bullish:</strong> AO crosses above zero line</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Bearish:</strong> AO crosses below zero line</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Twin Peaks:</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Bullish Twin Peaks:</strong> Two peaks below zero, second peak higher (less negative) than first</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Bearish Twin Peaks:</strong> Two peaks above zero, second peak lower than first</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Twin Peaks:</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Bullish Twin Peaks:</strong> Two peaks below zero, second peak higher (less negative) than first</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Bearish Twin Peaks:</strong> Two peaks above zero, second peak lower than first</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Saucer Signals:</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li><strong class="text-gray-900 dark:text-gray-100">Bullish Saucer:</strong> Three bars - red, red (lower), green (above zero)</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Bearish Saucer:</strong> Three bars - green, green (higher), red (below zero)</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Saucer Signals:</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li><strong class="text-gray-900 dark:text-gray-100"> Bullish Saucer:</strong> Three bars - red, red (lower), green (above zero)</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Bearish Saucer:</strong> Three bars - green, green (higher), red (below zero)</li>
     </ul>
   </div>
 

@@ -105,127 +105,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::hma;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate Hull Moving Average
-let hma_values = hma(&close_prices, 16)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Detect HMA direction changes for signals
-for i in 2..hma_values.len() {
-    if let (Some(prev2), Some(prev1), Some(curr)) = 
-        (hma_values.get(i-2), hma_values.get(i-1), hma_values.get(i)) {
-        
-        // Check for direction change
-        if prev2 > prev1 && prev1 < curr {
-            println!("HMA turned up at index {} - potential buy signal", i);
-        } else if prev2 < prev1 && prev1 > curr {
-            println!("HMA turned down at index {} - potential sell signal", i);
-        }
-        
-        // Measure slope for trend strength
-        let slope = (curr - prev1) / prev1 * 100.0;
-        if slope.abs() > 0.5 {
-            println!("Strong trend: {:.2}% slope", slope);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Trend Following</h3> <p>Use HMA for responsive trend following:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Use multiple HMAs for confirmation
-let fast_hma = hma(&close_prices, 9)?;
-let slow_hma = hma(&close_prices, 25)?;
+  <h3>2. Dynamic Support/Resistance</h3> <p>HMA as adaptive support and resistance:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-for i in 0..close_prices.len() {
-    if let (Some(fast), Some(slow)) = (fast_hma.get(i), slow_hma.get(i)) {
-        if fast > slow && fast_hma[i-1] <= slow_hma[i-1] {
-            println!("HMA crossover buy signal at index {}", i);
-        }
-    }
-}
-  </code></pre>
+  <h3>3. Multi-Timeframe Analysis</h3> <p>Combine different period HMAs:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import hma
-
-# Calculate HMA
-df['hma'] = hma(df['close'], period=16)
-
-# Detect direction changes
-df['hma_direction'] = np.sign(df['hma'].diff())
-df['hma_turn_up'] = (df['hma_direction'] > 0) & (df['hma_direction'].shift(1) <= 0)
-df['hma_turn_down'] = (df['hma_direction'] < 0) & (df['hma_direction'].shift(1) >= 0)
-
-# Color coding for visualization
-df['hma_color'] = np.where(df['hma'] > df['hma'].shift(1), 'green', 'red')
-
-# Generate trading signals
-df['signal'] = 0
-df.loc[df['hma_turn_up'], 'signal'] = 1
-df.loc[df['hma_turn_down'], 'signal'] = -1
-
-# Measure trend strength
-df['hma_slope'] = df['hma'].pct_change() * 100
-df['strong_trend'] = df['hma_slope'].abs() > 0.5
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Trend Following</h3>
-  <p>Use HMA for responsive trend following:</p>
-  <pre><code class="language-python">
-# Entry on HMA direction change
-long_entry = (hma > hma.shift(1)) & (hma.shift(1) <= hma.shift(2))
-short_entry = (hma < hma.shift(1)) & (hma.shift(1) >= hma.shift(2))
-
-# Exit on opposite direction change
-long_exit = hma < hma.shift(1)
-short_exit = hma > hma.shift(1)
-
-# Position sizing based on slope
-hma_slope = hma.pct_change()
-position_size = np.clip(abs(hma_slope) * 100, 0.5, 2.0)
-  </code></pre>
-
-  <h3>2. Dynamic Support/Resistance</h3>
-  <p>HMA as adaptive support and resistance:</p>
-  <pre><code class="language-python">
-# Use HMA as trailing stop
-hma_16 = hma(close, 16)
-
-# Long positions: stop below HMA
-long_stop = hma_16 * 0.98  # 2% below HMA
-
-# Short positions: stop above HMA  
-short_stop = hma_16 * 1.02  # 2% above HMA
-
-# Tighten stops in strong trends
-slope = hma_16.pct_change()
-stop_distance = np.where(abs(slope) > 0.01, 0.01, 0.02)
-dynamic_stop = hma_16 * (1 - stop_distance * np.sign(position))
-  </code></pre>
-
-  <h3>3. Multi-Timeframe Analysis</h3>
-  <p>Combine different period HMAs:</p>
-  <pre><code class="language-python">
-# Three HMA system
-hma_fast = hma(close, 9)    # Entry timing
-hma_medium = hma(close, 16)  # Trend direction
-hma_slow = hma(close, 25)    # Trend filter
-
-# Bullish alignment
-bullish = (hma_fast > hma_medium) & (hma_medium > hma_slow)
-
-# Momentum measurement
-momentum = (hma_fast - hma_slow) / hma_slow * 100
-
-# Trade only strong momentum
-strong_bullish = bullish & (momentum > 2)
-strong_bearish = ~bullish & (momentum < -2)
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Minimum period:</strong> Period must be at least 4 for stable calculation</li>

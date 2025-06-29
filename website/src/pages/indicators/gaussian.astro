@@ -113,70 +113,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::gaussian;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate Gaussian Filter with default parameters
-let gf_values = gaussian(&close_prices, 14, 1.0)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Using different sigma for more/less smoothing
-let smooth_gf = gaussian(&close_prices, 20, 2.0)?;  // More smoothing
-let responsive_gf = gaussian(&close_prices, 10, 0.7)?;  // More responsive
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Trend Following</h3> <p>Use the Gaussian Filter as a dynamic trend line:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify trend direction
-for i in 1..close_prices.len() {
-    if let (Some(price), Some(gf)) = (close_prices.get(i), gf_values.get(i)) {
-        if price > gf && close_prices[i-1] <= gf_values[i-1] {
-            println!("Bullish crossover at index {}", i);
-        }
-    }
-}
-  </code></pre>
+  <h3>2. Noise Filtering</h3> <p>Apply to other indicators to reduce false signals:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import gaussian
+  <h3>3. Multi-Timeframe Analysis</h3> <p>Use multiple Gaussian Filters for different timeframes:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate Gaussian Filter
-df['gaussian'] = gaussian(df['close'], period=14, sigma=1.0)
-
-# Generate trading signals
-df['signal'] = np.where(df['close'] > df['gaussian'], 1, -1)
-df['position'] = df['signal'].diff()
-
-# Find crossover points
-bullish_crosses = df[df['position'] == 2]
-bearish_crosses = df[df['position'] == -2]
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Trend Following</h3>
-  <p>Use the Gaussian Filter as a dynamic trend line:</p>
-  <pre><code class="language-python">
-# Long when price is above filter and filter is rising
-long_condition = (price > gaussian_filter) & (gaussian_filter > gaussian_filter.shift(1))
-  </code></pre>
-
-  <h3>2. Noise Filtering</h3>
-  <p>Apply to other indicators to reduce false signals:</p>
-  <pre><code class="language-python">
-# Smooth RSI with Gaussian Filter
-smoothed_rsi = gaussian(rsi_values, period=5, sigma=1.5)
-  </code></pre>
-
-  <h3>3. Multi-Timeframe Analysis</h3>
-  <p>Use multiple Gaussian Filters for different timeframes:</p>
-  <pre><code class="language-python">
-fast_gf = gaussian(close, 10, 0.8)  # Short-term trend
-slow_gf = gaussian(close, 30, 1.5)  # Long-term trend
-
-# Trade when both align
-bullish = (close > fast_gf) & (fast_gf > slow_gf)
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Insufficient data:</strong> Need at least 'period' number of values</li>

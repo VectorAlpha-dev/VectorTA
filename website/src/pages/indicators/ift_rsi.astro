@@ -113,194 +113,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::ift_rsi;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate IFT-RSI with 14-period RSI
-let prices = vec![45.15, 45.87, 45.99, 46.15, 46.67, 46.89, 47.12, 47.45, 
-                  47.23, 46.98, 46.87, 47.15, 47.56, 47.89, 48.12];
-let ift_rsi_values = ift_rsi(&prices, 14)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify signals
-for i in 1..ift_rsi_values.len() {
-    if let (Some(current), Some(previous)) = (ift_rsi_values[i], ift_rsi_values[i-1]) {
-        // Oversold bounce
-        if previous < -0.5 && current > -0.5 {
-            println!("Buy signal at index {}: IFT-RSI crossed above -0.5 ({:.3})", i, current);
-        }
-        
-        // Overbought reversal
-        if previous > 0.5 && current < 0.5 {
-            println!("Sell signal at index {}: IFT-RSI crossed below 0.5 ({:.3})", i, current);
-        }
-        
-        // Extreme readings
-        if current > 0.9 {
-            println!("Extreme overbought at {}: IFT-RSI = {:.3}", i, current);
-        } else if current < -0.9 {
-            println!("Extreme oversold at {}: IFT-RSI = {:.3}", i, current);
-        }
-        
-        // Momentum shifts
-        if previous < 0.0 && current > 0.0 {
-            println!("Bullish momentum shift at {}: IFT-RSI crossed above zero", i);
-        } else if previous > 0.0 && current < 0.0 {
-            println!("Bearish momentum shift at {}: IFT-RSI crossed below zero", i);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Mean Reversion Trading</h3> <p>Trading extreme IFT-RSI readings:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Compare with standard RSI
-let rsi_values = rsi(&prices, 14)?;
-for i in 14..prices.len() {
-    if let (Some(ift), Some(rsi)) = (ift_rsi_values[i], rsi_values[i]) {
-        println!("Index {}: Price={:.2}, RSI={:.1}, IFT-RSI={:.3}", 
-                 i, prices[i], rsi, ift);
-    }
-}
-  </code></pre>
+  <h3>2. Trend Following with IFT-RSI</h3> <p>Using IFT-RSI for trend confirmation:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ift_rsi, rsi
+  <h3>3. Multi-Timeframe IFT-RSI</h3> <p>Combining IFT-RSI from multiple timeframes:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Example usage with price data
-df = pd.DataFrame({
-    'close': [45.15, 45.87, 45.99, 46.15, 46.67, 46.89, 47.12, 47.45,
-              47.23, 46.98, 46.87, 47.15, 47.56, 47.89, 48.12, 48.45,
-              48.23, 47.95, 47.67, 47.89, 48.15, 48.56, 48.89, 49.12]
-})
-
-# Calculate IFT-RSI
-df['ift_rsi'] = ift_rsi(df['close'], period=14)
-
-# Calculate standard RSI for comparison
-df['rsi'] = rsi(df['close'], period=14)
-
-# Generate trading signals
-df['ift_oversold'] = df['ift_rsi'] < -0.5
-df['ift_overbought'] = df['ift_rsi'] > 0.5
-
-# Buy/Sell signals
-df['buy_signal'] = (df['ift_rsi'] > -0.5) & (df['ift_rsi'].shift(1) <= -0.5)
-df['sell_signal'] = (df['ift_rsi'] < 0.5) & (df['ift_rsi'].shift(1) >= 0.5)
-
-# Extreme reversals
-df['extreme_oversold'] = df['ift_rsi'] < -0.9
-df['extreme_overbought'] = df['ift_rsi'] > 0.9
-
-# Momentum analysis
-df['ift_momentum'] = np.where(df['ift_rsi'] > 0, 'Bullish', 'Bearish')
-df['momentum_shift'] = df['ift_momentum'] != df['ift_momentum'].shift(1)
-
-# Signal strength (distance from zero)
-df['signal_strength'] = abs(df['ift_rsi'])
-
-# Compare IFT-RSI with standard RSI signals
-df['rsi_oversold'] = df['rsi'] < 30
-df['rsi_overbought'] = df['rsi'] > 70
-
-print("Signal Comparison:")
-print(df[['close', 'rsi', 'ift_rsi', 'buy_signal', 'sell_signal']].tail(10))
-
-# Count signals
-ift_signals = df['buy_signal'].sum() + df['sell_signal'].sum()
-rsi_signals = ((df['rsi'] > 30) & (df['rsi'].shift(1) <= 30)).sum() + \
-              ((df['rsi'] < 70) & (df['rsi'].shift(1) >= 70)).sum()
-
-print(f"\nIFT-RSI signals: {ift_signals}")
-print(f"Standard RSI signals: {rsi_signals}")
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Mean Reversion Trading</h3>
-  <p>Trading extreme IFT-RSI readings:</p>
-  <pre><code class="language-python">
-# Calculate IFT-RSI
-ift = ift_rsi(close, 14)
-
-# Define extreme thresholds
-extreme_oversold = -0.9
-extreme_overbought = 0.9
-
-# Mean reversion signals
-# Buy when extremely oversold and turning up
-ift_turning_up = ift > ift.shift(1)
-buy_extreme = (ift < extreme_oversold) & ift_turning_up
-
-# Sell when extremely overbought and turning down
-ift_turning_down = ift < ift.shift(1)
-sell_extreme = (ift > extreme_overbought) & ift_turning_down
-
-# Exit at opposite threshold or zero crossing
-exit_long = (ift > 0.5) | (ift < ift.shift(1) & (ift < 0))
-exit_short = (ift < -0.5) | (ift > ift.shift(1) & (ift > 0))
-
-# Position sizing based on extremity
-position_size = abs(ift) * 100  # 0-100% based on signal strength
-  </code></pre>
-
-  <h3>2. Trend Following with IFT-RSI</h3>
-  <p>Using IFT-RSI for trend confirmation:</p>
-  <pre><code class="language-python">
-# Combine with moving average
-ma_50 = close.rolling(50).mean()
-ma_200 = close.rolling(200).mean()
-
-# IFT-RSI
-ift = ift_rsi(close, 14)
-
-# Trend definition
-uptrend = ma_50 > ma_200
-downtrend = ma_50 < ma_200
-
-# Filtered signals
-# Only buy in uptrends when IFT-RSI confirms
-buy_trend = uptrend & (ift > -0.5) & (ift.shift(1) <= -0.5)
-
-# Only sell in downtrends when IFT-RSI confirms  
-sell_trend = downtrend & (ift < 0.5) & (ift.shift(1) >= 0.5)
-
-# Hold positions while IFT-RSI confirms trend
-hold_long = uptrend & (ift > 0)
-hold_short = downtrend & (ift < 0)
-
-# Exit on IFT-RSI divergence
-exit_divergence = (uptrend & (ift < -0.5)) | (downtrend & (ift > 0.5))
-  </code></pre>
-
-  <h3>3. Multi-Timeframe IFT-RSI</h3>
-  <p>Combining IFT-RSI from multiple timeframes:</p>
-  <pre><code class="language-python">
-# Calculate IFT-RSI on different timeframes
-ift_5m = ift_rsi(close_5m, 14)
-ift_15m = ift_rsi(close_15m, 14)
-ift_1h = ift_rsi(close_1h, 14)
-
-# Align to 5-minute timeframe
-ift_15m_aligned = ift_15m.reindex(close_5m.index, method='ffill')
-ift_1h_aligned = ift_1h.reindex(close_5m.index, method='ffill')
-
-# Multi-timeframe agreement
-all_oversold = (ift_5m < -0.5) & (ift_15m_aligned < -0.3) & (ift_1h_aligned < 0)
-all_overbought = (ift_5m > 0.5) & (ift_15m_aligned > 0.3) & (ift_1h_aligned > 0)
-
-# Strong signals when all timeframes agree
-strong_buy = all_oversold & (ift_5m > ift_5m.shift(1))
-strong_sell = all_overbought & (ift_5m < ift_5m.shift(1))
-
-# Timeframe divergence detection
-tf_divergence = ((ift_5m > 0.5) & (ift_1h_aligned < -0.5)) | \
-                ((ift_5m < -0.5) & (ift_1h_aligned > 0.5))
-
-# Avoid signals during divergence
-filtered_buy = strong_buy & ~tf_divergence
-filtered_sell = strong_sell & ~tf_divergence
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Whipsaws in ranging markets:</strong> Rapid transitions can create false signals</li>

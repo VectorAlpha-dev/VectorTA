@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'heikin_ashi_candles';
 const indicatorName = 'Heikin Ashi Candles';
 const description = `Heikin Ashi is a Japanese candlestick charting technique that filters out market noise by using modified price calculations to create smoother candlestick patterns that make trends easier to identify.`;
-const parameters = [];  // Heikin Ashi doesn't typically have parameters
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Heikin Ashi doesn't typically have parameters
 ---
 
 <IndicatorLayout
@@ -88,95 +95,25 @@ const parameters = [];  // Heikin Ashi doesn't typically have parameters
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::heikin_ashi_candles;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Transform regular candles to Heikin Ashi
-let ha_candles = heikin_ashi_candles(&ohlc_data)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Access transformed values
-for (i, candle) in ha_candles.iter().enumerate() {
-    let is_bullish = candle.close > candle.open;
-    let has_no_lower_shadow = (candle.low - candle.open.min(candle.close)).abs() < 0.001;
-    
-    if is_bullish && has_no_lower_shadow {
-        println!("Strong bullish signal at candle {}", i);
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Trend Trading</h3> <p>Use Heikin Ashi for clear trend identification:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify trend changes
-for i in 1..ha_candles.len() {
-    let prev_bullish = ha_candles[i-1].close > ha_candles[i-1].open;
-    let curr_bullish = ha_candles[i].close > ha_candles[i].open;
-    
-    if prev_bullish != curr_bullish {
-        println!("Potential trend reversal at candle {}", i);
-    }
-}
-  </code></pre>
+  <h3>2. Swing Trading</h3> <p>Identify swing points using Heikin Ashi patterns:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import heikin_ashi_candles
+  <h3>3. Multi-Timeframe Analysis</h3> <p>Combine different timeframes for confirmation:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate Heikin Ashi candles
-ha_data = heikin_ashi_candles(df[['open', 'high', 'low', 'close']])
-df['ha_open'] = ha_data['open']
-df['ha_high'] = ha_data['high']
-df['ha_low'] = ha_data['low']
-df['ha_close'] = ha_data['close']
-
-# Identify candle types
-df['ha_color'] = np.where(df['ha_close'] > df['ha_open'], 'green', 'red')
-df['ha_body'] = abs(df['ha_close'] - df['ha_open'])
-df['ha_upper_shadow'] = df['ha_high'] - df[['ha_open', 'ha_close']].max(axis=1)
-df['ha_lower_shadow'] = df[['ha_open', 'ha_close']].min(axis=1) - df['ha_low']
-
-# Generate signals
-df['signal'] = 0
-df.loc[(df['ha_color'] == 'green') & (df['ha_lower_shadow'] < 0.01), 'signal'] = 1
-df.loc[(df['ha_color'] == 'red') & (df['ha_upper_shadow'] < 0.01), 'signal'] = -1
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Trend Trading</h3>
-  <p>Use Heikin Ashi for clear trend identification:</p>
-  <pre><code class="language-python">
-# Enter long when strong bullish candles appear
-long_entry = (ha_color == 'green') & (ha_lower_shadow < ha_body * 0.1)
-
-# Stay in position while trend continues
-hold_long = ha_color == 'green'
-
-# Exit when color changes or doji appears
-exit_long = (ha_color == 'red') | (ha_body < average_body * 0.3)
-  </code></pre>
-
-  <h3>2. Swing Trading</h3>
-  <p>Identify swing points using Heikin Ashi patterns:</p>
-  <pre><code class="language-python">
-# Look for trend exhaustion (small bodies after trend)
-exhaustion = (ha_body < ha_body.rolling(10).mean() * 0.5)
-
-# Confirm reversal with color change
-reversal = exhaustion.shift(1) & (ha_color != ha_color.shift(1))
-  </code></pre>
-
-  <h3>3. Multi-Timeframe Analysis</h3>
-  <p>Combine different timeframes for confirmation:</p>
-  <pre><code class="language-python">
-# Daily Heikin Ashi for trend direction
-daily_ha = heikin_ashi_candles(daily_data)
-daily_trend = 'up' if daily_ha['close'][-1] > daily_ha['open'][-1] else 'down'
-
-# Hourly Heikin Ashi for entry timing
-hourly_ha = heikin_ashi_candles(hourly_data)
-entry_signal = (daily_trend == 'up') & (hourly_ha['color'] == 'green')
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Limitations</h3>
   <ul>
     <li><strong>Delayed signals:</strong> Due to averaging, signals may lag actual price reversals</li>

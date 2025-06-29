@@ -78,14 +78,13 @@ const parameters = [
   <h2>How It Works</h2>
   <p>The Alligator consists of three smoothed moving averages (SMMA) with different periods and forward shifts:</p>
   <ol>
-    <li><strong>Jaw (Blue Line):</strong&gt; 13-period SMMA shifted 8 bars into the future - represents long-term trend</li>
-    <li><strong>Teeth (Red Line):</strong&gt; 8-period SMMA shifted 5 bars into the future - represents medium-term trend</li>
-    <li><strong>Lips (Green Line):</strong&gt; 5-period SMMA shifted 3 bars into the future - represents short-term trend</li>
+    <li><strong>Jaw (Blue Line):</strong> 13-period SMMA shifted 8 bars into the future - represents long-term trend</li>
+    <li><strong>Teeth (Red Line):</strong> 8-period SMMA shifted 5 bars into the future - represents medium-term trend</li>
+    <li><strong>Lips (Green Line):</strong> 5-period SMMA shifted 3 bars into the future - represents short-term trend</li>
   </ol>
   
   <div class="not-prose bg-gray-100 dark:bg-gray-800 p-4 rounded-lg my-4 border border-gray-200 dark:border-gray-700">
-    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200">
-      Jaw (Blue) = SMMA(Median Price, 13) shifted 8 bars forward<br/>
+    <p class="font-mono text-sm mb-0 text-gray-800 dark:text-gray-200"> Jaw (Blue) = SMMA(Median Price, 13) shifted 8 bars forward<br/>
       Teeth (Red) = SMMA(Median Price, 8) shifted 5 bars forward<br/>
       Lips (Green) = SMMA(Median Price, 5) shifted 3 bars forward<br/>
       <br/>
@@ -106,25 +105,19 @@ const parameters = [
   
   <h3>Alligator States</h3>
   <div class="not-prose bg-blue-50 dark:bg-blue-950/30 p-4 rounded-lg my-4 border border-blue-200 dark:border-blue-800">
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Sleeping Alligator (Ranging Market):</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li>All three lines are intertwined or crossing frequently</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Sleeping Alligator (Ranging Market):</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li>All three lines are intertwined or crossing frequently</li>
       <li>No clear order to the lines</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Action:</strong> Stay out of the market or use range-trading strategies</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Action:</strong> Stay out of the market or use range-trading strategies</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Awakening Alligator (Trend Beginning):</h4>
-    <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300">
-      <li>Lines begin to spread apart</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Awakening Alligator (Trend Beginning):</h4> <ul class="list-disc list-inside mb-4 text-gray-700 dark:text-gray-300"> <li>Lines begin to spread apart</li>
       <li>Clear order emerges: Lips → Teeth → Jaw</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Action:</strong> Prepare for trend-following trades</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Action:</strong> Prepare for trend-following trades</li>
     </ul>
     
-    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100">Eating Alligator (Trending Market):</h4>
-    <ul class="list-disc list-inside text-gray-700 dark:text-gray-300">
-      <li>Lines are widely separated in order</li>
+    <h4 class="font-semibold mb-2 text-lg text-blue-900 dark:text-blue-100"> Eating Alligator (Trending Market):</h4> <ul class="list-disc list-inside text-gray-700 dark:text-gray-300"> <li>Lines are widely separated in order</li>
       <li>Price stays on one side of all lines</li>
-      <li><strong class="text-gray-900 dark:text-gray-100">Action:</strong> Trade in the direction of the trend</li>
+      <li><strong class="text-gray-900 dark:text-gray-100"> Action:</strong> Trade in the direction of the trend</li>
     </ul>
   </div>
 

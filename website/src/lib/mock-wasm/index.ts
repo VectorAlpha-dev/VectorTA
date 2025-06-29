@@ -296,7 +296,7 @@ export class MockTALib {
   }
 
   // Generic indicator calculator
-  calculate(indicatorId: string, data: OHLCV[], params: Record<string, any>): any {
+  calculate(indicatorId: string, data: any[], params: Record<string, any>): any {
     const closes = data.map(d => d.close);
     const highs = data.map(d => d.high);
     const lows = data.map(d => d.low);

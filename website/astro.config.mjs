@@ -6,9 +6,32 @@ import wasm from 'vite-plugin-wasm';
 import topLevelAwait from 'vite-plugin-top-level-await';
 
 export default defineConfig({
-  site: 'https://ta-indicators-demo.com', // Update with actual domain
-  integrations: [tailwind(), sitemap(), react()],
+  site: 'https://vectoralpha.dev',
+  base: '/ta',
+  integrations: [
+    tailwind(), 
+    sitemap(), 
+    react()
+  ],
   vite: {
-    plugins: [wasm(), topLevelAwait()]
+    plugins: [wasm(), topLevelAwait()],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-charts': ['lightweight-charts'],
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-utils': ['papaparse', 'recharts'],
+          }
+        }
+      }
+    },
+    optimizeDeps: {
+      include: ['lightweight-charts', 'react', 'react-dom']
+    }
+  },
+  output: 'static',
+  build: {
+    inlineStylesheets: 'auto'
   }
 });

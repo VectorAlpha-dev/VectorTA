@@ -8,6 +8,11 @@ interface SidebarProps {
 
 export function Sidebar({ currentPath = '' }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Get base URL from environment
+  const base = import.meta.env.BASE_URL || '/';
+  // Remove trailing slash for consistent path building
+  const baseUrl = base.endsWith('/') ? base.slice(0, -1) : base;
 
   // Get all indicators sorted alphabetically
   const allIndicators = React.useMemo(() => {
@@ -28,7 +33,7 @@ export function Sidebar({ currentPath = '' }: SidebarProps) {
   }, [allIndicators, searchQuery]);
 
   return (
-    <aside className="w-64 h-full bg-background border-r border-border overflow-hidden flex flex-col">
+    <aside className="fixed left-0 top-16 w-64 h-[calc(100vh-4rem)] bg-background border-r border-border overflow-hidden flex flex-col">
       {/* Search */}
       <div className="p-4 border-b border-border">
         <div className="relative">
@@ -65,11 +70,12 @@ export function Sidebar({ currentPath = '' }: SidebarProps) {
         {/* Indicators List */}
         <div className="px-4">
           {filteredIndicators.map((indicator) => {
-            const isActive = currentPath === `/indicators/${indicator.id}`;
+            const indicatorPath = `${baseUrl}/indicators/${indicator.id}`;
+            const isActive = currentPath === indicatorPath || currentPath === `/indicators/${indicator.id}`;
             return (
               <a
                 key={indicator.id}
-                href={`/indicators/${indicator.id}`}
+                href={indicatorPath}
                 className={`block px-3 py-1.5 rounded-md text-sm transition-colors ${
                   isActive
                     ? 'bg-primary/10 text-primary font-medium'
@@ -82,21 +88,6 @@ export function Sidebar({ currentPath = '' }: SidebarProps) {
           })}
         </div>
       </nav>
-
-      {/* Footer */}
-      <div className="p-4 border-t border-border">
-        <a 
-          href="/guides"
-          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-              d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" 
-            />
-          </svg>
-          <span>Documentation</span>
-        </a>
-      </div>
     </aside>
   );
 }

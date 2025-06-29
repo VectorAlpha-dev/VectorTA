@@ -1,9 +1,10 @@
 ---
-import Header from '../components/layout/Header.astro';
-import Sidebar from '../components/layout/Sidebar.astro';
-import SkipToContent from '../components/ui/SkipToContent.astro';
-import HeaderScrollBehavior from '../components/layout/HeaderScrollBehavior.astro';
-import '../styles/global.css';
+import Header from "../components/layout/Header.astro";
+import Sidebar from "../components/layout/Sidebar.astro";
+import Footer from "../components/layout/Footer.astro";
+import SkipToContent from "../components/ui/SkipToContent.astro";
+import HeaderScrollBehavior from "../components/layout/HeaderScrollBehavior.astro";
+import "../styles/global.css";
 
 export interface Props {
   title: string;
@@ -11,10 +12,14 @@ export interface Props {
   includeSidebar?: boolean;
 }
 
-const { title, description = 'VectorTA - High-performance technical analysis library with 300+ indicators', includeSidebar = true } = Astro.props;
+const {
+  title,
+  description = "VectorTA - High-performance technical analysis library with 300+ indicators",
+  includeSidebar = true,
+} = Astro.props;
 ---
 
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -22,107 +27,139 @@ const { title, description = 'VectorTA - High-performance technical analysis lib
     <title>{title} | VectorTA</title>
     <meta name="description" content={description} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    
+
     <!-- Theme color -->
     <meta name="theme-color" content="#3b82f6" />
-    
+
     <!-- Critical theme script - must run before render to prevent flash -->
     <script is:inline>
       // This runs immediately to prevent theme flash
-      (function() {
-        const stored = localStorage.getItem('theme');
-        const theme = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      (function () {
+        const stored = localStorage.getItem("theme");
+        const theme =
+          stored ||
+          (window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light");
         document.documentElement.classList.add(theme);
-        
+
         // Update theme color meta tag
-        const themeColor = theme === 'dark' ? '#171717' : '#3b82f6';
+        const themeColor = theme === "dark" ? "#171717" : "#3b82f6";
         const metaTheme = document.querySelector('meta[name="theme-color"]');
-        if (metaTheme) metaTheme.setAttribute('content', themeColor);
+        if (metaTheme) metaTheme.setAttribute("content", themeColor);
       })();
     </script>
-    
+
     <!-- Preload fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <!-- Service Worker Registration -->
+    <script is:inline>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("/ta/sw.js").catch((err) => {
+            console.log("ServiceWorker registration failed:", err);
+          });
+        });
+      }
+    </script>
   </head>
-  <body class="bg-background text-foreground min-h-screen">
+  <body class="bg-background text-foreground min-h-screen flex flex-col">
     <SkipToContent />
     <Header />
     <HeaderScrollBehavior />
-    
+
     <!-- Mobile menu backdrop -->
-    <div id="mobile-backdrop" class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden" aria-hidden="true"></div>
-    
-    {includeSidebar ? (
-      <div class="flex">
-        <Sidebar />
-        <main id="main-content" class="flex-1 lg:ml-64 min-w-0" role="main">
-          <div class="px-4 sm:px-6 py-6 sm:py-8">
-            <slot />
+    <div
+      id="mobile-backdrop"
+      class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden"
+      aria-hidden="true"
+    >
+    </div>
+
+    <div class="flex-1 flex flex-col">
+      {
+        includeSidebar ? (
+          <div class="flex flex-1">
+            <div class="hidden lg:block">
+              <Sidebar />
+            </div>
+            <div class="flex-1 lg:ml-64 min-w-0 flex flex-col">
+              <main id="main-content" class="flex-1" role="main">
+                <div class="px-4 sm:px-6 py-6 sm:py-8">
+                  <slot />
+                </div>
+              </main>
+              <Footer />
+            </div>
           </div>
-        </main>
-      </div>
-    ) : (
-      <main id="main-content" role="main">
-        <slot />
-      </main>
-    )}
-    
+        ) : (
+          <>
+            <main id="main-content" class="flex-1" role="main">
+              <slot />
+            </main>
+            <Footer />
+          </>
+        )
+      }
+    </div>
+
     <script>
       // Theme management (already handled in head, this is for runtime changes)
       const getPreferredTheme = () => {
-        const stored = localStorage.getItem('theme');
+        const stored = localStorage.getItem("theme");
         if (stored) return stored;
-        
+
         // Check system preference
-        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          return 'dark';
+        if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+          return "dark";
         }
-        return 'light';
+        return "light";
       };
-      
+
       const theme = getPreferredTheme();
-      document.documentElement.classList.toggle('dark', theme === 'dark');
-      
+      document.documentElement.classList.toggle("dark", theme === "dark");
+
       // Listen for theme changes
-      window.addEventListener('theme-change', (e) => {
-        const newTheme = e.detail.theme;
-        document.documentElement.classList.toggle('dark', newTheme === 'dark');
-        localStorage.setItem('theme', newTheme);
+      window.addEventListener("theme-change", (e) => {
+        const newTheme = (e as CustomEvent).detail.theme;
+        document.documentElement.classList.toggle("dark", newTheme === "dark");
+        localStorage.setItem("theme", newTheme);
       });
-      
-      // Mobile menu toggle
-      const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
-      const mobileSidebar = document.getElementById('sidebar');
-      const mobileBackdrop = document.getElementById('mobile-backdrop');
-      
+
+      // Mobile menu toggle test
+      const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
+      const mobileSidebar = document.getElementById("sidebar");
+      const mobileBackdrop = document.getElementById("mobile-backdrop");
+
       function toggleMobileMenu() {
-        const isOpen = mobileSidebar?.classList.contains('translate-x-0');
-        
+        const isOpen = mobileSidebar?.classList.contains("translate-x-0");
+
         if (isOpen) {
-          mobileSidebar?.classList.remove('translate-x-0');
-          mobileSidebar?.classList.add('-translate-x-full');
-          mobileBackdrop?.classList.add('hidden');
-          document.body.style.overflow = '';
+          mobileSidebar?.classList.remove("translate-x-0");
+          mobileSidebar?.classList.add("-translate-x-full");
+          mobileBackdrop?.classList.add("hidden");
+          document.body.style.overflow = "";
         } else {
-          mobileSidebar?.classList.add('translate-x-0');
-          mobileSidebar?.classList.remove('-translate-x-full');
-          mobileBackdrop?.classList.remove('hidden');
-          document.body.style.overflow = 'hidden';
+          mobileSidebar?.classList.add("translate-x-0");
+          mobileSidebar?.classList.remove("-translate-x-full");
+          mobileBackdrop?.classList.remove("hidden");
+          document.body.style.overflow = "hidden";
         }
       }
-      
-      mobileMenuToggle?.addEventListener('click', toggleMobileMenu);
-      mobileBackdrop?.addEventListener('click', toggleMobileMenu);
-      
+
+      mobileMenuToggle?.addEventListener("click", toggleMobileMenu);
+      mobileBackdrop?.addEventListener("click", toggleMobileMenu);
+
       // Close mobile menu on resize to desktop
       let lastWidth = window.innerWidth;
-      window.addEventListener('resize', () => {
+      window.addEventListener("resize", () => {
         if (window.innerWidth >= 1024 && lastWidth < 1024) {
-          mobileSidebar?.classList.remove('translate-x-0');
-          mobileSidebar?.classList.add('-translate-x-full');
-          mobileBackdrop?.classList.add('hidden');
-          document.body.style.overflow = '';
+          mobileSidebar?.classList.remove("translate-x-0");
+          mobileSidebar?.classList.add("-translate-x-full");
+          mobileBackdrop?.classList.add("hidden");
+          document.body.style.overflow = "";
         }
         lastWidth = window.innerWidth;
       });
@@ -135,7 +172,7 @@ const { title, description = 'VectorTA - High-performance technical analysis lib
   #sidebar {
     transition: transform 0.3s ease-in-out;
   }
-  
+
   #mobile-backdrop {
     transition: opacity 0.3s ease-in-out;
   }

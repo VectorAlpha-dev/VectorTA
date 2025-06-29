@@ -4,7 +4,14 @@ import IndicatorLayout from '../../layouts/IndicatorLayout.astro';
 const indicatorId = 'ht_dcperiod';
 const indicatorName = 'Hilbert Transform - Dominant Cycle Period';
 const description = `The Hilbert Transform Dominant Cycle Period indicator uses advanced signal processing to measure the current dominant cycle length in market data, providing adaptive period measurements that can be used to optimize other indicators in real-time.`;
-const parameters = [];  // Hilbert Transform typically doesn't have user parameters
+const parameters: Array<{
+  name: string;
+  type: 'number' | 'boolean';
+  default: any;
+  min?: number;
+  max?: number;
+  description?: string;
+}> = [];  // Hilbert Transform typically doesn't have user parameters
 ---
 
 <IndicatorLayout
@@ -103,149 +110,25 @@ const parameters = [];  // Hilbert Transform typically doesn't have user paramet
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::{ht_dcperiod, rsi, sma};
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate dominant cycle period
-let dc_periods = ht_dcperiod(&close_prices)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Use for adaptive RSI
-for i in 50..close_prices.len() {
-    if let Some(period) = dc_periods.get(i) {
-        // Adaptive RSI using half the dominant cycle
-        let adaptive_period = (period / 2.0).round() as usize;
-        let adaptive_period = adaptive_period.clamp(5, 25); // Safety bounds
-        
-        // Calculate RSI for the adaptive period
-        let end_idx = i + 1;
-        let start_idx = end_idx.saturating_sub(adaptive_period * 2);
-        let slice = &close_prices[start_idx..end_idx];
-        
-        let rsi_value = rsi(slice, adaptive_period)?;
-        println!("Adaptive RSI[{}]: {}", adaptive_period, rsi_value.last().unwrap());
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Adaptive Indicator Systems</h3> <p>Create indicators that automatically adjust to market conditions:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify market regime
-for i in 1..dc_periods.len() {
-    if let (Some(curr), Some(prev)) = (dc_periods.get(i), dc_periods.get(i-1)) {
-        if curr > &30.0 {
-            println!("Trending market detected at bar {}", i);
-        } else if curr < &10.0 {
-            println!("Choppy/fast cycling market at bar {}", i);
-        }
-        
-        // Detect regime changes
-        let change_rate = (curr - prev).abs() / prev;
-        if change_rate > 0.2 {
-            println!("Market regime change at bar {}: {:.1} -> {:.1}", i, prev, curr);
-        }
-    }
-}
-  </code></pre>
+  <h3>2. Cycle-Based Trading</h3> <p>Time entries and exits based on cycle phase:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import ht_dcperiod, rsi, ema
+  <h3>3. Market Regime Detection</h3> <p>Identify and adapt to different market conditions:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Calculate dominant cycle period
-df['dc_period'] = ht_dcperiod(df['close'])
-
-# Create adaptive indicators
-def adaptive_rsi(close, dc_period):
-    # Use half the dominant cycle as RSI period
-    period = np.clip(dc_period / 2, 5, 25).round().astype(int)
-    return rsi(close, period)
-
-df['adaptive_rsi'] = adaptive_rsi(df['close'], df['dc_period'])
-
-# Market regime identification
-df['market_regime'] = pd.cut(df['dc_period'], 
-                            bins=[0, 10, 20, 30, 100],
-                            labels=['Fast', 'Normal', 'Slow', 'Trending'])
-
-# Detect cycle period stability
-df['period_change'] = df['dc_period'].pct_change().abs()
-df['stable_cycle'] = df['period_change'].rolling(10).mean() < 0.05
-
-# Generate adaptive moving average
-for i in range(50, len(df)):
-    period = int(df['dc_period'].iloc[i])
-    df.loc[df.index[i], 'adaptive_ma'] = df['close'].iloc[i-period:i].mean()
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Adaptive Indicator Systems</h3>
-  <p>Create indicators that automatically adjust to market conditions:</p>
-  <pre><code class="language-python">
-# Adaptive indicator suite
-dc_period = ht_dcperiod(close)
-
-# Adaptive moving average (full cycle)
-adaptive_ma = pd.Series(index=close.index)
-for i in range(50, len(close)):
-    period = int(dc_period.iloc[i])
-    adaptive_ma.iloc[i] = close.iloc[i-period:i].mean()
-
-# Adaptive RSI (half cycle)
-adaptive_rsi_period = (dc_period / 2).round().astype(int).clip(5, 25)
-adaptive_rsi = rsi(close, adaptive_rsi_period)
-
-# Adaptive Bollinger Bands
-adaptive_bb_period = dc_period.round().astype(int).clip(10, 50)
-adaptive_bb = bollinger_bands(close, adaptive_bb_period)
-  </code></pre>
-
-  <h3>2. Cycle-Based Trading</h3>
-  <p>Time entries and exits based on cycle phase:</p>
-  <pre><code class="language-python">
-# Calculate cycle phase position
-dc_period = ht_dcperiod(close)
-bars_since_low = close.rolling(int(dc_period)).apply(lambda x: len(x) - x.argmin())
-
-# Cycle phase (0 to 1)
-cycle_phase = bars_since_low / dc_period
-
-# Trade cycle extremes
-buy_zone = cycle_phase < 0.25  # First quarter of cycle
-sell_zone = cycle_phase > 0.75  # Last quarter of cycle
-
-# Combine with momentum
-momentum = roc(close, int(dc_period / 4))
-buy_signal = buy_zone & (momentum > 0)
-sell_signal = sell_zone & (momentum < 0)
-  </code></pre>
-
-  <h3>3. Market Regime Detection</h3>
-  <p>Identify and adapt to different market conditions:</p>
-  <pre><code class="language-python">
-# Comprehensive regime detection
-dc_period = ht_dcperiod(close)
-period_stability = dc_period.rolling(20).std()
-
-# Define regimes
-trending = dc_period > 30
-cycling = (dc_period >= 10) & (dc_period <= 30) & (period_stability < 2)
-choppy = (dc_period < 10) | (period_stability > 5)
-
-# Apply different strategies per regime
-position = pd.Series(0, index=close.index)
-
-# Trend following in trending regime
-position[trending] = np.where(close[trending] > sma(close, 50)[trending], 1, -1)
-
-# Mean reversion in cycling regime  
-cycle_position = (close - adaptive_ma) / close.rolling(dc_period).std()
-position[cycling] = np.where(cycle_position[cycling] < -1, 1, 
-                            np.where(cycle_position[cycling] > 1, -1, 0))
-
-# Stay out in choppy regime
-position[choppy] = 0
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Initialization period:</strong> Requires 50+ bars for accurate readings</li>

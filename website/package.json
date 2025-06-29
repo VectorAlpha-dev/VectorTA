@@ -3,15 +3,16 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
-    "dev": "npm run prebuild && node node_modules/astro/astro.js dev",
+    "dev": "astro dev",
     "dev-alt": "node scripts/start-dev.js",
-    "start": "node node_modules/astro/astro.js dev",
-    "build": "npm run prebuild && node node_modules/astro/astro.js build",
-    "preview": "node node_modules/astro/astro.js preview",
-    "astro": "node node_modules/astro/astro.js",
-    "prebuild": "node scripts/run-prebuild.js",
-    "scan-indicators": "node scripts/scan-indicators.js",
-    "cache-data": "node scripts/cache-sample-data.js"
+    "start": "astro dev",
+    "build": "astro check && astro build",
+    "build:analyze": "astro check && astro build --analyze",
+    "preview": "astro preview",
+    "astro": "astro",
+    "generate:indicators": "node scripts/scan-indicators.js",
+    "generate:cache": "node scripts/cache-sample-data.js",
+    "generate:all": "npm run generate:indicators && npm run generate:cache"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",
@@ -20,6 +21,7 @@
     "@astrojs/sitemap": "^3.4.1",
     "@astrojs/tailwind": "^6.0.2",
     "@tippyjs/react": "^4.2.6",
+    "@types/recharts": "^1.8.29",
     "astro": "^5.9.3",
     "fuse.js": "^7.1.0",
     "lightweight-charts": "^5.0.7",
@@ -27,7 +29,8 @@
     "react": "^19.1.0",
     "react-colorful": "^5.6.1",
     "react-dom": "^19.1.0",
-    "react-hotkeys-hook": "^5.1.0"
+    "react-hotkeys-hook": "^5.1.0",
+    "recharts": "^2.15.4"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.16",

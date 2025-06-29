@@ -100,160 +100,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::hwma;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate 7-period Henderson Weighted Moving Average
-let prices = vec![100.0, 102.0, 101.0, 103.0, 105.0, 104.0, 106.0, 108.0, 107.0, 109.0];
-let hwma_values = hwma(&prices, 7)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Identify trend direction
-for i in 3..hwma_values.len() {
-    if let Some(current) = hwma_values[i] {
-        if let Some(previous) = hwma_values[i-1] {
-            if current > previous {
-                println!("Uptrend at index {}: HWMA rising from {:.2} to {:.2}", 
-                         i, previous, current);
-            } else if current < previous {
-                println!("Downtrend at index {}: HWMA falling from {:.2} to {:.2}", 
-                         i, previous, current);
-            }
-        }
-        
-        // Check price position relative to HWMA
-        if prices[i] > current {
-            println!("Price {:.2} above HWMA {:.2} - Bullish bias", prices[i], current);
-        }
-    }
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Trend Following System</h3> <p>Using HWMA for smooth trend identification:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Compare smoothness with SMA
-let sma_values = simple_ma(&prices, 7)?;
-for i in 4..hwma_values.len()-1 {
-    if let (Some(hwma_curr), Some(sma_curr)) = (hwma_values[i], sma_values[i]) {
-        let hwma_smoothness = (hwma_values[i+1].unwrap() - 2.0*hwma_curr + hwma_values[i-1].unwrap()).abs();
-        let sma_smoothness = (sma_values[i+1].unwrap() - 2.0*sma_curr + sma_values[i-1].unwrap()).abs();
-        
-        println!("Smoothness at {}: HWMA={:.4}, SMA={:.4}", i, hwma_smoothness, sma_smoothness);
-    }
-}
-  </code></pre>
+  <h3>2. Support/Resistance Trading</h3> <p>Using HWMA as dynamic support/resistance:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import hwma
+  <h3>3. Cycle Analysis with HWMA</h3> <p>Combining HWMA with cycle indicators:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-# Example usage with price data
-df = pd.DataFrame({
-    'close': [100, 102, 101, 103, 105, 104, 106, 108, 107, 109, 111, 110, 112]
-})
-
-# Calculate Henderson Weighted Moving Average
-df['hwma_7'] = hwma(df['close'], period=7)
-df['hwma_13'] = hwma(df['close'], period=13)
-
-# Identify crossovers
-df['price_above_hwma'] = df['close'] > df['hwma_7']
-df['bullish_cross'] = df['price_above_hwma'] & ~df['price_above_hwma'].shift(1)
-df['bearish_cross'] = ~df['price_above_hwma'] & df['price_above_hwma'].shift(1)
-
-# Calculate HWMA slope for trend strength
-df['hwma_slope'] = df['hwma_7'].diff()
-df['hwma_accel'] = df['hwma_slope'].diff()
-
-# Trend classification
-df['trend'] = np.where(df['hwma_slope'] > 0, 'Up', 
-                       np.where(df['hwma_slope'] < 0, 'Down', 'Flat'))
-
-# Trading signals
-df['signal'] = 0
-df.loc[df['bullish_cross'], 'signal'] = 1
-df.loc[df['bearish_cross'], 'signal'] = -1
-
-# Advanced: Dual HWMA strategy
-df['hwma_fast'] = hwma(df['close'], 7)
-df['hwma_slow'] = hwma(df['close'], 21)
-df['hwma_diff'] = df['hwma_fast'] - df['hwma_slow']
-df['momentum_signal'] = np.where(df['hwma_diff'] > 0, 1, -1)
-
-print(df[['close', 'hwma_7', 'hwma_slope', 'trend', 'signal']].tail(10))
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Trend Following System</h3>
-  <p>Using HWMA for smooth trend identification:</p>
-  <pre><code class="language-python">
-# Calculate HWMA
-hwma_21 = hwma(close, 21)
-
-# Trend direction
-hwma_rising = hwma_21 > hwma_21.shift(1)
-hwma_falling = hwma_21 < hwma_21.shift(1)
-
-# Entry signals with confirmation
-price_momentum = close > close.shift(5)
-buy_signal = (close > hwma_21) & hwma_rising & price_momentum
-sell_signal = (close < hwma_21) & hwma_falling & ~price_momentum
-
-# Position sizing based on trend strength
-hwma_slope = hwma_21.diff()
-trend_strength = abs(hwma_slope) / close * 100
-position_size = np.minimum(trend_strength * 10, 100)  # Cap at 100%
-  </code></pre>
-
-  <h3>2. Support/Resistance Trading</h3>
-  <p>Using HWMA as dynamic support/resistance:</p>
-  <pre><code class="language-python">
-# Multiple HWMA periods
-hwma_9 = hwma(close, 9)
-hwma_21 = hwma(close, 21)
-
-# Distance from HWMA
-distance_9 = (close - hwma_9) / hwma_9 * 100
-distance_21 = (close - hwma_21) / hwma_21 * 100
-
-# Support bounce signals
-near_support = (distance_9 > -1) & (distance_9 < 0.5)  # Within 1% below
-hwma_support = hwma_9 > hwma_9.shift(1)  # Rising HWMA
-
-bounce_signal = near_support & hwma_support & (low <= hwma_9)
-
-# Resistance rejection
-near_resistance = (distance_9 < 1) & (distance_9 > -0.5)  # Within 1% above
-hwma_resistance = hwma_9 < hwma_9.shift(1)  # Falling HWMA
-
-rejection_signal = near_resistance & hwma_resistance & (high >= hwma_9)
-  </code></pre>
-
-  <h3>3. Cycle Analysis with HWMA</h3>
-  <p>Combining HWMA with cycle indicators:</p>
-  <pre><code class="language-python">
-# HWMA for trend
-hwma_trend = hwma(close, 21)
-
-# Detrend using HWMA
-detrended = close - hwma_trend
-
-# Apply cycle analysis to detrended data
-from ta_lib import ht_sine
-sine, leadsine = ht_sine(detrended)
-
-# Combine trend and cycle
-trend_up = hwma_trend > hwma_trend.shift(1)
-cycle_buy = (leadsine > sine) & (sine < -0.5)
-
-combined_buy = trend_up & cycle_buy
-
-# Exit on trend change or cycle peak
-trend_change = trend_up != trend_up.shift(1)
-cycle_peak = sine > 0.8
-
-exit_signal = trend_change | cycle_peak
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Minimum period:</strong> Period must be at least 5 and odd</li>

@@ -141,219 +141,25 @@ const parameters = [
 
   <h2 id="usage">Example Usage</h2>
   <h3>Rust Implementation</h3>
-  <pre><code class="language-rust">
-use ta_lib::indicators::kama;
+  <pre><code class="language-rust"> // Rust implementation example will be added here
+</code></pre>
 
-// Calculate KAMA with default parameters
-let prices = vec![100.0, 102.0, 101.5, 103.0, 102.5, 104.0, 105.5, 104.5, 106.0, 107.0];
-let kama_values = kama(&prices, 10, 2, 30)?;
+  <h3>Python Integration</h3> <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Manual ER calculation for understanding
-fn calculate_efficiency_ratio(prices: &[f64], period: usize) -> Vec<f64> {
-    let mut er_values = vec![0.0; prices.len()];
-    
-    for i in period..prices.len() {
-        // Direction (net change)
-        let direction = (prices[i] - prices[i - period]).abs();
-        
-        // Volatility (sum of absolute changes)
-        let mut volatility = 0.0;
-        for j in (i - period + 1)..=i {
-            volatility += (prices[j] - prices[j - 1]).abs();
-        }
-        
-        // Efficiency Ratio
-        er_values[i] = if volatility != 0.0 {
-            direction / volatility
-        } else {
-            0.0
-        };
-        
-        println!("Bar {}: Price={:.2}, ER={:.3}", i, prices[i], er_values[i]);
-    }
-    er_values
-}
+  <h2 id="use-cases"> Common Use Cases</h2> <h3>1. Adaptive Trend Following</h3> <p>Using KAMA for trend identification and entry:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Trading signals
-for i in 1..kama_values.len() {
-    if let (Some(current), Some(previous)) = (kama_values[i], kama_values[i-1]) {
-        // Trend detection
-        let kama_rising = current > previous;
-        let kama_change_pct = (current - previous) / previous * 100.0;
-        
-        // Price position
-        if prices[i] > current && prices[i-1] <= previous {
-            println!("Bullish crossover at {}: Price crossed above KAMA", i);
-        }
-        
-        // KAMA acceleration
-        if i > 1 {
-            if let Some(prev_prev) = kama_values[i-2] {
-                let accel = (current - previous) - (previous - prev_prev);
-                if accel > 0.0 && kama_rising {
-                    println!("KAMA accelerating upward at {}", i);
-                }
-            }
-        }
-    }
-}
+  <h3>2. KAMA Band Trading</h3> <p>Creating adaptive bands around KAMA:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-// Compare with fixed MAs
-let ema_10 = ema(&prices, 10)?;
-let ema_30 = ema(&prices, 30)?;
+  <h3>3. Multi-KAMA System</h3> <p>Using multiple KAMA settings for confirmation:</p>
+  <pre><code class="language-python"> # Python implementation example will be added here
+</code></pre>
 
-for i in 0..prices.len() {
-    if let (Some(k), Some(f), Some(s)) = (kama_values[i], ema_10[i], ema_30[i]) {
-        println!("Index {}: KAMA={:.2}, EMA10={:.2}, EMA30={:.2}", i, k, f, s);
-    }
-}
-  </code></pre>
-
-  <h3>Python Integration</h3>
-  <pre><code class="language-python">
-import pandas as pd
-import numpy as np
-from ta_lib import kama
-
-# Example usage with price data
-df = pd.DataFrame({
-    'close': [100, 102, 101.5, 103, 102.5, 104, 105.5, 104.5, 106, 107, 106.5, 108, 109, 108.5, 110]
-})
-
-# Calculate KAMA with different parameters
-df['kama_default'] = kama(df['close'], period=10, fast_period=2, slow_period=30)
-df['kama_responsive'] = kama(df['close'], period=8, fast_period=2, slow_period=20)
-df['kama_smooth'] = kama(df['close'], period=14, fast_period=3, slow_period=40)
-
-# Trading signals
-df['kama_trend'] = np.where(df['kama_default'] > df['kama_default'].shift(1), 1, -1)
-df['price_above_kama'] = df['close'] > df['kama_default']
-
-# Crossover signals
-df['bullish_cross'] = df['price_above_kama'] & ~df['price_above_kama'].shift(1)
-df['bearish_cross'] = ~df['price_above_kama'] & df['price_above_kama'].shift(1)
-
-# KAMA slope for trend strength
-df['kama_slope'] = df['kama_default'].diff()
-df['kama_slope_pct'] = df['kama_default'].pct_change() * 100
-
-# Acceleration
-df['kama_acceleration'] = df['kama_slope'].diff()
-df['trend_strengthening'] = (df['kama_trend'] == 1) & (df['kama_acceleration'] > 0)
-
-# Calculate Efficiency Ratio manually
-def efficiency_ratio(close, period=10):
-    direction = abs(close - close.shift(period))
-    volatility = abs(close.diff()).rolling(period).sum()
-    return direction / volatility
-
-df['er'] = efficiency_ratio(df['close'])
-df['trending'] = df['er'] > 0.3  # Market is trending when ER > 0.3
-
-# Adaptive stop loss
-df['kama_atr'] = atr(df['high'], df['low'], df['close'], 14)
-df['stop_long'] = df['kama_default'] - df['kama_atr'] * np.where(df['er'] > 0.5, 1.5, 2.5)
-df['stop_short'] = df['kama_default'] + df['kama_atr'] * np.where(df['er'] > 0.5, 1.5, 2.5)
-
-print(df[['close', 'kama_default', 'er', 'kama_trend', 'bullish_cross']].tail(10))
-  </code></pre>
-
-  <h2 id="use-cases">Common Use Cases</h2>
-  <h3>1. Adaptive Trend Following</h3>
-  <p>Using KAMA for trend identification and entry:</p>
-  <pre><code class="language-python">
-# Calculate KAMA
-kama_line = kama(close, 10, 2, 30)
-
-# Trend filters
-kama_rising = kama_line > kama_line.shift(1)
-kama_falling = kama_line < kama_line.shift(1)
-
-# Slope threshold for trend strength
-min_slope = 0.1  # 0.1% minimum slope
-kama_slope_pct = kama_line.pct_change() * 100
-strong_uptrend = kama_rising & (kama_slope_pct > min_slope)
-strong_downtrend = kama_falling & (kama_slope_pct < -min_slope)
-
-# Entry signals
-buy_signal = (close > kama_line) & strong_uptrend & (close.shift(1) <= kama_line.shift(1))
-sell_signal = (close < kama_line) & strong_downtrend & (close.shift(1) >= kama_line.shift(1))
-
-# Exit on KAMA flattening
-kama_flattening = abs(kama_slope_pct) < 0.05
-exit_signal = kama_flattening | (df['er'] < 0.2)
-  </code></pre>
-
-  <h3>2. KAMA Band Trading</h3>
-  <p>Creating adaptive bands around KAMA:</p>
-  <pre><code class="language-python">
-# Calculate KAMA and ER
-kama_center = kama(close, 10, 2, 30)
-er = efficiency_ratio(close, 10)
-
-# Adaptive band width based on ER
-atr_value = atr(high, low, close, 14)
-band_multiplier = np.where(er > 0.5, 1.5,  # Tight bands in trends
-                          np.where(er > 0.3, 2.0,  # Medium bands
-                                             2.5))  # Wide bands in ranges
-
-upper_band = kama_center + atr_value * band_multiplier
-lower_band = kama_center - atr_value * band_multiplier
-
-# Mean reversion in low ER
-low_er = er < 0.3
-buy_reversal = low_er & (close <= lower_band) & (close > close.shift(1))
-sell_reversal = low_er & (close >= upper_band) & (close < close.shift(1))
-
-# Breakout in high ER
-high_er = er > 0.5
-buy_breakout = high_er & (close > upper_band) & (close.shift(1) <= upper_band.shift(1))
-sell_breakout = high_er & (close < lower_band) & (close.shift(1) >= lower_band.shift(1))
-
-# Combine strategies based on market condition
-final_buy = buy_reversal | buy_breakout
-final_sell = sell_reversal | sell_breakout
-  </code></pre>
-
-  <h3>3. Multi-KAMA System</h3>
-  <p>Using multiple KAMA settings for confirmation:</p>
-  <pre><code class="language-python">
-# Calculate multiple KAMAs
-kama_fast = kama(close, 8, 2, 20)    # More responsive
-kama_medium = kama(close, 10, 2, 30)  # Balanced
-kama_slow = kama(close, 14, 3, 40)   # More stable
-
-# Trend alignment
-all_rising = (kama_fast > kama_fast.shift(1)) & \
-             (kama_medium > kama_medium.shift(1)) & \
-             (kama_slow > kama_slow.shift(1))
-
-all_falling = (kama_fast < kama_fast.shift(1)) & \
-              (kama_medium < kama_medium.shift(1)) & \
-              (kama_slow < kama_slow.shift(1))
-
-# KAMA spread analysis
-fast_medium_spread = (kama_fast - kama_medium) / kama_medium * 100
-medium_slow_spread = (kama_medium - kama_slow) / kama_slow * 100
-
-# Strong trend: KAMAs spreading apart
-spreading = (abs(fast_medium_spread) > abs(fast_medium_spread.shift(5))) & \
-            (abs(medium_slow_spread) > abs(medium_slow_spread.shift(5)))
-
-# Consolidation: KAMAs converging
-converging = (abs(fast_medium_spread) < abs(fast_medium_spread.shift(5))) & \
-             (abs(medium_slow_spread) < abs(medium_slow_spread.shift(5)))
-
-# Trading rules
-strong_buy_setup = all_rising & spreading & (close > kama_fast)
-strong_sell_setup = all_falling & spreading & (close < kama_fast)
-
-# Exit on convergence
-exit_longs = converging & (close < kama_medium)
-exit_shorts = converging & (close > kama_medium)
-  </code></pre>
-
-  <h2 id="edge-cases">Edge Cases & Errors</h2>
+  <h2 id="edge-cases"> Edge Cases & Errors</h2>
   <h3>Common Issues</h3>
   <ul>
     <li><strong>Initialization period:</strong> Requires 'period' bars for stable ER calculation</li>

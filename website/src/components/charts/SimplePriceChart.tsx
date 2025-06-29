@@ -36,7 +36,7 @@ export function SimplePriceChart({ darkMode = false, height = 500 }: SimplePrice
     });
 
     // Add candlestick series with dummy data
-    const candlestickSeries = chart.addCandlestickSeries({
+    const candlestickSeries = (chart as any).addCandlestickSeries({
       upColor: '#10b981',
       downColor: '#ef4444',
       borderVisible: false,

@@ -36,8 +36,8 @@ export function WorkingPriceChart({ height = 500 }: { height?: number }) {
         const LightweightCharts = await import('lightweight-charts');
         
         console.log('WorkingPriceChart: Creating chart...');
-        const chart = LightweightCharts.createChart(chartContainerRef.current, {
-          width: chartContainerRef.current.clientWidth,
+        const chart = LightweightCharts.createChart(chartContainerRef.current!, {
+          width: chartContainerRef.current!.clientWidth,
           height: height,
           layout: {
             background: { type: LightweightCharts.ColorType.Solid, color: '#ffffff' },
@@ -50,7 +50,7 @@ export function WorkingPriceChart({ height = 500 }: { height?: number }) {
         });
 
         // Create candlestick series
-        const candlestickSeries = chart.addCandlestickSeries({
+        const candlestickSeries = (chart as any).addCandlestickSeries({
           upColor: '#26a69a',
           downColor: '#ef5350',
           borderVisible: false,

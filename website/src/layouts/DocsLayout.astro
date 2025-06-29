@@ -3,6 +3,7 @@ import BaseLayout from './BaseLayout.astro';
 import { Sidebar } from '../components/layout/Sidebar';
 import { MobileNav } from '../components/layout/MobileNav';
 import Breadcrumbs from '../components/layout/Breadcrumbs.astro';
+import Footer from '../components/layout/Footer.astro';
 
 export interface Props {
   title: string;
@@ -14,21 +15,26 @@ const currentPath = Astro.url.pathname;
 ---
 
 <BaseLayout title={title} description={description} includeSidebar={false}>
-  <div class="flex h-[calc(100vh-4rem)]">
+  <div class="flex min-h-screen">
     <!-- Desktop Sidebar -->
     <div class="hidden lg:block">
       <Sidebar client:load currentPath={currentPath} />
     </div>
     
     <!-- Main Content -->
-    <div class="flex-1 overflow-y-auto">
-      <div class="max-w-5xl mx-auto px-6 py-8">
-        <!-- Breadcrumbs -->
-        <Breadcrumbs />
-        
-        <!-- Page Content -->
-        <slot />
-      </div>
+    <div class="flex-1 flex flex-col lg:ml-64">
+      <main class="flex-1">
+        <div class="max-w-5xl mx-auto px-6 py-8">
+          <!-- Breadcrumbs -->
+          <Breadcrumbs />
+          
+          <!-- Page Content -->
+          <slot />
+        </div>
+      </main>
+      
+      <!-- Footer -->
+      <Footer />
     </div>
   </div>
   
