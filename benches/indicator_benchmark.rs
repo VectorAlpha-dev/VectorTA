@@ -95,7 +95,7 @@ use my_project::indicators::{
     maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqData, MaaqInput},
     mab::{mab as mab_raw, MabInput},
     macd::{macd as macd_raw, MacdInput},
-    mama::{mama as mama_raw, MamaInput},
+    mama::{mama_with_kernel, MamaBatchBuilder, MamaData, MamaInput},
     marketefi::{marketefi as marketfi_raw, MarketefiInput},
     mass::{mass as mass_raw, MassInput},
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
@@ -703,7 +703,6 @@ bench_wrappers! {
     (lrsi_bench, lrsi_raw, LrsiInputS),
     (mab_bench, mab_raw, MabInputS),
     (macd_bench, macd_raw, MacdInputS),
-    (mama_bench, mama_raw, MamaInputS),
     (marketfi_bench, marketfi_raw, MarketefiInputS),
     (mass_bench, mass_raw, MassInputS),
     (mean_ad_bench, mean_ad_raw, MeanAdInputS),
@@ -842,7 +841,6 @@ bench_scalars!(
 
     mab_bench  => MabInputS,
     macd_bench => MacdInputS,
-    mama_bench => MamaInputS,
     marketfi_bench  => MarketefiInputS,
     mass_bench      => MassInputS,
     mean_ad_bench   => MeanAdInputS,
@@ -935,6 +933,7 @@ make_kernel_wrappers!(jsa, jsa_with_kernel, JsaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(kama, kama_with_kernel, KamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(linreg, linreg_with_kernel, LinRegInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(maaq, maaq_with_kernel, MaaqInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(mama, mama_with_kernel, MamaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -995,6 +994,7 @@ make_batch_wrappers!(jsa_batch, JsaBatchBuilder, JsaInputS; ScalarBatch, Avx2Bat
 make_batch_wrappers!(kama_batch, KamaBatchBuilder, KamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(linreg_batch, LinRegBatchBuilder, LinRegInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(maaq_batch, MaaqBatchBuilder, MaaqInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(mama_batch, MamaBatchBuilder, MamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
@@ -1130,6 +1130,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    mama_batch => MamaInputS; Some(227);
+    mama_batch_scalarbatch,
+    mama_batch_avx2batch,
+    mama_batch_avx512batch,
+);
+
+bench_variants!(
     alma => AlmaInputS; None;
     alma_scalar,
     alma_avx2,
@@ -1262,6 +1269,13 @@ bench_variants!(
     maaq_avx512,
 );
 
+bench_variants!(
+    mama => MamaInputS; None;
+    mama_scalar,
+    mama_avx2,
+    mama_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1301,5 +1315,7 @@ criterion_main!(
     benches_linreg,
     benches_linreg_batch,
     benches_maaq,
-    benches_maaq_batch
+    benches_maaq_batch,
+    benches_mama,
+    benches_mama_batch
 );

@@ -1,0 +1,6 @@
+# Python test dependencies
+pytest>=7.0.0
+pytest-xdist>=3.0.0  # For parallel test execution
+pytest-cov>=4.0.0    # For coverage reports
+numpy>=1.20.0
+maturin>=1.0.0

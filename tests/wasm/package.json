@@ -1,0 +1,16 @@
+{
+  "name": "wasm-binding-tests",
+  "version": "1.0.0",
+  "description": "WASM binding tests for Rust TA indicators",
+  "scripts": {
+    "test": "node run_all_tests.js",
+    "test:alma": "node run_all_tests.js alma",
+    "test:verbose": "node run_all_tests.js --verbose"
+  },
+  "devDependencies": {
+    "csv-parse": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

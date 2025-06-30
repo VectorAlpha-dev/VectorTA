@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(mkdir:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(chmod:*)",
+      "Bash(dos2unix:*)",
+      "Bash(sed:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": []
+  }
+}
