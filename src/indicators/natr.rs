@@ -279,9 +279,10 @@ pub fn natr_scalar(
                 let c = close[i];
                 if c.is_finite() && c != 0.0 {
                     out[i] = (prev_atr / c) * 100.0;
-                
-                    } else {
+                } else {
                     out[i] = 0.0;
+                }
+            }
         } else {
             let new_atr = ((prev_atr * ((period - 1) as f64)) + tr) / (period as f64);
             prev_atr = new_atr;
@@ -653,7 +654,7 @@ fn natr_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

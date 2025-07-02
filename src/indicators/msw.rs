@@ -603,7 +603,7 @@ fn msw_batch_inner(
                     do_row(row, sine_row, lead_row);
 
         }
-
+        }
     } else {
         for (row, (sine_row, lead_row)) in sine.chunks_mut(cols).zip(lead.chunks_mut(cols)).enumerate() {
             do_row(row, sine_row, lead_row);

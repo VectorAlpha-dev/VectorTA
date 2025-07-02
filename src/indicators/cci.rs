@@ -395,20 +395,23 @@ impl CciStream {
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
             self.filled = true;
-            self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
-            if !self.filled {
-                return None;
-            }
-            self.last_sma = self.sum / self.period as f64;
-            let mut sum_abs = 0.0;
-            for &v in &self.buffer {
-                sum_abs += (v - self.last_sma).abs();
-            }
-            if sum_abs == 0.0 {
-                Some(0.0)
-            } else {
-                Some((value - self.last_sma) / (0.015 * (sum_abs / self.period as f64)))
-            }
+        }
+        
+        if !self.filled {
+            self.sum += value;
+            return None;
+        }
+        
+        self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
+        self.last_sma = self.sum / self.period as f64;
+        let mut sum_abs = 0.0;
+        for &v in &self.buffer {
+            sum_abs += (v - self.last_sma).abs();
+        }
+        if sum_abs == 0.0 {
+            Some(0.0)
+        } else {
+            Some((value - self.last_sma) / (0.015 * (sum_abs / self.period as f64)))
         }
     }
 }

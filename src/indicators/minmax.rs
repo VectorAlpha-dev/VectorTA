@@ -448,6 +448,8 @@ impl MinmaxStream {
             }
             if !is_min && !is_max {
                 break;
+            }
+        }
         let min_val = if is_min { center_low } else { f64::NAN };
         let max_val = if is_max { center_high } else { f64::NAN };
 

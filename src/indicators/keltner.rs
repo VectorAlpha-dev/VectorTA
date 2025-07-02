@@ -270,7 +270,8 @@ pub fn keltner_scalar(
             if i == period - 1 {
                 rma = sum_tr / (period as f64);
                 atr[i] = rma;
-} else {
+            }
+        } else {
             rma += alpha * (tr - rma);
             atr[i] = rma;
         }
@@ -583,6 +584,7 @@ fn keltner_batch_inner(
 
         }
 
+        }
     } else {
         for ((row, u), (m, l)) in upper.chunks_mut(cols).enumerate()
             .zip(middle.chunks_mut(cols).zip(lower.chunks_mut(cols))) {

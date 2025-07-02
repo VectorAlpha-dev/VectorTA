@@ -652,7 +652,7 @@ fn sinwma_batch_inner(
                     do_row(r, sl);
 
         }
-
+        }
     } else {
         for (r, sl) in raw.chunks_mut(cols).enumerate() {
             do_row(r, sl);

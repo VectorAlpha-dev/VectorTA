@@ -338,6 +338,7 @@ impl DiStream {
             prev_h = h;
             prev_l = l;
             prev_c = c;
+        }
         let plus = if tr_sum == 0.0 { 0.0 } else { (plus_dm_sum / tr_sum) * 100.0 };
         let minus = if tr_sum == 0.0 { 0.0 } else { (minus_dm_sum / tr_sum) * 100.0 };
         Some((plus, minus))
@@ -508,6 +509,7 @@ fn di_batch_inner(
         }
 
 
+        }
     } else {
         for (row, (pl, mi)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
             do_row(row, pl, mi);

@@ -893,6 +893,7 @@ fn correlation_cycle_batch_inner(
         }
 
 
+        }
     } else {
         for (((r, im), an), st) in real.chunks_mut(cols)
             .zip(imag.chunks_mut(cols))

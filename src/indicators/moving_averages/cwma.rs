@@ -827,6 +827,7 @@ fn cwma_batch_inner(
 
         }
 
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

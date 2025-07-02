@@ -242,6 +242,7 @@ pub unsafe fn trendflex_scalar(
 
             tf[i] = if ms_current != 0.0 { my_sum / ms_current.sqrt() } else { 0.0 };
             rolling_sum += ssf[i] - ssf[i - period];
+        }
     } else {
         let m = len - first_valid;
         if m < period {
@@ -629,7 +630,7 @@ fn trendflex_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

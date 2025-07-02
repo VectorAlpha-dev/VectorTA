@@ -774,7 +774,7 @@ fn wavetrend_batch_inner(
 
 
         }
-
+        }
 
     } else {
         for (row, (((w1, w2), wd))) in wt1.chunks_mut(cols).zip(wt2.chunks_mut(cols)).zip(wt_diff.chunks_mut(cols)).enumerate() {

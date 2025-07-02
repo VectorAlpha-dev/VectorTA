@@ -255,10 +255,10 @@ pub fn cmo_scalar(
                 let sum_gl = avg_gain + avg_loss;
                 out[i] = if sum_gl != 0.0 {
                     100.0 * ((avg_gain - avg_loss) / sum_gl)
-                
-                    } else {
+                } else {
                     0.0
                 };
+            }
         } else {
             avg_gain *= period_m1;
             avg_loss *= period_m1;
@@ -269,8 +269,7 @@ pub fn cmo_scalar(
             let sum_gl = avg_gain + avg_loss;
             out[i] = if sum_gl != 0.0 {
                 100.0 * ((avg_gain - avg_loss) / sum_gl)
-            
-                } else {
+            } else {
                 0.0
             };
         }
@@ -524,6 +523,7 @@ fn cmo_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

@@ -311,7 +311,7 @@ pub fn sar_scalar(
                 next_sar = ep;
                 ep = low[i];
                 acc = acceleration;
-} else {
+            } else {
                 if high[i] > ep {
                     ep = high[i];
                     acc = (acc + acceleration).min(maximum);
@@ -323,29 +323,29 @@ pub fn sar_scalar(
                 }
                 if pre_prev < len {
                     next_sar = next_sar.min(low[pre_prev]);
-        
-            } else {
-            if high[i] > next_sar {
-                trend_up = true;
-                next_sar = ep;
-                ep = high[i];
-                acc = acceleration;
-            
-                } else {
-                if low[i] < ep {
-                    ep = low[i];
-                    acc = (acc + acceleration).min(maximum);
-                }
-                let prev = i.saturating_sub(1);
-                let pre_prev = i.saturating_sub(2);
-                if prev < len {
-                    next_sar = next_sar.max(high[prev]);
-                }
-                if pre_prev < len {
-                    next_sar = next_sar.max(high[pre_prev]);
                 }
             }
-        }
+        } else {
+                if high[i] > next_sar {
+                    trend_up = true;
+                    next_sar = ep;
+                    ep = high[i];
+                    acc = acceleration;
+                } else {
+                    if low[i] < ep {
+                        ep = low[i];
+                        acc = (acc + acceleration).min(maximum);
+                    }
+                    let prev = i.saturating_sub(1);
+                    let pre_prev = i.saturating_sub(2);
+                    if prev < len {
+                        next_sar = next_sar.max(high[prev]);
+                    }
+                    if pre_prev < len {
+                        next_sar = next_sar.max(high[pre_prev]);
+                    }
+                }
+            }
         out[i] = next_sar;
         sar = next_sar;
     }
@@ -474,7 +474,7 @@ impl SarStream {
                         next_sar = st.ep;
                         st.ep = low;
                         st.acc = self.acceleration;
-} else {
+                    } else {
                         if high > st.ep {
                             st.ep = high;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -484,15 +484,15 @@ impl SarStream {
                         }
                         if let Some(p2) = st.prev2 {
                             next_sar = next_sar.min(p2);
-                
-                    } else {
+                        }
+                    }
+                } else {
                     if high > next_sar {
                         st.trend_up = true;
                         next_sar = st.ep;
                         st.ep = high;
                         st.acc = self.acceleration;
-                    
-                        } else {
+                    } else {
                         if low < st.ep {
                             st.ep = low;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -746,7 +746,7 @@ fn sar_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

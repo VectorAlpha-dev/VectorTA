@@ -341,8 +341,9 @@ pub unsafe fn safezonestop_scalar(
         for i in 0..len {
             if !minus_dm_smooth[i].is_nan() && !last_low[i].is_nan() {
                 intermediate[i] = last_low[i] - mult * minus_dm_smooth[i];
-    
-        } else {
+            }
+        }
+    } else {
         for i in 0..len {
             if !plus_dm_smooth[i].is_nan() && !last_high[i].is_nan() {
                 intermediate[i] = last_high[i] + mult * plus_dm_smooth[i];
@@ -744,7 +745,7 @@ fn safezonestop_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

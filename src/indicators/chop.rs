@@ -908,77 +908,78 @@ impl ChopStream {
             }
             if self.count == self.drift {
                 self.rma_atr = self.sum_tr / (self.drift as f64);
-            } else {
-                self.rma_atr += (1.0 / (self.drift as f64)) * (tr - self.rma_atr);
             }
-            let current_atr = if self.count <= self.drift {
-                if self.count == self.drift {
-                    self.rma_atr
-                } else {
-                    f64::NAN
-                }
-            } else {
+        } else {
+            self.rma_atr += (1.0 / (self.drift as f64)) * (tr - self.rma_atr);
+        }
+        
+        let current_atr = if self.count <= self.drift {
+            if self.count == self.drift {
                 self.rma_atr
-            };
-            let oldest = self.atr_ring[idx];
-            self.rolling_sum_atr -= oldest;
-            let new_val = if current_atr.is_nan() {
-                0.0
             } else {
-                current_atr
-            };
-            self.atr_ring[idx] = new_val;
-            self.rolling_sum_atr += new_val;
+                f64::NAN
+            }
+        } else {
+            self.rma_atr
+        };
+        let oldest = self.atr_ring[idx];
+        self.rolling_sum_atr -= oldest;
+        let new_val = if current_atr.is_nan() {
+            0.0
+        } else {
+            current_atr
+        };
+        self.atr_ring[idx] = new_val;
+        self.rolling_sum_atr += new_val;
 
-            // Highest-high and lowest-low logic using VecDeque.
-            let win_start = self.count.saturating_sub(self.period);
-            while let Some(&front_idx) = self.dq_high.front() {
-                if front_idx < win_start {
-                    self.dq_high.pop_front();
-                } else {
-                    break;
-                }
-            }
-            while let Some(&back_idx) = self.dq_high.back() {
-                let actual_idx = (back_idx % self.period);
-                if self.buf_high[actual_idx] <= high {
-                    self.dq_high.pop_back();
-                } else {
-                    break;
-                }
-            }
-            self.dq_high.push_back(self.count - 1);
-
-            while let Some(&front_idx) = self.dq_low.front() {
-                if front_idx < win_start {
-                    self.dq_low.pop_front();
-                } else {
-                    break;
-                }
-            }
-            while let Some(&back_idx) = self.dq_low.back() {
-                let actual_idx = (back_idx % self.period);
-                if self.buf_low[actual_idx] >= low {
-                    self.dq_low.pop_back();
-                } else {
-                    break;
-                }
-            }
-            self.dq_low.push_back(self.count - 1);
-
-            if self.count >= self.period {
-                let hh_idx = self.dq_high.front().unwrap() % self.period;
-                let ll_idx = self.dq_low.front().unwrap() % self.period;
-                let range = self.buf_high[hh_idx] - self.buf_low[ll_idx];
-                if range > 0.0 && self.rolling_sum_atr > 0.0 {
-                    let logp = (self.period as f64).log10();
-                    Some((self.scalar * (self.rolling_sum_atr.log10() - range.log10())) / logp)
-                } else {
-                    Some(f64::NAN)
-                }
+        // Highest-high and lowest-low logic using VecDeque.
+        let win_start = self.count.saturating_sub(self.period);
+        while let Some(&front_idx) = self.dq_high.front() {
+            if front_idx < win_start {
+                self.dq_high.pop_front();
             } else {
-                None
+                break;
             }
+        }
+        while let Some(&back_idx) = self.dq_high.back() {
+            let actual_idx = (back_idx % self.period);
+            if self.buf_high[actual_idx] <= high {
+                self.dq_high.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_high.push_back(self.count - 1);
+
+        while let Some(&front_idx) = self.dq_low.front() {
+            if front_idx < win_start {
+                self.dq_low.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&back_idx) = self.dq_low.back() {
+            let actual_idx = (back_idx % self.period);
+            if self.buf_low[actual_idx] >= low {
+                self.dq_low.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.dq_low.push_back(self.count - 1);
+
+        if self.count >= self.period {
+            let hh_idx = self.dq_high.front().unwrap() % self.period;
+            let ll_idx = self.dq_low.front().unwrap() % self.period;
+            let range = self.buf_high[hh_idx] - self.buf_low[ll_idx];
+            if range > 0.0 && self.rolling_sum_atr > 0.0 {
+                let logp = (self.period as f64).log10();
+                Some((self.scalar * (self.rolling_sum_atr.log10() - range.log10())) / logp)
+            } else {
+                Some(f64::NAN)
+            }
+        } else {
+            None
         }
     }
 }

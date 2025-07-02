@@ -452,7 +452,7 @@ fn smma_batch_inner(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel, parallel
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

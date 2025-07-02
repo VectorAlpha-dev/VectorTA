@@ -880,6 +880,7 @@ fn damiani_volatmeter_batch_inner(
 
         }
 
+        }
     } else {
         for (row, (outv, outa)) in vol.chunks_mut(cols).zip(anti.chunks_mut(cols)).enumerate() {
             do_row(row, outv, outa);

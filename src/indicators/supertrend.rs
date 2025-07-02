@@ -499,6 +499,7 @@ impl SuperTrendStream {
         let atr_opt = self.atr_stream.update(high, low, close);
         if !self.filled || atr_opt.is_none() {
             return None;
+        }
         let idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
         let avg = (self.buffer_high[idx] + self.buffer_low[idx]) / 2.0;
         let atr = atr_opt.unwrap();
@@ -509,16 +510,14 @@ impl SuperTrendStream {
             upper_basic
         } else if self.buffer_close[(self.head + self.period - 2) % self.period] <= self.prev_upper_band {
             f64::min(upper_basic, self.prev_upper_band)
-        
-            } else {
+        } else {
             upper_basic
         };
         let lower_band = if self.prev_lower_band.is_nan() {
             lower_basic
         } else if self.buffer_close[(self.head + self.period - 2) % self.period] >= self.prev_lower_band {
             f64::max(lower_basic, self.prev_lower_band)
-        
-            } else {
+        } else {
             lower_basic
         };
         let prev_trend = self.prev_trend;
@@ -841,7 +840,7 @@ fn supertrend_batch_inner(
                     do_row(row, tr, ch);
 
         }
-
+        }
     } else {
         for (row, (tr, ch)) in trend.chunks_mut(cols).zip(changed.chunks_mut(cols)).enumerate() {
             do_row(row, tr, ch);

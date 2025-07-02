@@ -271,8 +271,9 @@ pub unsafe fn stochf_scalar(
                 count += 1;
                 if count == fastd_period {
                     d_vals[i] = sma_sum / (fastd_period as f64);
-} else {
+                } else {
                     d_vals[i] = f64::NAN;
+                }
             } else {
                 sma_sum += v - k_vals[i - fastd_period];
                 d_vals[i] = sma_sum / (fastd_period as f64);
@@ -592,7 +593,7 @@ fn stochf_batch_inner(
                     do_row(row, k, d);
 
         }
-
+        }
     } else {
         for (row, (k, d)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
             do_row(row, k, d);
@@ -641,8 +642,9 @@ unsafe fn stochf_row_scalar(
                 count += 1;
                 if count == fastd_period {
                     d_out[i] = sma_sum / (fastd_period as f64);
-} else {
+                } else {
                     d_out[i] = f64::NAN;
+                }
             } else {
                 sma_sum += v - k_out[i - fastd_period];
                 d_out[i] = sma_sum / (fastd_period as f64);

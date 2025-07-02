@@ -522,7 +522,7 @@ fn mwdx_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

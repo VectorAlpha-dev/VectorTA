@@ -532,6 +532,7 @@ fn dm_batch_inner(
         }
 
 
+        }
     } else {
         for (row, (plus_row, minus_row)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
             do_row(row, plus_row, minus_row);

@@ -311,8 +311,9 @@ impl RocrStream {
             let prev = self.buffer[self.head];
             if prev == 0.0 || prev.is_nan() {
                 0.0
-} else {
+            } else {
                 value / prev
+            }
         } else {
             f64::NAN
         };
@@ -548,7 +549,7 @@ fn rocr_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

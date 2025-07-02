@@ -343,9 +343,9 @@ unsafe fn vlma_scalar(
                 prev_period - 1.0
             } else if data[i] >= b[i] && data[i] <= c[i] {
                 prev_period + 1.0
-            
-                } else {
+            } else {
                 prev_period
+            }
         } else {
             prev_period
         };
@@ -800,7 +800,7 @@ fn vlma_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

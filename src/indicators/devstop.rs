@@ -342,7 +342,8 @@ pub fn devstop_scalar(
         if direction.eq_ignore_ascii_case("long") {
             if !high[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
                 base[i] = high[i] - avtr[i] - mult * dev_values[i];
-} else {
+            }
+        } else {
             if !low[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
                 base[i] = low[i] + avtr[i] + mult * dev_values[i];
             }
@@ -353,7 +354,8 @@ pub fn devstop_scalar(
         match max_rolling(&base, period) {
             Ok(v) => v,
             Err(_) => vec![f64::NAN; high.len()],
-} else {
+        }
+    } else {
         match min_rolling(&base, period) {
             Ok(v) => v,
             Err(_) => vec![f64::NAN; high.len()],
@@ -663,6 +665,7 @@ fn devstop_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

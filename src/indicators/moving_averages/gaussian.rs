@@ -1138,6 +1138,9 @@ fn gaussian_batch_inner(
             for (row, dst) in raw.chunks_mut(cols).enumerate() {
                 unsafe {
                     compute_row(row, dst, &combos, data, cols, row_runner);
+                }
+            }
+        }
     } else {
         match chosen {
             /* ---- AVX-512 serial ----------------------------------------- */

@@ -313,6 +313,7 @@ pub unsafe fn kama_avx2(
         while idx <= lookback {
             sum_roc1 += (*base.add(idx + 1) - *base.add(idx)).abs();
             idx += 1;
+        }
     } else {
         for k in 0..=lookback {
             sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
@@ -414,6 +415,7 @@ pub unsafe fn kama_avx512(
         while j <= lookback {
             sum_roc1 += (*base.add(j + 1) - *base.add(j)).abs();
             j += 1;
+        }
     } else {
         for k in 0..=lookback {
             sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
@@ -737,7 +739,7 @@ fn kama_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

@@ -527,9 +527,9 @@ impl DtiStream {
             self.last_low = Some(low);
             if !self.e1_u.is_nan() && self.e1_u != 0.0 {
                 Some(100.0 * self.e0_u / self.e1_u)
-            
-                } else {
+            } else {
                 Some(0.0)
+            }
         } else {
             self.last_high = Some(high);
             self.last_low = Some(low);
@@ -790,6 +790,7 @@ fn dti_batch_inner(
 
         }
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

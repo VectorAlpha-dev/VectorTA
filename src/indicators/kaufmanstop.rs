@@ -382,7 +382,8 @@ pub fn kaufmanstop_avx512(
     if period <= 32 {
         unsafe {
             kaufmanstop_avx512_short(high, low, range_ma, period, first, mult, direction, out)
-} else {
+        }
+    } else {
         unsafe {
             kaufmanstop_avx512_long(high, low, range_ma, period, first, mult, direction, out)
         }
@@ -820,6 +821,7 @@ fn kaufmanstop_batch_inner(
 
         }
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

@@ -533,7 +533,7 @@ fn nma_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -676,6 +676,7 @@ impl NmaStream {
             num += oi * self.sqrt_diffs[i];
             denom += oi;
             idx = (idx + self.period) % (self.period + 1);
+        }
         let ratio = if denom == 0.0 { 0.0 } else { num / denom };
         let val_idx = (self.head + 1) % (self.period + 1);
         let i = self.period - 1;

@@ -479,7 +479,7 @@ fn vwma_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -596,8 +596,8 @@ impl VwmaStream {
             }
             if !self.filled {
                 return None;
-        
-            } else {
+            }
+        } else {
             let old_p = self.prices[idx];
             let old_v = self.volumes[idx];
             self.sum += price * volume - old_p * old_v;

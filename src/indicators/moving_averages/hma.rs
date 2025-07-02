@@ -340,6 +340,7 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
                         x_wsum += (k as f64 + 1.0) * x_buf[k];
                     }
                     out[first_out] = x_wsum / ws_sqrt;
+                }
             } else {
                 // … then do rolling updates
                 let old_x = x_buf[x_head];
@@ -469,6 +470,7 @@ pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
                             sum
                         };
                         *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt;
+                    }
                 } else {
                     // rolling update after buffer full
                     let old_x = *x_buf.get_unchecked(x_head);
@@ -982,7 +984,7 @@ fn hma_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

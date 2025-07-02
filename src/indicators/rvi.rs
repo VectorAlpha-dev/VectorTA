@@ -568,7 +568,7 @@ fn rvi_batch_inner(
                     do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -876,11 +876,13 @@ fn rolling_ema(data: &[f64], period: usize) -> Vec<f64> {
                 prev_ema += x;
                 if i + 1 == first_window_end {
                     prev_ema /= period as f64;
-} else {
+                }
+            } else {
                 prev_ema += x;
                 prev_ema /= period as f64;
                 out[i] = prev_ema;
                 started = true;
+            }
         } else {
             prev_ema = alpha * x + (1.0 - alpha) * prev_ema;
             out[i] = prev_ema;

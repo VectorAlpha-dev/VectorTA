@@ -596,7 +596,7 @@ fn stoch_batch_inner(
                     do_row(row, k, d);
 
         }
-
+        }
     } else {
         for (row, (k, d)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
             do_row(row, k, d);

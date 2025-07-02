@@ -916,7 +916,7 @@ fn mama_batch_inner(
                     do_row(row, m_row, f_row);
 
         }
-
+        }
     } else {
         for (row, (m_row, f_row)) in raw_mama.chunks_mut(cols)
                                              .zip(raw_fama.chunks_mut(cols))

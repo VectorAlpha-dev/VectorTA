@@ -290,7 +290,8 @@ pub fn correl_hl_scalar(
                 sum_l += ll;
                 sum_l2 += ll * ll;
                 sum_hl += hh * ll;
-} else {
+            }
+        } else {
             sum_h += new_h - old_h;
             sum_h2 += new_h * new_h - old_h * old_h;
             sum_l += new_l - old_l;
@@ -640,6 +641,7 @@ fn correl_hl_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

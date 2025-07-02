@@ -564,7 +564,7 @@ fn vi_batch_inner(
                     do_row(row, p, m);
 
         }
-
+        }
     } else {
         for ((row, p), m) in plus.chunks_mut(cols).enumerate().zip(minus.chunks_mut(cols)) {
             do_row(row, p, m);

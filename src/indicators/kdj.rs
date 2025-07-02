@@ -266,6 +266,7 @@ pub fn kdj_avx512(
                 slow_d_period, slow_d_ma_type,
                 first_valid_idx
             )
+        }
     } else {
         unsafe {
             kdj_avx512_long(

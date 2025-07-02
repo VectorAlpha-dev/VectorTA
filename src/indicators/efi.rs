@@ -355,16 +355,16 @@ impl EfiStream {
         let out = if price.is_nan() || self.last_price.is_nan() || volume.is_nan() {
             if self.filled {
                 self.prev
-} else {
+            } else {
                 f64::NAN
+            }
         } else {
             let diff = (price - self.last_price) * volume;
             if !self.filled {
                 self.prev = diff;
                 self.filled = true;
                 diff
-            
-                } else {
+            } else {
                 let ema = self.alpha * diff + (1.0 - self.alpha) * self.prev;
                 self.prev = ema;
                 ema
@@ -571,6 +571,7 @@ fn efi_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

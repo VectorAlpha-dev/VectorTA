@@ -332,15 +332,15 @@ pub unsafe fn cksp_scalar(
             if i - first_valid_idx == p - 1 {
                 rma = sum_tr / p as f64;
                 atr[i] = rma;
-} else {
+            }
+        } else {
             rma += alpha * (tr - rma);
             atr[i] = rma;
         }
         while let Some((_, v)) = dq_h.back() {
             if *v <= high[i] {
                 dq_h.pop_back();
-            
-                } else {
+            } else {
                 break;
             }
         }
@@ -349,16 +349,14 @@ pub unsafe fn cksp_scalar(
         while let Some(&(idx, _)) = dq_h.front() {
             if idx < start_h {
                 dq_h.pop_front();
-            
-                } else {
+            } else {
                 break;
             }
         }
         while let Some((_, v)) = dq_l.back() {
             if *v >= low[i] {
                 dq_l.pop_back();
-            
-                } else {
+            } else {
                 break;
             }
         }
@@ -367,8 +365,7 @@ pub unsafe fn cksp_scalar(
         while let Some(&(idx, _)) = dq_l.front() {
             if idx < start_l {
                 dq_l.pop_front();
-            
-                } else {
+            } else {
                 break;
             }
         }
@@ -379,9 +376,7 @@ pub unsafe fn cksp_scalar(
                 while let Some((_, val)) = dq_ls0.back() {
                     if *val <= ls0_val {
                         dq_ls0.pop_back();
-                    
-                        }
-                         else {
+                    } else {
                         break;
                     }
                 }
@@ -390,8 +385,7 @@ pub unsafe fn cksp_scalar(
                 while let Some(&(idx, _)) = dq_ls0.front() {
                     if idx < start_ls0 {
                         dq_ls0.pop_front();
-                    
-                        } else {
+                    } else {
                         break;
                     }
                 }
@@ -401,8 +395,7 @@ pub unsafe fn cksp_scalar(
                 while let Some((_, val)) = dq_ss0.back() {
                     if *val >= ss0_val {
                         dq_ss0.pop_back();
-                    
-                        } else {
+                    } else {
                         break;
                     }
                 }
@@ -411,8 +404,7 @@ pub unsafe fn cksp_scalar(
                 while let Some(&(idx, _)) = dq_ss0.front() {
                     if idx < start_ss0 {
                         dq_ss0.pop_front();
-                    
-                        } else {
+                    } else {
                         break;
                     }
                 }

@@ -612,7 +612,7 @@ fn voss_batch_inner(
 
 
         }
-
+        }
 
     } else {
         for (row, (vo, fo)) in voss_vec.chunks_mut(cols).zip(filt_vec.chunks_mut(cols)).enumerate() {

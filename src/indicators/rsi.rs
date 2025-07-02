@@ -521,7 +521,7 @@ fn rsi_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -698,6 +698,7 @@ impl RsiStream {
         }
         if !self.filled {
             return None;
+        }
         let gain = if delta > 0.0 { delta } else { 0.0 };
         let loss = if delta < 0.0 { -delta } else { 0.0 };
         let inv_period = 1.0 / self.period as f64;
@@ -706,8 +707,7 @@ impl RsiStream {
         self.avg_loss = inv_period * loss + beta * self.avg_loss;
         if self.avg_gain + self.avg_loss == 0.0 {
             Some(50.0)
-        
-            } else {
+        } else {
             Some(100.0 * self.avg_gain / (self.avg_gain + self.avg_loss))
         }
     }

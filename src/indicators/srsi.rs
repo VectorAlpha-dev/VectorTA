@@ -655,7 +655,7 @@ fn srsi_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, (ks, ds)) in k_vals.chunks_mut(cols).zip(d_vals.chunks_mut(cols)).enumerate() {
             do_row(row, ks, ds);

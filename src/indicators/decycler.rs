@@ -649,6 +649,7 @@ fn decycler_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

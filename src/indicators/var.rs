@@ -557,7 +557,7 @@ fn var_batch_inner(
         for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice);
 
         }
-
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice); }
     }
@@ -625,8 +625,9 @@ impl VarStream {
             self.sum_sq += value * value;
             if self.head == 0 {
                 self.filled = true;
-} else {
+            } else {
                 return None;
+            }
         } else {
             self.sum += value - old;
             self.sum_sq += value * value - old * old;

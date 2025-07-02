@@ -728,7 +728,7 @@ fn rsmk_batch_inner(
 
         }
 
-
+        }
     } else {
         for (row, (ind_row, sig_row)) in indicators.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
             do_row(row, ind_row, sig_row);

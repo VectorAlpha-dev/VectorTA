@@ -618,6 +618,7 @@ fn mab_batch_inner(
 
         }
 
+        }
     } else {
         let mut upper_iter = upperbands.chunks_mut(cols);
         let mut middle_iter = middlebands.chunks_mut(cols);

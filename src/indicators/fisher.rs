@@ -437,6 +437,7 @@ fn fisher_batch_inner(
         }
 
 
+        }
     } else {
         for (row, (fish, sig)) in fisher.chunks_mut(cols).zip(signal.chunks_mut(cols)).enumerate() {
             do_row(row, fish, sig);

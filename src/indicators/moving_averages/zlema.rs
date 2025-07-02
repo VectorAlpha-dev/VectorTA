@@ -381,12 +381,11 @@ impl ZlemaStream {
 
         if !self.filled && self.head == 0 {
             self.filled = true;
+        }
         let val = if !self.filled { value } else { 2.0 * value - self.buffer[lag_idx] };
         if self.last_ema.is_nan() {
             self.last_ema = val;
-        
-            }
- else {
+        } else {
             self.last_ema = self.alpha * val + (1.0 - self.alpha) * self.last_ema;
         }
         Some(self.last_ema)
@@ -601,7 +600,7 @@ fn zlema_batch_inner(
 
         }
 
-
+        }
     } else {
         for (r, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(r, slice);

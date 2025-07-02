@@ -443,8 +443,8 @@ impl CoppockStream {
             }
             if count > 0 {
                 smoothed /= count as f64;
-        
-            } else {
+            }
+        } else {
             // only "wma" and "sma" supported in streaming
             return None;
         }
@@ -729,6 +729,7 @@ fn coppock_batch_inner(
         }
 
 
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

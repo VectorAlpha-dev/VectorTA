@@ -431,6 +431,7 @@ fn donchian_batch_inner(
         }
 
 
+        }
     } else {
         for (((upper, middle), lower), row) in upper.chunks_mut(cols)
             .zip(middle.chunks_mut(cols))
