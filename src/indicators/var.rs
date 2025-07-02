@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -338,7 +339,8 @@ pub unsafe fn var_row_avx512(
 ) {
     if period <= 32 {
         var_row_avx512_short(data, first, period, stride, nbdev, out);
-    } else {
+    
+        } else {
         var_row_avx512_long(data, first, period, stride, nbdev, out);
     }
 }
@@ -539,9 +541,23 @@ fn var_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice); }
     }
@@ -609,9 +625,8 @@ impl VarStream {
             self.sum_sq += value * value;
             if self.head == 0 {
                 self.filled = true;
-            } else {
+} else {
                 return None;
-            }
         } else {
             self.sum += value - old;
             self.sum_sq += value * value - old * old;

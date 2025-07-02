@@ -26,8 +26,8 @@ prebuild.on('close', (code) => {
   const astroPath = join(rootDir, 'node_modules', '.bin', 'astro');
   const astroCmd = process.platform === 'win32' ? `${astroPath}.cmd` : astroPath;
   
-  // Start Astro
-  const astro = spawn(astroCmd, ['dev'], {
+  // Start Astro - Use npx to avoid path issues
+  const astro = spawn('npx', ['astro', 'dev'], {
     stdio: 'inherit',
     cwd: rootDir,
     shell: true

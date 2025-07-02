@@ -34,6 +34,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -315,7 +316,8 @@ pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize
 pub unsafe fn coppock_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     if short.max(long) <= 32 {
         coppock_avx512_short(data, short, long, first, out)
-    } else {
+    
+        } else {
         coppock_avx512_long(data, short, long, first, out)
     }
 }
@@ -441,8 +443,8 @@ impl CoppockStream {
             }
             if count > 0 {
                 smoothed /= count as f64;
-            }
-        } else {
+        
+            } else {
             // only "wma" and "sma" supported in streaming
             return None;
         }
@@ -695,10 +697,38 @@ fn coppock_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -763,7 +793,8 @@ pub unsafe fn coppock_row_avx512(
 ) {
     if short.max(long) <= 32 {
         coppock_row_avx512_short(data, first, short, long, stride, w_ptr, inv_n, out)
-    } else {
+    
+        } else {
         coppock_row_avx512_long(data, first, short, long, stride, w_ptr, inv_n, out)
     }
 }

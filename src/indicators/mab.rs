@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -581,11 +582,42 @@ fn mab_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         upperbands.par_chunks_mut(cols)
-            .zip(middlebands.par_chunks_mut(cols))
-            .zip(lowerbands.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+
+                    .zip(middlebands.par_chunks_mut(cols))
+
+                    .zip(lowerbands.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        let mut upper_iter = upperbands.chunks_mut(cols);
+
+                let mut middle_iter = middlebands.chunks_mut(cols);
+
+                let mut lower_iter = lowerbands.chunks_mut(cols);
+
+
+                for row in 0..rows {
+
+                    let u = upper_iter.next().unwrap();
+
+                    let m = middle_iter.next().unwrap();
+
+                    let l = lower_iter.next().unwrap();
+
+                    do_row(row, u, m, l);
+
+        }
+
     } else {
         let mut upper_iter = upperbands.chunks_mut(cols);
         let mut middle_iter = middlebands.chunks_mut(cols);
@@ -656,7 +688,8 @@ impl MabStream {
             let upper = slow_ma + self.devup * dev;
             let lower = slow_ma - self.devdn * dev;
             Some((upper, fast_ma, lower))
-        } else {
+        
+            } else {
             None
         };
         self.idx += 1;

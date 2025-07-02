@@ -16,6 +16,7 @@
 //! - **`Ok(DeviationOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(DeviationError)`** otherwise.
 
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use crate::utilities::enums::Kernel;
@@ -350,7 +351,19 @@ fn deviation_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice); }
     }
@@ -437,7 +450,8 @@ fn find_median(slice: &[f64]) -> f64 {
     let mid = sorted.len() / 2;
     if sorted.len() % 2 == 0 {
         (sorted[mid - 1] + sorted[mid]) / 2.0
-    } else {
+    
+        } else {
         sorted[mid]
     }
 }
@@ -540,7 +554,8 @@ pub unsafe fn deviation_row_avx512(
 ) {
     if period <= 32 {
         deviation_row_avx512_short(data, first, period, stride, devtype, out);
-    } else {
+    
+        } else {
         deviation_row_avx512_long(data, first, period, stride, devtype, out);
     }
 }

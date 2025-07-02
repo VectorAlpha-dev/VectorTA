@@ -20,6 +20,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;

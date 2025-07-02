@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN, ConstAlign};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -241,7 +242,6 @@ pub unsafe fn trendflex_scalar(
 
             tf[i] = if ms_current != 0.0 { my_sum / ms_current.sqrt() } else { 0.0 };
             rolling_sum += ssf[i] - ssf[i - period];
-        }
     } else {
         let m = len - first_valid;
         if m < period {
@@ -315,7 +315,8 @@ pub unsafe fn trendflex_avx512(
 ) -> Result<TrendFlexOutput, TrendFlexError> {
     if period <= 32 {
         trendflex_avx512_short(data, period, first_valid, out)
-    } else {
+    
+        } else {
         trendflex_avx512_long(data, period, first_valid, out)
     }
 }
@@ -610,9 +611,25 @@ fn trendflex_batch_inner(
 
     // 4. run every row, writing directly into `raw`
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -658,7 +675,8 @@ unsafe fn trendflex_row_avx512(
 ) {
     if period <= 32 {
         trendflex_row_avx512_short(data, first, period, out);
-    } else {
+    
+        } else {
         trendflex_row_avx512_long(data, first, period, out);
     }
 }

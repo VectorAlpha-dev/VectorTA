@@ -21,6 +21,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -228,7 +229,8 @@ fn build_symmetric_triangle(n: usize) -> Vec<f64> {
         back.reverse();
         front.extend(back);
         front
-    } else {
+    
+        } else {
         let half_plus = ((n + 1) as f64 / 2.0).floor() as usize;
         let mut front: Vec<f64> = (1..=half_plus).map(|x| x as f64).collect();
         let mut tri = front.clone();
@@ -573,9 +575,25 @@ fn swma_batch_inner(
     // 3)  Run every row, writing directly into `raw`
     // ------------------------------------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -645,7 +663,8 @@ pub unsafe fn swma_row_avx512(
 ) {
     if period <= 32 {
         swma_row_avx512_short(data, first, period, stride, w_ptr, out);
-    } else {
+    
+        } else {
         swma_row_avx512_long(data, first, period, stride, w_ptr, out);
     }
 }

@@ -21,6 +21,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -236,7 +237,8 @@ pub unsafe fn rsi_scalar(
         let delta = data[i] - data[i - 1];
         if delta > 0.0 {
             avg_gain += delta;
-        } else {
+        
+            } else {
             avg_loss += -delta;
         }
     }
@@ -245,7 +247,8 @@ pub unsafe fn rsi_scalar(
 
     let initial_rsi = if avg_gain + avg_loss == 0.0 {
         50.0
-    } else {
+    
+        } else {
         100.0 * avg_gain / (avg_gain + avg_loss)
     };
     rsi_values[first + period] = initial_rsi;
@@ -258,7 +261,8 @@ pub unsafe fn rsi_scalar(
         avg_loss = inv_period * loss + beta * avg_loss;
         let rsi = if avg_gain + avg_loss == 0.0 {
             50.0
-        } else {
+        
+            } else {
             100.0 * avg_gain / (avg_gain + avg_loss)
         };
         rsi_values[i] = rsi;
@@ -287,7 +291,8 @@ pub unsafe fn rsi_avx512(
 ) -> Result<RsiOutput, RsiError> {
     if period <= 32 {
         rsi_avx512_short(data, period, first, out)
-    } else {
+    
+        } else {
         rsi_avx512_long(data, period, first, out)
     }
 }
@@ -485,10 +490,38 @@ fn rsi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -520,7 +553,8 @@ unsafe fn rsi_row_scalar(
         let delta = data[i] - data[i - 1];
         if delta > 0.0 {
             avg_gain += delta;
-        } else {
+        
+            } else {
             avg_loss += -delta;
         }
     }
@@ -529,7 +563,8 @@ unsafe fn rsi_row_scalar(
 
     let initial_rsi = if avg_gain + avg_loss == 0.0 {
         50.0
-    } else {
+    
+        } else {
         100.0 * avg_gain / (avg_gain + avg_loss)
     };
     out[first + period] = initial_rsi;
@@ -542,7 +577,8 @@ unsafe fn rsi_row_scalar(
         avg_loss = inv_period * loss + beta * avg_loss;
         let rsi = if avg_gain + avg_loss == 0.0 {
             50.0
-        } else {
+        
+            } else {
             100.0 * avg_gain / (avg_gain + avg_loss)
         };
         out[i] = rsi;
@@ -568,7 +604,8 @@ unsafe fn rsi_row_avx512(
 ) {
     if period <= 32 {
         rsi_row_avx512_short(data, first, period, out)
-    } else {
+    
+        } else {
         rsi_row_avx512_long(data, first, period, out)
     }
 }
@@ -645,7 +682,8 @@ impl RsiStream {
             for &d in &self.buffer[..self.period] {
                 if d > 0.0 {
                     gain += d;
-                } else {
+                
+                    } else {
                     loss += -d;
                 }
             }
@@ -653,13 +691,13 @@ impl RsiStream {
             self.avg_loss = loss / self.period as f64;
             if self.avg_gain + self.avg_loss == 0.0 {
                 return Some(50.0);
-            } else {
+            
+                } else {
                 return Some(100.0 * self.avg_gain / (self.avg_gain + self.avg_loss));
             }
         }
         if !self.filled {
             return None;
-        }
         let gain = if delta > 0.0 { delta } else { 0.0 };
         let loss = if delta < 0.0 { -delta } else { 0.0 };
         let inv_period = 1.0 / self.period as f64;
@@ -668,7 +706,8 @@ impl RsiStream {
         self.avg_loss = inv_period * loss + beta * self.avg_loss;
         if self.avg_gain + self.avg_loss == 0.0 {
             Some(50.0)
-        } else {
+        
+            } else {
             Some(100.0 * self.avg_gain / (self.avg_gain + self.avg_loss))
         }
     }

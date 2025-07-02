@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -243,7 +244,8 @@ pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         let prev = data[i - period];
         if prev == 0.0 || prev.is_nan() {
             out[i] = 0.0;
-        } else {
+        
+            } else {
             out[i] = ((curr / prev) - 1.0) * 100.0;
         }
     }
@@ -373,7 +375,8 @@ impl RocStream {
             None
         } else if prev == 0.0 {
             Some(0.0)
-        } else {
+        
+            } else {
             Some(((value / prev) - 1.0) * 100.0)
         }
     }
@@ -526,10 +529,38 @@ fn roc_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

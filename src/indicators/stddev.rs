@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -254,7 +255,8 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
         let var = (sum_sqr / period as f64) - (mean * mean);
         if var <= 0.0 {
             0.0
-        } else {
+        
+            } else {
             var.sqrt() * nbdev
         }
     };
@@ -346,7 +348,8 @@ impl StdDevStream {
             let old = self.buffer[self.head];
             self.sum += value - old;
             self.sum_sqr += value * value - old * old;
-        } else {
+        
+            } else {
             self.sum += value;
             self.sum_sqr += value * value;
             if self.head + 1 == self.period {
@@ -579,10 +582,38 @@ fn stddev_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -625,7 +656,8 @@ unsafe fn stddev_row_avx512(
 ) {
     if period <= 32 {
         stddev_row_avx512_short(data, first, period, nbdev, out)
-    } else {
+    
+        } else {
         stddev_row_avx512_long(data, first, period, nbdev, out)
     }
 }

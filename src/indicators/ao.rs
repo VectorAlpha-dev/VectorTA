@@ -23,6 +23,8 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -229,17 +231,11 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                ao_scalar(data, short, long, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                ao_avx2(data, short, long, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                ao_avx512(data, short, long, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -249,13 +245,7 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
 
 // Scalar implementation (no logic changes)
 #[inline]
-pub fn ao_scalar(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let mut short_sum = 0.0;
     let mut long_sum = 0.0;
@@ -281,13 +271,7 @@ pub fn ao_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ao_avx512(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn ao_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     if long <= 32 {
         unsafe { ao_avx512_short(data, short, long, first, out) }
     } else {
@@ -297,13 +281,7 @@ pub fn ao_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ao_avx2(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn ao_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     unsafe { ao_scalar(data, short, long, first, out) }
 }
 
@@ -559,11 +537,7 @@ fn ao_batch_inner(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(AoError::AllValuesNaN)?;
-    let max_long = combos
-        .iter()
-        .map(|c| c.long_period.unwrap())
-        .max()
-        .unwrap();
+    let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
     if data.len() - first < max_long {
         return Err(AoError::NotEnoughValidData {
             needed: max_long,
@@ -586,10 +560,20 @@ fn ao_batch_inner(
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -603,24 +587,12 @@ fn ao_batch_inner(
     })
 }
 #[inline(always)]
-unsafe fn ao_row_scalar(
-    data: &[f64],
-    first: usize,
-    short: usize,
-    long: usize,
-    out: &mut [f64],
-) {
+unsafe fn ao_row_scalar(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
     ao_scalar(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn ao_row_avx2(
-    data: &[f64],
-    first: usize,
-    short: usize,
-    long: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn ao_row_avx2(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
     ao_scalar(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -664,8 +636,8 @@ pub unsafe fn ao_row_avx512_long(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
 
     fn check_ao_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -725,7 +697,11 @@ mod tests {
         };
         let input = AoInput::from_slice(&input_data, params);
         let res = ao_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] AO should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] AO should fail with zero period",
+            test_name
+        );
         Ok(())
     }
     fn check_ao_period_exceeds_length(
@@ -740,13 +716,14 @@ mod tests {
         };
         let input = AoInput::from_slice(&data_small, params);
         let res = ao_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] AO should fail with period exceeding length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] AO should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
-    fn check_ao_very_small_dataset(
-        test_name: &str,
-        kernel: Kernel,
-    ) -> Result<(), Box<dyn Error>> {
+    fn check_ao_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = AoParams {
@@ -755,7 +732,11 @@ mod tests {
         };
         let input = AoInput::from_slice(&single_point, params);
         let res = ao_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] AO should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] AO should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
     fn check_ao_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

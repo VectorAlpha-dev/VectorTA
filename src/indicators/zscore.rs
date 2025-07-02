@@ -27,6 +27,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -322,7 +323,8 @@ pub unsafe fn zscore_avx512(
 ) -> Result<ZscoreOutput, ZscoreError> {
     if period <= 32 {
         zscore_avx512_short(data, period, first, ma_type, nbdev, devtype)
-    } else {
+    
+        } else {
         zscore_avx512_long(data, period, first, ma_type, nbdev, devtype)
     }
 }
@@ -425,7 +427,8 @@ impl ZscoreStream {
         let value = ordered[self.period - 1];
         if sigma == 0.0 || sigma.is_nan() {
             f64::NAN
-        } else {
+        
+            } else {
             (value - mean) / sigma
         }
     }
@@ -670,7 +673,21 @@ fn zscore_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -736,7 +753,8 @@ unsafe fn zscore_row_avx512(
 ) {
     if period <= 32 {
         zscore_row_avx512_short(data, first, period, ma_type, nbdev, devtype, out)
-    } else {
+    
+        } else {
         zscore_row_avx512_long(data, first, period, ma_type, nbdev, devtype, out)
     }
 }

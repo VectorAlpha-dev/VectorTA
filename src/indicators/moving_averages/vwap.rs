@@ -27,6 +27,8 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 use chrono::{Datelike, NaiveDateTime, Utc};
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -332,7 +334,8 @@ pub fn vwap_scalar(
 
         out[i] = if volume_sum > 0.0 {
             vol_price_sum / volume_sum
-        } else {
+        
+            } else {
             f64::NAN
         };
     }
@@ -412,7 +415,8 @@ impl VwapStream {
         self.vol_price_sum += volume * price;
         if self.volume_sum > 0.0 {
             Some(self.vol_price_sum / self.volume_sum)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -608,9 +612,25 @@ fn vwap_batch_inner(
 
     // ---------- 3. run every row, writing directly into `raw` ----------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -669,7 +689,8 @@ fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
     if count == 1 {
         let group_id = (year as i64) * 12 + (month as i64 - 1);
         Ok(group_id)
-    } else {
+    
+        } else {
         let quarter_group = (month as i64 - 1) / (count as i64);
         let group_id = (year as i64) * 100 + quarter_group;
         Ok(group_id)

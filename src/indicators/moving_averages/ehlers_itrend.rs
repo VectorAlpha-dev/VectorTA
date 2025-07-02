@@ -26,6 +26,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
@@ -333,7 +334,8 @@ fn ehlers_itrend_safe_scalar(
 
         let eit_val = if i < warmup_bars {
             x0
-        } else {
+        
+            } else {
             (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0
         };
         prev_it3 = prev_it2;
@@ -419,7 +421,8 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
 
         let mut mesa = if re != 0.0 && im != 0.0 {
             TWO_PI / im.atan2(re)
-        } else {
+        
+            } else {
             0.0
         };
         mesa = mesa.clamp(0.67 * mesa_p, 1.5 * mesa_p).clamp(6.0, 50.0);
@@ -447,7 +450,8 @@ pub unsafe fn ehlers_itrend_unsafe_scalar(
 
         out[idx] = if idx < warmup {
             x0
-        } else {
+        
+            } else {
             (4.0 * it + 3.0 * it1p + 2.0 * it2p + it3p) * DIV10
         };
 
@@ -607,17 +611,20 @@ impl EhlersITrendStream {
         let i = self.bar;
         let x1 = if i >= 1 {
             self.sum_ring[(self.sum_idx + self.max_dc - 1) % self.max_dc]
-        } else {
+        
+            } else {
             0.0
         };
         let x2 = if i >= 2 {
             self.sum_ring[(self.sum_idx + self.max_dc - 2) % self.max_dc]
-        } else {
+        
+            } else {
             0.0
         };
         let x3 = if i >= 3 {
             self.sum_ring[(self.sum_idx + self.max_dc - 3) % self.max_dc]
-        } else {
+        
+            } else {
             0.0
         };
         let fir_val = (4.0 * x0 + 3.0 * x1 + 2.0 * x2 + x3) / 10.0;
@@ -711,7 +718,8 @@ impl EhlersITrendStream {
         let it_val = sum_src / dcp as f64;
         let eit_val = if self.bar < self.warmup_bars {
             x0
-        } else {
+        
+            } else {
             (4.0 * it_val + 3.0 * self.prev_it1 + 2.0 * self.prev_it2 + self.prev_it3) / 10.0
         };
         self.prev_it3 = self.prev_it2;
@@ -875,9 +883,25 @@ fn ehlers_itrend_batch_inner(
     // ❹ run the kernels row-by-row (parallel or serial)
     // ────────────────────────────────────────────────────────────────────
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -925,7 +949,7 @@ fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, Eh
         if step == 0 {
             return if start == end {
                 Some(vec![start])
-            } else {
+} else {
                 None
             };
         }

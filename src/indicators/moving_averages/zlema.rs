@@ -20,6 +20,8 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -379,11 +381,12 @@ impl ZlemaStream {
 
         if !self.filled && self.head == 0 {
             self.filled = true;
-        }
         let val = if !self.filled { value } else { 2.0 * value - self.buffer[lag_idx] };
         if self.last_ema.is_nan() {
             self.last_ema = val;
-        } else {
+        
+            }
+ else {
             self.last_ema = self.alpha * val + (1.0 - self.alpha) * self.last_ema;
         }
         Some(self.last_ema)
@@ -570,9 +573,35 @@ fn zlema_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(r, slice)| do_row(r, slice));
+
+
+                .enumerate()
+
+
+                .for_each(|(r, slice)| do_row(r, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (r, slice) in raw.chunks_mut(cols).enumerate() {
+
+
+                    do_row(r, slice);
+
+
+        }
+
+
     } else {
         for (r, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(r, slice);

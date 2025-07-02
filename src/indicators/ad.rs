@@ -14,12 +14,14 @@
 //! - **Ok(AdOutput)** on success, with AD values.
 //! - **Err(AdError)** otherwise.
 
-use crate::utilities::data_loader::{Candles, source_type};
+use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -48,14 +50,29 @@ pub struct AdInput<'a> {
 impl<'a> AdInput<'a> {
     #[inline]
     pub fn from_candles(candles: &'a Candles, params: AdParams) -> Self {
-        Self { data: AdData::Candles { candles }, params }
+        Self {
+            data: AdData::Candles { candles },
+            params,
+        }
     }
 
     #[inline]
     pub fn from_slices(
-        high: &'a [f64], low: &'a [f64], close: &'a [f64], volume: &'a [f64], params: AdParams
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        volume: &'a [f64],
+        params: AdParams,
     ) -> Self {
-        Self { data: AdData::Slices { high, low, close, volume }, params }
+        Self {
+            data: AdData::Slices {
+                high,
+                low,
+                close,
+                volume,
+            },
+            params,
+        }
     }
 
     #[inline]
@@ -76,7 +93,11 @@ pub struct AdBuilder {
 
 impl AdBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self { kernel: Kernel::Auto } }
+    pub fn new() -> Self {
+        Self {
+            kernel: Kernel::Auto,
+        }
+    }
 
     #[inline(always)]
     pub fn kernel(mut self, k: Kernel) -> Self {
@@ -93,7 +114,10 @@ impl AdBuilder {
     #[inline(always)]
     pub fn apply_slices(
         self,
-        high: &[f64], low: &[f64], close: &[f64], volume: &[f64]
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        volume: &[f64],
     ) -> Result<AdOutput, AdError> {
         let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
         ad_with_kernel(&input, self.kernel)
@@ -110,7 +134,12 @@ pub enum AdError {
     #[error(transparent)]
     CandleFieldError(#[from] Box<dyn std::error::Error>),
     #[error("ad: Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
-    DataLengthMismatch { high_len: usize, low_len: usize, close_len: usize, volume_len: usize },
+    DataLengthMismatch {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+        volume_len: usize,
+    },
     #[error("ad: Not enough data points to calculate AD. Length={len}")]
     NotEnoughData { len: usize },
 }
@@ -129,7 +158,12 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
             let volume = candles.select_candle_field("volume")?;
             (high, low, close, volume)
         }
-        AdData::Slices { high, low, close, volume } => (*high, *low, *close, *volume),
+        AdData::Slices {
+            high,
+            low,
+            close,
+            volume,
+        } => (*high, *low, *close, *volume),
     };
 
     if high.len() != low.len() || high.len() != close.len() || high.len() != volume.len() {
@@ -155,17 +189,11 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                ad_scalar(high, low, close, volume, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => ad_scalar(high, low, close, volume, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                ad_avx2(high, low, close, volume, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => ad_avx2(high, low, close, volume, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                ad_avx512(high, low, close, volume, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => ad_avx512(high, low, close, volume, &mut out),
             _ => unreachable!(),
         }
     }
@@ -173,9 +201,7 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
 }
 
 #[inline]
-pub fn ad_scalar(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
-) {
+pub fn ad_scalar(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     let size = high.len();
     let mut sum = 0.0;
     for i in 0..size {
@@ -191,41 +217,30 @@ pub fn ad_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ad_avx2(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
-) {
+pub fn ad_avx2(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     ad_scalar(high, low, close, volume, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ad_avx512(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
-) {
+pub fn ad_avx512(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     ad_scalar(high, low, close, volume, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ad_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
-) {
+pub fn ad_avx512_short(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     ad_scalar(high, low, close, volume, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn ad_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
-) {
+pub fn ad_avx512_long(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     ad_scalar(high, low, close, volume, out)
 }
 
 #[inline]
-pub fn ad_batch_with_kernel(
-    data: &AdBatchInput,
-    k: Kernel,
-) -> Result<AdBatchOutput, AdError> {
+pub fn ad_batch_with_kernel(data: &AdBatchInput, k: Kernel) -> Result<AdBatchOutput, AdError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
@@ -257,18 +272,12 @@ pub struct AdBatchOutput {
 }
 
 #[inline(always)]
-pub fn ad_batch_slice(
-    data: &AdBatchInput,
-    kern: Kernel,
-) -> Result<AdBatchOutput, AdError> {
+pub fn ad_batch_slice(data: &AdBatchInput, kern: Kernel) -> Result<AdBatchOutput, AdError> {
     ad_batch_inner(data, kern, false)
 }
 
 #[inline(always)]
-pub fn ad_batch_par_slice(
-    data: &AdBatchInput,
-    kern: Kernel,
-) -> Result<AdBatchOutput, AdError> {
+pub fn ad_batch_par_slice(data: &AdBatchInput, kern: Kernel) -> Result<AdBatchOutput, AdError> {
     ad_batch_inner(data, kern, true)
 }
 
@@ -292,10 +301,20 @@ fn ad_batch_inner(
     };
 
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -307,7 +326,11 @@ fn ad_batch_inner(
 
 #[inline(always)]
 pub unsafe fn ad_row_scalar(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
 ) {
     ad_scalar(high, low, close, volume, out)
 }
@@ -315,7 +338,11 @@ pub unsafe fn ad_row_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ad_row_avx2(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
 ) {
     ad_row_scalar(high, low, close, volume, out)
 }
@@ -323,7 +350,11 @@ pub unsafe fn ad_row_avx2(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ad_row_avx512(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
 ) {
     ad_row_scalar(high, low, close, volume, out)
 }
@@ -331,7 +362,11 @@ pub unsafe fn ad_row_avx512(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ad_row_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
 ) {
     ad_row_scalar(high, low, close, volume, out)
 }
@@ -339,7 +374,11 @@ pub unsafe fn ad_row_avx512_short(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn ad_row_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
 ) {
     ad_row_scalar(high, low, close, volume, out)
 }
@@ -373,7 +412,11 @@ pub struct AdBatchBuilder {
 }
 
 impl AdBatchBuilder {
-    pub fn new() -> Self { Self { kernel: Kernel::Auto } }
+    pub fn new() -> Self {
+        Self {
+            kernel: Kernel::Auto,
+        }
+    }
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
@@ -381,9 +424,17 @@ impl AdBatchBuilder {
 
     pub fn apply_slices(
         self,
-        highs: &[&[f64]], lows: &[&[f64]], closes: &[&[f64]], volumes: &[&[f64]],
+        highs: &[&[f64]],
+        lows: &[&[f64]],
+        closes: &[&[f64]],
+        volumes: &[&[f64]],
     ) -> Result<AdBatchOutput, AdError> {
-        let batch = AdBatchInput { highs, lows, closes, volumes };
+        let batch = AdBatchInput {
+            highs,
+            lows,
+            closes,
+            volumes,
+        };
         ad_batch_with_kernel(&batch, self.kernel)
     }
 }
@@ -391,7 +442,10 @@ impl AdBatchBuilder {
 // Grid expansion for batch (no param sweep in AD, but kept for parity)
 #[inline(always)]
 fn expand_grid_ad<'a>(
-    highs: &'a [&'a [f64]], lows: &'a [&'a [f64]], closes: &'a [&'a [f64]], volumes: &'a [&'a [f64]],
+    highs: &'a [&'a [f64]],
+    lows: &'a [&'a [f64]],
+    closes: &'a [&'a [f64]],
+    volumes: &'a [&'a [f64]],
 ) -> Vec<(&'a [f64], &'a [f64], &'a [f64], &'a [f64])> {
     let mut out = Vec::with_capacity(highs.len());
     for i in 0..highs.len() {
@@ -403,11 +457,14 @@ fn expand_grid_ad<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
 
-    fn check_ad_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -418,7 +475,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_ad_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -432,13 +492,19 @@ mod tests {
             assert!(
                 (val - expected_last_five[i]).abs() < 1e-1,
                 "[{}] AD mismatch at idx {}: got {}, expected {}",
-                test_name, i, val, expected_last_five[i]
+                test_name,
+                i,
+                val,
+                expected_last_five[i]
             );
         }
         Ok(())
     }
 
-    fn check_ad_with_slice_data_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_with_slice_data_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -459,7 +525,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_ad_input_with_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_input_with_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -471,7 +540,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_ad_accuracy_nan_check(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_accuracy_nan_check(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -483,14 +555,18 @@ mod tests {
                 assert!(
                     !ad_result.values[i].is_nan(),
                     "[{}] Expected no NaN after index 50, but found NaN at index {}",
-                    test_name, i
+                    test_name,
+                    i
                 );
             }
         }
         Ok(())
     }
 
-    fn check_ad_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_ad_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -503,14 +579,20 @@ mod tests {
                 candles.high[i],
                 candles.low[i],
                 candles.close[i],
-                candles.volume[i]
+                candles.volume[i],
             );
             stream_values.push(val);
         }
         assert_eq!(batch.len(), stream_values.len());
         for (b, s) in batch.iter().zip(stream_values.iter()) {
-            if b.is_nan() && s.is_nan() { continue; }
-            assert!((b - s).abs() < 1e-9, "[{}] AD streaming mismatch", test_name);
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
+            assert!(
+                (b - s).abs() < 1e-9,
+                "[{}] AD streaming mismatch",
+                test_name
+            );
         }
         Ok(())
     }
@@ -541,7 +623,10 @@ mod tests {
         check_ad_accuracy_nan_check,
         check_ad_streaming
     );
-        fn check_batch_single_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_single_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -552,7 +637,11 @@ mod tests {
         let volumes: Vec<&[f64]> = vec![&candles.volume];
 
         // Individual calculation
-        let single = ad_with_kernel(&AdInput::from_candles(&candles, AdParams::default()), kernel)?.values;
+        let single = ad_with_kernel(
+            &AdInput::from_candles(&candles, AdParams::default()),
+            kernel,
+        )?
+        .values;
 
         // Batch calculation
         let batch = AdBatchBuilder::new()
@@ -567,7 +656,10 @@ mod tests {
             assert!(
                 (a - b).abs() < 1e-8,
                 "[{}] AD batch single row mismatch at {}: {} vs {}",
-                test, i, a, b
+                test,
+                i,
+                a,
+                b
             );
         }
         Ok(())
@@ -584,7 +676,11 @@ mod tests {
         let volumes: Vec<&[f64]> = vec![&candles.volume, &candles.volume, &candles.volume];
 
         // Individual calculation (should match every row)
-        let single = ad_with_kernel(&AdInput::from_candles(&candles, AdParams::default()), kernel)?.values;
+        let single = ad_with_kernel(
+            &AdInput::from_candles(&candles, AdParams::default()),
+            kernel,
+        )?
+        .values;
 
         let batch = AdBatchBuilder::new()
             .kernel(kernel)
@@ -600,7 +696,11 @@ mod tests {
                 assert!(
                     (a - b).abs() < 1e-8,
                     "[{}] AD batch multi row mismatch row {} idx {}: {} vs {}",
-                    test, row, i, a, b
+                    test,
+                    row,
+                    i,
+                    a,
+                    b
                 );
             }
         }
@@ -630,5 +730,4 @@ mod tests {
 
     gen_batch_tests!(check_batch_single_row);
     gen_batch_tests!(check_batch_multi_row);
-
 }

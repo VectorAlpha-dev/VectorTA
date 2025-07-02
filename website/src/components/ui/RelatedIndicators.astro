@@ -30,7 +30,7 @@ const related = Object.entries(indicators)
     return commonWords.length > 0;
   })
   .slice(0, 6)
-  .map(([id, indicator]) => ({ ...indicator, id }));
+  .map(([id, indicator]: [string, any]) => ({ ...indicator, id }));
 
 if (related.length === 0) return null;
 ---

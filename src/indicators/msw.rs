@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -254,7 +255,8 @@ pub unsafe fn msw_scalar(
         }
         let mut phase = if rp.abs() > 0.001 {
             atan(ip / rp)
-        } else {
+        
+            } else {
             TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
         };
         if rp < 0.0 {
@@ -384,7 +386,8 @@ impl MswStream {
         }
         let mut phase = if rp.abs() > 0.001 {
             atan(ip / rp)
-        } else {
+        
+            } else {
             TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
         };
         if rp < 0.0 {
@@ -578,11 +581,29 @@ fn msw_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         sine
-            .par_chunks_mut(cols)
-            .zip(lead.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (sine_row, lead_row))| do_row(row, sine_row, lead_row));
+
+                    .par_chunks_mut(cols)
+
+                    .zip(lead.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, (sine_row, lead_row))| do_row(row, sine_row, lead_row));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (sine_row, lead_row)) in sine.chunks_mut(cols).zip(lead.chunks_mut(cols)).enumerate() {
+
+                    do_row(row, sine_row, lead_row);
+
+        }
+
     } else {
         for (row, (sine_row, lead_row)) in sine.chunks_mut(cols).zip(lead.chunks_mut(cols)).enumerate() {
             do_row(row, sine_row, lead_row);
@@ -626,7 +647,8 @@ unsafe fn msw_row_scalar(
         }
         let mut phase = if rp.abs() > 0.001 {
             atan(ip / rp)
-        } else {
+        
+            } else {
             TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
         };
         if rp < 0.0 {
@@ -667,7 +689,8 @@ unsafe fn msw_row_avx512(
 ) {
     if period <= 32 {
         msw_row_avx512_short(data, first, period, sine, lead)
-    } else {
+    
+        } else {
         msw_row_avx512_long(data, first, period, sine, lead)
     }
 }

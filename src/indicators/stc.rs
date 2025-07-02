@@ -22,6 +22,7 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use std::error::Error;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

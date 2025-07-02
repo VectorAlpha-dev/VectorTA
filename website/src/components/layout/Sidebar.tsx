@@ -33,7 +33,7 @@ export function Sidebar({ currentPath = '' }: SidebarProps) {
   }, [allIndicators, searchQuery]);
 
   return (
-    <aside className="fixed left-0 top-16 w-64 h-[calc(100vh-4rem)] bg-background border-r border-border overflow-hidden flex flex-col">
+    <aside className="w-64 h-full bg-background border-r border-border overflow-hidden flex flex-col">
       {/* Search */}
       <div className="p-4 border-b border-border">
         <div className="relative">

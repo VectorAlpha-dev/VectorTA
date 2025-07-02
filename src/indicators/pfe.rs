@@ -21,6 +21,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -288,7 +289,8 @@ pub fn pfe_scalar(
     for i in 0..diff_len {
         if b_array[i].abs() < f64::EPSILON {
             pfe_tmp[i] = 0.0;
-        } else {
+        
+            } else {
             pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
         }
     }
@@ -301,7 +303,8 @@ pub fn pfe_scalar(
             signed_pfe[i] = f64::NAN;
         } else if d > 0.0 {
             signed_pfe[i] = pfe_tmp[i];
-        } else {
+        
+            } else {
             signed_pfe[i] = -pfe_tmp[i];
         }
     }
@@ -320,7 +323,8 @@ pub fn pfe_scalar(
             ema_val = val;
             ema_array[i] = val;
             started = true;
-        } else {
+        
+            } else {
             ema_val = alpha * val + (1.0 - alpha) * ema_val;
             ema_array[i] = ema_val;
         }
@@ -587,10 +591,38 @@ fn pfe_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -653,7 +685,8 @@ unsafe fn pfe_row_scalar(
     for i in 0..diff_len {
         if b_array[i].abs() < f64::EPSILON {
             pfe_tmp[i] = 0.0;
-        } else {
+        
+            } else {
             pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
         }
     }
@@ -667,7 +700,8 @@ unsafe fn pfe_row_scalar(
             signed_pfe[i] = f64::NAN;
         } else if d > 0.0 {
             signed_pfe[i] = pfe_tmp[i];
-        } else {
+        
+            } else {
             signed_pfe[i] = -pfe_tmp[i];
         }
     }
@@ -686,7 +720,8 @@ unsafe fn pfe_row_scalar(
             ema_val = val;
             ema_array[i] = val;
             started = true;
-        } else {
+        
+            } else {
             ema_val = alpha * val + (1.0 - alpha) * ema_val;
             ema_array[i] = ema_val;
         }
@@ -832,7 +867,8 @@ impl PfeStream {
         // 7) raw PFE = 100 * (long_leg / short_leg), or 0 if denominator ≈ 0
         let raw_pfe = if short_leg.abs() < f64::EPSILON {
             0.0
-        } else {
+        
+            } else {
             100.0 * long_leg / short_leg
         };
 
@@ -846,7 +882,8 @@ impl PfeStream {
             self.ema_val = signed;
             self.started = true;
             signed
-        } else {
+        
+            } else {
             self.ema_val = alpha * signed + (1.0 - alpha) * self.ema_val;
             self.ema_val
         };

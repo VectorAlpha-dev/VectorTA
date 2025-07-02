@@ -28,6 +28,14 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -230,6 +238,7 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
     Ok(DemaOutput { values: out })
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "fma")]
 #[inline]
 pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -261,6 +270,39 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
         let price = *p;
         ema = ema.mul_add(alpha_1, price * alpha);
         ema2 = ema2.mul_add(alpha_1, ema * alpha);
+
+        *q = (2.0 * ema) - ema2;
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline]
+pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    debug_assert!(period >= 1 && data.len() == out.len());
+    if first >= data.len() {
+        return;
+    }
+
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let alpha_1 = 1.0 - alpha;
+    let n = data.len();
+
+    let mut p = data.as_ptr().add(first);
+    let mut q = out.as_mut_ptr().add(first);
+
+    let mut ema = *p;
+    let mut ema2 = ema;
+    *q = ema;
+
+    for i in (first + 1)..n {
+        p = p.add(1);
+        q = q.add(1);
+        
+        let price = *p;
+        // Note: This uses regular multiplication instead of mul_add
+        // which may be less accurate but works on all architectures
+        ema = ema * alpha_1 + price * alpha;
+        ema2 = ema2 * alpha_1 + ema * alpha;
 
         *q = (2.0 * ema) - ema2;
     }
@@ -312,13 +354,15 @@ impl DemaStream {
         if self.filled == 0 {
             self.ema  = value;
             self.ema2 = value;
-        } else {
+        
+            } else {
             self.ema  = self.ema * self.alpha_1 + value * self.alpha;
             self.ema2 = self.ema2 * self.alpha_1 + self.ema  * self.alpha;
         }
         let out = if self.filled >= self.nan_fill {
             (2.0 * self.ema) - self.ema2
-        } else {
+        
+            } else {
             f64::NAN
         };
 
@@ -526,9 +570,25 @@ fn dema_batch_inner(
 
     // ── 4. run every row kernel, parallel or sequential ────────────────────
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -1012,4 +1072,156 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dema")]
+pub fn dema_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?;
+    
+    let params = DemaParams {
+        period: Some(period),
+    };
+    let dema_in = DemaInput::from_slice(slice_in, params);
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| -> Result<(), DemaError> {
+        let result = dema_with_kernel(&dema_in, Kernel::Auto)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DemaStream")]
+pub struct DemaStreamPy {
+    stream: DemaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DemaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = DemaParams {
+            period: Some(period),
+        };
+        let stream = DemaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(DemaStreamPy { stream })
+    }
+    
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dema_batch")]
+pub fn dema_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = DemaBatchRange {
+        period: period_range,
+    };
+    
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let batch_result = dema_batch_par_slice(slice_in, &sweep, kernel)?;
+        slice_out.copy_from_slice(&batch_result.values);
+        Ok::<(), DemaError>(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = DemaParams {
+        period: Some(period),
+    };
+    let input = DemaInput::from_slice(data, params);
+    
+    dema_with_kernel(&input, Kernel::Auto)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dema_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = DemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    dema_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dema_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = DemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+    
+    Ok(metadata)
 }

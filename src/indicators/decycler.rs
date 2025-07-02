@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -409,7 +410,8 @@ impl DecyclerStream {
             self.hp[idx0] = value;
         } else if self.idx == 1 {
             self.hp[idx0] = value;
-        } else {
+        
+            } else {
             let prev1 = self.buffer[(self.idx + self.hp_period - 1) % self.hp_period];
             let prev2 = self.buffer[(self.idx + self.hp_period - 2) % self.hp_period];
             let hp_prev1 = self.hp[(self.idx + self.hp_period - 1) % self.hp_period];
@@ -423,7 +425,8 @@ impl DecyclerStream {
         }
         let out = if self.idx < 2 {
             value - self.hp[idx0]
-        } else {
+        
+            } else {
             value - self.hp[idx0]
         };
         self.idx += 1;
@@ -614,10 +617,38 @@ fn decycler_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -696,7 +727,8 @@ pub unsafe fn decycler_row_avx512(
 ) {
     if hp_period <= 32 {
         decycler_row_avx512_short(data, first, hp_period, k, out)
-    } else {
+    
+        } else {
         decycler_row_avx512_long(data, first, hp_period, k, out)
     }
     _mm_sfence();

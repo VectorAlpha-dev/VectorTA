@@ -25,6 +25,14 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
@@ -476,7 +484,8 @@ impl EdcfStream {
         }
         if coef_sum != 0.0 {
             Some(num / coef_sum)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -594,7 +603,8 @@ fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
     // Build the list of periods
     let periods: Vec<usize> = if step == 0 || start == end {
         vec![start] // static single value
-    } else {
+    
+        } else {
         (start..=end).step_by(step).collect()
     };
 
@@ -684,9 +694,35 @@ fn edcf_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -1136,4 +1172,156 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "edcf")]
+pub fn edcf_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?;
+    
+    let params = EdcfParams {
+        period: Some(period),
+    };
+    let edcf_in = EdcfInput::from_slice(slice_in, params);
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| -> Result<(), EdcfError> {
+        let result = edcf_with_kernel(&edcf_in, Kernel::Auto)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "EdcfStream")]
+pub struct EdcfStreamPy {
+    stream: EdcfStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl EdcfStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = EdcfParams {
+            period: Some(period),
+        };
+        let stream = EdcfStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(EdcfStreamPy { stream })
+    }
+    
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "edcf_batch")]
+pub fn edcf_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = EdcfBatchRange {
+        period: period_range,
+    };
+    
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let batch_result = edcf_batch_par_slice(slice_in, &sweep, kernel)?;
+        slice_out.copy_from_slice(&batch_result.values);
+        Ok::<(), EdcfError>(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn edcf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = EdcfParams {
+        period: Some(period),
+    };
+    let input = EdcfInput::from_slice(data, params);
+    
+    edcf_with_kernel(&input, Kernel::Auto)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn edcf_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = EdcfBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    edcf_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn edcf_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = EdcfBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+    
+    Ok(metadata)
 }

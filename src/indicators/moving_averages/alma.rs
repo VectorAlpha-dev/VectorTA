@@ -43,6 +43,8 @@ use crate::utilities::helpers::{
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::alloc::{alloc, dealloc, Layout};
 use std::convert::AsRef;
@@ -479,8 +481,8 @@ unsafe fn alma_avx512_short(
     debug_assert!(weights.len() >= period);
 
     const STEP: usize = 8;
-    let chunks    = period / STEP;      // 0,1,2,3,4 (≤ 4 because period ≤ 32)
-    let tail_len  = period % STEP;
+    let chunks = period / STEP; // 0,1,2,3,4 (≤ 4 because period ≤ 32)
+    let tail_len = period % STEP;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     // ---------- fast path for period ≤ 8 ---------------------------------------
@@ -489,7 +491,7 @@ unsafe fn alma_avx512_short(
         for i in (first_valid + period - 1)..data.len() {
             let start = i + 1 - period;
             let d_vec = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start));
-            let sum   = hsum_pd_zmm(_mm512_mul_pd(d_vec, w_vec)) * inv_norm;
+            let sum = hsum_pd_zmm(_mm512_mul_pd(d_vec, w_vec)) * inv_norm;
             *out.get_unchecked_mut(i) = sum;
         }
         return;
@@ -517,7 +519,6 @@ unsafe fn alma_avx512_short(
         *out.get_unchecked_mut(i) = hsum_pd_zmm(acc) * inv_norm;
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
@@ -992,11 +993,17 @@ fn alma_batch_inner(
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar => alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                alma_row_avx2(data, first, period, max_p, w_ptr, inv_n, dst)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst)
+            }
             _ => unreachable!(),
         }
     };
@@ -1005,9 +1012,19 @@ fn alma_batch_inner(
     // 3. run every row kernel; no element is read before it is written
     // ---------------------------------------------------------------------------
     if parallel {
-        raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            raw.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -1133,8 +1150,8 @@ unsafe fn alma_row_avx512_short(
     debug_assert!(period <= 32);
     const STEP: usize = 8;
 
-    let chunks   = period / STEP;       // number of full 8‑wide blocks (0‑4)
-    let tail_len = period % STEP;       // 0‑7 remaining samples
+    let chunks = period / STEP; // number of full 8‑wide blocks (0‑4)
+    let tail_len = period % STEP; // 0‑7 remaining samples
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     // ───────────────────────────────────────────────────────────────────────────
@@ -1350,6 +1367,7 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    #[cfg(feature = "proptest")]
     use proptest::prelude::*;
 
     fn check_alma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1651,6 +1669,7 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(feature = "proptest")]
     #[allow(clippy::float_cmp)]
     fn check_alma_property(
         test_name: &str,
@@ -1660,17 +1679,17 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         // ── 1. Pick a period first, then a vector that is long enough ───────────
-        let strat = (1usize..=64)                                      // period
-            .prop_flat_map(|period| {                                  // ↙ dependents see it
+        let strat = (1usize..=64) // period
+            .prop_flat_map(|period| {
+                // ↙ dependents see it
                 (
                     prop::collection::vec(
-                        (-1e6f64..1e6f64)
-                            .prop_filter("finite", |x| x.is_finite()),
-                        period..400,                                   // len ≥ period
+                        (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                        period..400, // len ≥ period
                     ),
                     Just(period),
-                    0f64..1f64,                                        // offset
-                    0.1f64..10.0f64,                                   // sigma
+                    0f64..1f64,      // offset
+                    0.1f64..10.0f64, // sigma
                 )
             });
 
@@ -1680,20 +1699,21 @@ mod tests {
                 let params = AlmaParams {
                     period: Some(period),
                     offset: Some(offset),
-                    sigma:  Some(sigma),
+                    sigma: Some(sigma),
                 };
                 let input = AlmaInput::from_slice(&data, params);
 
-                let AlmaOutput { values: out }    = alma_with_kernel(&input, kernel).unwrap();
-                let AlmaOutput { values: ref_out} = alma_with_kernel(&input, Kernel::Scalar).unwrap();
+                let AlmaOutput { values: out } = alma_with_kernel(&input, kernel).unwrap();
+                let AlmaOutput { values: ref_out } =
+                    alma_with_kernel(&input, Kernel::Scalar).unwrap();
 
                 // ── 3. Core properties ──────────────────────────────────────────
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let y  = out[i];
-                    let r  = ref_out[i];
+                    let y = out[i];
+                    let r = ref_out[i];
 
                     // (a) boundedness
                     prop_assert!(
@@ -1711,19 +1731,21 @@ mod tests {
                         prop_assert!((y - data[0]).abs() <= 1e-9);
                     }
 
-                    let y_bits  = y.to_bits();
-                    let r_bits  = r.to_bits();
+                    let y_bits = y.to_bits();
+                    let r_bits = r.to_bits();
 
                     // Skip special cases: if either value is NaN or ±Inf, we only check that the
                     // other is equal (covers constant-series invariance and keeps shrinking sane).
                     if !y.is_finite() || !r.is_finite() {
-                        prop_assert!(y.to_bits() == r.to_bits(),
-                            "finite/NaN mismatch idx {i}: {y} vs {r}");
+                        prop_assert!(
+                            y.to_bits() == r.to_bits(),
+                            "finite/NaN mismatch idx {i}: {y} vs {r}"
+                        );
                         continue;
                     }
 
                     // ----------- safe ULP distance (no panics in debug) --------------------------
-                    let ulp_diff: u64 = y_bits.abs_diff(r_bits);   // or: (y_bits.max(r_bits) - y_bits.min(r_bits));
+                    let ulp_diff: u64 = y_bits.abs_diff(r_bits); // or: (y_bits.max(r_bits) - y_bits.min(r_bits));
 
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1773,9 +1795,12 @@ mod tests {
         check_alma_invalid_offset,
         check_alma_reinput,
         check_alma_nan_handling,
-        check_alma_streaming,
-        check_alma_property
+        check_alma_streaming
     );
+
+    // Only generate proptest-based tests when proptest feature is enabled
+    #[cfg(feature = "proptest")]
+    generate_all_alma_tests!(check_alma_property);
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1834,14 +1859,16 @@ mod tests {
 }
 
 #[cfg(feature = "python")]
-#[pyfunction]
-fn alma<'py>(
+#[pyfunction(name = "alma")]
+pub fn alma_py<'py>(
     py: Python<'py>,
-    arr_in: PyReadonlyArray1<'py, f64>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
     offset: f64,
     sigma: f64,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
     let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
 
     // ---------- build input struct -------------------------------------------------
@@ -1853,7 +1880,7 @@ fn alma<'py>(
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
     // ---------- allocate NumPy output buffer ---------------------------------------
-    let out_arr = PyArray1::<f64>::new(py, [slice_in.len()], false);
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
 
     // ---------- heavy lifting without the GIL --------------------------------------
@@ -1871,7 +1898,7 @@ fn alma<'py>(
 
 #[cfg(feature = "python")]
 #[pyclass(name = "AlmaStream")]
-struct AlmaStreamPy {
+pub struct AlmaStreamPy {
     stream: AlmaStream,
 }
 
@@ -1898,18 +1925,18 @@ impl AlmaStreamPy {
 }
 
 #[cfg(feature = "python")]
-#[pyfunction]
-fn alma_batch<'py>(
+#[pyfunction(name = "alma_batch")]
+pub fn alma_batch_py<'py>(
     py: Python<'py>,
-    data: &'py PyArray1<f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     offset_range: (f64, f64, f64),
     sigma_range: (f64, f64, f64),
-) -> PyResult<PyObject> {
-    use numpy::{PyArray1, PyArrayDyn};
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
 
-    let slice_in = unsafe { data.as_slice()? };
+    let slice_in = data.as_slice()?;
 
     let sweep = AlmaBatchRange {
         period: period_range,
@@ -1923,12 +1950,22 @@ fn alma_batch<'py>(
     let cols = slice_in.len();
 
     // 2. Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = PyArray1::<f64>::new(py, [rows * cols], false);
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 3. Heavy work without the GIL
-    py.allow_threads(|| alma_batch_into_slice(slice_in, &sweep, Kernel::Auto, slice_out))
-        .map_err(|e| PyValueError::new_err(e.to_string()))??; // two ? because of nested Result
+    py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let batch_result = alma_batch_par_slice(slice_in, &sweep, kernel)?;
+        // Copy the results into our pre-allocated buffer
+        slice_out.copy_from_slice(&batch_result.values);
+        Ok::<(), AlmaError>(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // 4. Build dict with the GIL
     let dict = PyDict::new(py);
@@ -1958,16 +1995,7 @@ fn alma_batch<'py>(
             .into_pyarray(py),
     )?;
 
-    Ok(dict.into())
-}
-
-#[cfg(feature = "python")]
-#[pymodule]
-fn ta_indicators(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(alma, m)?)?;
-    m.add_function(wrap_pyfunction!(alma_batch, m)?)?;
-    m.add_class::<AlmaStreamPy>()?;
-    Ok(())
+    Ok(dict)
 }
 
 #[cfg(feature = "wasm")]
@@ -1983,4 +2011,61 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
     alma_with_kernel(&input, Kernel::Auto)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    offset_start: f64,
+    offset_end: f64,
+    offset_step: f64,
+    sigma_start: f64,
+    sigma_end: f64,
+    sigma_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AlmaBatchRange {
+        period: (period_start, period_end, period_step),
+        offset: (offset_start, offset_end, offset_step),
+        sigma: (sigma_start, sigma_end, sigma_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    alma_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    offset_start: f64,
+    offset_end: f64,
+    offset_step: f64,
+    sigma_start: f64,
+    sigma_end: f64,
+    sigma_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AlmaBatchRange {
+        period: (period_start, period_end, period_step),
+        offset: (offset_start, offset_end, offset_step),
+        sigma: (sigma_start, sigma_end, sigma_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 3);
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+        metadata.push(combo.offset.unwrap());
+        metadata.push(combo.sigma.unwrap());
+    }
+
+    Ok(metadata)
 }

@@ -2,10 +2,11 @@
  * WASM binding tests for ALMA indicator.
  * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
  */
-const test = require('node:test');
-const assert = require('node:assert');
-const path = require('path');
-const { 
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
     loadTestData, 
     assertArrayClose, 
     assertClose,
@@ -13,7 +14,10 @@ const {
     assertAllNaN,
     assertNoNaN,
     EXPECTED_OUTPUTS 
-} = require('./test_utils');
+} from './test_utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let wasm;
 let testData;
@@ -23,7 +27,7 @@ test.before(async () => {
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         wasm = await import(wasmPath);
-        await wasm.default();
+        // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -194,8 +198,160 @@ test('ALMA all NaN input', () => {
     }, /All values are NaN/);
 });
 
-// Note: Streaming and batch tests would require those functions to be exposed in WASM bindings
-// Currently testing only the basic alma_js function that's exposed
+test('ALMA batch single parameter set', () => {
+    // Test batch with single parameter combination
+    const close = new Float64Array(testData.close);
+    
+    // Single parameter set: period=9, offset=0.85, sigma=6.0
+    const batchResult = wasm.alma_batch_js(
+        close,
+        9, 9, 0,      // period range
+        0.85, 0.85, 0, // offset range
+        6.0, 6.0, 0    // sigma range
+    );
+    
+    // Should match single calculation
+    const singleResult = wasm.alma_js(close, 9, 0.85, 6.0);
+    
+    assert.strictEqual(batchResult.length, singleResult.length);
+    assertArrayClose(batchResult, singleResult, 1e-10, "Batch vs single mismatch");
+});
+
+test('ALMA batch multiple periods', () => {
+    // Test batch with multiple period values
+    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
+    
+    // Multiple periods: 9, 11, 13
+    const batchResult = wasm.alma_batch_js(
+        close,
+        9, 13, 2,      // period range
+        0.85, 0.85, 0, // offset range  
+        6.0, 6.0, 0    // sigma range
+    );
+    
+    // Should have 3 rows * 100 cols = 300 values
+    assert.strictEqual(batchResult.length, 3 * 100);
+    
+    // Verify each row matches individual calculation
+    const periods = [9, 11, 13];
+    for (let i = 0; i < periods.length; i++) {
+        const rowStart = i * 100;
+        const rowEnd = rowStart + 100;
+        const rowData = batchResult.slice(rowStart, rowEnd);
+        
+        const singleResult = wasm.alma_js(close, periods[i], 0.85, 6.0);
+        assertArrayClose(
+            rowData, 
+            singleResult, 
+            1e-10, 
+            `Period ${periods[i]} mismatch`
+        );
+    }
+});
+
+test('ALMA batch metadata', () => {
+    // Test metadata function returns correct parameter combinations
+    const metadata = wasm.alma_batch_metadata_js(
+        9, 13, 2,      // period: 9, 11, 13
+        0.85, 0.95, 0.05, // offset: 0.85, 0.90, 0.95
+        6.0, 7.0, 0.5   // sigma: 6.0, 6.5, 7.0
+    );
+    
+    // Should have 3 * 3 * 3 = 27 combinations
+    // Each combo has 3 values: [period, offset, sigma]
+    assert.strictEqual(metadata.length, 27 * 3);
+    
+    // Check first combination
+    assert.strictEqual(metadata[0], 9);    // period
+    assert.strictEqual(metadata[1], 0.85); // offset
+    assert.strictEqual(metadata[2], 6.0);  // sigma
+    
+    // Check last combination
+    assert.strictEqual(metadata[78], 13);   // period
+    assert.strictEqual(metadata[79], 0.95); // offset
+    assert.strictEqual(metadata[80], 7.0);  // sigma
+});
+
+test('ALMA batch full parameter sweep', () => {
+    // Test full parameter sweep matching expected structure
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const batchResult = wasm.alma_batch_js(
+        close,
+        9, 11, 2,      // 2 periods
+        0.85, 0.90, 0.05, // 2 offsets
+        6.0, 6.0, 0    // 1 sigma
+    );
+    
+    const metadata = wasm.alma_batch_metadata_js(
+        9, 11, 2,
+        0.85, 0.90, 0.05,
+        6.0, 6.0, 0
+    );
+    
+    // Should have 2 * 2 * 1 = 4 combinations
+    const numCombos = metadata.length / 3;
+    assert.strictEqual(numCombos, 4);
+    assert.strictEqual(batchResult.length, 4 * 50);
+    
+    // Verify structure
+    for (let combo = 0; combo < numCombos; combo++) {
+        const period = metadata[combo * 3];
+        const offset = metadata[combo * 3 + 1];
+        const sigma = metadata[combo * 3 + 2];
+        
+        const rowStart = combo * 50;
+        const rowData = batchResult.slice(rowStart, rowStart + 50);
+        
+        // First period-1 values should be NaN
+        for (let i = 0; i < period - 1; i++) {
+            assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
+        }
+        
+        // After warmup should have values
+        for (let i = period - 1; i < 50; i++) {
+            assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
+        }
+    }
+});
+
+test('ALMA batch edge cases', () => {
+    // Test edge cases for batch processing
+    const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    // Single value sweep
+    const singleBatch = wasm.alma_batch_js(
+        close,
+        5, 5, 1,
+        0.85, 0.85, 0.1,
+        6.0, 6.0, 1.0
+    );
+    
+    assert.strictEqual(singleBatch.length, 10);
+    
+    // Step larger than range
+    const largeBatch = wasm.alma_batch_js(
+        close,
+        5, 7, 10, // Step larger than range
+        0.85, 0.85, 0,
+        6.0, 6.0, 0
+    );
+    
+    // Should only have period=5
+    assert.strictEqual(largeBatch.length, 10);
+    
+    // Empty data should throw
+    assert.throws(() => {
+        wasm.alma_batch_js(
+            new Float64Array([]),
+            9, 9, 0,
+            0.85, 0.85, 0,
+            6.0, 6.0, 0
+        );
+    }, /No data provided/);
+});
+
+// Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
 test.after(() => {
     console.log('ALMA WASM tests completed');

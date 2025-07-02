@@ -29,3 +29,16 @@ website/dist/
 website/node_modules/
 website/*.csv
 website
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# WASM/Node
+pkg/
+tests/wasm/node_modules/

@@ -28,6 +28,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -341,8 +342,7 @@ pub fn devstop_scalar(
         if direction.eq_ignore_ascii_case("long") {
             if !high[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
                 base[i] = high[i] - avtr[i] - mult * dev_values[i];
-            }
-        } else {
+} else {
             if !low[i].is_nan() && !avtr[i].is_nan() && !dev_values[i].is_nan() {
                 base[i] = low[i] + avtr[i] + mult * dev_values[i];
             }
@@ -353,8 +353,7 @@ pub fn devstop_scalar(
         match max_rolling(&base, period) {
             Ok(v) => v,
             Err(_) => vec![f64::NAN; high.len()],
-        }
-    } else {
+} else {
         match min_rolling(&base, period) {
             Ok(v) => v,
             Err(_) => vec![f64::NAN; high.len()],
@@ -641,7 +640,29 @@ fn devstop_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -692,7 +713,8 @@ pub unsafe fn devstop_row_avx512(
 ) {
     if period <= 32 {
         devstop_row_avx512_short(high, low, first, period, input, out);
-    } else {
+    
+        } else {
         devstop_row_avx512_long(high, low, first, period, input, out);
     }
 }
@@ -795,7 +817,8 @@ impl DevStopStream {
                 let mid = v.len() / 2;
                 if v.len() % 2 == 0 {
                     (v[mid - 1] + v[mid]) / 2.0
-                } else {
+                
+                    } else {
                     v[mid]
                 }
             }
@@ -803,7 +826,8 @@ impl DevStopStream {
         };
         if self.direction.eq_ignore_ascii_case("long") {
             high2 - avtr - self.mult * dev
-        } else {
+        
+            } else {
             low2 + avtr + self.mult * dev
         }
     }

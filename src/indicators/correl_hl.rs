@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -248,7 +249,8 @@ pub fn correl_hl_scalar(
 
         if var_h <= 0.0 || var_l <= 0.0 {
             0.0
-        } else {
+        
+            } else {
             cov / (var_h.sqrt() * var_l.sqrt())
         }
     }
@@ -288,8 +290,7 @@ pub fn correl_hl_scalar(
                 sum_l += ll;
                 sum_l2 += ll * ll;
                 sum_hl += hh * ll;
-            }
-        } else {
+} else {
             sum_h += new_h - old_h;
             sum_h2 += new_h * new_h - old_h * old_h;
             sum_l += new_l - old_l;
@@ -417,7 +418,8 @@ impl CorrelHlStream {
         let var_l = sum_l2 - (sum_l * sum_l / pf);
         if var_h <= 0.0 || var_l <= 0.0 {
             0.0
-        } else {
+        
+            } else {
             cov / (var_h.sqrt() * var_l.sqrt())
         }
     }
@@ -606,10 +608,38 @@ fn correl_hl_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -658,7 +688,8 @@ pub unsafe fn correl_hl_row_avx512(
 ) {
     if period <= 32 {
         correl_hl_row_avx512_short(high, low, first, period, out)
-    } else {
+    
+        } else {
         correl_hl_row_avx512_long(high, low, first, period, out)
     }
 }

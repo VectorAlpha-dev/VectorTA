@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -404,7 +405,8 @@ impl ReflexStream {
         } else if t == 1 {
             // at t = 1: ssf[1] = data[1]
             value
-        } else {
+        
+            } else {
             // for t >= 2: ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
             let prev_data = self.last_data.unwrap();
             let idx1 = (t - 1) % (period + 1);
@@ -432,7 +434,7 @@ impl ReflexStream {
 
             if ms_t > 0.0 {
                 out_val = my_sum / ms_t.sqrt();
-            } else {
+} else {
                 out_val = 0.0;
             }
         }
@@ -449,7 +451,8 @@ impl ReflexStream {
         //    next iteration.
         if t < period {
             self.ssf_sum += ssf_t;
-        } else {
+        
+            } else {
             let idx_remove = (t - period) % (period + 1);
             let remove_ssf = self.ssf_buf[idx_remove];
             self.ssf_sum = self.ssf_sum - remove_ssf + ssf_t;
@@ -467,7 +470,8 @@ impl ReflexStream {
         // 7) return `Some(out_val)` only once t >= period; otherwise return None
         if t >= period {
             Some(out_val)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -650,9 +654,25 @@ fn reflex_batch_inner(
 
     // ---- fill every row directly into `raw` ------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -688,7 +708,8 @@ unsafe fn reflex_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [
 unsafe fn reflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     if period <= 32 {
         reflex_row_avx512_short(data, first, period, out);
-    } else {
+    
+        } else {
         reflex_row_avx512_long(data, first, period, out);
     }
 }

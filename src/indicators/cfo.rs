@@ -21,6 +21,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -77,7 +78,10 @@ impl<'a> CfoInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: CfoParams) -> Self {
         Self {
-            data: CfoData::Candles { candles: c, source: s },
+            data: CfoData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -194,13 +198,22 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
     let period = input.get_period();
     let scalar = input.get_scalar();
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CfoError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CfoError::AllValuesNaN)?;
 
     if period == 0 || period > len {
-        return Err(CfoError::InvalidPeriod { period, data_len: len });
+        return Err(CfoError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
-        return Err(CfoError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(CfoError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
     }
     if len == 0 {
         return Err(CfoError::NoData);
@@ -219,9 +232,7 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
                 cfo_scalar(data, period, scalar, first, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                cfo_avx2(data, period, scalar, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => cfo_avx2(data, period, scalar, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 cfo_avx512(data, period, scalar, first, &mut out)
@@ -236,13 +247,7 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
 // --- Scalar Logic ---
 
 #[inline]
-pub fn cfo_scalar(
-    data: &[f64],
-    period: usize,
-    scalar: f64,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub fn cfo_scalar(data: &[f64], period: usize, scalar: f64, first_valid: usize, out: &mut [f64]) {
     let size = data.len();
     let x = (period * (period + 1)) / 2;
     let x2 = (period * (period + 1) * (2 * period + 1)) / 6;
@@ -282,13 +287,7 @@ pub fn cfo_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cfo_avx512(
-    data: &[f64],
-    period: usize,
-    scalar: f64,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub fn cfo_avx512(data: &[f64], period: usize, scalar: f64, first_valid: usize, out: &mut [f64]) {
     if period <= 32 {
         unsafe { cfo_avx512_short(data, period, scalar, first_valid, out) }
     } else {
@@ -417,7 +416,10 @@ impl CfoStream {
     pub fn try_new(params: CfoParams) -> Result<Self, CfoError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(CfoError::InvalidPeriod { period, data_len: 0 });
+            return Err(CfoError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let scalar = params.scalar.unwrap_or(100.0);
         Ok(Self {
@@ -643,12 +645,21 @@ fn cfo_batch_inner(
 ) -> Result<CfoBatchOutput, CfoError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(CfoError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(CfoError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CfoError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CfoError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(CfoError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(CfoError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
     let rows = combos.len();
     let cols = data.len();
@@ -666,10 +677,20 @@ fn cfo_batch_inner(
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -686,8 +707,8 @@ fn cfo_batch_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_cfo_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -764,7 +785,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cfo_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_cfo_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = CfoParams {

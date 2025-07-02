@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -393,7 +394,8 @@ pub unsafe fn damiani_volatmeter_scalar(
             let tr2 = (high[i] - prev_close).abs();
             let tr3 = (low[i] - prev_close).abs();
             tr1.max(tr2).max(tr3)
-        } else {
+        
+            } else {
             0.0
         };
         // Update prev_close to today’s close
@@ -429,7 +431,8 @@ pub unsafe fn damiani_volatmeter_scalar(
             filled_vis += 1;
             sum_vis_std += val;
             sum_sq_vis_std += val * val;
-        } else {
+        
+            } else {
             sum_vis_std = sum_vis_std - old_v + val;
             sum_sq_vis_std = sum_sq_vis_std - (old_v * old_v) + (val * val);
         }
@@ -441,7 +444,8 @@ pub unsafe fn damiani_volatmeter_scalar(
             filled_sed += 1;
             sum_sed_std += val;
             sum_sq_sed_std += val * val;
-        } else {
+        
+            } else {
             sum_sed_std = sum_sed_std - old_s + val;
             sum_sq_sed_std = sum_sq_sed_std - (old_s * old_s) + (val * val);
         }
@@ -455,19 +459,21 @@ pub unsafe fn damiani_volatmeter_scalar(
             // Previous two “vol” values needed for the lag component
             let p1 = if i >= 1 && !vol[i - 1].is_nan() {
                 vol[i - 1]
-            } else {
+} else {
                 0.0
             };
             let p3 = if i >= 3 && !vol[i - 3].is_nan() {
                 vol[i - 3]
-            } else {
+            
+                } else {
                 0.0
             };
 
             // Safely handle ATR Sed = 0 or NaN
             let sed_safe = if atr_sed_val.is_finite() && atr_sed_val != 0.0 {
                 atr_sed_val
-            } else {
+            
+                } else {
                 atr_sed_val + f64::EPSILON
             };
 
@@ -490,7 +496,7 @@ pub unsafe fn damiani_volatmeter_scalar(
 
                 let ratio = if std_sed != 0.0 {
                     std_vis / std_sed
-                } else {
+} else {
                     std_vis / (std_sed + f64::EPSILON)
                 };
                 anti[i] = threshold - ratio;
@@ -509,7 +515,8 @@ fn stddev(sum: f64, sum_sq: f64, n: usize) -> f64 {
     let var = mean_sq - mean * mean;
     if var <= 0.0 {
         0.0
-    } else {
+    
+        } else {
         var.sqrt()
     }
 }
@@ -852,10 +859,27 @@ fn damiani_volatmeter_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         vol.par_chunks_mut(cols)
-            .zip(anti.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (outv, outa))| do_row(row, outv, outa));
+
+                    .zip(anti.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, (outv, outa))| do_row(row, outv, outa));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (outv, outa)) in vol.chunks_mut(cols).zip(anti.chunks_mut(cols)).enumerate() {
+
+                    do_row(row, outv, outa);
+
+        }
+
     } else {
         for (row, (outv, outa)) in vol.chunks_mut(cols).zip(anti.chunks_mut(cols)).enumerate() {
             do_row(row, outv, outa);
@@ -1114,7 +1138,8 @@ impl<'a> DamianiVolatmeterStream<'a> {
             let tr2 = (hi - pc).abs();
             let tr3 = (lo - pc).abs();
             tr1.max(tr2).max(tr3)
-        } else {
+        
+            } else {
             0.0
         };
         
@@ -1154,7 +1179,8 @@ impl<'a> DamianiVolatmeterStream<'a> {
             self.filled_vis += 1;
             self.sum_vis_std += val;
             self.sum_sq_vis_std += val * val;
-        } else {
+        
+            } else {
             self.sum_vis_std = self.sum_vis_std - old_v + val;
             self.sum_sq_vis_std = self.sum_sq_vis_std - (old_v * old_v) + (val * val);
         }
@@ -1167,7 +1193,8 @@ impl<'a> DamianiVolatmeterStream<'a> {
             self.filled_sed += 1;
             self.sum_sed_std += val;
             self.sum_sq_sed_std += val * val;
-        } else {
+        
+            } else {
             self.sum_sed_std = self.sum_sed_std - old_s + val;
             self.sum_sq_sed_std = self.sum_sq_sed_std - (old_s * old_s) + (val * val);
         }
@@ -1187,19 +1214,22 @@ impl<'a> DamianiVolatmeterStream<'a> {
         // Get previous vol values from history
         let p1 = if !self.vol_history[0].is_nan() {
             self.vol_history[0]
-        } else {
+        
+            } else {
             0.0
         };
         let p3 = if !self.vol_history[2].is_nan() {
             self.vol_history[2]
-        } else {
+        
+            } else {
             0.0
         };
 
         // Avoid divide‐by‐zero on sed:
         let sed_safe = if self.atr_sed_val.is_finite() && self.atr_sed_val != 0.0 {
             self.atr_sed_val
-        } else {
+        
+            } else {
             self.atr_sed_val + f64::EPSILON
         };
 
@@ -1217,7 +1247,7 @@ impl<'a> DamianiVolatmeterStream<'a> {
             let std_sed = stddev(self.sum_sed_std, self.sum_sq_sed_std, self.sed_std);
             let ratio = if std_sed != 0.0 {
                 std_vis / std_sed
-            } else {
+} else {
                 std_vis / (std_sed + f64::EPSILON)
             };
             self.threshold - ratio
@@ -1380,7 +1410,8 @@ mod tests {
             if let Some((v, a)) = stream.update() {
                 stream_vol.push(v);
                 stream_anti.push(a);
-            } else {
+            
+                } else {
                 stream_vol.push(f64::NAN);
                 stream_anti.push(f64::NAN);
             }

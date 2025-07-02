@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -257,7 +258,8 @@ pub fn keltner_scalar(
     for i in 0..len {
         let tr = if i == 0 {
             high[0] - low[0]
-        } else {
+        
+            } else {
             let hl = high[i] - low[i];
             let hc = (high[i] - close[i - 1]).abs();
             let lc = (low[i] - close[i - 1]).abs();
@@ -268,8 +270,7 @@ pub fn keltner_scalar(
             if i == period - 1 {
                 rma = sum_tr / (period as f64);
                 atr[i] = rma;
-            }
-        } else {
+} else {
             rma += alpha * (tr - rma);
             atr[i] = rma;
         }
@@ -557,11 +558,31 @@ fn keltner_batch_inner(
         keltner_row_scalar(high, low, close, source, period, mult, "ema", first, up, mid, low_out)
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         upper.par_chunks_mut(cols)
-            .zip(middle.par_chunks_mut(cols))
-            .zip(lower.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+
+                    .zip(middle.par_chunks_mut(cols))
+
+                    .zip(lower.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for ((row, u), (m, l)) in upper.chunks_mut(cols).enumerate()
+
+                    .zip(middle.chunks_mut(cols).zip(lower.chunks_mut(cols))) {
+
+                    do_row(row, u, m, l);
+
+        }
+
     } else {
         for ((row, u), (m, l)) in upper.chunks_mut(cols).enumerate()
             .zip(middle.chunks_mut(cols).zip(lower.chunks_mut(cols))) {
@@ -616,7 +637,8 @@ impl KeltnerStream {
     pub fn update(&mut self, high: f64, low: f64, close: f64, source: f64) -> Option<(f64, f64, f64)> {
         let tr = if self.count == 0 {
             high - low
-        } else {
+        
+            } else {
             let hl = high - low;
             let hc = (high - self.prev_close).abs();
             let lc = (low - self.prev_close).abs();
@@ -630,7 +652,8 @@ impl KeltnerStream {
                 MaImpl::Ema { alpha, value } => {
                     if self.count == 1 {
                         *value = source;
-                    } else {
+                    
+                        } else {
                         *value += (source - *value) * *alpha;
                     }
                 }
@@ -645,7 +668,8 @@ impl KeltnerStream {
 
         if self.count == self.period {
             self.atr = (self.atr + tr) / self.period as f64;
-        } else {
+        
+            } else {
             self.atr += (tr - self.atr) / self.period as f64;
         }
 
@@ -653,7 +677,8 @@ impl KeltnerStream {
             MaImpl::Ema { alpha, value } => {
                 if self.count == 1 {
                     *value = source;
-                } else {
+                
+                    } else {
                     *value += (source - *value) * *alpha;
                 }
                 *value

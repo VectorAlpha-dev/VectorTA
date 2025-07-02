@@ -28,6 +28,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -313,7 +314,8 @@ pub fn dti_scalar(
 
         if !e1_u.is_nan() && e1_u != 0.0 {
             out[i] = 100.0 * e0_u / e1_u;
-        } else {
+        
+            } else {
             out[i] = 0.0;
         }
     }
@@ -525,9 +527,9 @@ impl DtiStream {
             self.last_low = Some(low);
             if !self.e1_u.is_nan() && self.e1_u != 0.0 {
                 Some(100.0 * self.e0_u / self.e1_u)
-            } else {
+            
+                } else {
                 Some(0.0)
-            }
         } else {
             self.last_high = Some(high);
             self.last_low = Some(low);
@@ -767,10 +769,27 @@ fn dti_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .par_chunks_mut(cols)
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

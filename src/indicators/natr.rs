@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -263,7 +264,8 @@ pub fn natr_scalar(
     for i in first..out.len() {
         let tr = if i == first {
             high[i] - low[i]
-        } else {
+        
+            } else {
             let tr_curr = high[i] - low[i];
             let tr_prev_close_high = (high[i] - close[i - 1]).abs();
             let tr_prev_close_low = (low[i] - close[i - 1]).abs();
@@ -277,10 +279,9 @@ pub fn natr_scalar(
                 let c = close[i];
                 if c.is_finite() && c != 0.0 {
                     out[i] = (prev_atr / c) * 100.0;
-                } else {
+                
+                    } else {
                     out[i] = 0.0;
-                }
-            }
         } else {
             let new_atr = ((prev_atr * ((period - 1) as f64)) + tr) / (period as f64);
             prev_atr = new_atr;
@@ -288,7 +289,8 @@ pub fn natr_scalar(
             let c = close[i];
             if c.is_finite() && c != 0.0 {
                 out[i] = (new_atr / c) * 100.0;
-            } else {
+            
+                } else {
                 out[i] = 0.0;
             }
         }
@@ -310,7 +312,8 @@ pub fn natr_avx512(
     unsafe {
         if period <= 32 {
             natr_avx512_short(high, low, close, period, first, out);
-        } else {
+        
+            } else {
             natr_avx512_long(high, low, close, period, first, out);
         }
     }
@@ -394,7 +397,8 @@ impl NatrStream {
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         let tr = if self.count == 0 {
             high - low
-        } else {
+        
+            } else {
             let tr_curr = high - low;
             let tr_prev_close_high = (high - self.close_buffer[(self.head + self.period - 1) % self.period]).abs();
             let tr_prev_close_low = (low - self.close_buffer[(self.head + self.period - 1) % self.period]).abs();
@@ -414,7 +418,8 @@ impl NatrStream {
                 self.filled = true;
                 if close.is_finite() && close != 0.0 {
                     return Some((self.prev_atr / close) * 100.0);
-                } else {
+                
+                    } else {
                     return Some(0.0);
                 }
             }
@@ -424,7 +429,8 @@ impl NatrStream {
             self.prev_atr = new_atr;
             if close.is_finite() && close != 0.0 {
                 return Some((new_atr / close) * 100.0);
-            } else {
+            
+                } else {
                 return Some(0.0);
             }
         }
@@ -616,10 +622,38 @@ fn natr_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -670,7 +704,8 @@ pub unsafe fn natr_row_avx512(
 ) {
     if period <= 32 {
         natr_row_avx512_short(high, low, close, first, period, out);
-    } else {
+    
+        } else {
         natr_row_avx512_long(high, low, close, first, period, out);
     }
 }

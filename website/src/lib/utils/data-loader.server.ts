@@ -52,13 +52,13 @@ export async function loadSampleData(size: 'small' | 'medium' | 'large' = 'small
 export async function cacheSampleData() {
   try {
     const data = await loadSampleData('small');
-    // Take last 1000 candles for demo
-    const demoData = data.slice(-1000);
+    // Use full dataset
+    const demoData = data;
     
     // Write to public directory for client access
     const { writeFileSync } = await import('fs');
     writeFileSync('./public/data/sample-ohlcv.json', JSON.stringify(demoData));
-    console.log(`Cached ${demoData.length} candles for demo`);
+    console.log(`Cached full dataset: ${demoData.length} candles`);
   } catch (error) {
     console.error('Error caching sample data:', error);
   }

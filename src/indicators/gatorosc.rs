@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -393,7 +394,8 @@ pub unsafe fn gatorosc_avx512(
             data, jaws_length, jaws_shift, teeth_length, teeth_shift,
             lips_length, lips_shift, first_valid, upper, lower, upper_change, lower_change
         );
-    } else {
+    
+        } else {
         gatorosc_avx512_long(
             data, jaws_length, jaws_shift, teeth_length, teeth_shift,
             lips_length, lips_shift, first_valid, upper, lower, upper_change, lower_change
@@ -538,7 +540,8 @@ impl GatorOscStream {
             let jaws_p = self.jaws.value_at(pj)?;
             let teeth_p = self.teeth.value_at(pt)?;
             (jaws_p - teeth_p).abs()
-        } else {
+        
+            } else {
             f64::NAN
         };
 
@@ -548,7 +551,8 @@ impl GatorOscStream {
             let teeth_p = self.teeth.value_at(pt)?;
             let lips_p = self.lips.value_at(pl)?;
             -(teeth_p - lips_p).abs()
-        } else {
+        
+            } else {
             f64::NAN
         };
 
@@ -578,7 +582,8 @@ impl EmaStream {
     fn update(&mut self, value: f64) -> f64 {
         let ema = if self.idx == 0 {
             value
-        } else {
+        
+            } else {
             self.alpha * value + (1.0 - self.alpha) * self.state[self.idx - 1]
         };
         self.state.push(ema);
@@ -744,27 +749,26 @@ fn gatorosc_batch_inner(
         )
     };
 
-    upper.par_chunks_mut(cols)
-        .zip(lower.par_chunks_mut(cols))
-        .zip(upper_change.par_chunks_mut(cols))
-        .zip(lower_change.par_chunks_mut(cols))
-        .enumerate()
-        .for_each(|(row, (((u, l), uc), lc))| {
-            let prm = &combos[row];
-            unsafe {
-                gatorosc_row_scalar(
-                    data,
-                    first,
-                    prm.jaws_length.unwrap(),
-                    prm.jaws_shift.unwrap(),
-                    prm.teeth_length.unwrap(),
-                    prm.teeth_shift.unwrap(),
-                    prm.lips_length.unwrap(),
-                    prm.lips_shift.unwrap(),
-                    u, l, uc, lc
-                );
-            }
-        });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        upper.par_chunks_mut(cols)
+            .zip(lower.par_chunks_mut(cols))
+            .zip(upper_change.par_chunks_mut(cols))
+            .zip(lower_change.par_chunks_mut(cols))
+            .enumerate()
+            .for_each(|(row, (((u, l), uc), lc))| {
+                do_row(row, u, l, uc, lc);
+            });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for row in 0..rows {
+            let start = row * cols;
+            let end = start + cols;
+            do_row(row, &mut upper[start..end], &mut lower[start..end], 
+                   &mut upper_change[start..end], &mut lower_change[start..end]);
+        }
+    }
 
     Ok(GatorOscBatchOutput { upper, lower, upper_change, lower_change, combos: combos.to_vec(), rows, cols })
 }
@@ -951,14 +955,38 @@ pub fn gatorosc_batch_par_slice(
     let mut lower = vec![f64::NAN; rows * cols];
     let mut upper_change = vec![f64::NAN; rows * cols];
     let mut lower_change = vec![f64::NAN; rows * cols];
-
+#[cfg(not(target_arch = "wasm32"))]
     use rayon::prelude::*;
-    upper.par_chunks_mut(cols)
-        .zip(lower.par_chunks_mut(cols))
-        .zip(upper_change.par_chunks_mut(cols))
-        .zip(lower_change.par_chunks_mut(cols))
-        .enumerate()
-        .for_each(|(row, (((u, l), uc), lc))| {
+    
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        upper.par_chunks_mut(cols)
+            .zip(lower.par_chunks_mut(cols))
+            .zip(upper_change.par_chunks_mut(cols))
+            .zip(lower_change.par_chunks_mut(cols))
+            .enumerate()
+            .for_each(|(row, (((u, l), uc), lc))| {
+                let prm = &combos[row];
+                unsafe {
+                    gatorosc_row_scalar(
+                        data,
+                        first,
+                        prm.jaws_length.unwrap(),
+                        prm.jaws_shift.unwrap(),
+                        prm.teeth_length.unwrap(),
+                        prm.teeth_shift.unwrap(),
+                        prm.lips_length.unwrap(),
+                        prm.lips_shift.unwrap(),
+                        u, l, uc, lc
+                    );
+                }
+            });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for row in 0..rows {
+            let start = row * cols;
+            let end = start + cols;
             let prm = &combos[row];
             unsafe {
                 gatorosc_row_scalar(
@@ -970,10 +998,14 @@ pub fn gatorosc_batch_par_slice(
                     prm.teeth_shift.unwrap(),
                     prm.lips_length.unwrap(),
                     prm.lips_shift.unwrap(),
-                    u, l, uc, lc
+                    &mut upper[start..end],
+                    &mut lower[start..end],
+                    &mut upper_change[start..end],
+                    &mut lower_change[start..end]
                 );
             }
-        });
+        }
+    }
 
     Ok(GatorOscBatchOutput { upper, lower, upper_change, lower_change, combos, rows, cols })
 }

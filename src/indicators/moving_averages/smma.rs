@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::mem::MaybeUninit;
@@ -275,7 +276,8 @@ impl SmmaStream {
         if self.filled {
             self.value = (self.value * (self.period as f64 - 1.0) + v) / (self.period as f64);
             Some(self.value)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -432,9 +434,25 @@ fn smma_batch_inner(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel, parallel
     // 4.  Run every row (optionally in parallel) straight into `raw`
     // ------------------------------------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -462,7 +480,8 @@ pub unsafe fn smma_row_avx2(data: &[f64], first: usize, period: usize, out: &mut
 pub unsafe fn smma_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     if period <= 32 {
         smma_row_avx512_short(data, first, period, out);
-    } else {
+    
+        } else {
         smma_row_avx512_long(data, first, period, out);
     }
 }

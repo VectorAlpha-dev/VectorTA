@@ -21,6 +21,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -460,9 +461,25 @@ fn vwma_batch_inner(
 
     // ---------- 3. run every row ----------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+
+                   .enumerate()
+
+                   .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -508,7 +525,8 @@ pub unsafe fn vwma_row_avx512(
 ) {
     if period <= 32 {
         vwma_row_avx512_short(price, volume, first, period, out);
-    } else {
+    
+        } else {
         vwma_row_avx512_long(price, volume, first, period, out);
     }
 }
@@ -578,8 +596,8 @@ impl VwmaStream {
             }
             if !self.filled {
                 return None;
-            }
-        } else {
+        
+            } else {
             let old_p = self.prices[idx];
             let old_v = self.volumes[idx];
             self.sum += price * volume - old_p * old_v;

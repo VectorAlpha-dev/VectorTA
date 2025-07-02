@@ -3,6 +3,10 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "skipLibCheck": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   }
 }

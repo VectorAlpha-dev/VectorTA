@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -254,10 +255,10 @@ pub fn cmo_scalar(
                 let sum_gl = avg_gain + avg_loss;
                 out[i] = if sum_gl != 0.0 {
                     100.0 * ((avg_gain - avg_loss) / sum_gl)
-                } else {
+                
+                    } else {
                     0.0
                 };
-            }
         } else {
             avg_gain *= period_m1;
             avg_loss *= period_m1;
@@ -268,7 +269,8 @@ pub fn cmo_scalar(
             let sum_gl = avg_gain + avg_loss;
             out[i] = if sum_gl != 0.0 {
                 100.0 * ((avg_gain - avg_loss) / sum_gl)
-            } else {
+            
+                } else {
                 0.0
             };
         }
@@ -286,7 +288,8 @@ pub fn cmo_avx512(
     unsafe {
         if period <= 32 {
             cmo_avx512_short(data, period, first_valid, out)
-        } else {
+        
+            } else {
             cmo_avx512_long(data, period, first_valid, out)
         }
     }
@@ -498,7 +501,29 @@ fn cmo_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -543,7 +568,8 @@ unsafe fn cmo_row_avx512(
 ) {
     if period <= 32 {
         cmo_row_avx512_short(data, first, period, out);
-    } else {
+    
+        } else {
         cmo_row_avx512_long(data, first, period, out);
     }
 }
@@ -623,7 +649,8 @@ impl CmoStream {
                 let sum_gl = self.avg_gain + self.avg_loss;
                 return Some(if sum_gl != 0.0 {
                     100.0 * ((self.avg_gain - self.avg_loss) / sum_gl)
-                } else {
+                
+                    } else {
                     0.0
                 });
             }

@@ -25,6 +25,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -376,7 +378,8 @@ unsafe fn fwma_avx512_long(
     let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
     let w_tail = if tail_len > 0 {
         Some(_mm512_maskz_load_pd(tmask, fib_ptr.add(chunks * STEP)))
-    } else {
+    
+        } else {
         None
     };
 
@@ -454,7 +457,9 @@ unsafe fn fwma_avx512_long(
 pub unsafe fn fwma_avx512(data: &[f64], fib: &[f64], period: usize, first: usize, out: &mut [f64]) {
     if period <= 32 {
         fwma_avx512_short(data, fib, period, first, out);
-    } else {
+    
+        }
+ else {
         fwma_avx512_long(data, fib, period, first, out);
     }
 }
@@ -795,9 +800,25 @@ fn fwma_batch_inner(
 
     // 3. run every row kernel – no element is read before it is written
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

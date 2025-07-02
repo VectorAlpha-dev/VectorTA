@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -235,7 +236,8 @@ pub fn fosc_scalar(
         let a = (y - b * x) * p;
         if !data[i].is_nan() && data[i] != 0.0 {
             out[i] = 100.0 * (data[i] - tsf) / data[i];
-        } else {
+        
+            } else {
             out[i] = f64::NAN;
         }
         tsf = a + b * ((period + 1) as f64);
@@ -270,7 +272,8 @@ pub unsafe fn fosc_avx512(
     // AVX512 not implemented, fallback to scalar
     if period <= 32 {
         fosc_avx512_short(data, period, first, out)
-    } else {
+    
+        } else {
         fosc_avx512_long(data, period, first, out)
     }
 }
@@ -538,7 +541,29 @@ fn fosc_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -584,7 +609,8 @@ unsafe fn fosc_row_avx512(
 ) {
     if period <= 32 {
         fosc_row_avx512_short(data, first, period, out)
-    } else {
+    
+        } else {
         fosc_row_avx512_long(data, first, period, out)
     }
 }
@@ -723,7 +749,8 @@ mod tests {
             let exp: f64 = expected_last_five[i];
             if exp.is_nan() {
                 assert!(val.is_nan());
-            } else {
+            
+                } else {
                 assert!(
                     (val - exp).abs() < 1e-7,
                     "Mismatch at index {}: expected {}, got {}",

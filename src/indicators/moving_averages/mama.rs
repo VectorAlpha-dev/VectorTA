@@ -22,6 +22,8 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, ma
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -392,7 +394,8 @@ pub unsafe fn mama_avx2_inplace(
         /* dominant cycle period */
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0_f64 * std::f64::consts::PI / (im / re).atan()
-        } else { prev_mesa };
+        
+            } else { prev_mesa };
         let prior = if i == 0 { mesa } else { prev_mesa };
         mesa = mesa.min(1.5_f64 * prior).max(0.67_f64 * prior);
         mesa = mesa.max(6.0_f64).min(50.0_f64);
@@ -487,7 +490,8 @@ pub fn mama_scalar_inplace(
         /* --- in-phase & quadrature ------------------------------------ */
         let i1_val = if i >= 3 {
             detrender_buf[(idx + 4) % 7]   // lag 3
-        } else {
+        
+            } else {
             dt_val
         };
         i1_buf[idx] = i1_val;
@@ -530,7 +534,8 @@ pub fn mama_scalar_inplace(
         /* --- dominant cycle period ------------------------------------ */
         let mut mesa_period = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / (im / re).atan()
-        } else {
+        
+            } else {
             prev_mesa_period
         };
 
@@ -628,7 +633,8 @@ impl MamaStream {
         let slice_storage;                      // lives only in this branch
         let slice: &[f64] = if self.pos == 0 {
             &self.buffer[..]                   // already contiguous
-        } else {
+        
+            } else {
             // copy into a local array to linearise [pos..] ∪ [..pos]
             slice_storage = {
                 let mut tmp = [0.0_f64; 10];   // stack-allocated
@@ -884,10 +890,33 @@ fn mama_batch_inner(
 
     // ---------- 3. run over every row ----------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw_mama.par_chunks_mut(cols)
-                .zip(raw_fama.par_chunks_mut(cols))
-                .enumerate()
-                .for_each(|(row, (m_row, f_row))| do_row(row, m_row, f_row));
+
+                        .zip(raw_fama.par_chunks_mut(cols))
+
+                        .enumerate()
+
+                        .for_each(|(row, (m_row, f_row))| do_row(row, m_row, f_row));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (m_row, f_row)) in raw_mama.chunks_mut(cols)
+
+                                                     .zip(raw_fama.chunks_mut(cols))
+
+                                                     .enumerate()
+
+                {
+
+                    do_row(row, m_row, f_row);
+
+        }
+
     } else {
         for (row, (m_row, f_row)) in raw_mama.chunks_mut(cols)
                                              .zip(raw_fama.chunks_mut(cols))

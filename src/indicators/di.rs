@@ -24,6 +24,7 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -216,12 +217,14 @@ pub unsafe fn di_scalar(
         prev_close = close[idx];
         if diff_p > 0.0 && diff_p > diff_m {
             current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64)) + diff_p;
-        } else {
+        
+            } else {
             current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64));
         }
         if diff_m > 0.0 && diff_m > diff_p {
             current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64)) + diff_m;
-        } else {
+        
+            } else {
             current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64));
         }
         current_tr = current_tr - (current_tr / (period as f64)) + tr;
@@ -335,7 +338,6 @@ impl DiStream {
             prev_h = h;
             prev_l = l;
             prev_c = c;
-        }
         let plus = if tr_sum == 0.0 { 0.0 } else { (plus_dm_sum / tr_sum) * 100.0 };
         let minus = if tr_sum == 0.0 { 0.0 } else { (minus_dm_sum / tr_sum) * 100.0 };
         Some((plus, minus))
@@ -483,7 +485,29 @@ fn di_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         plus.par_chunks_mut(cols).zip(minus.par_chunks_mut(cols)).enumerate().for_each(|(row, (pl, mi))| do_row(row, pl, mi));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (pl, mi)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, pl, mi);
+
+
+        }
+
+
     } else {
         for (row, (pl, mi)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
             do_row(row, pl, mi);
@@ -537,12 +561,14 @@ pub unsafe fn di_row_scalar(
         prev_close = close[idx];
         if diff_p > 0.0 && diff_p > diff_m {
             current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64)) + diff_p;
-        } else {
+        
+            } else {
             current_plus_dm = current_plus_dm - (current_plus_dm / (period as f64));
         }
         if diff_m > 0.0 && diff_m > diff_p {
             current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64)) + diff_m;
-        } else {
+        
+            } else {
             current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64));
         }
         current_tr = current_tr - (current_tr / (period as f64)) + tr;

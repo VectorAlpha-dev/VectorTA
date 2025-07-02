@@ -21,13 +21,17 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use thiserror::Error;
 use std::convert::AsRef;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum BollingerBandsData<'a> {
-    Candles { candles: &'a Candles, source: &'a str },
+    Candles {
+        candles: &'a Candles,
+        source: &'a str,
+    },
     Slice(&'a [f64]),
 }
 
@@ -78,26 +82,45 @@ pub struct BollingerBandsInput<'a> {
 impl<'a> BollingerBandsInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: BollingerBandsParams) -> Self {
-        Self { data: BollingerBandsData::Candles { candles: c, source: s }, params: p }
+        Self {
+            data: BollingerBandsData::Candles {
+                candles: c,
+                source: s,
+            },
+            params: p,
+        }
     }
     #[inline]
     pub fn from_slice(sl: &'a [f64], p: BollingerBandsParams) -> Self {
-        Self { data: BollingerBandsData::Slice(sl), params: p }
+        Self {
+            data: BollingerBandsData::Slice(sl),
+            params: p,
+        }
     }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", BollingerBandsParams::default())
     }
     #[inline]
-    pub fn get_period(&self) -> usize { self.params.period.unwrap_or(20) }
+    pub fn get_period(&self) -> usize {
+        self.params.period.unwrap_or(20)
+    }
     #[inline]
-    pub fn get_devup(&self) -> f64 { self.params.devup.unwrap_or(2.0) }
+    pub fn get_devup(&self) -> f64 {
+        self.params.devup.unwrap_or(2.0)
+    }
     #[inline]
-    pub fn get_devdn(&self) -> f64 { self.params.devdn.unwrap_or(2.0) }
+    pub fn get_devdn(&self) -> f64 {
+        self.params.devdn.unwrap_or(2.0)
+    }
     #[inline]
-    pub fn get_matype(&self) -> String { self.params.matype.clone().unwrap_or_else(|| "sma".into()) }
+    pub fn get_matype(&self) -> String {
+        self.params.matype.clone().unwrap_or_else(|| "sma".into())
+    }
     #[inline]
-    pub fn get_devtype(&self) -> usize { self.params.devtype.unwrap_or(0) }
+    pub fn get_devtype(&self) -> usize {
+        self.params.devtype.unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -125,19 +148,39 @@ impl Default for BollingerBandsBuilder {
 
 impl BollingerBandsBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
-    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn devup(mut self, x: f64) -> Self { self.devup = Some(x); self }
+    pub fn devup(mut self, x: f64) -> Self {
+        self.devup = Some(x);
+        self
+    }
     #[inline(always)]
-    pub fn devdn(mut self, x: f64) -> Self { self.devdn = Some(x); self }
+    pub fn devdn(mut self, x: f64) -> Self {
+        self.devdn = Some(x);
+        self
+    }
     #[inline(always)]
-    pub fn matype(mut self, x: &str) -> Self { self.matype = Some(x.into()); self }
+    pub fn matype(mut self, x: &str) -> Self {
+        self.matype = Some(x.into());
+        self
+    }
     #[inline(always)]
-    pub fn devtype(mut self, t: usize) -> Self { self.devtype = Some(t); self }
+    pub fn devtype(mut self, t: usize) -> Self {
+        self.devtype = Some(t);
+        self
+    }
     #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<BollingerBandsOutput, BollingerBandsError> {
         let p = BollingerBandsParams {
@@ -190,11 +233,16 @@ pub enum BollingerBandsError {
 }
 
 #[inline]
-pub fn bollinger_bands(input: &BollingerBandsInput) -> Result<BollingerBandsOutput, BollingerBandsError> {
+pub fn bollinger_bands(
+    input: &BollingerBandsInput,
+) -> Result<BollingerBandsOutput, BollingerBandsError> {
     bollinger_bands_with_kernel(input, Kernel::Auto)
 }
 
-pub fn bollinger_bands_with_kernel(input: &BollingerBandsInput, kernel: Kernel) -> Result<BollingerBandsOutput, BollingerBandsError> {
+pub fn bollinger_bands_with_kernel(
+    input: &BollingerBandsInput,
+    kernel: Kernel,
+) -> Result<BollingerBandsOutput, BollingerBandsError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
         return Err(BollingerBandsError::EmptyData);
@@ -205,12 +253,21 @@ pub fn bollinger_bands_with_kernel(input: &BollingerBandsInput, kernel: Kernel) 
     let matype = input.get_matype();
     let devtype = input.get_devtype();
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(BollingerBandsError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(BollingerBandsError::AllValuesNaN)?;
     if period == 0 || period > data.len() {
-        return Err(BollingerBandsError::InvalidPeriod { period, data_len: data.len() });
+        return Err(BollingerBandsError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
     }
     if (data.len() - first) < period {
-        return Err(BollingerBandsError::NotEnoughValidData { needed: period, valid: data.len() - first });
+        return Err(BollingerBandsError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first,
+        });
     }
 
     let chosen = match kernel {
@@ -222,27 +279,27 @@ pub fn bollinger_bands_with_kernel(input: &BollingerBandsInput, kernel: Kernel) 
         BollingerBandsData::Candles { candles, source } => MaData::Candles { candles, source },
         BollingerBandsData::Slice(slice) => MaData::Slice(slice),
     };
-    let dev_input = DevInput::from_slice(data, DevParams { period: Some(period), devtype: Some(devtype) });
+    let dev_input = DevInput::from_slice(
+        data,
+        DevParams {
+            period: Some(period),
+            devtype: Some(devtype),
+        },
+    );
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                bollinger_bands_scalar(
-                    data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
-                )
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => bollinger_bands_scalar(
+                data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                bollinger_bands_avx2(
-                    data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
-                )
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => bollinger_bands_avx2(
+                data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                bollinger_bands_avx512(
-                    data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
-                )
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => bollinger_bands_avx512(
+                data, &matype, ma_data, period, devtype, dev_input, devup, devdn,
+            ),
             _ => unreachable!(),
         }
     }
@@ -273,7 +330,11 @@ pub unsafe fn bollinger_bands_scalar(
         upper_band[i] = middle[i] + devup * dev_values[i];
         lower_band[i] = middle[i] - devdn * dev_values[i];
     }
-    Ok(BollingerBandsOutput { upper_band, middle_band, lower_band })
+    Ok(BollingerBandsOutput {
+        upper_band,
+        middle_band,
+        lower_band,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -289,11 +350,11 @@ pub unsafe fn bollinger_bands_avx512(
 ) -> Result<BollingerBandsOutput, BollingerBandsError> {
     if period <= 32 {
         bollinger_bands_avx512_short(
-            data, matype, ma_data, period, devtype, dev_input, devup, devdn
+            data, matype, ma_data, period, devtype, dev_input, devup, devdn,
         )
     } else {
         bollinger_bands_avx512_long(
-            data, matype, ma_data, period, devtype, dev_input, devup, devdn
+            data, matype, ma_data, period, devtype, dev_input, devup, devdn,
         )
     }
 }
@@ -310,7 +371,7 @@ pub unsafe fn bollinger_bands_avx512_short(
     devdn: f64,
 ) -> Result<BollingerBandsOutput, BollingerBandsError> {
     bollinger_bands_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn,
     )
 }
 
@@ -326,7 +387,7 @@ pub unsafe fn bollinger_bands_avx512_long(
     devdn: f64,
 ) -> Result<BollingerBandsOutput, BollingerBandsError> {
     bollinger_bands_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn,
     )
 }
 
@@ -342,7 +403,7 @@ pub unsafe fn bollinger_bands_avx2(
     devdn: f64,
 ) -> Result<BollingerBandsOutput, BollingerBandsError> {
     bollinger_bands_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn,
     )
 }
 
@@ -408,15 +469,26 @@ impl BollingerBandsStream {
         }
         let data = self.buffer.as_slice();
         let ma_data = MaData::Slice(data);
-        let dev_input = DevInput::from_slice(data, DevParams { period: Some(self.period), devtype: Some(self.devtype) });
+        let dev_input = DevInput::from_slice(
+            data,
+            DevParams {
+                period: Some(self.period),
+                devtype: Some(self.devtype),
+            },
+        );
 
-        let mid = ma(&self.matype, ma_data, self.period).ok().and_then(|v| v.last().copied()).unwrap_or(f64::NAN);
-        let dev = deviation(&dev_input).ok().and_then(|v| v.last().copied()).unwrap_or(f64::NAN);
+        let mid = ma(&self.matype, ma_data, self.period)
+            .ok()
+            .and_then(|v| v.last().copied())
+            .unwrap_or(f64::NAN);
+        let dev = deviation(&dev_input)
+            .ok()
+            .and_then(|v| v.last().copied())
+            .unwrap_or(f64::NAN);
 
         Some((mid + self.devup * dev, mid, mid - self.devdn * dev))
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct BollingerBandsBatchRange {
@@ -446,28 +518,69 @@ pub struct BollingerBandsBatchBuilder {
 }
 
 impl BollingerBandsBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self { self.range.period = (start, end, step); self }
-    pub fn period_static(mut self, p: usize) -> Self { self.range.period = (p, p, 0); self }
-    pub fn devup_range(mut self, start: f64, end: f64, step: f64) -> Self { self.range.devup = (start, end, step); self }
-    pub fn devup_static(mut self, x: f64) -> Self { self.range.devup = (x, x, 0.0); self }
-    pub fn devdn_range(mut self, start: f64, end: f64, step: f64) -> Self { self.range.devdn = (start, end, step); self }
-    pub fn devdn_static(mut self, x: f64) -> Self { self.range.devdn = (x, x, 0.0); self }
-    pub fn matype_static(mut self, m: &str) -> Self { self.range.matype = (m.into(), m.into(), 0); self }
-    pub fn devtype_static(mut self, d: usize) -> Self { self.range.devtype = (d, d, 0); self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+        self.range.period = (start, end, step);
+        self
+    }
+    pub fn period_static(mut self, p: usize) -> Self {
+        self.range.period = (p, p, 0);
+        self
+    }
+    pub fn devup_range(mut self, start: f64, end: f64, step: f64) -> Self {
+        self.range.devup = (start, end, step);
+        self
+    }
+    pub fn devup_static(mut self, x: f64) -> Self {
+        self.range.devup = (x, x, 0.0);
+        self
+    }
+    pub fn devdn_range(mut self, start: f64, end: f64, step: f64) -> Self {
+        self.range.devdn = (start, end, step);
+        self
+    }
+    pub fn devdn_static(mut self, x: f64) -> Self {
+        self.range.devdn = (x, x, 0.0);
+        self
+    }
+    pub fn matype_static(mut self, m: &str) -> Self {
+        self.range.matype = (m.into(), m.into(), 0);
+        self
+    }
+    pub fn devtype_static(mut self, d: usize) -> Self {
+        self.range.devtype = (d, d, 0);
+        self
+    }
 
-    pub fn apply_slice(self, data: &[f64]) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
+    pub fn apply_slice(
+        self,
+        data: &[f64],
+    ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
         bollinger_bands_batch_with_kernel(data, &self.range, self.kernel)
     }
-    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
+    pub fn with_default_slice(
+        data: &[f64],
+        k: Kernel,
+    ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
         Self::new().kernel(k).apply_slice(data)
     }
-    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
+    pub fn apply_candles(
+        self,
+        c: &Candles,
+        src: &str,
+    ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
         let slice = source_type(c, src);
         self.apply_slice(slice)
     }
-    pub fn with_default_candles(c: &Candles) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
+    pub fn with_default_candles(
+        c: &Candles,
+    ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
         Self::new().kernel(Kernel::Auto).apply_candles(c, "close")
     }
 }
@@ -494,26 +607,40 @@ impl BollingerBandsBatchOutput {
     pub fn bands_for(&self, p: &BollingerBandsParams) -> Option<(&[f64], &[f64], &[f64])> {
         self.row_for_params(p).map(|row| {
             let start = row * self.cols;
-            (&self.upper[start..start + self.cols],
-             &self.middle[start..start + self.cols],
-             &self.lower[start..start + self.cols])
+            (
+                &self.upper[start..start + self.cols],
+                &self.middle[start..start + self.cols],
+                &self.lower[start..start + self.cols],
+            )
         })
     }
 }
 
 fn expand_grid(r: &BollingerBandsBatchRange) -> Vec<BollingerBandsParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
-        let mut v = Vec::new(); let mut x = start;
-        while x <= end + 1e-12 { v.push(x); x += step; }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
+        let mut v = Vec::new();
+        let mut x = start;
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
         v
     }
     fn axis_str((start, end, _step): (String, String, usize)) -> Vec<String> {
-        if start == end { vec![start.clone()] } else { vec![start, end] }
+        if start == end {
+            vec![start.clone()]
+        } else {
+            vec![start, end]
+        }
     }
 
     let periods = axis_usize(r.period);
@@ -522,14 +649,20 @@ fn expand_grid(r: &BollingerBandsBatchRange) -> Vec<BollingerBandsParams> {
     let matypes = axis_str(r.matype.clone());
     let devtypes = axis_usize(r.devtype);
 
-    let mut out = Vec::with_capacity(periods.len() * devups.len() * devdns.len() * matypes.len() * devtypes.len());
+    let mut out = Vec::with_capacity(
+        periods.len() * devups.len() * devdns.len() * matypes.len() * devtypes.len(),
+    );
     for &p in &periods {
         for &u in &devups {
             for &d in &devdns {
                 for m in &matypes {
                     for &t in &devtypes {
                         out.push(BollingerBandsParams {
-                            period: Some(p), devup: Some(u), devdn: Some(d), matype: Some(m.clone()), devtype: Some(t),
+                            period: Some(p),
+                            devup: Some(u),
+                            devdn: Some(d),
+                            matype: Some(m.clone()),
+                            devtype: Some(t),
                         });
                     }
                 }
@@ -548,7 +681,10 @@ pub fn bollinger_bands_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(BollingerBandsError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(BollingerBandsError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
     };
     let simd = match kernel {
@@ -584,12 +720,21 @@ fn bollinger_bands_batch_inner(
 ) -> Result<BollingerBandsBatchOutput, BollingerBandsError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(BollingerBandsError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(BollingerBandsError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(BollingerBandsError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(BollingerBandsError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(BollingerBandsError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(BollingerBandsError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
 
     let rows = combos.len();
@@ -606,31 +751,71 @@ fn bollinger_bands_batch_inner(
         let dt = combos[row].devtype.unwrap();
 
         let ma_data = MaData::Slice(data);
-        let dev_input = DevInput::from_slice(data, DevParams { period: Some(p), devtype: Some(dt) });
+        let dev_input = DevInput::from_slice(
+            data,
+            DevParams {
+                period: Some(p),
+                devtype: Some(dt),
+            },
+        );
 
         match kern {
-            Kernel::Scalar => bollinger_bands_row_scalar(data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l),
+            Kernel::Scalar => bollinger_bands_row_scalar(
+                data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => bollinger_bands_row_avx2(data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l),
+            Kernel::Avx2 => bollinger_bands_row_avx2(
+                data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => bollinger_bands_row_avx512(data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l),
+            Kernel::Avx512 => bollinger_bands_row_avx512(
+                data, &mt, ma_data, p, dt, dev_input, du, dd, out_u, out_m, out_l,
+            ),
             _ => unreachable!(),
         };
     };
 
     if parallel {
-        upper.par_chunks_mut(cols)
-            .zip(middle.par_chunks_mut(cols))
-            .zip(lower.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            upper
+                .par_chunks_mut(cols)
+                .zip(middle.par_chunks_mut(cols))
+                .zip(lower.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, ((u, m), l)) in upper
+                .chunks_mut(cols)
+                .zip(middle.chunks_mut(cols))
+                .zip(lower.chunks_mut(cols))
+                .enumerate()
+            {
+                do_row(row, u, m, l);
+            }
+        }
     } else {
-        for (row, ((u, m), l)) in upper.chunks_mut(cols).zip(middle.chunks_mut(cols)).zip(lower.chunks_mut(cols)).enumerate() {
+        for (row, ((u, m), l)) in upper
+            .chunks_mut(cols)
+            .zip(middle.chunks_mut(cols))
+            .zip(lower.chunks_mut(cols))
+            .enumerate()
+        {
             do_row(row, u, m, l);
         }
     }
 
-    Ok(BollingerBandsBatchOutput { upper, middle, lower, combos, rows, cols })
+    Ok(BollingerBandsBatchOutput {
+        upper,
+        middle,
+        lower,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -648,7 +833,7 @@ unsafe fn bollinger_bands_row_avx2(
     out_l: &mut [f64],
 ) {
     bollinger_bands_row_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l,
     )
 }
 
@@ -668,11 +853,11 @@ unsafe fn bollinger_bands_row_avx512(
 ) {
     if period <= 32 {
         bollinger_bands_row_avx512_short(
-            data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l
+            data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l,
         )
     } else {
         bollinger_bands_row_avx512_long(
-            data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l
+            data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l,
         )
     }
 }
@@ -692,7 +877,7 @@ unsafe fn bollinger_bands_row_avx512_short(
     out_l: &mut [f64],
 ) {
     bollinger_bands_row_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l,
     )
 }
 
@@ -711,17 +896,20 @@ unsafe fn bollinger_bands_row_avx512_long(
     out_l: &mut [f64],
 ) {
     bollinger_bands_row_scalar(
-        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l
+        data, matype, ma_data, period, devtype, dev_input, devup, devdn, out_u, out_m, out_l,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_bb_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -741,7 +929,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_bb_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -777,21 +968,36 @@ mod tests {
             let actual_up = result.upper_band[start_idx + i];
             assert!(
                 (actual_mid - expected_middle[i]).abs() < 1e-4,
-                "[{}] BB middle mismatch at i={}: {} vs {}", test_name, i, actual_mid, expected_middle[i]
+                "[{}] BB middle mismatch at i={}: {} vs {}",
+                test_name,
+                i,
+                actual_mid,
+                expected_middle[i]
             );
             assert!(
                 (actual_low - expected_lower[i]).abs() < 1e-4,
-                "[{}] BB lower mismatch at i={}: {} vs {}", test_name, i, actual_low, expected_lower[i]
+                "[{}] BB lower mismatch at i={}: {} vs {}",
+                test_name,
+                i,
+                actual_low,
+                expected_lower[i]
             );
             assert!(
                 (actual_up - expected_upper[i]).abs() < 1e-4,
-                "[{}] BB upper mismatch at i={}: {} vs {}", test_name, i, actual_up, expected_upper[i]
+                "[{}] BB upper mismatch at i={}: {} vs {}",
+                test_name,
+                i,
+                actual_up,
+                expected_upper[i]
             );
         }
         Ok(())
     }
 
-    fn check_bb_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -806,32 +1012,59 @@ mod tests {
         Ok(())
     }
 
-    fn check_bb_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
-        let params = BollingerBandsParams { period: Some(0), ..BollingerBandsParams::default() };
+        let params = BollingerBandsParams {
+            period: Some(0),
+            ..BollingerBandsParams::default()
+        };
         let input = BollingerBandsInput::from_slice(&data, params);
         let res = bollinger_bands_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] BB should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] BB should fail with zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_bb_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
-        let params = BollingerBandsParams { period: Some(10), ..BollingerBandsParams::default() };
+        let params = BollingerBandsParams {
+            period: Some(10),
+            ..BollingerBandsParams::default()
+        };
         let input = BollingerBandsInput::from_slice(&data, params);
         let res = bollinger_bands_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] BB should fail with period exceeding length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] BB should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_bb_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
         let input = BollingerBandsInput::from_slice(&data, BollingerBandsParams::default());
         let res = bollinger_bands_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] BB should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] BB should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
 
@@ -840,38 +1073,72 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let first_params = BollingerBandsParams { period: Some(20), ..BollingerBandsParams::default() };
+        let first_params = BollingerBandsParams {
+            period: Some(20),
+            ..BollingerBandsParams::default()
+        };
         let first_input = BollingerBandsInput::from_candles(&candles, "close", first_params);
         let first_result = bollinger_bands_with_kernel(&first_input, kernel)?;
 
-        let second_params = BollingerBandsParams { period: Some(10), ..BollingerBandsParams::default() };
-        let second_input = BollingerBandsInput::from_slice(&first_result.middle_band, second_params);
+        let second_params = BollingerBandsParams {
+            period: Some(10),
+            ..BollingerBandsParams::default()
+        };
+        let second_input =
+            BollingerBandsInput::from_slice(&first_result.middle_band, second_params);
         let second_result = bollinger_bands_with_kernel(&second_input, kernel)?;
 
-        assert_eq!(second_result.middle_band.len(), first_result.middle_band.len());
+        assert_eq!(
+            second_result.middle_band.len(),
+            first_result.middle_band.len()
+        );
         Ok(())
     }
 
-    fn check_bb_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let params = BollingerBandsParams { period: Some(20), ..BollingerBandsParams::default() };
+        let params = BollingerBandsParams {
+            period: Some(20),
+            ..BollingerBandsParams::default()
+        };
         let input = BollingerBandsInput::from_candles(&candles, "close", params);
         let result = bollinger_bands_with_kernel(&input, kernel)?;
         let check_index = 240;
         if result.middle_band.len() > check_index {
             for i in check_index..result.middle_band.len() {
-                assert!(!result.middle_band[i].is_nan(), "[{}] BB NaN middle idx {}", test_name, i);
-                assert!(!result.upper_band[i].is_nan(), "[{}] BB NaN upper idx {}", test_name, i);
-                assert!(!result.lower_band[i].is_nan(), "[{}] BB NaN lower idx {}", test_name, i);
+                assert!(
+                    !result.middle_band[i].is_nan(),
+                    "[{}] BB NaN middle idx {}",
+                    test_name,
+                    i
+                );
+                assert!(
+                    !result.upper_band[i].is_nan(),
+                    "[{}] BB NaN upper idx {}",
+                    test_name,
+                    i
+                );
+                assert!(
+                    !result.lower_band[i].is_nan(),
+                    "[{}] BB NaN lower idx {}",
+                    test_name,
+                    i
+                );
             }
         }
         Ok(())
     }
 
-    fn check_bb_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bb_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -907,19 +1174,29 @@ mod tests {
             &batch_output.upper_band,
             &batch_output.middle_band,
             &batch_output.lower_band
-        ).enumerate() {
-            if bu.is_nan() && stream_upper[i].is_nan() { continue; }
+        )
+        .enumerate()
+        {
+            if bu.is_nan() && stream_upper[i].is_nan() {
+                continue;
+            }
             assert!(
                 (*bu - stream_upper[i]).abs() < 1e-6,
-                "[{}] BB stream/upper mismatch at idx {}", test_name, i
+                "[{}] BB stream/upper mismatch at idx {}",
+                test_name,
+                i
             );
             assert!(
                 (*bm - stream_middle[i]).abs() < 1e-6,
-                "[{}] BB stream/middle mismatch at idx {}", test_name, i
+                "[{}] BB stream/middle mismatch at idx {}",
+                test_name,
+                i
             );
             assert!(
                 (*bl - stream_lower[i]).abs() < 1e-6,
-                "[{}] BB stream/lower mismatch at idx {}", test_name, i
+                "[{}] BB stream/lower mismatch at idx {}",
+                test_name,
+                i
             );
         }
         Ok(())
@@ -961,7 +1238,10 @@ mod tests {
         check_bb_streaming
     );
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

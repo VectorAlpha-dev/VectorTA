@@ -118,8 +118,8 @@ fi
 if [ "$RUN_WASM" = true ]; then
     if command -v wasm-pack &> /dev/null; then
         echo -e "\n${YELLOW}Building WASM bindings...${NC}"
-        echo "Running: wasm-pack build --features wasm --target nodejs"
-        if wasm-pack build --features wasm --target nodejs; then
+        echo "Running: wasm-pack build --features wasm --target nodejs --no-default-features"
+        if wasm-pack build --features wasm --target nodejs --no-default-features; then
             echo -e "${GREEN}✓ WASM build successful${NC}"
             
             echo -e "\n${YELLOW}Running WASM tests...${NC}"

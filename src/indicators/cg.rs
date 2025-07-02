@@ -19,10 +19,11 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -73,7 +74,10 @@ impl<'a> CgInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: CgParams) -> Self {
         Self {
-            data: CgData::Candles { candles: c, source: s },
+            data: CgData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -175,17 +179,26 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     if data.is_empty() {
         return Err(CgError::EmptyData);
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CgError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CgError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(CgError::InvalidPeriod { period, data_len: len });
+        return Err(CgError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
 
     // ==== Revert to requiring period + 1 valid points =====
     if (len - first) < (period + 1) {
-        return Err(CgError::NotEnoughValidData { needed: period + 1, valid: len - first });
+        return Err(CgError::NotEnoughValidData {
+            needed: period + 1,
+            valid: len - first,
+        });
     }
 
     let mut out = vec![f64::NAN; len];
@@ -197,17 +210,11 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                cg_scalar(data, period, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => cg_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                cg_avx2(data, period, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => cg_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                cg_avx512(data, period, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => cg_avx512(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -216,12 +223,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
 }
 
 #[inline]
-pub fn cg_scalar(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // Start writing at i = first + period
     for i in (first + period)..data.len() {
         let mut num = 0.0;
@@ -244,12 +246,7 @@ pub fn cg_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cg_avx512(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn cg_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     if period <= 32 {
         unsafe { cg_avx512_short(data, period, first, out) }
     } else {
@@ -259,34 +256,19 @@ pub fn cg_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cg_avx2(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cg_avx512_short(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cg_avx512_long(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
@@ -302,7 +284,10 @@ impl CgStream {
     pub fn try_new(params: CgParams) -> Result<Self, CgError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
-            return Err(CgError::InvalidPeriod { period, data_len: 0 });
+            return Err(CgError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -442,9 +427,9 @@ pub struct CgBatchOutput {
 
 impl CgBatchOutput {
     pub fn row_for_params(&self, p: &CgParams) -> Option<usize> {
-        self.combos.iter().position(|c| {
-            c.period.unwrap_or(10) == p.period.unwrap_or(10)
-        })
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(10) == p.period.unwrap_or(10))
     }
     pub fn values_for(&self, p: &CgParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -497,12 +482,21 @@ fn cg_batch_inner(
 ) -> Result<CgBatchOutput, CgError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(CgError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(CgError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CgError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CgError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p + 1 {
-        return Err(CgError::NotEnoughValidData { needed: max_p + 1, valid: data.len() - first });
+        return Err(CgError::NotEnoughValidData {
+            needed: max_p + 1,
+            valid: data.len() - first,
+        });
     }
     let rows = combos.len();
     let cols = data.len();
@@ -519,47 +513,47 @@ fn cg_batch_inner(
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(CgBatchOutput { values, combos, rows, cols })
+    Ok(CgBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
-pub unsafe fn cg_row_scalar(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn cg_row_avx2(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn cg_row_avx512(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     if period <= 32 {
         cg_row_avx512_short(data, first, period, out)
     } else {
@@ -569,31 +563,21 @@ pub unsafe fn cg_row_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn cg_row_avx512_short(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn cg_row_avx512_long(
-    data: &[f64],
-    first: usize,
-    period: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cg_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     cg_scalar(data, period, first, out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_cg_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -620,13 +604,19 @@ mod tests {
             -4.9928483984587295,
             -5.004210799262688,
         ];
-        assert!(result.values.len() >= 5, "Not enough data for final 5-values check");
+        assert!(
+            result.values.len() >= 5,
+            "Not enough data for final 5-values check"
+        );
         let start = result.values.len() - 5;
         for (i, &exp) in expected_last_five.iter().enumerate() {
             let got = result.values[start + i];
             assert!(
                 (got - exp).abs() < 1e-4,
-                "Mismatch in CG at idx {}: expected={}, got={}", start + i, exp, got
+                "Mismatch in CG at idx {}: expected={}, got={}",
+                start + i,
+                exp,
+                got
             );
         }
         Ok(())
@@ -656,7 +646,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_cg_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_cg_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
         let params = CgParams { period: Some(10) };
@@ -672,7 +665,10 @@ mod tests {
         let params = CgParams { period: Some(10) };
         let input = CgInput::from_slice(&data, params);
         let result = cg_with_kernel(&input, kernel);
-        assert!(result.is_err(), "Expected error for data smaller than period=10");
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than period=10"
+        );
         Ok(())
     }
 
@@ -702,9 +698,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 10;
-        let input = CgInput::from_candles(&candles, "close", CgParams { period: Some(period) });
+        let input = CgInput::from_candles(
+            &candles,
+            "close",
+            CgParams {
+                period: Some(period),
+            },
+        );
         let batch_output = cg_with_kernel(&input, kernel)?.values;
-        let mut stream = CgStream::try_new(CgParams { period: Some(period) })?;
+        let mut stream = CgStream::try_new(CgParams {
+            period: Some(period),
+        })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
             match stream.update(price) {
@@ -718,9 +722,14 @@ mod tests {
                 continue;
             }
             let diff = (b - s).abs();
-            assert!(diff < 1e-9,
+            assert!(
+                diff < 1e-9,
                 "[{}] CG streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
-                test_name, i, b, s, diff
+                test_name,
+                i,
+                b,
+                s,
+                diff
             );
         }
         Ok(())

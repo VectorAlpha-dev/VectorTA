@@ -30,6 +30,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -265,7 +266,6 @@ pub fn kdj_avx512(
                 slow_d_period, slow_d_ma_type,
                 first_valid_idx
             )
-        }
     } else {
         unsafe {
             kdj_avx512_long(

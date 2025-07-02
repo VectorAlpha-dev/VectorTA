@@ -27,10 +27,12 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+use paste::paste;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
-use paste::paste;
 
 impl<'a> AsRef<[f64]> for AlligatorInput<'a> {
     #[inline(always)]
@@ -89,7 +91,10 @@ impl<'a> AlligatorInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: AlligatorParams) -> Self {
         Self {
-            data: AlligatorData::Candles { candles: c, source: s },
+            data: AlligatorData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -105,17 +110,29 @@ impl<'a> AlligatorInput<'a> {
         Self::from_candles(c, "hl2", AlligatorParams::default())
     }
     #[inline]
-    pub fn get_jaw_period(&self) -> usize { self.params.jaw_period.unwrap_or(13) }
+    pub fn get_jaw_period(&self) -> usize {
+        self.params.jaw_period.unwrap_or(13)
+    }
     #[inline]
-    pub fn get_jaw_offset(&self) -> usize { self.params.jaw_offset.unwrap_or(8) }
+    pub fn get_jaw_offset(&self) -> usize {
+        self.params.jaw_offset.unwrap_or(8)
+    }
     #[inline]
-    pub fn get_teeth_period(&self) -> usize { self.params.teeth_period.unwrap_or(8) }
+    pub fn get_teeth_period(&self) -> usize {
+        self.params.teeth_period.unwrap_or(8)
+    }
     #[inline]
-    pub fn get_teeth_offset(&self) -> usize { self.params.teeth_offset.unwrap_or(5) }
+    pub fn get_teeth_offset(&self) -> usize {
+        self.params.teeth_offset.unwrap_or(5)
+    }
     #[inline]
-    pub fn get_lips_period(&self) -> usize { self.params.lips_period.unwrap_or(5) }
+    pub fn get_lips_period(&self) -> usize {
+        self.params.lips_period.unwrap_or(5)
+    }
     #[inline]
-    pub fn get_lips_offset(&self) -> usize { self.params.lips_offset.unwrap_or(3) }
+    pub fn get_lips_offset(&self) -> usize {
+        self.params.lips_offset.unwrap_or(3)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -143,21 +160,44 @@ impl Default for AlligatorBuilder {
 }
 impl AlligatorBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
-    pub fn jaw_period(mut self, n: usize) -> Self { self.jaw_period = Some(n); self }
+    pub fn jaw_period(mut self, n: usize) -> Self {
+        self.jaw_period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn jaw_offset(mut self, n: usize) -> Self { self.jaw_offset = Some(n); self }
+    pub fn jaw_offset(mut self, n: usize) -> Self {
+        self.jaw_offset = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn teeth_period(mut self, n: usize) -> Self { self.teeth_period = Some(n); self }
+    pub fn teeth_period(mut self, n: usize) -> Self {
+        self.teeth_period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn teeth_offset(mut self, n: usize) -> Self { self.teeth_offset = Some(n); self }
+    pub fn teeth_offset(mut self, n: usize) -> Self {
+        self.teeth_offset = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn lips_period(mut self, n: usize) -> Self { self.lips_period = Some(n); self }
+    pub fn lips_period(mut self, n: usize) -> Self {
+        self.lips_period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn lips_offset(mut self, n: usize) -> Self { self.lips_offset = Some(n); self }
+    pub fn lips_offset(mut self, n: usize) -> Self {
+        self.lips_offset = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
 
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<AlligatorOutput, AlligatorError> {
@@ -221,12 +261,18 @@ pub enum AlligatorError {
 pub fn alligator(input: &AlligatorInput) -> Result<AlligatorOutput, AlligatorError> {
     alligator_with_kernel(input, Kernel::Auto)
 }
-pub fn alligator_with_kernel(input: &AlligatorInput, kernel: Kernel) -> Result<AlligatorOutput, AlligatorError> {
+pub fn alligator_with_kernel(
+    input: &AlligatorInput,
+    kernel: Kernel,
+) -> Result<AlligatorOutput, AlligatorError> {
     let data: &[f64] = match &input.data {
         AlligatorData::Candles { candles, source } => source_type(candles, source),
         AlligatorData::Slice(sl) => sl,
     };
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(AlligatorError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(AlligatorError::AllValuesNaN)?;
     let len = data.len();
     let jaw_period = input.get_jaw_period();
     let jaw_offset = input.get_jaw_offset();
@@ -235,22 +281,40 @@ pub fn alligator_with_kernel(input: &AlligatorInput, kernel: Kernel) -> Result<A
     let lips_period = input.get_lips_period();
     let lips_offset = input.get_lips_offset();
     if jaw_period == 0 || jaw_period > len {
-        return Err(AlligatorError::InvalidJawPeriod { period: jaw_period, data_len: len });
+        return Err(AlligatorError::InvalidJawPeriod {
+            period: jaw_period,
+            data_len: len,
+        });
     }
     if jaw_offset > len {
-        return Err(AlligatorError::InvalidJawOffset { offset: jaw_offset, data_len: len });
+        return Err(AlligatorError::InvalidJawOffset {
+            offset: jaw_offset,
+            data_len: len,
+        });
     }
     if teeth_period == 0 || teeth_period > len {
-        return Err(AlligatorError::InvalidTeethPeriod { period: teeth_period, data_len: len });
+        return Err(AlligatorError::InvalidTeethPeriod {
+            period: teeth_period,
+            data_len: len,
+        });
     }
     if teeth_offset > len {
-        return Err(AlligatorError::InvalidTeethOffset { offset: teeth_offset, data_len: len });
+        return Err(AlligatorError::InvalidTeethOffset {
+            offset: teeth_offset,
+            data_len: len,
+        });
     }
     if lips_period == 0 || lips_period > len {
-        return Err(AlligatorError::InvalidLipsPeriod { period: lips_period, data_len: len });
+        return Err(AlligatorError::InvalidLipsPeriod {
+            period: lips_period,
+            data_len: len,
+        });
     }
     if lips_offset > len {
-        return Err(AlligatorError::InvalidLipsOffset { offset: lips_offset, data_len: len });
+        return Err(AlligatorError::InvalidLipsOffset {
+            offset: lips_offset,
+            data_len: len,
+        });
     }
 
     let chosen = match kernel {
@@ -259,75 +323,211 @@ pub fn alligator_with_kernel(input: &AlligatorInput, kernel: Kernel) -> Result<A
     };
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                alligator_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => alligator_scalar(
+                data,
+                jaw_period,
+                jaw_offset,
+                teeth_period,
+                teeth_offset,
+                lips_period,
+                lips_offset,
+                first,
+                len,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                alligator_avx2(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => alligator_avx2(
+                data,
+                jaw_period,
+                jaw_offset,
+                teeth_period,
+                teeth_offset,
+                lips_period,
+                lips_offset,
+                first,
+                len,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                alligator_avx512(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => alligator_avx512(
+                data,
+                jaw_period,
+                jaw_offset,
+                teeth_period,
+                teeth_offset,
+                lips_period,
+                lips_offset,
+                first,
+                len,
+            ),
             _ => unreachable!(),
         }
     }
 }
 #[inline]
 pub unsafe fn alligator_scalar(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, first: usize, len: usize
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    first: usize,
+    len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
     let mut jaw = vec![f64::NAN; len];
     let mut teeth = vec![f64::NAN; len];
     let mut lips = vec![f64::NAN; len];
 
-    let (jaw_val, teeth_val, lips_val) =
-        alligator_smma_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len, &mut jaw, &mut teeth, &mut lips);
+    let (jaw_val, teeth_val, lips_val) = alligator_smma_scalar(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        first,
+        len,
+        &mut jaw,
+        &mut teeth,
+        &mut lips,
+    );
     Ok(AlligatorOutput { jaw, teeth, lips })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn alligator_avx2(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, first: usize, len: usize
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    first: usize,
+    len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
     // API parity only; forward to scalar
-    alligator_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
+    alligator_scalar(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        first,
+        len,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn alligator_avx512(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, first: usize, len: usize
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    first: usize,
+    len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
     if jaw_period <= 32 && teeth_period <= 32 && lips_period <= 32 {
-        alligator_avx512_short(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
+        alligator_avx512_short(
+            data,
+            jaw_period,
+            jaw_offset,
+            teeth_period,
+            teeth_offset,
+            lips_period,
+            lips_offset,
+            first,
+            len,
+        )
     } else {
-        alligator_avx512_long(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
+        alligator_avx512_long(
+            data,
+            jaw_period,
+            jaw_offset,
+            teeth_period,
+            teeth_offset,
+            lips_period,
+            lips_offset,
+            first,
+            len,
+        )
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn alligator_avx512_short(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, first: usize, len: usize
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    first: usize,
+    len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
     // API stub: forwards to scalar
-    alligator_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
+    alligator_scalar(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        first,
+        len,
+    )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn alligator_avx512_long(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, first: usize, len: usize
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    first: usize,
+    len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    alligator_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, len)
+    alligator_scalar(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        first,
+        len,
+    )
 }
 
 #[inline(always)]
 pub unsafe fn alligator_smma_scalar(
-    data: &[f64], jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize, _first: usize, len: usize,
-    jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    _first: usize,
+    len: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
     let mut jaw_sum = 0.0;
     let mut teeth_sum = 0.0;
@@ -448,13 +648,22 @@ impl AlligatorStream {
         let lips_offset = params.lips_offset.unwrap_or(3);
 
         if jaw_period == 0 {
-            return Err(AlligatorError::InvalidJawPeriod { period: jaw_period, data_len: 0 });
+            return Err(AlligatorError::InvalidJawPeriod {
+                period: jaw_period,
+                data_len: 0,
+            });
         }
         if teeth_period == 0 {
-            return Err(AlligatorError::InvalidTeethPeriod { period: teeth_period, data_len: 0 });
+            return Err(AlligatorError::InvalidTeethPeriod {
+                period: teeth_period,
+                data_len: 0,
+            });
         }
         if lips_period == 0 {
-            return Err(AlligatorError::InvalidLipsPeriod { period: lips_period, data_len: 0 });
+            return Err(AlligatorError::InvalidLipsPeriod {
+                period: lips_period,
+                data_len: 0,
+            });
         }
 
         Ok(Self {
@@ -491,7 +700,8 @@ impl AlligatorStream {
             self.jaw_filled = true;
             self.jaw_val = self.jaw_buf.iter().copied().sum::<f64>() / self.jaw_period as f64;
         } else if self.jaw_filled {
-            self.jaw_val = (self.jaw_val * (self.jaw_period as f64 - 1.0) + value) / self.jaw_period as f64;
+            self.jaw_val =
+                (self.jaw_val * (self.jaw_period as f64 - 1.0) + value) / self.jaw_period as f64;
         }
 
         // Teeth
@@ -501,7 +711,8 @@ impl AlligatorStream {
             self.teeth_filled = true;
             self.teeth_val = self.teeth_buf.iter().copied().sum::<f64>() / self.teeth_period as f64;
         } else if self.teeth_filled {
-            self.teeth_val = (self.teeth_val * (self.teeth_period as f64 - 1.0) + value) / self.teeth_period as f64;
+            self.teeth_val = (self.teeth_val * (self.teeth_period as f64 - 1.0) + value)
+                / self.teeth_period as f64;
         }
 
         // Lips
@@ -511,7 +722,8 @@ impl AlligatorStream {
             self.lips_filled = true;
             self.lips_val = self.lips_buf.iter().copied().sum::<f64>() / self.lips_period as f64;
         } else if self.lips_filled {
-            self.lips_val = (self.lips_val * (self.lips_period as f64 - 1.0) + value) / self.lips_period as f64;
+            self.lips_val =
+                (self.lips_val * (self.lips_period as f64 - 1.0) + value) / self.lips_period as f64;
         }
 
         if self.idx < self.jaw_period.max(self.teeth_period).max(self.lips_period) {
@@ -549,48 +761,75 @@ pub struct AlligatorBatchBuilder {
     kernel: Kernel,
 }
 impl AlligatorBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     pub fn jaw_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.jaw_period = (start, end, step); self
+        self.range.jaw_period = (start, end, step);
+        self
     }
     pub fn jaw_offset_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.jaw_offset = (start, end, step); self
+        self.range.jaw_offset = (start, end, step);
+        self
     }
     pub fn teeth_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.teeth_period = (start, end, step); self
+        self.range.teeth_period = (start, end, step);
+        self
     }
     pub fn teeth_offset_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.teeth_offset = (start, end, step); self
+        self.range.teeth_offset = (start, end, step);
+        self
     }
     pub fn lips_period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.lips_period = (start, end, step); self
+        self.range.lips_period = (start, end, step);
+        self
     }
     pub fn lips_offset_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.lips_offset = (start, end, step); self
+        self.range.lips_offset = (start, end, step);
+        self
     }
     pub fn apply_slice(self, data: &[f64]) -> Result<AlligatorBatchOutput, AlligatorError> {
         alligator_batch_with_kernel(data, &self.range, self.kernel)
     }
-    pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<AlligatorBatchOutput, AlligatorError> {
+    pub fn with_default_slice(
+        data: &[f64],
+        k: Kernel,
+    ) -> Result<AlligatorBatchOutput, AlligatorError> {
         AlligatorBatchBuilder::new().kernel(k).apply_slice(data)
     }
-    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<AlligatorBatchOutput, AlligatorError> {
+    pub fn apply_candles(
+        self,
+        c: &Candles,
+        src: &str,
+    ) -> Result<AlligatorBatchOutput, AlligatorError> {
         let slice = source_type(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<AlligatorBatchOutput, AlligatorError> {
-        AlligatorBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c, "hl2")
+        AlligatorBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c, "hl2")
     }
 }
 
 pub fn alligator_batch_with_kernel(
-    data: &[f64], sweep: &AlligatorBatchRange, k: Kernel,
+    data: &[f64],
+    sweep: &AlligatorBatchRange,
+    k: Kernel,
 ) -> Result<AlligatorBatchOutput, AlligatorError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AlligatorError::InvalidJawPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(AlligatorError::InvalidJawPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -612,14 +851,14 @@ pub struct AlligatorBatchOutput {
 }
 impl AlligatorBatchOutput {
     pub fn row_for_params(&self, p: &AlligatorParams) -> Option<usize> {
-        self.combos.iter().position(|c|
+        self.combos.iter().position(|c| {
             c.jaw_period.unwrap_or(13) == p.jaw_period.unwrap_or(13)
-            && c.jaw_offset.unwrap_or(8) == p.jaw_offset.unwrap_or(8)
-            && c.teeth_period.unwrap_or(8) == p.teeth_period.unwrap_or(8)
-            && c.teeth_offset.unwrap_or(5) == p.teeth_offset.unwrap_or(5)
-            && c.lips_period.unwrap_or(5) == p.lips_period.unwrap_or(5)
-            && c.lips_offset.unwrap_or(3) == p.lips_offset.unwrap_or(3)
-        )
+                && c.jaw_offset.unwrap_or(8) == p.jaw_offset.unwrap_or(8)
+                && c.teeth_period.unwrap_or(8) == p.teeth_period.unwrap_or(8)
+                && c.teeth_offset.unwrap_or(5) == p.teeth_offset.unwrap_or(5)
+                && c.lips_period.unwrap_or(5) == p.lips_period.unwrap_or(5)
+                && c.lips_offset.unwrap_or(3) == p.lips_offset.unwrap_or(3)
+        })
     }
     pub fn values_for(&self, p: &AlligatorParams) -> Option<(&[f64], &[f64], &[f64])> {
         self.row_for_params(p).map(|row| {
@@ -636,7 +875,9 @@ impl AlligatorBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &AlligatorBatchRange) -> Vec<AlligatorParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     let jaw_periods = axis(r.jaw_period);
@@ -646,7 +887,14 @@ fn expand_grid(r: &AlligatorBatchRange) -> Vec<AlligatorParams> {
     let lips_periods = axis(r.lips_period);
     let lips_offsets = axis(r.lips_offset);
 
-    let mut out = Vec::with_capacity(jaw_periods.len() * jaw_offsets.len() * teeth_periods.len() * teeth_offsets.len() * lips_periods.len() * lips_offsets.len());
+    let mut out = Vec::with_capacity(
+        jaw_periods.len()
+            * jaw_offsets.len()
+            * teeth_periods.len()
+            * teeth_offsets.len()
+            * lips_periods.len()
+            * lips_offsets.len(),
+    );
     for &jp in &jaw_periods {
         for &jo in &jaw_offsets {
             for &tp in &teeth_periods {
@@ -672,28 +920,53 @@ fn expand_grid(r: &AlligatorBatchRange) -> Vec<AlligatorParams> {
 
 #[inline(always)]
 pub fn alligator_batch_slice(
-    data: &[f64], sweep: &AlligatorBatchRange, kern: Kernel,
+    data: &[f64],
+    sweep: &AlligatorBatchRange,
+    kern: Kernel,
 ) -> Result<AlligatorBatchOutput, AlligatorError> {
     alligator_batch_inner(data, sweep, kern, false)
 }
 #[inline(always)]
 pub fn alligator_batch_par_slice(
-    data: &[f64], sweep: &AlligatorBatchRange, kern: Kernel,
+    data: &[f64],
+    sweep: &AlligatorBatchRange,
+    kern: Kernel,
 ) -> Result<AlligatorBatchOutput, AlligatorError> {
     alligator_batch_inner(data, sweep, kern, true)
 }
 #[inline(always)]
 fn alligator_batch_inner(
-    data: &[f64], sweep: &AlligatorBatchRange, kern: Kernel, parallel: bool
+    data: &[f64],
+    sweep: &AlligatorBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<AlligatorBatchOutput, AlligatorError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AlligatorError::InvalidJawPeriod { period: 0, data_len: 0 });
+        return Err(AlligatorError::InvalidJawPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(AlligatorError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.jaw_period.unwrap().max(c.teeth_period.unwrap()).max(c.lips_period.unwrap())).max().unwrap();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(AlligatorError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
+        .map(|c| {
+            c.jaw_period
+                .unwrap()
+                .max(c.teeth_period.unwrap())
+                .max(c.lips_period.unwrap())
+        })
+        .max()
+        .unwrap();
     if data.len() - first < max_p {
-        return Err(AlligatorError::InvalidJawPeriod { period: max_p, data_len: data.len() });
+        return Err(AlligatorError::InvalidJawPeriod {
+            period: max_p,
+            data_len: data.len(),
+        });
     }
     let rows = combos.len();
     let cols = data.len();
@@ -704,109 +977,288 @@ fn alligator_batch_inner(
     let do_row = |row: usize, jaw_out: &mut [f64], teeth_out: &mut [f64], lips_out: &mut [f64]| unsafe {
         let prm = &combos[row];
         let (jaw_val, teeth_val, lips_val) = match kern {
-            Kernel::Scalar => alligator_row_scalar(data, first,
-                prm.jaw_period.unwrap(), prm.jaw_offset.unwrap(),
-                prm.teeth_period.unwrap(), prm.teeth_offset.unwrap(),
-                prm.lips_period.unwrap(), prm.lips_offset.unwrap(),
-                cols, jaw_out, teeth_out, lips_out
+            Kernel::Scalar => alligator_row_scalar(
+                data,
+                first,
+                prm.jaw_period.unwrap(),
+                prm.jaw_offset.unwrap(),
+                prm.teeth_period.unwrap(),
+                prm.teeth_offset.unwrap(),
+                prm.lips_period.unwrap(),
+                prm.lips_offset.unwrap(),
+                cols,
+                jaw_out,
+                teeth_out,
+                lips_out,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => alligator_row_avx2(data, first,
-                prm.jaw_period.unwrap(), prm.jaw_offset.unwrap(),
-                prm.teeth_period.unwrap(), prm.teeth_offset.unwrap(),
-                prm.lips_period.unwrap(), prm.lips_offset.unwrap(),
-                cols, jaw_out, teeth_out, lips_out
+            Kernel::Avx2 => alligator_row_avx2(
+                data,
+                first,
+                prm.jaw_period.unwrap(),
+                prm.jaw_offset.unwrap(),
+                prm.teeth_period.unwrap(),
+                prm.teeth_offset.unwrap(),
+                prm.lips_period.unwrap(),
+                prm.lips_offset.unwrap(),
+                cols,
+                jaw_out,
+                teeth_out,
+                lips_out,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => alligator_row_avx512(data, first,
-                prm.jaw_period.unwrap(), prm.jaw_offset.unwrap(),
-                prm.teeth_period.unwrap(), prm.teeth_offset.unwrap(),
-                prm.lips_period.unwrap(), prm.lips_offset.unwrap(),
-                cols, jaw_out, teeth_out, lips_out
+            Kernel::Avx512 => alligator_row_avx512(
+                data,
+                first,
+                prm.jaw_period.unwrap(),
+                prm.jaw_offset.unwrap(),
+                prm.teeth_period.unwrap(),
+                prm.teeth_offset.unwrap(),
+                prm.lips_period.unwrap(),
+                prm.lips_offset.unwrap(),
+                cols,
+                jaw_out,
+                teeth_out,
+                lips_out,
             ),
             _ => unreachable!(),
         };
     };
     if parallel {
-        jaw.par_chunks_mut(cols).zip(teeth.par_chunks_mut(cols)).zip(lips.par_chunks_mut(cols)).enumerate()
-            .for_each(|(row, ((j, t), l))| do_row(row, j, t, l));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            jaw.par_chunks_mut(cols)
+                .zip(teeth.par_chunks_mut(cols))
+                .zip(lips.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, ((j, t), l))| do_row(row, j, t, l));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, ((j, t), l)) in jaw
+                .chunks_mut(cols)
+                .zip(teeth.chunks_mut(cols))
+                .zip(lips.chunks_mut(cols))
+                .enumerate()
+            {
+                do_row(row, j, t, l);
+            }
+        }
     } else {
-        for (row, ((j, t), l)) in jaw.chunks_mut(cols).zip(teeth.chunks_mut(cols)).zip(lips.chunks_mut(cols)).enumerate() {
+        for (row, ((j, t), l)) in jaw
+            .chunks_mut(cols)
+            .zip(teeth.chunks_mut(cols))
+            .zip(lips.chunks_mut(cols))
+            .enumerate()
+        {
             do_row(row, j, t, l);
         }
     }
-    Ok(AlligatorBatchOutput { jaw, teeth, lips, combos, rows, cols })
+    Ok(AlligatorBatchOutput {
+        jaw,
+        teeth,
+        lips,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
 pub unsafe fn alligator_row_scalar(
-    data: &[f64], first: usize,
-    jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize,
-    cols: usize, jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    first: usize,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    cols: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
-    alligator_smma_scalar(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, first, cols, jaw, teeth, lips)
+    alligator_smma_scalar(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        first,
+        cols,
+        jaw,
+        teeth,
+        lips,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn alligator_row_avx2(
-    data: &[f64], first: usize,
-    jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize,
-    cols: usize, jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    first: usize,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    cols: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
-    alligator_row_scalar(data, first, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, cols, jaw, teeth, lips)
+    alligator_row_scalar(
+        data,
+        first,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        cols,
+        jaw,
+        teeth,
+        lips,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn alligator_row_avx512(
-    data: &[f64], first: usize,
-    jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize,
-    cols: usize, jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    first: usize,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    cols: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
-    alligator_row_scalar(data, first, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, cols, jaw, teeth, lips)
+    alligator_row_scalar(
+        data,
+        first,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        cols,
+        jaw,
+        teeth,
+        lips,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn alligator_row_avx512_short(
-    data: &[f64], first: usize,
-    jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize,
-    cols: usize, jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    first: usize,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    cols: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
-    alligator_row_scalar(data, first, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, cols, jaw, teeth, lips)
+    alligator_row_scalar(
+        data,
+        first,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        cols,
+        jaw,
+        teeth,
+        lips,
+    )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn alligator_row_avx512_long(
-    data: &[f64], first: usize,
-    jaw_period: usize, jaw_offset: usize, teeth_period: usize, teeth_offset: usize, lips_period: usize, lips_offset: usize,
-    cols: usize, jaw: &mut [f64], teeth: &mut [f64], lips: &mut [f64]
+    data: &[f64],
+    first: usize,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    cols: usize,
+    jaw: &mut [f64],
+    teeth: &mut [f64],
+    lips: &mut [f64],
 ) -> (f64, f64, f64) {
-    alligator_row_scalar(data, first, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset, cols, jaw, teeth, lips)
+    alligator_row_scalar(
+        data,
+        first,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+        cols,
+        jaw,
+        teeth,
+        lips,
+    )
 }
 
 #[inline(always)]
 fn expand_grid_len(r: &AlligatorBatchRange) -> usize {
     fn axis((start, end, step): (usize, usize, usize)) -> usize {
-        if step == 0 || start == end { 1 } else { ((end - start) / step + 1) }
+        if step == 0 || start == end {
+            1
+        } else {
+            ((end - start) / step + 1)
+        }
     }
-    axis(r.jaw_period) * axis(r.jaw_offset) * axis(r.teeth_period) * axis(r.teeth_offset) * axis(r.lips_period) * axis(r.lips_offset)
+    axis(r.jaw_period)
+        * axis(r.jaw_offset)
+        * axis(r.teeth_period)
+        * axis(r.teeth_offset)
+        * axis(r.lips_period)
+        * axis(r.lips_offset)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
-    fn check_alligator_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::utilities::data_loader::read_candles_from_csv;
+    fn check_alligator_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let partial_params = AlligatorParams {
-            jaw_period: Some(14), jaw_offset: None,
-            teeth_period: None, teeth_offset: None,
-            lips_period: None, lips_offset: Some(2),
+            jaw_period: Some(14),
+            jaw_offset: None,
+            teeth_period: None,
+            teeth_offset: None,
+            lips_period: None,
+            lips_offset: Some(2),
         };
         let input = AlligatorInput::from_candles(&candles, "hl2", partial_params);
         let result = alligator_with_kernel(&input, kernel)?;
@@ -815,7 +1267,10 @@ mod tests {
         assert_eq!(result.lips.len(), candles.close.len());
         Ok(())
     }
-    fn check_alligator_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_alligator_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -834,7 +1289,9 @@ mod tests {
             assert!(
                 (value - expected_value).abs() < 1e-1,
                 "alligator jaw value mismatch at index {}: expected {}, got {}",
-                i, expected_value, value
+                i,
+                expected_value,
+                value
             );
         }
         for (i, &value) in result_last_five_teeth.iter().enumerate() {
@@ -842,7 +1299,9 @@ mod tests {
             assert!(
                 (value - expected_value).abs() < 1e-1,
                 "alligator teeth value mismatch at index {}: expected {}, got {}",
-                i, expected_value, value
+                i,
+                expected_value,
+                value
             );
         }
         for (i, &value) in result_last_five_lips.iter().enumerate() {
@@ -850,12 +1309,17 @@ mod tests {
             assert!(
                 (value - expected_value).abs() < 1e-1,
                 "alligator lips value mismatch at index {}: expected {}, got {}",
-                i, expected_value, value
+                i,
+                expected_value,
+                value
             );
         }
         Ok(())
     }
-    fn check_alligator_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_alligator_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -868,20 +1332,27 @@ mod tests {
         assert_eq!(output.jaw.len(), candles.close.len());
         Ok(())
     }
-    fn check_alligator_with_slice_data_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_alligator_with_slice_data_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let first_input = AlligatorInput::with_default_candles(&candles);
         let first_result = alligator_with_kernel(&first_input, kernel)?;
-        let second_input = AlligatorInput::from_slice(&first_result.jaw, AlligatorParams::default());
+        let second_input =
+            AlligatorInput::from_slice(&first_result.jaw, AlligatorParams::default());
         let second_result = alligator_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.jaw.len(), first_result.jaw.len());
         assert_eq!(second_result.teeth.len(), first_result.teeth.len());
         assert_eq!(second_result.lips.len(), first_result.lips.len());
         Ok(())
     }
-    fn check_alligator_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_alligator_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -896,14 +1367,24 @@ mod tests {
         }
         Ok(())
     }
-    fn check_alligator_zero_jaw_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-    skip_if_unsupported!(kernel, test_name);
-    let data = vec![10.0, 20.0, 30.0];
-    let params = AlligatorParams { jaw_period: Some(0), ..AlligatorParams::default() };
-    let input = AlligatorInput::from_slice(&data, params);
-    let res = alligator_with_kernel(&input, kernel);
-    assert!(res.is_err(), "[{}] Alligator should fail with zero jaw period", test_name);
-    Ok(())
+    fn check_alligator_zero_jaw_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let data = vec![10.0, 20.0, 30.0];
+        let params = AlligatorParams {
+            jaw_period: Some(0),
+            ..AlligatorParams::default()
+        };
+        let input = AlligatorInput::from_slice(&data, params);
+        let res = alligator_with_kernel(&input, kernel);
+        assert!(
+            res.is_err(),
+            "[{}] Alligator should fail with zero jaw period",
+            test_name
+        );
+        Ok(())
     }
     macro_rules! generate_all_alligator_tests {
         ($($test_fn:ident),*) => {
@@ -936,21 +1417,26 @@ mod tests {
         check_alligator_nan_handling,
         check_alligator_zero_jaw_period
     );
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        let output = AlligatorBatchBuilder::new().kernel(kernel).apply_candles(&c, "hl2")?;
+        let output = AlligatorBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "hl2")?;
         let def = AlligatorParams::default();
         let (row_jaw, row_teeth, row_lips) = output.values_for(&def).expect("default row missing");
         assert_eq!(row_jaw.len(), c.close.len());
-        let expected = [
-            60742.4, 60632.6, 60555.1, 60442.7, 60308.7
-        ];
+        let expected = [60742.4, 60632.6, 60555.1, 60442.7, 60308.7];
         let start = row_jaw.len() - 5;
         for (i, &v) in row_jaw[start..].iter().enumerate() {
-            assert!((v - expected[i]).abs() < 1e-1,
-                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}");
+            assert!(
+                (v - expected[i]).abs() < 1e-1,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
         }
         Ok(())
     }

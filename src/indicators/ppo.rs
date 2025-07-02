@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -272,7 +273,8 @@ pub unsafe fn ppo_scalar(
         let ff = fast_ma[i];
         if sf.is_nan() || ff.is_nan() || sf == 0.0 {
             out[i] = f64::NAN;
-        } else {
+        
+            } else {
             out[i] = 100.0 * (ff - sf) / sf;
         }
     }
@@ -303,7 +305,8 @@ pub unsafe fn ppo_avx512(
 ) {
     if slow <= 32 {
         ppo_avx512_short(data, fast, slow, ma_type, first, out)
-    } else {
+    
+        } else {
         ppo_avx512_long(data, fast, slow, ma_type, first, out)
     }
 }
@@ -529,10 +532,38 @@ fn ppo_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -583,7 +614,8 @@ pub unsafe fn ppo_row_avx512(
 ) {
     if slow <= 32 {
         ppo_row_avx512_short(data, first, fast, slow, ma_type, out)
-    } else {
+    
+        } else {
         ppo_row_avx512_long(data, first, fast, slow, ma_type, out)
     }
 }
@@ -651,7 +683,8 @@ impl PpoStream {
         let sf = *slow_ma.last()?;
         if ff.is_nan() || sf.is_nan() || sf == 0.0 {
             Some(f64::NAN)
-        } else {
+        
+            } else {
             Some(100.0 * (ff - sf) / sf)
         }
     }

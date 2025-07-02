@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -447,8 +448,6 @@ impl MinmaxStream {
             }
             if !is_min && !is_max {
                 break;
-            }
-        }
         let min_val = if is_min { center_low } else { f64::NAN };
         let max_val = if is_max { center_high } else { f64::NAN };
 

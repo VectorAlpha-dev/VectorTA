@@ -22,7 +22,17 @@
       "Bash(git checkout:*)",
       "Bash(rg:*)",
       "Bash(./fix-html-syntax.sh:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(true)",
+      "Bash(npm run dev:*)",
+      "Bash(npx astro:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm --version)",
+      "Bash(./start-dev.sh:*)",
+      "Bash(curl:*)",
+      "Bash(timeout 30s npm run dev)",
+      "Bash(npx tsc:*)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }

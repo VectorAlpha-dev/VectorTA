@@ -21,6 +21,8 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -502,9 +504,25 @@ fn mwdx_batch_inner(
     // ---------------------------------------------------------------------------
     // 4.  Drive the whole matrix, in parallel or serial
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -558,7 +576,8 @@ pub unsafe fn mwdx_row_avx512(
 ) {
     if data.len() <= 32 {
         mwdx_row_avx512_short(data, fac, out);
-    } else {
+    
+        } else {
         mwdx_row_avx512_long(data, fac, out);
     }
 }

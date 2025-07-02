@@ -24,6 +24,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -319,7 +320,8 @@ pub unsafe fn cksp_scalar(
         }
         let tr = if i == first_valid_idx {
             high[i] - low[i]
-        } else {
+        
+            } else {
             let hl = high[i] - low[i];
             let hc = (high[i] - close[i - 1]).abs();
             let lc = (low[i] - close[i - 1]).abs();
@@ -330,15 +332,15 @@ pub unsafe fn cksp_scalar(
             if i - first_valid_idx == p - 1 {
                 rma = sum_tr / p as f64;
                 atr[i] = rma;
-            }
-        } else {
+} else {
             rma += alpha * (tr - rma);
             atr[i] = rma;
         }
         while let Some((_, v)) = dq_h.back() {
             if *v <= high[i] {
                 dq_h.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -347,14 +349,16 @@ pub unsafe fn cksp_scalar(
         while let Some(&(idx, _)) = dq_h.front() {
             if idx < start_h {
                 dq_h.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
         while let Some((_, v)) = dq_l.back() {
             if *v >= low[i] {
                 dq_l.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -363,7 +367,8 @@ pub unsafe fn cksp_scalar(
         while let Some(&(idx, _)) = dq_l.front() {
             if idx < start_l {
                 dq_l.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -374,7 +379,9 @@ pub unsafe fn cksp_scalar(
                 while let Some((_, val)) = dq_ls0.back() {
                     if *val <= ls0_val {
                         dq_ls0.pop_back();
-                    } else {
+                    
+                        }
+                         else {
                         break;
                     }
                 }
@@ -383,7 +390,8 @@ pub unsafe fn cksp_scalar(
                 while let Some(&(idx, _)) = dq_ls0.front() {
                     if idx < start_ls0 {
                         dq_ls0.pop_front();
-                    } else {
+                    
+                        } else {
                         break;
                     }
                 }
@@ -393,7 +401,8 @@ pub unsafe fn cksp_scalar(
                 while let Some((_, val)) = dq_ss0.back() {
                     if *val >= ss0_val {
                         dq_ss0.pop_back();
-                    } else {
+                    
+                        } else {
                         break;
                     }
                 }
@@ -402,7 +411,8 @@ pub unsafe fn cksp_scalar(
                 while let Some(&(idx, _)) = dq_ss0.front() {
                     if idx < start_ss0 {
                         dq_ss0.pop_front();
-                    } else {
+                    
+                        } else {
                         break;
                     }
                 }
@@ -610,7 +620,8 @@ impl CkspStream {
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
         let tr = if self.prev_close.is_nan() {
             high - low
-        } else {
+        
+            } else {
             let hl = high - low;
             let hc = (high - self.prev_close).abs();
             let lc = (low - self.prev_close).abs();
@@ -633,7 +644,8 @@ impl CkspStream {
         while let Some((_, v)) = self.dq_h.back() {
             if *v <= high {
                 self.dq_h.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -642,7 +654,8 @@ impl CkspStream {
         while let Some(&(idx, _)) = self.dq_h.front() {
             if idx < start_h {
                 self.dq_h.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -650,7 +663,8 @@ impl CkspStream {
         while let Some((_, v)) = self.dq_l.back() {
             if *v >= low {
                 self.dq_l.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -659,7 +673,8 @@ impl CkspStream {
         while let Some(&(idx, _)) = self.dq_l.front() {
             if idx < start_l {
                 self.dq_l.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -681,7 +696,8 @@ impl CkspStream {
         while let Some((_, val)) = self.dq_ls0.back() {
             if *val <= ls0_val {
                 self.dq_ls0.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -690,7 +706,8 @@ impl CkspStream {
         while let Some(&(idx, _)) = self.dq_ls0.front() {
             if idx < start_ls0 {
                 self.dq_ls0.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -699,7 +716,8 @@ impl CkspStream {
         while let Some((_, val)) = self.dq_ss0.back() {
             if *val >= ss0_val {
                 self.dq_ss0.pop_back();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -708,7 +726,8 @@ impl CkspStream {
         while let Some(&(idx, _)) = self.dq_ss0.front() {
             if idx < start_ss0 {
                 self.dq_ss0.pop_front();
-            } else {
+            
+                } else {
                 break;
             }
         }
@@ -949,11 +968,41 @@ fn cksp_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         long_values
-            .par_chunks_mut(cols)
-            .zip(short_values.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (lv, sv))| do_row(row, lv, sv));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .zip(short_values.par_chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, (lv, sv))| do_row(row, lv, sv));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (lv, sv)) in long_values.chunks_mut(cols).zip(short_values.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, lv, sv);
+
+
+        }
+
+    }
     } else {
         for (row, (lv, sv)) in long_values.chunks_mut(cols).zip(short_values.chunks_mut(cols)).enumerate() {
             do_row(row, lv, sv);

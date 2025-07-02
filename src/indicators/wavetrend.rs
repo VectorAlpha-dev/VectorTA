@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -352,7 +353,8 @@ pub unsafe fn wavetrend_avx512(
 ) -> Result<WavetrendOutput, WavetrendError> {
     if channel_len <= 32 {
         wavetrend_avx512_short(data, channel_len, average_len, ma_len, factor, first)
-    } else {
+    
+        } else {
         wavetrend_avx512_long(data, channel_len, average_len, ma_len, factor, first)
     }
 }
@@ -477,7 +479,8 @@ impl WavetrendStream {
             let new_esa = self.alpha_ch * price + (1.0 - self.alpha_ch) * prev_esa;
             self.last_esa = Some(new_esa);
             new_esa
-        } else {
+        
+            } else {
             // First-ever finite price: seed ESA = price₀ (exactly what ema_scalar does).
             self.last_esa = Some(price);
             price
@@ -490,7 +493,8 @@ impl WavetrendStream {
             let new_de = self.alpha_ch * abs_diff + (1.0 - self.alpha_ch) * prev_de;
             self.last_de = Some(new_de);
             new_de
-        } else {
+        
+            } else {
             // First-ever |price₀ − esa₀|: seed DE = abs_diff₀ (likely 0 at i=0).
             self.last_de = Some(abs_diff);
             abs_diff
@@ -509,7 +513,8 @@ impl WavetrendStream {
             let new_wt1 = self.alpha_avg * ci + (1.0 - self.alpha_avg) * prev_wt1;
             self.last_wt1 = Some(new_wt1);
             new_wt1
-        } else {
+        
+            } else {
             // First-ever valid CI: seed WT1 = ci₁ (just like ema_scalar seeds)
             self.last_wt1 = Some(ci);
             ci
@@ -742,9 +747,35 @@ fn wavetrend_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         wt1.par_chunks_mut(cols).zip(wt2.par_chunks_mut(cols)).zip(wt_diff.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((w1, w2), wd))| do_row(row, w1, w2, wd));
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, ((w1, w2), wd))| do_row(row, w1, w2, wd));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (((w1, w2), wd))) in wt1.chunks_mut(cols).zip(wt2.chunks_mut(cols)).zip(wt_diff.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, w1, w2, wd);
+
+
+        }
+
+
     } else {
         for (row, (((w1, w2), wd))) in wt1.chunks_mut(cols).zip(wt2.chunks_mut(cols)).zip(wt_diff.chunks_mut(cols)).enumerate() {
             do_row(row, w1, w2, wd);

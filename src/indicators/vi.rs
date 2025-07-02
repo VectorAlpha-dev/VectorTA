@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::error::Error;
@@ -277,7 +278,8 @@ pub unsafe fn vi_avx512(
 ) {
     if period <= 32 {
         vi_avx512_short(high, low, close, period, first, plus, minus);
-    } else {
+    
+        } else {
         vi_avx512_long(high, low, close, period, first, plus, minus);
     }
 }
@@ -360,7 +362,8 @@ impl ViStream {
         }
         if self.filled {
             Some((self.sum_vp / self.sum_tr, self.sum_vm / self.sum_tr))
-        } else {
+        
+            } else {
             None
         }
     }
@@ -541,10 +544,27 @@ fn vi_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         plus.par_chunks_mut(cols)
-            .zip(minus.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (p, m))| do_row(row, p, m));
+
+                    .zip(minus.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, (p, m))| do_row(row, p, m));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for ((row, p), m) in plus.chunks_mut(cols).enumerate().zip(minus.chunks_mut(cols)) {
+
+                    do_row(row, p, m);
+
+        }
+
     } else {
         for ((row, p), m) in plus.chunks_mut(cols).enumerate().zip(minus.chunks_mut(cols)) {
             do_row(row, p, m);
@@ -591,7 +611,8 @@ unsafe fn vi_row_avx512(
 ) {
     if period <= 32 {
         vi_row_avx512_short(high, low, close, first, period, plus, minus);
-    } else {
+    
+        } else {
         vi_row_avx512_long(high, low, close, first, period, plus, minus);
     }
 }

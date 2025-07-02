@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -213,7 +214,8 @@ pub unsafe fn mfi_scalar(
             neg_buf[ring_idx] = flow;
             pos_buf[ring_idx] = 0.0;
             neg_sum += flow;
-        } else {
+        
+            } else {
             pos_buf[ring_idx] = 0.0;
             neg_buf[ring_idx] = 0.0;
         }
@@ -225,7 +227,7 @@ pub unsafe fn mfi_scalar(
         let total = pos_sum + neg_sum;
         out[idx_mfi_start] = if total < 1e-14 {
             0.0
-        } else {
+} else {
             100.0 * (pos_sum / total)
         };
     }
@@ -248,7 +250,8 @@ pub unsafe fn mfi_scalar(
             neg_buf[ring_idx] = flow;
             pos_buf[ring_idx] = 0.0;
             neg_sum += flow;
-        } else {
+        
+            } else {
             pos_buf[ring_idx] = 0.0;
             neg_buf[ring_idx] = 0.0;
         }
@@ -258,7 +261,8 @@ pub unsafe fn mfi_scalar(
         let total = pos_sum + neg_sum;
         out[i] = if total < 1e-14 {
             0.0
-        } else {
+        
+            } else {
             100.0 * (pos_sum / total)
         };
     }
@@ -282,7 +286,8 @@ pub fn mfi_avx512(
     unsafe {
         if period <= 32 {
             mfi_avx512_short(high, low, close, volume, period, first, out)
-        } else {
+        
+            } else {
             mfi_avx512_long(high, low, close, volume, period, first, out)
         }
     }
@@ -420,7 +425,8 @@ impl MfiStream {
             self.pos_sum -= self.pos_buf[self.head];
             self.neg_buf[self.head] = flow;
             self.pos_buf[self.head] = 0.0;
-        } else {
+        
+            } else {
             self.pos_sum -= self.pos_buf[self.head];
             self.neg_sum -= self.neg_buf[self.head];
             self.pos_buf[self.head] = 0.0;
@@ -599,7 +605,29 @@ fn mfi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -639,7 +667,8 @@ pub unsafe fn mfi_row_avx512(
 ) {
     if period <= 32 {
         mfi_row_avx512_short(high, low, close, volume, first, period, out)
-    } else {
+    
+        } else {
         mfi_row_avx512_long(high, low, close, volume, first, period, out)
     }
 }

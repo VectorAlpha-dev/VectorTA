@@ -1,15 +1,19 @@
 /**
  * Common utilities for WASM binding tests
  */
-const fs = require('fs');
-const path = require('path');
-const { parse } = require('csv-parse/sync');
+import fs from 'fs';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const content = fs.readFileSync(csvPath, 'utf8');
     const records = parse(content, { 
-        columns: true,
+        columns: false,
         skip_empty_lines: true,
         cast: true
     });
@@ -23,11 +27,13 @@ function loadTestData() {
     };
     
     for (const row of records) {
-        candles.open.push(parseFloat(row.open));
-        candles.high.push(parseFloat(row.high));
-        candles.low.push(parseFloat(row.low));
-        candles.close.push(parseFloat(row.close));
-        candles.volume.push(parseFloat(row.volume || 0));
+        if (row.length < 6) continue;
+        // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+        candles.open.push(parseFloat(row[1]));
+        candles.close.push(parseFloat(row[2]));
+        candles.high.push(parseFloat(row[3]));
+        candles.low.push(parseFloat(row[4]));
+        candles.volume.push(parseFloat(row[5]));
     }
     
     return candles;
@@ -93,10 +99,40 @@ const EXPECTED_OUTPUTS = {
             59222.63528822,
             59165.14427332
         ]
+    },
+    cwma: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59224.641237300435,
+            59213.64831277214,
+            59171.21190130624,
+            59167.01279027576,
+            59039.413552249636
+        ]
+    },
+    dema: {
+        defaultParams: { period: 30 },
+        last5Values: [
+            59189.73193987478,
+            59129.24920772847,
+            59058.80282420511,
+            59011.5555611042,
+            58908.370159946775
+        ]
+    },
+    edcf: {
+        defaultParams: { period: 15 },
+        last5Values: [
+            59593.332275678375,
+            59731.70263288801,
+            59766.41512339413,
+            59655.66162110993,
+            59332.492883847
+        ]
     }
 };
 
-module.exports = { 
+export { 
     loadTestData, 
     assertClose, 
     assertArrayClose, 

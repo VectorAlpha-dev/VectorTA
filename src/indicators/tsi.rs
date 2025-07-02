@@ -24,6 +24,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -254,13 +255,15 @@ pub unsafe fn tsi_scalar(data: &[f64], long: usize, short: usize, first: usize) 
     for i in 0..data.len() {
         if i < first {
             out[i] = f64::NAN;
-        } else {
+        
+            } else {
             let idx = i - first;
             let numer = ema_short_numer.values[idx];
             let denom = ema_short_denom.values[idx];
             if numer.is_nan() || denom.is_nan() || denom == 0.0 {
                 out[i] = f64::NAN;
-            } else {
+            
+                } else {
                 out[i] = 100.0 * (numer / denom);
             }
         }
@@ -280,7 +283,8 @@ pub unsafe fn tsi_avx512(data: &[f64], long: usize, short: usize, first: usize) 
     // Stub, dispatch short/long
     if long <= 32 && short <= 32 {
         tsi_avx512_short(data, long, short, first)
-    } else {
+    
+        } else {
         tsi_avx512_long(data, long, short, first)
     }
 }
@@ -340,7 +344,8 @@ impl TsiStream {
         let ema_short_den = self.ema_short_den.update(ema_long_den)?;
         if ema_short_den == 0.0 {
             Some(f64::NAN)
-        } else {
+        
+            } else {
             Some(100.0 * (ema_short_num / ema_short_den))
         }
     }
@@ -522,7 +527,29 @@ fn tsi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -548,7 +575,8 @@ pub unsafe fn tsi_row_avx2(data: &[f64], long: usize, short: usize, first: usize
 pub unsafe fn tsi_row_avx512(data: &[f64], long: usize, short: usize, first: usize, out: &mut [f64]) {
     if long <= 32 && short <= 32 {
         tsi_row_avx512_short(data, long, short, first, out);
-    } else {
+    
+        } else {
         tsi_row_avx512_long(data, long, short, first, out);
     }
 }

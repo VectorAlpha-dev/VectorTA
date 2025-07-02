@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -265,7 +266,8 @@ pub fn kaufmanstop_with_kernel(
     for i in first_valid_idx..high.len() {
         if high[i].is_nan() || low[i].is_nan() {
             hl_diff[i] = f64::NAN;
-        } else {
+        
+            } else {
             hl_diff[i] = high[i] - low[i];
         }
     }
@@ -343,7 +345,7 @@ pub fn kaufmanstop_scalar(
         if idx < high.len() {
             if direction.eq_ignore_ascii_case("long") {
                 out[idx] = low[idx] - val * mult;
-            } else {
+} else {
                 out[idx] = high[idx] + val * mult;
             }
         }
@@ -380,8 +382,7 @@ pub fn kaufmanstop_avx512(
     if period <= 32 {
         unsafe {
             kaufmanstop_avx512_short(high, low, range_ma, period, first, mult, direction, out)
-        }
-    } else {
+} else {
         unsafe {
             kaufmanstop_avx512_long(high, low, range_ma, period, first, mult, direction, out)
         }
@@ -457,7 +458,8 @@ impl KaufmanstopStream {
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         let diff = if high.is_nan() || low.is_nan() {
             f64::NAN
-        } else {
+        
+            } else {
             high - low
         };
         self.range_buffer[self.buffer_head] = diff;
@@ -480,7 +482,8 @@ impl KaufmanstopStream {
         ma_val.map(|val| {
             if self.direction.eq_ignore_ascii_case("long") {
                 low - val * self.mult
-            } else {
+            
+                } else {
                 high + val * self.mult
             }
         })
@@ -737,7 +740,8 @@ fn kaufmanstop_batch_inner(
     for i in first..high.len() {
         if high[i].is_nan() || low[i].is_nan() {
             range_buf[i] = f64::NAN;
-        } else {
+        
+            } else {
             range_buf[i] = high[i] - low[i];
         }
     }
@@ -795,10 +799,27 @@ fn kaufmanstop_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .par_chunks_mut(cols)
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -857,7 +878,8 @@ pub unsafe fn kaufmanstop_row_avx512(
         kaufmanstop_row_avx512_short(
             high, low, range_ma, period, first, mult, direction, out,
         );
-    } else {
+    
+        } else {
         kaufmanstop_row_avx512_long(
             high, low, range_ma, period, first, mult, direction, out,
         );

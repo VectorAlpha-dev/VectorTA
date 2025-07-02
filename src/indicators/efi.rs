@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -257,7 +258,8 @@ pub fn efi_scalar(
         let prev_ema = out[i - 1];
         if price[i].is_nan() || price[i - 1].is_nan() || volume[i].is_nan() {
             out[i] = prev_ema;
-        } else {
+        
+            } else {
             let current_dif = (price[i] - price[i - 1]) * volume[i];
             out[i] = alpha * current_dif + (1.0 - alpha) * prev_ema;
         }
@@ -353,16 +355,16 @@ impl EfiStream {
         let out = if price.is_nan() || self.last_price.is_nan() || volume.is_nan() {
             if self.filled {
                 self.prev
-            } else {
+} else {
                 f64::NAN
-            }
         } else {
             let diff = (price - self.last_price) * volume;
             if !self.filled {
                 self.prev = diff;
                 self.filled = true;
                 diff
-            } else {
+            
+                } else {
                 let ema = self.alpha * diff + (1.0 - self.alpha) * self.prev;
                 self.prev = ema;
                 ema
@@ -546,7 +548,29 @@ fn efi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -595,7 +619,8 @@ pub unsafe fn efi_row_avx512(
 ) {
     if period <= 32 {
         efi_row_avx512_short(price, volume, first, period, out);
-    } else {
+    
+        } else {
         efi_row_avx512_long(price, volume, first, period, out);
     }
     _mm_sfence();

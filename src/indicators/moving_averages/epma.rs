@@ -29,6 +29,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
@@ -358,7 +359,8 @@ pub unsafe fn epma_avx512(
 ) {
     if period <= 32 {
         epma_avx512_short(data, period, offset, first_valid, out)
-    } else {
+    
+        } else {
         epma_avx512_long(data, period, offset, first_valid, out)
     }
 }
@@ -384,12 +386,14 @@ unsafe fn epma_avx512_short(
     let w0 = _mm512_loadu_pd(weights.as_ptr());
     let w1 = if chunks >= 2 {
         Some(_mm512_loadu_pd(weights.as_ptr().add(STEP)))
-    } else {
+    
+        } else {
         None
     };
     let w_tail = if tail != 0 {
         _mm512_maskz_loadu_pd(tmask, weights.as_ptr().add(chunks * STEP))
-    } else {
+    
+        } else {
         _mm512_setzero_pd()
     };
 
@@ -775,9 +779,25 @@ fn epma_batch_inner(
     // 3. run all rows (parallel or serial) on the MaybeUninit buffer
     // ---------------------------------------------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

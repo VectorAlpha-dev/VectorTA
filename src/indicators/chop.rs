@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -256,17 +257,38 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                chop_scalar(high, low, close, period, drift, scalar, first_valid_idx, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => chop_scalar(
+                high,
+                low,
+                close,
+                period,
+                drift,
+                scalar,
+                first_valid_idx,
+                &mut out,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                chop_avx2(high, low, close, period, drift, scalar, first_valid_idx, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => chop_avx2(
+                high,
+                low,
+                close,
+                period,
+                drift,
+                scalar,
+                first_valid_idx,
+                &mut out,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                chop_avx512(high, low, close, period, drift, scalar, first_valid_idx, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => chop_avx512(
+                high,
+                low,
+                close,
+                period,
+                drift,
+                scalar,
+                first_valid_idx,
+                &mut out,
+            ),
             _ => unreachable!(),
         }
     }
@@ -315,9 +337,9 @@ pub unsafe fn chop_scalar(
             }
             if (i - first_valid_idx) == (drift - 1) {
                 rma_atr = sum_tr / drift as f64;
+            } else {
+                rma_atr += alpha * (tr - rma_atr);
             }
-        } else {
-            rma_atr += alpha * (tr - rma_atr);
         }
         prev_close = close[i];
 
@@ -334,7 +356,11 @@ pub unsafe fn chop_scalar(
         let oldest = atr_ring[ring_idx];
         rolling_sum_atr -= oldest;
 
-        let new_val = if current_atr.is_nan() { 0.0 } else { current_atr };
+        let new_val = if current_atr.is_nan() {
+            0.0
+        } else {
+            current_atr
+        };
         atr_ring[ring_idx] = new_val;
         rolling_sum_atr += new_val;
 
@@ -402,7 +428,16 @@ pub unsafe fn chop_avx2(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    chop_scalar(high, low, close, period, drift, scalar, first_valid_idx, out)
+    chop_scalar(
+        high,
+        low,
+        close,
+        period,
+        drift,
+        scalar,
+        first_valid_idx,
+        out,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -417,24 +452,63 @@ pub unsafe fn chop_avx512(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    chop_scalar(high, low, close, period, drift, scalar, first_valid_idx, out)
+    chop_scalar(
+        high,
+        low,
+        close,
+        period,
+        drift,
+        scalar,
+        first_valid_idx,
+        out,
+    )
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn chop_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64],
-    period: usize, drift: usize, scalar: f64, first_valid_idx: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    drift: usize,
+    scalar: f64,
+    first_valid_idx: usize,
+    out: &mut [f64],
 ) {
-    chop_avx512(high, low, close, period, drift, scalar, first_valid_idx, out)
+    chop_avx512(
+        high,
+        low,
+        close,
+        period,
+        drift,
+        scalar,
+        first_valid_idx,
+        out,
+    )
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn chop_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64],
-    period: usize, drift: usize, scalar: f64, first_valid_idx: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    drift: usize,
+    scalar: f64,
+    first_valid_idx: usize,
+    out: &mut [f64],
 ) {
-    chop_avx512(high, low, close, period, drift, scalar, first_valid_idx, out)
+    chop_avx512(
+        high,
+        low,
+        close,
+        period,
+        drift,
+        scalar,
+        first_valid_idx,
+        out,
+    )
 }
 
 #[inline(always)]
@@ -649,10 +723,20 @@ fn chop_batch_inner(
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -824,83 +908,86 @@ impl ChopStream {
             }
             if self.count == self.drift {
                 self.rma_atr = self.sum_tr / (self.drift as f64);
+            } else {
+                self.rma_atr += (1.0 / (self.drift as f64)) * (tr - self.rma_atr);
             }
-        } else {
-            self.rma_atr += (1.0 / (self.drift as f64)) * (tr - self.rma_atr);
-        }
-        let current_atr = if self.count <= self.drift {
-            if self.count == self.drift {
+            let current_atr = if self.count <= self.drift {
+                if self.count == self.drift {
+                    self.rma_atr
+                } else {
+                    f64::NAN
+                }
+            } else {
                 self.rma_atr
+            };
+            let oldest = self.atr_ring[idx];
+            self.rolling_sum_atr -= oldest;
+            let new_val = if current_atr.is_nan() {
+                0.0
             } else {
-                f64::NAN
-            }
-        } else {
-            self.rma_atr
-        };
-        let oldest = self.atr_ring[idx];
-        self.rolling_sum_atr -= oldest;
-        let new_val = if current_atr.is_nan() { 0.0 } else { current_atr };
-        self.atr_ring[idx] = new_val;
-        self.rolling_sum_atr += new_val;
+                current_atr
+            };
+            self.atr_ring[idx] = new_val;
+            self.rolling_sum_atr += new_val;
 
-        // Highest-high and lowest-low logic using VecDeque.
-        let win_start = self.count.saturating_sub(self.period);
-        while let Some(&front_idx) = self.dq_high.front() {
-            if front_idx < win_start {
-                self.dq_high.pop_front();
-            } else {
-                break;
+            // Highest-high and lowest-low logic using VecDeque.
+            let win_start = self.count.saturating_sub(self.period);
+            while let Some(&front_idx) = self.dq_high.front() {
+                if front_idx < win_start {
+                    self.dq_high.pop_front();
+                } else {
+                    break;
+                }
             }
-        }
-        while let Some(&back_idx) = self.dq_high.back() {
-            let actual_idx = (back_idx % self.period);
-            if self.buf_high[actual_idx] <= high {
-                self.dq_high.pop_back();
-            } else {
-                break;
+            while let Some(&back_idx) = self.dq_high.back() {
+                let actual_idx = (back_idx % self.period);
+                if self.buf_high[actual_idx] <= high {
+                    self.dq_high.pop_back();
+                } else {
+                    break;
+                }
             }
-        }
-        self.dq_high.push_back(self.count - 1);
+            self.dq_high.push_back(self.count - 1);
 
-        while let Some(&front_idx) = self.dq_low.front() {
-            if front_idx < win_start {
-                self.dq_low.pop_front();
-            } else {
-                break;
+            while let Some(&front_idx) = self.dq_low.front() {
+                if front_idx < win_start {
+                    self.dq_low.pop_front();
+                } else {
+                    break;
+                }
             }
-        }
-        while let Some(&back_idx) = self.dq_low.back() {
-            let actual_idx = (back_idx % self.period);
-            if self.buf_low[actual_idx] >= low {
-                self.dq_low.pop_back();
-            } else {
-                break;
+            while let Some(&back_idx) = self.dq_low.back() {
+                let actual_idx = (back_idx % self.period);
+                if self.buf_low[actual_idx] >= low {
+                    self.dq_low.pop_back();
+                } else {
+                    break;
+                }
             }
-        }
-        self.dq_low.push_back(self.count - 1);
+            self.dq_low.push_back(self.count - 1);
 
-        if self.count >= self.period {
-            let hh_idx = self.dq_high.front().unwrap() % self.period;
-            let ll_idx = self.dq_low.front().unwrap() % self.period;
-            let range = self.buf_high[hh_idx] - self.buf_low[ll_idx];
-            if range > 0.0 && self.rolling_sum_atr > 0.0 {
-                let logp = (self.period as f64).log10();
-                Some((self.scalar * (self.rolling_sum_atr.log10() - range.log10())) / logp)
+            if self.count >= self.period {
+                let hh_idx = self.dq_high.front().unwrap() % self.period;
+                let ll_idx = self.dq_low.front().unwrap() % self.period;
+                let range = self.buf_high[hh_idx] - self.buf_low[ll_idx];
+                if range > 0.0 && self.rolling_sum_atr > 0.0 {
+                    let logp = (self.period as f64).log10();
+                    Some((self.scalar * (self.rolling_sum_atr.log10() - range.log10())) / logp)
+                } else {
+                    Some(f64::NAN)
+                }
             } else {
-                Some(f64::NAN)
+                None
             }
-        } else {
-            None
         }
     }
 }
-
 // -- Tests --
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     fn check_chop_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -966,7 +1053,11 @@ mod tests {
         };
         let input = ChopInput::from_candles(&candles, params);
         let result = chop_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected error for zero period", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for zero period",
+            test_name
+        );
         Ok(())
     }
     fn check_chop_period_exceeds_length(
@@ -1001,8 +1092,7 @@ mod tests {
             assert!(
                 !all_nan,
                 "[{}] All CHOP values from index {} onward are NaN.",
-                test_name,
-                check_index
+                test_name, check_index
             );
         }
         Ok(())
@@ -1030,11 +1120,7 @@ mod tests {
         })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for i in 0..candles.close.len() {
-            let res = stream.update(
-                candles.high[i],
-                candles.low[i],
-                candles.close[i],
-            );
+            let res = stream.update(candles.high[i], candles.low[i], candles.close[i]);
             match res {
                 Some(chop_val) => stream_values.push(chop_val),
                 None => stream_values.push(f64::NAN),
@@ -1092,10 +1178,6 @@ mod tests {
         check_chop_streaming
     );
     #[cfg(test)]
-mod batch_tests {
-    use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::skip_if_unsupported;
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1180,10 +1262,7 @@ mod batch_tests {
             .kernel(kernel)
             .period_range(100_000, 100_001, 1);
         let result = builder.apply_slices(high, low, close);
-        assert!(
-            result.is_err(),
-            "[{test}] Expected error for huge period"
-        );
+        assert!(result.is_err(), "[{test}] Expected error for huge period");
         Ok(())
     }
 
@@ -1210,6 +1289,4 @@ mod batch_tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_param_row_lookup);
     gen_batch_tests!(check_batch_huge_period);
-}
-
 }

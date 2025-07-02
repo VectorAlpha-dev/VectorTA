@@ -23,6 +23,7 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
@@ -309,7 +310,8 @@ impl EmaStream {
             self.mean = x;
         } else if self.count > self.period {
             self.mean = self.beta.mul_add(self.mean, self.alpha * x);
-        } else {
+        
+            } else {
             self.mean = ((self.count as f64 - 1.0) * self.mean + x) / self.count as f64;
         }
 
@@ -517,9 +519,25 @@ fn ema_batch_inner(
 
     // ------------ 3. run rows in parallel or serial ------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

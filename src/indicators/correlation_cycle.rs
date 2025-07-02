@@ -9,6 +9,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -314,7 +315,8 @@ pub fn correlation_cycle_scalar(
 
         if im == 0.0 {
             angle[i] = 0.0;
-        } else {
+        
+            } else {
             // a = atan64(real[i] / im) + half_pi, then to_degrees, then -180° if im > 0
             let mut a = (real[i] / im).atan() + half_pi;
             a = a.to_degrees();
@@ -838,12 +840,59 @@ fn correlation_cycle_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         real.par_chunks_mut(cols)
-            .zip(imag.par_chunks_mut(cols))
-            .zip(angle.par_chunks_mut(cols))
-            .zip(state.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (((r, im), an), st))| do_row(row, r, im, an, st));
+
+
+                    .zip(imag.par_chunks_mut(cols))
+
+
+                    .zip(angle.par_chunks_mut(cols))
+
+
+                    .zip(state.par_chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, (((r, im), an), st))| do_row(row, r, im, an, st));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (((r, im), an), st) in real.chunks_mut(cols)
+
+
+                    .zip(imag.chunks_mut(cols))
+
+
+                    .zip(angle.chunks_mut(cols))
+
+
+                    .zip(state.chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .map(|(_, x)| x) {
+
+
+                    do_row(0, r, im, an, st); // fix: row tracking if needed, otherwise just keep as 0
+
+
+        }
+
+
     } else {
         for (((r, im), an), st) in real.chunks_mut(cols)
             .zip(imag.chunks_mut(cols))

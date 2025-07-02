@@ -22,6 +22,14 @@ module.exports = {
           DEFAULT: 'hsl(var(--destructive))',
           foreground: 'hsl(var(--destructive-foreground))',
         },
+        success: {
+          DEFAULT: 'hsl(var(--success))',
+          foreground: 'hsl(var(--success-foreground))',
+        },
+        warning: {
+          DEFAULT: 'hsl(var(--warning))',
+          foreground: 'hsl(var(--warning-foreground))',
+        },
         muted: {
           DEFAULT: 'hsl(var(--muted))',
           foreground: 'hsl(var(--muted-foreground))',
@@ -41,6 +49,11 @@ module.exports = {
         chart: {
           up: 'hsl(var(--chart-up))',
           down: 'hsl(var(--chart-down))',
+          1: 'hsl(var(--chart-1))',
+          2: 'hsl(var(--chart-2))',
+          3: 'hsl(var(--chart-3))',
+          4: 'hsl(var(--chart-4))',
+          5: 'hsl(var(--chart-5))',
         },
       },
       borderRadius: {
@@ -130,16 +143,28 @@ module.exports = {
             '--tw-prose-pre-bg': theme('colors.muted.DEFAULT'),
             '--tw-prose-th-borders': theme('colors.border'),
             '--tw-prose-td-borders': theme('colors.border'),
-            maxWidth: 'none',
+            maxWidth: '75ch',
             fontSize: theme('fontSize.base'),
-            lineHeight: theme('lineHeight.relaxed'),
+            lineHeight: '1.75',
+            'h2, h3': {
+              scrollMarginTop: '5rem', // Account for fixed header
+            },
             a: {
               color: theme('colors.primary.DEFAULT'),
               textDecoration: 'none',
               fontWeight: '500',
+              transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
               '&:hover': {
                 textDecoration: 'underline',
+                textDecorationThickness: '2px',
+                textUnderlineOffset: '2px',
               },
+            },
+            'a[href^="http"]:not([href*="localhost"]):not([href*="127.0.0.1"])::after': {
+              content: '"↗"',
+              marginLeft: '0.125rem',
+              fontSize: '0.875em',
+              opacity: '0.7',
             },
             'code::before': {
               content: '""',

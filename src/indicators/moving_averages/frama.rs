@@ -30,6 +30,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -404,7 +405,7 @@ fn frama_scalar_deque(
                 if idx < first + half {
                     d_left_max.push_max(idx, high);
                     d_left_min.push_min(idx, low);
-                } else {
+} else {
                     d_right_max.push_max(idx, high);
                     d_right_min.push_min(idx, low);
                 }
@@ -443,7 +444,8 @@ fn frama_scalar_deque(
                 if newest < (idx_out + half) {
                     d_left_max.push_max(newest, high);
                     d_left_min.push_min(newest, low);
-                } else {
+                
+                    } else {
                     d_right_max.push_max(newest, high);
                     d_right_min.push_min(newest, low);
                 }
@@ -482,7 +484,7 @@ fn frama_scalar_deque(
 
             let d_cur = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
                 ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
-            } else {
+} else {
                 d_prev
             };
             d_prev = d_cur;
@@ -546,8 +548,7 @@ pub fn frama_scalar(
     if win <= 32 {
         unsafe {
             frama_small_scan(high, low, close, win, sc, fc, first, len, &mut out)?;
-        }
-    } else {
+} else {
         frama_scalar_deque(high, low, close, win, sc, fc, first, len, &mut out)?;
     }
     Ok(FramaOutput { values: out })
@@ -620,7 +621,8 @@ unsafe fn frama_small_scan(
 
         let d_cur = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
             ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
-        } else {
+        
+            } else {
             d_prev
         };
         d_prev = d_cur;
@@ -746,7 +748,8 @@ unsafe fn frama_avx2_small<const WIN: usize>(
 
         let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
             ((n1 + n2).ln() - n3.ln()) / LN2
-        } else {
+        
+            } else {
             d_prev
         };
         d_prev = d;
@@ -866,7 +869,8 @@ unsafe fn frama_avx512_small<const WIN: usize>(
 
         let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
             ((n1 + n2).ln() - n3.ln()) / LN2 // Keep exact original formula
-        } else {
+        
+            } else {
             d_prev
         };
         d_prev = d;
@@ -1198,9 +1202,25 @@ fn frama_batch_inner(
     // 3. run every row kernel without exposing uninitialised data
     // -----------------------------------------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -1295,8 +1315,8 @@ impl FramaStream {
                 }
                 if l < min2 {
                     min2 = l;
-                }
-            } else {
+            
+                } else {
                 if h > max1 {
                     max1 = h;
                 }
@@ -1318,7 +1338,8 @@ impl FramaStream {
 
         let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
             ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
-        } else {
+        
+            } else {
             self.d_prev
         };
         self.d_prev = d;
@@ -1376,8 +1397,7 @@ pub unsafe fn frama_row_avx2(
             20 => frama_avx2_small::<20>(high, low, close, sc, fc, first, high.len(), out),
             32 => frama_avx2_small::<32>(high, low, close, sc, fc, first, high.len(), out),
             _ => frama_row_scalar(high, low, close, first, window, out, sc, fc),
-        }
-    } else {
+} else {
         frama_row_scalar(high, low, close, first, window, out, sc, fc)
     }
 }
@@ -1402,8 +1422,7 @@ pub unsafe fn frama_row_avx512(
             20 => frama_avx512_small::<20>(high, low, close, sc, fc, first, high.len(), out),
             32 => frama_avx512_small::<32>(high, low, close, sc, fc, first, high.len(), out),
             _ => frama_row_scalar(high, low, close, first, window, out, sc, fc),
-        }
-    } else {
+} else {
         frama_row_scalar(high, low, close, first, window, out, sc, fc)
     }
 }

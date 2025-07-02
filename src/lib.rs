@@ -9,7 +9,7 @@
 pub mod indicators;
 pub mod utilities;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod _rayon_one_big_stack {
     use ctor::ctor;
     use rayon::ThreadPoolBuilder;
@@ -23,12 +23,10 @@ mod _rayon_one_big_stack {
     }
 }
 
-#[cfg(feature = "wasm")]
 pub mod bindings {
-    pub mod wasm;
-}
-
-#[cfg(feature = "python")]
-pub mod bindings {
+    #[cfg(feature = "python")]
     pub mod python;
+    
+    #[cfg(feature = "wasm")]
+    pub mod wasm;
 }

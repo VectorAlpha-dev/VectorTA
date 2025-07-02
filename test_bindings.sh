@@ -57,6 +57,29 @@ FAILED=false
 
 # Python tests
 if [ "$RUN_PYTHON" = true ]; then
+    echo -e "\n${YELLOW}Setting up Python environment...${NC}"
+    
+    # Create virtual environment if it doesn't exist
+    if [ ! -d ".venv" ]; then
+        echo "Creating Python virtual environment..."
+        # Try python3 first, then python
+        if command -v python3 &> /dev/null; then
+            python3 -m venv .venv --without-pip
+            source .venv/bin/activate
+            curl https://bootstrap.pypa.io/get-pip.py | python
+        else
+            python -m venv .venv
+            source .venv/bin/activate
+        fi
+    else
+        # Activate existing virtual environment
+        source .venv/bin/activate
+    fi
+    
+    # Install dependencies
+    python -m pip install --upgrade pip
+    python -m pip install maturin pytest pytest-xdist numpy
+    
     echo -e "\n${YELLOW}Building Python bindings...${NC}"
     if maturin develop --features python --release; then
         echo -e "${GREEN}✓ Python build successful${NC}"
@@ -83,7 +106,7 @@ fi
 # WASM tests
 if [ "$RUN_WASM" = true ]; then
     echo -e "\n${YELLOW}Building WASM bindings...${NC}"
-    if wasm-pack build --features wasm --target nodejs; then
+    if wasm-pack build -- --features wasm --no-default-features; then
         echo -e "${GREEN}✓ WASM build successful${NC}"
         
         echo -e "\n${YELLOW}Running WASM tests...${NC}"

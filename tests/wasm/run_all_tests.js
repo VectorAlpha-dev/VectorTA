@@ -6,9 +6,13 @@
  *   node run_all_tests.js alma         # Run only alma tests
  *   node run_all_tests.js --verbose    # Run with verbose output
  */
-const { execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function checkWasmBuilt() {
     const pkgDir = path.join(__dirname, '../../pkg');
@@ -52,7 +56,7 @@ async function runTests() {
     
     // Build test command
     const args = process.argv.slice(2);
-    let cmd = 'node --test';
+    let cmd = 'node --experimental-wasm-modules --test';
     
     // Add verbose flag if requested
     if (args.includes('--verbose') || args.includes('-v')) {
@@ -67,17 +71,17 @@ async function runTests() {
         // Check if it's a specific test file
         const testFile = `test_${pattern}.js`;
         if (testFiles.includes(testFile)) {
-            cmd += ` ${path.join(testDir, testFile)}`;
+            cmd += ` "${path.join(testDir, testFile)}"`;
             console.log(`Running specific test file: ${testFile}`);
         } else {
             // Use as pattern
             cmd += ` --test-name-pattern="${pattern}"`;
-            cmd += ' ' + testFiles.map(f => path.join(testDir, f)).join(' ');
+            cmd += ' ' + testFiles.map(f => `"${path.join(testDir, f)}"`).join(' ');
             console.log(`Running tests matching pattern: ${pattern}`);
         }
     } else {
-        // Run all test files
-        cmd += ' ' + testFiles.map(f => path.join(testDir, f)).join(' ');
+        // Run all test files (with proper quoting for paths with spaces)
+        cmd += ' ' + testFiles.map(f => `"${path.join(testDir, f)}"`).join(' ');
     }
     
     try {

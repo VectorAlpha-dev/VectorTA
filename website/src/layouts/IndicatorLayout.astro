@@ -1,10 +1,8 @@
 ---
 import DocsLayout from './DocsLayout.astro';
-import { IndicatorChart } from '../components/charts/IndicatorChart';
+import { IndicatorWithUpload } from '../components/charts/IndicatorWithUpload';
 import RelatedIndicators from '../components/ui/RelatedIndicators.astro';
 import { PerformanceChart } from '../components/performance/PerformanceChart';
-import { PerformanceMetrics } from '../components/performance/PerformanceMetrics';
-import { ComparisonMatrix } from '../components/performance/ComparisonMatrix';
 import { CodeExport } from '../components/export/CodeExport';
 
 export interface Props {
@@ -12,9 +10,10 @@ export interface Props {
   indicatorName: string;
   description?: string;
   parameters: any[];
+  category?: string;
 }
 
-const { indicatorId, indicatorName, description, parameters } = Astro.props;
+const { indicatorId, indicatorName, description, parameters, category } = Astro.props;
 
 // Get default parameters
 const defaultParams = parameters.reduce((acc, p) => ({ 
@@ -22,22 +21,9 @@ const defaultParams = parameters.reduce((acc, p) => ({
   [p.name]: p.default 
 }), {});
 
-// For now, we'll use empty data array to avoid parsing errors
-// This will be replaced with real data when WASM is ready
-const sampleData: any[] = [];
-
-// Create a table of contents from the sections
-const sections = [
-  { id: 'overview', title: 'Overview' },
-  { id: 'interpretation', title: 'Interpretation' },
-  { id: 'calculation', title: 'Calculation' },
-  { id: 'parameters', title: 'Parameters' },
-  { id: 'returns', title: 'Returns & Output' },
-  { id: 'usage', title: 'Example Usage' },
-  { id: 'use-cases', title: 'Common Use Cases' },
-  { id: 'edge-cases', title: 'Edge Cases & Errors' },
-  { id: 'references', title: 'References' },
-];
+// Determine if this is an oscillator that needs a separate pane
+const oscillatorIndicators = ['rsi', 'stoch', 'cci', 'williams_r', 'mfi', 'ultimate_oscillator', 'macd', 'atr'];
+const isOscillator = oscillatorIndicators.includes(indicatorId) || category === 'oscillators' || category === 'momentum';
 ---
 
 <DocsLayout title={indicatorName} description={description}>
@@ -46,122 +32,61 @@ const sections = [
       <h1 class="gradient-text">{indicatorName}</h1>
     </header>
     
-    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
-      <!-- Main Content Area -->
-      <div class="lg:col-span-3 space-y-6">
+    <!-- Parameters Info at the top -->
+    {parameters && parameters.length > 0 && (
+      <div class="mb-6 p-4 bg-muted/50 rounded-lg border border-border">
+        <div class="flex flex-wrap gap-4 items-center">
+          <span class="text-sm font-medium">Parameters:</span>
+          {parameters.map((param, index) => (
+            <span class="text-sm">
+              <code class="text-xs bg-background px-2 py-1 rounded">{param.name}</code>
+              <span class="text-muted-foreground ml-1">= {param.default}</span>
+              {param.min !== undefined && param.max !== undefined && (
+                <span class="text-xs text-muted-foreground ml-1">({param.min}–{param.max})</span>
+              )}
+              {index < parameters.length - 1 && <span class="text-muted-foreground mx-2">•</span>}
+            </span>
+          ))}
+        </div>
+      </div>
+    )}
+    
+    <div class="space-y-8">
         <!-- Chart Card -->
-        <div class="card">
-          <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+        <div class="card overflow-hidden" style="max-width: 100%;">
+          <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
             Interactive Chart
           </h2>
-          <div id="chart-container" class="min-h-[400px] animate-fade-in">
-            <IndicatorChart
+          <div id="chart-container" class="animate-fade-in overflow-hidden" style="max-width: 100%;">
+            <IndicatorWithUpload
               client:only="react"
               indicatorId={indicatorId}
+              indicatorName={indicatorName}
               parameters={defaultParams}
+              isOscillator={isOscillator}
+              category={category}
             />
-          </div>
-          <div class="mt-4 p-4 bg-muted rounded-lg">
-            <p class="text-sm text-muted-foreground">
-              <strong>Note:</strong> Interactive chart will be available once WASM implementation is complete. 
-              The chart will update in real-time as you adjust parameters.
-            </p>
           </div>
         </div>
         
         <!-- Documentation Content -->
-        <div class="prose prose-lg dark:prose-invert prose-content">
+        <div class="prose prose-sm dark:prose-invert max-w-4xl mx-auto">
           <slot />
         </div>
         
         <!-- Performance Section -->
-        <div class="space-y-6 mt-8">
-          <div class="card">
-            <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
-              <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              Performance Benchmarks
-            </h2>
-            <PerformanceMetrics client:load indicatorId={indicatorId} />
-          </div>
+        <div class="mt-12 space-y-6">
+          <h2 class="text-xl font-semibold mb-6 text-center">Performance Analysis</h2>
           
           <div class="card">
-            <h3 class="text-lg font-semibold mb-4">Performance Comparison</h3>
+            <h3 class="text-base font-semibold mb-4">Performance Comparison</h3>
             <PerformanceChart client:load indicatorId={indicatorId} />
           </div>
           
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-4">Feature Comparison</h3>
-            <ComparisonMatrix client:load />
-          </div>
-          
         </div>
-      </div>
-      
-      <!-- Sidebar -->
-      <div class="lg:col-span-1 space-y-6">
-        <!-- Table of Contents -->
-        <div class="card sticky top-20">
-          <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-            On This Page
-          </h3>
-          <nav class="space-y-2">
-            {sections.map((section) => (
-              <a 
-                href={`#${section.id}`} 
-                class="block text-sm text-muted-foreground hover:text-foreground transition-colors"
-              >
-                {section.title}
-              </a>
-            ))}
-          </nav>
-        </div>
-        
-        <!-- Parameters Card -->
-        <div class="card">
-          <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
-            <svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-            </svg>
-            Quick Reference
-          </h3>
-          <div class="space-y-4">
-            <div>
-              <h4 class="font-medium text-sm mb-2">Parameters</h4>
-              <div class="space-y-2">
-                {parameters.map((param) => (
-                  <div class="text-sm">
-                    <code class="text-xs bg-muted px-1 py-0.5 rounded">{param.name}</code>
-                    <span class="text-muted-foreground"> = {param.default}</span>
-                    {param.min !== undefined && param.max !== undefined ? (
-                      <div class="text-xs text-muted-foreground mt-0.5">
-                        Range: {param.min}–{param.max}
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            <div class="border-t border-border pt-4">
-              <h4 class="font-medium text-sm mb-2">Category</h4>
-              <p class="text-sm text-muted-foreground">Technical Indicator</p>
-            </div>
-            
-            <div class="border-t border-border pt-4">
-              <h4 class="font-medium text-sm mb-2">Complexity</h4>
-              <p class="text-sm text-muted-foreground">O(n) - Linear time</p>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
   <!-- Related Indicators -->
@@ -183,12 +108,6 @@ const sections = [
     @apply my-6;
   }
   
-  /* Responsive adjustments */
-  @media (max-width: 1024px) {
-    .sticky {
-      position: static;
-    }
-  }
   
   /* Smooth scroll for anchor links */
   html {

@@ -4,6 +4,9 @@ import Sidebar from "../components/layout/Sidebar.astro";
 import Footer from "../components/layout/Footer.astro";
 import SkipToContent from "../components/ui/SkipToContent.astro";
 import HeaderScrollBehavior from "../components/layout/HeaderScrollBehavior.astro";
+import { MobileNav } from "../components/layout/MobileNav";
+import { ThemeCustomizer } from "../components/ui/ThemeCustomizer";
+import SimpleAnalytics from "../components/analytics/SimpleAnalytics.astro";
 import "../styles/global.css";
 
 export interface Props {
@@ -35,13 +38,30 @@ const {
     <script is:inline>
       // This runs immediately to prevent theme flash
       (function () {
-        const stored = localStorage.getItem("theme");
-        const theme =
-          stored ||
-          (window.matchMedia("(prefers-color-scheme: dark)").matches
-            ? "dark"
-            : "light");
+        // Migrate from old theme storage if needed
+        const oldTheme = localStorage.getItem("theme");
+        if (oldTheme && !localStorage.getItem("theme-preference")) {
+          // User has old theme setting, migrate to new system
+          localStorage.setItem("theme-preference", oldTheme);
+          localStorage.removeItem("theme");
+        }
+        
+        // Get theme preference (system/light/dark)
+        const preference = localStorage.getItem("theme-preference") || "system";
+        
+        // Get actual theme to apply
+        let theme;
+        if (preference === "system") {
+          // Use system preference
+          theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        } else {
+          // Use explicit preference
+          theme = preference;
+        }
+        
+        // Apply theme
         document.documentElement.classList.add(theme);
+        document.documentElement.setAttribute("data-theme-preference", preference);
 
         // Update theme color meta tag
         const themeColor = theme === "dark" ? "#171717" : "#3b82f6";
@@ -64,27 +84,20 @@ const {
         });
       }
     </script>
+    
+    <!-- Analytics -->
+    <SimpleAnalytics />
   </head>
   <body class="bg-background text-foreground min-h-screen flex flex-col">
     <SkipToContent />
     <Header />
     <HeaderScrollBehavior />
 
-    <!-- Mobile menu backdrop -->
-    <div
-      id="mobile-backdrop"
-      class="fixed inset-0 bg-black/50 z-40 lg:hidden hidden"
-      aria-hidden="true"
-    >
-    </div>
-
     <div class="flex-1 flex flex-col">
       {
         includeSidebar ? (
           <div class="flex flex-1">
-            <div class="hidden lg:block">
-              <Sidebar />
-            </div>
+            <Sidebar />
             <div class="flex-1 lg:ml-64 min-w-0 flex flex-col">
               <main id="main-content" class="flex-1" role="main">
                 <div class="px-4 sm:px-6 py-6 sm:py-8">
@@ -105,75 +118,65 @@ const {
       }
     </div>
 
-    <script>
-      // Theme management (already handled in head, this is for runtime changes)
-      const getPreferredTheme = () => {
-        const stored = localStorage.getItem("theme");
-        if (stored) return stored;
+    {/* Mobile Navigation - only show when sidebar is included */}
+    {includeSidebar && <MobileNav client:load currentPath={Astro.url.pathname} />}
 
-        // Check system preference
-        if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-          return "dark";
+    {/* Theme Customizer */}
+    <ThemeCustomizer client:idle position="right" />
+
+    <script>
+      // Apply theme based on preference
+      const applyTheme = () => {
+        const preference = localStorage.getItem("theme-preference") || "system";
+        let theme;
+        
+        if (preference === "system") {
+          // Use system preference
+          theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        } else {
+          // Use explicit preference
+          theme = preference;
         }
-        return "light";
+        
+        // Update classes
+        document.documentElement.classList.remove("light", "dark");
+        document.documentElement.classList.add(theme);
+        
+        // Update theme color meta tag
+        const themeColor = theme === "dark" ? "#171717" : "#3b82f6";
+        const metaTheme = document.querySelector('meta[name="theme-color"]');
+        if (metaTheme) metaTheme.setAttribute("content", themeColor);
+        
+        // Dispatch event for other components
+        window.dispatchEvent(new CustomEvent("theme-applied", {
+          detail: { theme, preference }
+        }));
       };
 
-      const theme = getPreferredTheme();
-      document.documentElement.classList.toggle("dark", theme === "dark");
-
-      // Listen for theme changes
+      // Listen for preference changes
+      window.addEventListener("theme-preference-change", (e) => {
+        applyTheme();
+      });
+      
+      // Listen for system theme changes when in system mode
+      const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      systemThemeQuery.addEventListener("change", () => {
+        const preference = localStorage.getItem("theme-preference") || "system";
+        if (preference === "system") {
+          applyTheme();
+        }
+      });
+      
+      // Legacy support: Listen for old theme-change events
       window.addEventListener("theme-change", (e) => {
         const newTheme = (e as CustomEvent).detail.theme;
-        document.documentElement.classList.toggle("dark", newTheme === "dark");
-        localStorage.setItem("theme", newTheme);
+        // Convert to new preference system
+        localStorage.setItem("theme-preference", newTheme);
+        localStorage.removeItem("theme"); // Clean up old storage
+        applyTheme();
       });
 
-      // Mobile menu toggle test
-      const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
-      const mobileSidebar = document.getElementById("sidebar");
-      const mobileBackdrop = document.getElementById("mobile-backdrop");
-
-      function toggleMobileMenu() {
-        const isOpen = mobileSidebar?.classList.contains("translate-x-0");
-
-        if (isOpen) {
-          mobileSidebar?.classList.remove("translate-x-0");
-          mobileSidebar?.classList.add("-translate-x-full");
-          mobileBackdrop?.classList.add("hidden");
-          document.body.style.overflow = "";
-        } else {
-          mobileSidebar?.classList.add("translate-x-0");
-          mobileSidebar?.classList.remove("-translate-x-full");
-          mobileBackdrop?.classList.remove("hidden");
-          document.body.style.overflow = "hidden";
-        }
-      }
-
-      mobileMenuToggle?.addEventListener("click", toggleMobileMenu);
-      mobileBackdrop?.addEventListener("click", toggleMobileMenu);
-
-      // Close mobile menu on resize to desktop
-      let lastWidth = window.innerWidth;
-      window.addEventListener("resize", () => {
-        if (window.innerWidth >= 1024 && lastWidth < 1024) {
-          mobileSidebar?.classList.remove("translate-x-0");
-          mobileSidebar?.classList.add("-translate-x-full");
-          mobileBackdrop?.classList.add("hidden");
-          document.body.style.overflow = "";
-        }
-        lastWidth = window.innerWidth;
-      });
     </script>
   </body>
 </html>
 
-<style>
-  /* Ensure smooth transitions */
-  #sidebar {
-    transition: transform 0.3s ease-in-out;
-  }
-
-  #mobile-backdrop {
-    transition: opacity 0.3s ease-in-out;
-  }
-</style>

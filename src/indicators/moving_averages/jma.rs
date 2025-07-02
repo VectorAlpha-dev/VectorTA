@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -229,7 +230,8 @@ pub fn jma_scalar(
         0.5
     } else if phase > 100.0 {
         2.5
-    } else {
+    
+        } else {
         phase / 100.0 + 1.5
     };
 
@@ -270,6 +272,7 @@ pub fn jma_scalar(
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn jma_avx2(
@@ -287,7 +290,8 @@ pub unsafe fn jma_avx2(
         0.5
     } else if phase > 100.0 {
         2.5
-    } else {
+    
+        } else {
         phase / 100.0 + 1.5
     };
 
@@ -331,7 +335,8 @@ fn jma_consts(period: usize, phase: f64, power: u32) -> (f64, f64, f64, f64, f64
         0.5
     } else if phase > 100.0 {
         2.5
-    } else {
+    
+        } else {
         phase / 100.0 + 1.5
     };
 
@@ -447,7 +452,8 @@ impl JmaStream {
             0.5
         } else if phase > 100.0 {
             2.5
-        } else {
+        
+            } else {
             (phase / 100.0) + 1.5
         };
         let beta = {
@@ -695,9 +701,25 @@ fn jma_batch_inner(
 
     // ---------- 3. run every row ----------------------------------------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

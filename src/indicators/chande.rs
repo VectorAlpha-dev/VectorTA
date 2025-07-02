@@ -24,6 +24,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -64,7 +65,10 @@ pub struct ChandeInput<'a> {
 impl<'a> ChandeInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, p: ChandeParams) -> Self {
-        Self { data: ChandeData::Candles { candles: c }, params: p }
+        Self {
+            data: ChandeData::Candles { candles: c },
+            params: p,
+        }
     }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
@@ -94,31 +98,58 @@ pub struct ChandeBuilder {
 
 impl Default for ChandeBuilder {
     fn default() -> Self {
-        Self { period: None, mult: None, direction: None, kernel: Kernel::Auto }
+        Self {
+            period: None,
+            mult: None,
+            direction: None,
+            kernel: Kernel::Auto,
+        }
     }
 }
 impl ChandeBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
-    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
+    pub fn period(mut self, n: usize) -> Self {
+        self.period = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn mult(mut self, m: f64) -> Self { self.mult = Some(m); self }
+    pub fn mult(mut self, m: f64) -> Self {
+        self.mult = Some(m);
+        self
+    }
     #[inline(always)]
-    pub fn direction<S: Into<String>>(mut self, d: S) -> Self { self.direction = Some(d.into()); self }
+    pub fn direction<S: Into<String>>(mut self, d: S) -> Self {
+        self.direction = Some(d.into());
+        self
+    }
     #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
 
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<ChandeOutput, ChandeError> {
-        let p = ChandeParams { period: self.period, mult: self.mult, direction: self.direction };
+        let p = ChandeParams {
+            period: self.period,
+            mult: self.mult,
+            direction: self.direction,
+        };
         let i = ChandeInput::from_candles(c, p);
         chande_with_kernel(&i, self.kernel)
     }
 
     #[inline(always)]
     pub fn into_stream(self) -> Result<ChandeStream, ChandeError> {
-        let p = ChandeParams { period: self.period, mult: self.mult, direction: self.direction };
+        let p = ChandeParams {
+            period: self.period,
+            mult: self.mult,
+            direction: self.direction,
+        };
         ChandeStream::try_new(p)
     }
 }
@@ -140,14 +171,20 @@ pub fn chande(input: &ChandeInput) -> Result<ChandeOutput, ChandeError> {
     chande_with_kernel(input, Kernel::Auto)
 }
 
-pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeOutput, ChandeError> {
+pub fn chande_with_kernel(
+    input: &ChandeInput,
+    kernel: Kernel,
+) -> Result<ChandeOutput, ChandeError> {
     let ChandeData::Candles { candles } = &input.data;
     let high = source_type(candles, "high");
     let low = source_type(candles, "low");
     let close = source_type(candles, "close");
     let len = high.len();
 
-    let first = close.iter().position(|&x| !x.is_nan()).ok_or(ChandeError::AllValuesNaN)?;
+    let first = close
+        .iter()
+        .position(|&x| !x.is_nan())
+        .ok_or(ChandeError::AllValuesNaN)?;
     let period = input.get_period();
     let mult = input.get_mult();
     let dir = input.get_direction().to_lowercase();
@@ -155,10 +192,16 @@ pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeO
         return Err(ChandeError::InvalidDirection { direction: dir });
     }
     if period == 0 || period > len {
-        return Err(ChandeError::InvalidPeriod { period, data_len: len });
+        return Err(ChandeError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if len - first < period {
-        return Err(ChandeError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(ChandeError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
     }
 
     let chosen = match kernel {
@@ -169,11 +212,17 @@ pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeO
     let mut out = vec![f64::NAN; len];
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => chande_scalar(high, low, close, period, mult, &dir, first, &mut out),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                chande_scalar(high, low, close, period, mult, &dir, first, &mut out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => chande_avx2(high, low, close, period, mult, &dir, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                chande_avx2(high, low, close, period, mult, &dir, first, &mut out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => chande_avx512(high, low, close, period, mult, &dir, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                chande_avx512(high, low, close, period, mult, &dir, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }
@@ -182,7 +231,14 @@ pub fn chande_with_kernel(input: &ChandeInput, kernel: Kernel) -> Result<ChandeO
 
 #[inline]
 pub fn chande_scalar(
-    high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, dir: &str, first: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
 ) {
     let len = high.len();
     let alpha = 1.0 / period as f64;
@@ -215,13 +271,17 @@ pub fn chande_scalar(
                 if dir == "long" {
                     let mut m = f64::MIN;
                     for j in start..=i {
-                        if high[j] > m { m = high[j]; }
+                        if high[j] > m {
+                            m = high[j];
+                        }
                     }
                     out[i] = m - a * mult;
                 } else {
                     let mut m = f64::MAX;
                     for j in start..=i {
-                        if low[j] < m { m = low[j]; }
+                        if low[j] < m {
+                            m = low[j];
+                        }
                     }
                     out[i] = m + a * mult;
                 }
@@ -233,7 +293,14 @@ pub fn chande_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn chande_avx2(
-    high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, dir: &str, first: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
 ) {
     chande_scalar(high, low, close, period, mult, dir, first, out)
 }
@@ -241,7 +308,14 @@ pub fn chande_avx2(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn chande_avx512(
-    high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, dir: &str, first: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
 ) {
     if period <= 32 {
         unsafe { chande_avx512_short(high, low, close, period, mult, dir, first, out) }
@@ -253,7 +327,14 @@ pub fn chande_avx512(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn chande_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, dir: &str, first: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
 ) {
     chande_scalar(high, low, close, period, mult, dir, first, out)
 }
@@ -261,7 +342,14 @@ pub unsafe fn chande_avx512_short(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn chande_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], period: usize, mult: f64, dir: &str, first: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    dir: &str,
+    first: usize,
+    out: &mut [f64],
 ) {
     chande_scalar(high, low, close, period, mult, dir, first, out)
 }
@@ -285,7 +373,10 @@ impl ChandeStream {
         let mult = params.mult.unwrap_or(3.0);
         let direction = params.direction.unwrap_or_else(|| "long".into());
         if period == 0 {
-            return Err(ChandeError::InvalidPeriod { period, data_len: 0 });
+            return Err(ChandeError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if direction != "long" && direction != "short" {
             return Err(ChandeError::InvalidDirection { direction });
@@ -339,8 +430,12 @@ impl ChandeStream {
         self.atr += alpha * (tr - self.atr);
         self.high_buf.push(high);
         self.low_buf.push(low);
-        if self.high_buf.len() > self.period { self.high_buf.remove(0); }
-        if self.low_buf.len() > self.period { self.low_buf.remove(0); }
+        if self.high_buf.len() > self.period {
+            self.high_buf.remove(0);
+        }
+        if self.low_buf.len() > self.period {
+            self.low_buf.remove(0);
+        }
         self.close_prev = close;
         if self.filled {
             if self.direction == "long" {
@@ -380,22 +475,36 @@ pub struct ChandeBatchBuilder {
 
 impl ChandeBatchBuilder {
     pub fn new() -> Self {
-        Self { range: ChandeBatchRange::default(), direction: "long".into(), kernel: Kernel::Auto }
+        Self {
+            range: ChandeBatchRange::default(),
+            direction: "long".into(),
+            kernel: Kernel::Auto,
+        }
     }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    pub fn direction<S: Into<String>>(mut self, d: S) -> Self { self.direction = d.into(); self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
+    pub fn direction<S: Into<String>>(mut self, d: S) -> Self {
+        self.direction = d.into();
+        self
+    }
 
     pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.period = (start, end, step); self
+        self.range.period = (start, end, step);
+        self
     }
     pub fn period_static(mut self, p: usize) -> Self {
-        self.range.period = (p, p, 0); self
+        self.range.period = (p, p, 0);
+        self
     }
     pub fn mult_range(mut self, start: f64, end: f64, step: f64) -> Self {
-        self.range.mult = (start, end, step); self
+        self.range.mult = (start, end, step);
+        self
     }
     pub fn mult_static(mut self, m: f64) -> Self {
-        self.range.mult = (m, m, 0.0); self
+        self.range.mult = (m, m, 0.0);
+        self
     }
 
     pub fn apply_candles(self, c: &Candles) -> Result<ChandeBatchOutput, ChandeError> {
@@ -417,7 +526,12 @@ pub fn chande_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(ChandeError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(ChandeError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -437,11 +551,12 @@ pub struct ChandeBatchOutput {
 }
 impl ChandeBatchOutput {
     pub fn row_for_params(&self, p: &ChandeParams) -> Option<usize> {
-        self.combos.iter().position(|c|
-            c.period.unwrap_or(22) == p.period.unwrap_or(22) &&
-            (c.mult.unwrap_or(3.0) - p.mult.unwrap_or(3.0)).abs() < 1e-12 &&
-            c.direction.as_deref().unwrap_or("long") == p.direction.as_deref().unwrap_or("long")
-        )
+        self.combos.iter().position(|c| {
+            c.period.unwrap_or(22) == p.period.unwrap_or(22)
+                && (c.mult.unwrap_or(3.0) - p.mult.unwrap_or(3.0)).abs() < 1e-12
+                && c.direction.as_deref().unwrap_or("long")
+                    == p.direction.as_deref().unwrap_or("long")
+        })
     }
     pub fn values_for(&self, p: &ChandeParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -454,11 +569,15 @@ impl ChandeBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Vec<ChandeParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
         let mut v = Vec::new();
         let mut x = start;
         while x <= end + 1e-12 {
@@ -484,30 +603,55 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Vec<ChandeParams> {
 
 #[inline(always)]
 pub fn chande_batch_slice(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &ChandeBatchRange, dir: &str, kern: Kernel
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &ChandeBatchRange,
+    dir: &str,
+    kern: Kernel,
 ) -> Result<ChandeBatchOutput, ChandeError> {
     chande_batch_inner(high, low, close, sweep, dir, kern, false)
 }
 
 #[inline(always)]
 pub fn chande_batch_par_slice(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &ChandeBatchRange, dir: &str, kern: Kernel
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &ChandeBatchRange,
+    dir: &str,
+    kern: Kernel,
 ) -> Result<ChandeBatchOutput, ChandeError> {
     chande_batch_inner(high, low, close, sweep, dir, kern, true)
 }
 
 #[inline(always)]
 fn chande_batch_inner(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &ChandeBatchRange, dir: &str, kern: Kernel, parallel: bool
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &ChandeBatchRange,
+    dir: &str,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<ChandeBatchOutput, ChandeError> {
     let combos = expand_grid(sweep, dir);
     if combos.is_empty() {
-        return Err(ChandeError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(ChandeError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = close.iter().position(|&x| !x.is_nan()).ok_or(ChandeError::AllValuesNaN)?;
+    let first = close
+        .iter()
+        .position(|&x| !x.is_nan())
+        .ok_or(ChandeError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if high.len() - first < max_p {
-        return Err(ChandeError::NotEnoughValidData { needed: max_p, valid: high.len() - first });
+        return Err(ChandeError::NotEnoughValidData {
+            needed: max_p,
+            valid: high.len() - first,
+        });
     }
     let rows = combos.len();
     let cols = high.len();
@@ -517,39 +661,86 @@ fn chande_batch_inner(
         let mult = combos[row].mult.unwrap();
         let direction = combos[row].direction.as_deref().unwrap();
         match kern {
-            Kernel::Scalar => chande_row_scalar(high, low, close, first, period, mult, direction, out_row),
+            Kernel::Scalar => {
+                chande_row_scalar(high, low, close, first, period, mult, direction, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => chande_row_avx2(high, low, close, first, period, mult, direction, out_row),
+            Kernel::Avx2 => {
+                chande_row_avx2(high, low, close, first, period, mult, direction, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => chande_row_avx512(high, low, close, first, period, mult, direction, out_row),
+            Kernel::Avx512 => {
+                chande_row_avx512(high, low, close, first, period, mult, direction, out_row)
+            }
             _ => unreachable!(),
         }
     };
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice); }
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
     }
-    Ok(ChandeBatchOutput { values, combos, rows, cols })
+    Ok(ChandeBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
 unsafe fn chande_row_scalar(
-    high: &[f64], low: &[f64], close: &[f64], first: usize, period: usize, mult: f64, dir: &str, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    mult: f64,
+    dir: &str,
+    out: &mut [f64],
 ) {
     chande_scalar(high, low, close, period, mult, dir, first, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn chande_row_avx2(
-    high: &[f64], low: &[f64], close: &[f64], first: usize, period: usize, mult: f64, dir: &str, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    mult: f64,
+    dir: &str,
+    out: &mut [f64],
 ) {
     chande_row_scalar(high, low, close, first, period, mult, dir, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn chande_row_avx512(
-    high: &[f64], low: &[f64], close: &[f64], first: usize, period: usize, mult: f64, dir: &str, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    mult: f64,
+    dir: &str,
+    out: &mut [f64],
 ) {
     if period <= 32 {
         chande_row_avx512_short(high, low, close, first, period, mult, dir, out)
@@ -560,24 +751,41 @@ unsafe fn chande_row_avx512(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn chande_row_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], first: usize, period: usize, mult: f64, dir: &str, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    mult: f64,
+    dir: &str,
+    out: &mut [f64],
 ) {
     chande_row_scalar(high, low, close, first, period, mult, dir, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn chande_row_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], first: usize, period: usize, mult: f64, dir: &str, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    period: usize,
+    mult: f64,
+    dir: &str,
+    out: &mut [f64],
 ) {
     chande_row_scalar(high, low, close, first, period, mult, dir, out)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_chande_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -594,7 +802,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_chande_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -626,7 +837,10 @@ mod tests {
             assert!(
                 (val - exp).abs() < 1e-4,
                 "[{}] Chande Exits mismatch at index {}: expected {}, got {}",
-                test_name, i, exp, val
+                test_name,
+                i,
+                exp,
+                val
             );
         }
 
@@ -645,7 +859,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_chande_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -658,11 +875,18 @@ mod tests {
         let input = ChandeInput::from_candles(&candles, params);
 
         let res = chande_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Chande should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Chande should fail with zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_chande_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -675,11 +899,18 @@ mod tests {
         let input = ChandeInput::from_candles(&candles, params);
 
         let res = chande_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Chande should fail with period exceeding length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Chande should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_chande_bad_direction(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_bad_direction(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -692,11 +923,18 @@ mod tests {
         let input = ChandeInput::from_candles(&candles, params);
 
         let res = chande_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Chande should fail with bad direction", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Chande should fail with bad direction",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_chande_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -713,14 +951,19 @@ mod tests {
             for i in 240..result.values.len() {
                 assert!(
                     !result.values[i].is_nan(),
-                    "[{}] Unexpected NaN at index {}", test_name, i
+                    "[{}] Unexpected NaN at index {}",
+                    test_name,
+                    i
                 );
             }
         }
         Ok(())
     }
 
-    fn check_chande_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_chande_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -750,7 +993,11 @@ mod tests {
             assert!(
                 diff < 1e-8,
                 "[{}] Chande streaming mismatch at idx {}: batch={}, stream={}, diff={}",
-                test_name, i, b, s, diff
+                test_name,
+                i,
+                b,
+                s,
+                diff
             );
         }
         Ok(())
@@ -784,13 +1031,14 @@ mod tests {
         check_chande_streaming
     );
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        let output = ChandeBatchBuilder::new()
-            .kernel(kernel)
-            .apply_candles(&c)?;
+        let output = ChandeBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
 
         let def = ChandeParams::default();
         let row = output.values_for(&def).expect("default row missing");

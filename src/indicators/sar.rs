@@ -25,6 +25,7 @@ use crate::utilities::enums::Kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -292,7 +293,8 @@ pub fn sar_scalar(
         trend_up = true;
         sar = low[i0];
         ep = high[i1];
-    } else {
+    
+        } else {
         trend_up = false;
         sar = high[i0];
         ep = low[i1];
@@ -309,7 +311,7 @@ pub fn sar_scalar(
                 next_sar = ep;
                 ep = low[i];
                 acc = acceleration;
-            } else {
+} else {
                 if high[i] > ep {
                     ep = high[i];
                     acc = (acc + acceleration).min(maximum);
@@ -321,15 +323,15 @@ pub fn sar_scalar(
                 }
                 if pre_prev < len {
                     next_sar = next_sar.min(low[pre_prev]);
-                }
-            }
-        } else {
+        
+            } else {
             if high[i] > next_sar {
                 trend_up = true;
                 next_sar = ep;
                 ep = high[i];
                 acc = acceleration;
-            } else {
+            
+                } else {
                 if low[i] < ep {
                     ep = low[i];
                     acc = (acc + acceleration).min(maximum);
@@ -451,7 +453,7 @@ impl SarStream {
                 let prev_low = low;
                 let (trend_up, sar, ep) = if high > prev_high {
                     (true, prev_low, high)
-                } else {
+} else {
                     (false, prev_high, low)
                 };
                 *st = StreamState {
@@ -472,7 +474,7 @@ impl SarStream {
                         next_sar = st.ep;
                         st.ep = low;
                         st.acc = self.acceleration;
-                    } else {
+} else {
                         if high > st.ep {
                             st.ep = high;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -482,15 +484,15 @@ impl SarStream {
                         }
                         if let Some(p2) = st.prev2 {
                             next_sar = next_sar.min(p2);
-                        }
-                    }
-                } else {
+                
+                    } else {
                     if high > next_sar {
                         st.trend_up = true;
                         next_sar = st.ep;
                         st.ep = high;
                         st.acc = self.acceleration;
-                    } else {
+                    
+                        } else {
                         if low < st.ep {
                             st.ep = low;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -713,10 +715,38 @@ fn sar_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -768,7 +798,8 @@ pub unsafe fn sar_row_avx512(
 ) {
     if high.len() <= 32 {
         sar_row_avx512_short(high, low, first, acceleration, maximum, out);
-    } else {
+    
+        } else {
         sar_row_avx512_long(high, low, first, acceleration, maximum, out);
     }
 }

@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -254,23 +255,27 @@ pub fn lrsi_scalar(
         let mut cd = 0.0;
         if l0[i] >= l1[i] {
             cu += l0[i] - l1[i];
-        } else {
+        
+            } else {
             cd += l1[i] - l0[i];
         }
         if l1[i] >= l2[i] {
             cu += l1[i] - l2[i];
-        } else {
+        
+            } else {
             cd += l2[i] - l1[i];
         }
         if l2[i] >= l3[i] {
             cu += l2[i] - l3[i];
-        } else {
+        
+            } else {
             cd += l3[i] - l2[i];
         }
 
         out[i] = if (cu + cd).abs() < f64::EPSILON {
             0.0
-        } else {
+        
+            } else {
             cu / (cu + cd)
         };
     }
@@ -378,17 +383,20 @@ impl LrsiStream {
         let mut cd = 0.0;
         if l0 >= l1 {
             cu += l0 - l1;
-        } else {
+        
+            } else {
             cd += l1 - l0;
         }
         if l1 >= l2 {
             cu += l1 - l2;
-        } else {
+        
+            } else {
             cd += l2 - l1;
         }
         if l2 >= l3 {
             cu += l2 - l3;
-        } else {
+        
+            } else {
             cd += l3 - l2;
         }
         Some(if (cu + cd).abs() < f64::EPSILON {
@@ -586,10 +594,38 @@ fn lrsi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

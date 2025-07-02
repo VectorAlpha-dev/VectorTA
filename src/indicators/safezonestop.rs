@@ -28,6 +28,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -340,9 +341,8 @@ pub unsafe fn safezonestop_scalar(
         for i in 0..len {
             if !minus_dm_smooth[i].is_nan() && !last_low[i].is_nan() {
                 intermediate[i] = last_low[i] - mult * minus_dm_smooth[i];
-            }
-        }
-    } else {
+    
+        } else {
         for i in 0..len {
             if !plus_dm_smooth[i].is_nan() && !last_high[i].is_nan() {
                 intermediate[i] = last_high[i] + mult * plus_dm_smooth[i];
@@ -396,7 +396,8 @@ pub unsafe fn safezonestop_avx512(
 ) {
     if period <= 32 {
         safezonestop_avx512_short(high, low, period, mult, max_lookback, direction, out);
-    } else {
+    
+        } else {
         safezonestop_avx512_long(high, low, period, mult, max_lookback, direction, out);
     }
 }
@@ -712,10 +713,38 @@ fn safezonestop_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -765,7 +794,8 @@ pub unsafe fn safezonestop_row_avx512(
 ) {
     if period <= 32 {
         safezonestop_row_avx512_short(high, low, period, mult, max_lookback, direction, out)
-    } else {
+    
+        } else {
         safezonestop_row_avx512_long(high, low, period, mult, max_lookback, direction, out)
     }
 }

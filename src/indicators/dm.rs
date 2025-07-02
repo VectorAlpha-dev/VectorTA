@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -420,7 +421,8 @@ fn expand_grid(r: &DmBatchRange) -> Vec<DmParams> {
     let (start, end, step) = r.period;
     let periods = if step == 0 || start == end {
         vec![start]
-    } else {
+    
+        } else {
         (start..=end).step_by(step).collect()
     };
     periods.into_iter().map(|p| DmParams { period: Some(p) }).collect()
@@ -504,8 +506,32 @@ fn dm_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         plus.par_chunks_mut(cols).zip(minus.par_chunks_mut(cols)).enumerate()
-            .for_each(|(row, (plus_row, minus_row))| do_row(row, plus_row, minus_row));
+
+
+                    .for_each(|(row, (plus_row, minus_row))| do_row(row, plus_row, minus_row));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (plus_row, minus_row)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, plus_row, minus_row);
+
+
+        }
+
+
     } else {
         for (row, (plus_row, minus_row)) in plus.chunks_mut(cols).zip(minus.chunks_mut(cols)).enumerate() {
             do_row(row, plus_row, minus_row);

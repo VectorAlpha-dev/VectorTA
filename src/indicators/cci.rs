@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -180,15 +181,24 @@ pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, Cc
         CciData::Candles { candles, source } => source_type(candles, source),
         CciData::Slice(sl) => sl,
     };
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CciError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CciError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(CciError::InvalidPeriod { period, data_len: len });
+        return Err(CciError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
-        return Err(CciError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(CciError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
     }
 
     let chosen = match kernel {
@@ -199,17 +209,11 @@ pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, Cc
     let mut out = vec![f64::NAN; len];
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                cci_scalar(data, period, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => cci_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                cci_avx2(data, period, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => cci_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                cci_avx512(data, period, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -257,12 +261,7 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cci_avx512(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub fn cci_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     if period <= 32 {
         unsafe { cci_avx512_short(data, period, first_valid, out) }
     } else {
@@ -272,34 +271,19 @@ pub fn cci_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cci_avx2(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub fn cci_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     cci_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cci_avx512_short(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cci_avx512_short(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     cci_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cci_avx512_long(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn cci_avx512_long(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     cci_scalar(data, period, first_valid, out)
 }
 
@@ -411,20 +395,20 @@ impl CciStream {
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
             self.filled = true;
-        }
-        self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
-        if !self.filled {
-            return None;
-        }
-        self.last_sma = self.sum / self.period as f64;
-        let mut sum_abs = 0.0;
-        for &v in &self.buffer {
-            sum_abs += (v - self.last_sma).abs();
-        }
-        if sum_abs == 0.0 {
-            Some(0.0)
-        } else {
-            Some((value - self.last_sma) / (0.015 * (sum_abs / self.period as f64)))
+            self.sum = self.sum - if old.is_nan() { 0.0 } else { old } + value;
+            if !self.filled {
+                return None;
+            }
+            self.last_sma = self.sum / self.period as f64;
+            let mut sum_abs = 0.0;
+            for &v in &self.buffer {
+                sum_abs += (v - self.last_sma).abs();
+            }
+            if sum_abs == 0.0 {
+                Some(0.0)
+            } else {
+                Some((value - self.last_sma) / (0.015 * (sum_abs / self.period as f64)))
+            }
         }
     }
 }
@@ -494,7 +478,9 @@ pub struct CciBatchOutput {
 }
 impl CciBatchOutput {
     pub fn row_for_params(&self, p: &CciParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
     }
     pub fn values_for(&self, p: &CciParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -515,9 +501,7 @@ fn expand_grid(r: &CciBatchRange) -> Vec<CciParams> {
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
-        out.push(CciParams {
-            period: Some(p),
-        });
+        out.push(CciParams { period: Some(p) });
     }
     out
 }
@@ -577,7 +561,10 @@ fn cci_batch_inner(
             data_len: 0,
         });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(CciError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CciError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
         return Err(CciError::NotEnoughValidData {
@@ -591,19 +578,33 @@ fn cci_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            Kernel::Scalar => cci_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            Kernel::Scalar => {
+                cci_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => cci_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => cci_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            Kernel::Avx512 => {
+                cci_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row)
+            }
             _ => unreachable!(),
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -622,8 +623,8 @@ fn cci_batch_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
 
     fn check_cci_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -736,10 +737,7 @@ mod tests {
         Ok(())
     }
 
-    fn check_cci_very_small_dataset(
-        test_name: &str,
-        kernel: Kernel,
-    ) -> Result<(), Box<dyn Error>> {
+    fn check_cci_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = CciParams { period: Some(9) };

@@ -30,6 +30,7 @@ use crate::indicators::utility_functions::{max_rolling, min_rolling};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -319,7 +320,8 @@ pub fn stoch_scalar(
         let denom = hh[i] - ll[i];
         if denom.abs() < f64::EPSILON {
             out[i] = 50.0;
-        } else {
+        
+            } else {
             out[i] = 100.0 * (close[i] - ll[i]) / denom;
         }
     }
@@ -574,10 +576,27 @@ fn stoch_batch_inner(
         outd.copy_from_slice(&d);
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         k_mat.par_chunks_mut(cols)
-            .zip(d_mat.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (k, d))| do_row(row, k, d));
+
+                    .zip(d_mat.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, (k, d))| do_row(row, k, d));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (k, d)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
+
+                    do_row(row, k, d);
+
+        }
+
     } else {
         for (row, (k, d)) in k_mat.chunks_mut(cols).zip(d_mat.chunks_mut(cols)).enumerate() {
             do_row(row, k, d);
@@ -595,7 +614,8 @@ unsafe fn stoch_row_scalar(
         let denom = hh[i] - ll[i];
         if denom.abs() < f64::EPSILON {
             out[i] = 50.0;
-        } else {
+        
+            } else {
             out[i] = 100.0 * (close[i] - ll[i]) / denom;
         }
     }
@@ -616,7 +636,8 @@ unsafe fn stoch_row_avx512(
 ) {
     if fastk_period <= 32 {
         stoch_row_avx512_short(high, low, close, hh, ll, fastk_period, first, out)
-    } else {
+    
+        } else {
         stoch_row_avx512_long(high, low, close, hh, ll, fastk_period, first, out)
     }
 }

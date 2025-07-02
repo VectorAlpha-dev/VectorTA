@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -226,7 +227,8 @@ pub fn er_avx512(
     unsafe {
         if period <= 32 {
             er_avx512_short(data, period, first, out);
-        } else {
+        
+            } else {
             er_avx512_long(data, period, first, out);
         }
     }
@@ -311,7 +313,8 @@ impl ErStream {
         let delta = (self.buffer[end] - self.buffer[start]).abs();
         if sum > 0.0 {
             Some(delta / sum)
-        } else {
+        
+            } else {
             Some(f64::NAN)
         }
     }
@@ -484,10 +487,27 @@ fn er_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .par_chunks_mut(cols)
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -527,7 +547,8 @@ unsafe fn er_row_avx512(
 ) {
     if period <= 32 {
         er_row_avx512_short(data, first, period, out);
-    } else {
+    
+        } else {
         er_row_avx512_long(data, first, period, out);
     }
 }

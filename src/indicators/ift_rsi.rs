@@ -11,6 +11,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -524,10 +525,38 @@ fn ift_rsi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -607,7 +636,8 @@ unsafe fn ift_rsi_row_avx512(
 ) {
     if rsi_period.max(wma_period) <= 32 {
         ift_rsi_row_avx512_short(data, first, rsi_period, wma_period, out);
-    } else {
+    
+        } else {
         ift_rsi_row_avx512_long(data, first, rsi_period, wma_period, out);
     }
 }
@@ -689,7 +719,8 @@ impl IftRsiStream {
         };
         if wma_val.is_nan() {
             None
-        } else {
+        
+            } else {
             let two_w = 2.0 * wma_val;
             let numerator = two_w * two_w - 1.0;
             let denominator = two_w * two_w + 1.0;

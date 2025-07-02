@@ -30,6 +30,7 @@ use crate::utilities::helpers::{
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -296,7 +297,8 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             // window not yet full
             sum_full += val;
             wsum_full += (j as f64 + 1.0) * val;
-        } else {
+        
+            } else {
             let old = data[idx - period];
             let sum_prev = sum_full; // save old Σ
             sum_full = sum_prev + val - old; // new Σ
@@ -310,7 +312,8 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         if j < half_len {
             sum_half += val;
             wsum_half += (j as f64 + 1.0) * val;
-        } else {
+        
+            } else {
             let old = data[idx - half_len];
             let sum_prev = sum_half;
             sum_half = sum_prev + val - old;
@@ -337,7 +340,6 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
                         x_wsum += (k as f64 + 1.0) * x_buf[k];
                     }
                     out[first_out] = x_wsum / ws_sqrt;
-                }
             } else {
                 // … then do rolling updates
                 let old_x = x_buf[x_head];
@@ -406,7 +408,8 @@ pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             if j < period {
                 sum_full += val;
                 wsum_full += (j as f64 + 1.0) * val;
-            } else {
+            
+                } else {
                 let old = *data.get_unchecked(idx - period);
                 let sum_prev = sum_full;
                 sum_full = sum_prev + val - old;
@@ -420,7 +423,8 @@ pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             if j < half_len {
                 sum_half += val;
                 wsum_half += (j as f64 + 1.0) * val;
-            } else {
+            
+                } else {
                 let old = *data.get_unchecked(idx - half_len);
                 let sum_prev = sum_half;
                 sum_half = sum_prev + val - old;
@@ -465,7 +469,6 @@ pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
                             sum
                         };
                         *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt;
-                    }
                 } else {
                     // rolling update after buffer full
                     let old_x = *x_buf.get_unchecked(x_head);
@@ -557,7 +560,8 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
         if j < period {
             s_full += val;
             ws_full_acc += (j as f64 + 1.0) * val;
-        } else {
+        
+            } else {
             let old = *data.get_unchecked(idx - period);
             let prev = s_full;
             s_full = prev + val - old;
@@ -568,7 +572,8 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
         if j < half {
             s_half += val;
             ws_half_acc += (j as f64 + 1.0) * val;
-        } else {
+        
+            } else {
             let old = *data.get_unchecked(idx - half);
             let prev = s_half;
             s_half = prev + val - old;
@@ -756,7 +761,8 @@ impl HmaStream {
         if let (Some(f), Some(h)) = (full, half) {
             let x = 2.0 * h - f;
             self.wma_sqrt.update(x)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -958,9 +964,25 @@ fn hma_batch_inner(
 
     // -------- run every row -----------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

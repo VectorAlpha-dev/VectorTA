@@ -25,6 +25,8 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, ma
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -311,7 +313,6 @@ pub unsafe fn kama_avx2(
         while idx <= lookback {
             sum_roc1 += (*base.add(idx + 1) - *base.add(idx)).abs();
             idx += 1;
-        }
     } else {
         for k in 0..=lookback {
             sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
@@ -413,7 +414,6 @@ pub unsafe fn kama_avx512(
         while j <= lookback {
             sum_roc1 += (*base.add(j + 1) - *base.add(j)).abs();
             j += 1;
-        }
     } else {
         for k in 0..=lookback {
             sum_roc1 += (*base.add(k + 1) - *base.add(k)).abs();
@@ -530,7 +530,8 @@ impl KamaStream {
 
         let er = if self.sum_roc1 == 0.0 {
             0.0
-        } else {
+        
+            } else {
             direction / self.sum_roc1
         };
         let sc = (er * self.const_diff + self.const_max).powi(2);
@@ -718,9 +719,25 @@ fn kama_batch_inner(
     * 3.  run every row, writing **directly** into `raw`
     * ------------------------------------------------------------- */
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

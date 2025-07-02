@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -251,11 +252,13 @@ pub unsafe fn willr_scalar(
         }
         if has_nan || h.is_infinite() || l.is_infinite() {
             out[i] = f64::NAN;
-        } else {
+        
+            } else {
             let denom = h - l;
             if denom == 0.0 {
                 out[i] = 0.0;
-            } else {
+            
+                } else {
                 out[i] = (h - close[i]) / denom * -100.0;
             }
         }
@@ -287,7 +290,8 @@ pub unsafe fn willr_avx512(
 ) {
     if period <= 32 {
         willr_avx512_short(high, low, close, period, first_valid, out);
-    } else {
+    
+        } else {
         willr_avx512_long(high, low, close, period, first_valid, out);
     }
 }
@@ -491,7 +495,21 @@ fn willr_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -542,7 +560,8 @@ pub unsafe fn willr_row_avx512(
 ) {
     if period <= 32 {
         willr_row_avx512_short(high, low, close, first_valid, period, out);
-    } else {
+    
+        } else {
         willr_row_avx512_long(high, low, close, first_valid, period, out);
     }
 }

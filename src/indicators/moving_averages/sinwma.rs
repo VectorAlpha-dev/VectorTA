@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -633,9 +634,25 @@ fn sinwma_batch_inner(
 
     // ---------- run every row directly into `raw` ----------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(r, sl)| do_row(r, sl));
+
+                .enumerate()
+
+                .for_each(|(r, sl)| do_row(r, sl));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (r, sl) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(r, sl);
+
+        }
+
     } else {
         for (r, sl) in raw.chunks_mut(cols).enumerate() {
             do_row(r, sl);
@@ -697,7 +714,8 @@ pub unsafe fn sinwma_row_avx512(
 ) {
     if period <= 32 {
         sinwma_row_avx512_short(data, first, period, w_ptr, out);
-    } else {
+    
+        } else {
         sinwma_row_avx512_long(data, first, period, w_ptr, out);
     }
 }

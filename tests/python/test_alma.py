@@ -7,13 +7,14 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
-
 try:
     import my_project as ta_indicators
 except ImportError:
-    pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
+    # If not in virtual environment, try to import from installed location
+    try:
+        import my_project as ta_indicators
+    except ImportError:
+        pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 

@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -362,7 +363,8 @@ pub fn maaq_avx2(
 
     let er0 = if vol_sum > f64::EPSILON {
         (data[period] - data[0]).abs() / vol_sum
-    } else {
+    
+        } else {
         0.0
     };
     let mut sc = fast_sc.mul_add(er0, slow_sc); // (fast_sc * ER) + slow_sc
@@ -385,7 +387,8 @@ pub fn maaq_avx2(
         // efficiency ratio
         let er = if vol_sum > f64::EPSILON {
             (data[i] - data[i - period]).abs() / vol_sum
-        } else {
+        
+            } else {
             0.0
         };
 
@@ -458,7 +461,8 @@ impl MaaqStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let prev = if self.count > 0 {
             self.buffer[(self.head + self.period - 1) % self.period]
-        } else {
+        
+            } else {
             value
         };
         let old_value = self.buffer[self.head];
@@ -481,7 +485,8 @@ impl MaaqStream {
         let slow_sc = 2.0 / (self.slow_period as f64 + 1.0);
         let ratio = if noise.abs() < f64::EPSILON {
             0.0
-        } else {
+        
+            } else {
             signal / noise
         };
         let sc = ratio.mul_add(fast_sc, slow_sc);
@@ -729,9 +734,25 @@ fn maaq_batch_inner(
 
     // 3. run every row, writing directly into `raw`
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| do_row(row, slice));
+
+                .enumerate()
+
+                .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);

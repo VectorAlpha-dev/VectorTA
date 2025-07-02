@@ -20,6 +20,7 @@ use crate::indicators::moving_averages::ma::{ma, MaData};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -332,7 +333,8 @@ unsafe fn vlma_scalar(
         }
         let prev_period = if periods[i - 1] == 0.0 {
             max_period as f64
-        } else {
+        
+            } else {
             periods[i - 1]
         };
 
@@ -341,9 +343,9 @@ unsafe fn vlma_scalar(
                 prev_period - 1.0
             } else if data[i] >= b[i] && data[i] <= c[i] {
                 prev_period + 1.0
-            } else {
+            
+                } else {
                 prev_period
-            }
         } else {
             prev_period
         };
@@ -392,7 +394,8 @@ unsafe fn vlma_avx512(
 ) -> Result<VlmaOutput, VlmaError> {
     if max_period <= 32 {
         vlma_avx512_short(data, min_period, max_period, matype, devtype, first_valid)
-    } else {
+    
+        } else {
         vlma_avx512_long(data, min_period, max_period, matype, devtype, first_valid)
     }
 }
@@ -517,7 +520,8 @@ impl VlmaStream {
             prev_period - 1.0
         } else if value >= b && value <= c {
             prev_period + 1.0
-        } else {
+        
+            } else {
             prev_period
         };
 
@@ -638,21 +642,24 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
 fn axis_string((start, end, _): (String, String, String)) -> Vec<String> {
     if start == end {
         vec![start]
-    } else {
+    
+        } else {
         vec![start, end]
     }
 }
 fn axis_usize_step((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         vec![start]
-    } else {
+    
+        } else {
         (start..=end).step_by(step).collect()
     }
 }
 fn axis_devtype((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         vec![start]
-    } else {
+    
+        } else {
         (start..=end).step_by(step).collect()
     }
 }
@@ -773,10 +780,27 @@ fn vlma_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .par_chunks_mut(cols)
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);

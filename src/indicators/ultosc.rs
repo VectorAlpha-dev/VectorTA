@@ -22,6 +22,7 @@ use crate::utilities::data_loader::{Candles, source_type};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -342,7 +343,6 @@ pub unsafe fn ultosc_scalar(
             sum2_b += tr[today];
             sum3_a += cmtl[today];
             sum3_b += tr[today];
-        }
         let v1 = if sum1_b != 0.0 { 4.0 * (sum1_a / sum1_b) } else { 0.0 };
         let v2 = if sum2_b != 0.0 { 2.0 * (sum2_a / sum2_b) } else { 0.0 };
         let v3 = if sum3_b != 0.0 { sum3_a / sum3_b } else { 0.0 };

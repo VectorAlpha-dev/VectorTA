@@ -18,11 +18,12 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 
 impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
     #[inline(always)]
@@ -79,7 +80,10 @@ impl<'a> BollingerBandsWidthInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: BollingerBandsWidthParams) -> Self {
         Self {
-            data: BollingerBandsWidthData::Candles { candles: c, source: s },
+            data: BollingerBandsWidthData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -204,7 +208,10 @@ impl BollingerBandsWidthBuilder {
         bollinger_bands_width_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
-    pub fn apply_slice(self, d: &[f64]) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
+    pub fn apply_slice(
+        self,
+        d: &[f64],
+    ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
         let p = BollingerBandsWidthParams {
             period: self.period,
             devup: self.devup,
@@ -218,7 +225,9 @@ impl BollingerBandsWidthBuilder {
 }
 
 #[inline]
-pub fn bollinger_bands_width(input: &BollingerBandsWidthInput) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
+pub fn bollinger_bands_width(
+    input: &BollingerBandsWidthInput,
+) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     bollinger_bands_width_with_kernel(input, Kernel::Auto)
 }
 
@@ -232,14 +241,20 @@ pub fn bollinger_bands_width_with_kernel(
     }
     let period = input.get_period();
     if period == 0 || period > data.len() {
-        return Err(BollingerBandsWidthError::InvalidPeriod { period, data_len: data.len() });
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
     }
     let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
         None => return Err(BollingerBandsWidthError::AllValuesNaN),
     };
     if (data.len() - first_valid_idx) < period {
-        return Err(BollingerBandsWidthError::NotEnoughValidData { needed: period, valid: data.len() - first_valid_idx });
+        return Err(BollingerBandsWidthError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first_valid_idx,
+        });
     }
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -275,8 +290,12 @@ pub unsafe fn bollinger_bands_width_scalar(
     let matype = input.get_matype();
     let devtype = input.get_devtype();
     let ma_data = match &input.data {
-        BollingerBandsWidthData::Candles { candles, source } => crate::indicators::moving_averages::ma::MaData::Candles { candles, source },
-        BollingerBandsWidthData::Slice(slice) => crate::indicators::moving_averages::ma::MaData::Slice(slice),
+        BollingerBandsWidthData::Candles { candles, source } => {
+            crate::indicators::moving_averages::ma::MaData::Candles { candles, source }
+        }
+        BollingerBandsWidthData::Slice(slice) => {
+            crate::indicators::moving_averages::ma::MaData::Slice(slice)
+        }
     };
     let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period)
         .map_err(|e| BollingerBandsWidthError::UnderlyingFunctionFailed(e.to_string()))?;
@@ -349,8 +368,12 @@ pub fn bollinger_bands_width_row_scalar(
     let matype = input.get_matype();
     let devtype = input.get_devtype();
     let ma_data = match &input.data {
-        BollingerBandsWidthData::Candles { candles, source } => crate::indicators::moving_averages::ma::MaData::Candles { candles, source },
-        BollingerBandsWidthData::Slice(slice) => crate::indicators::moving_averages::ma::MaData::Slice(slice),
+        BollingerBandsWidthData::Candles { candles, source } => {
+            crate::indicators::moving_averages::ma::MaData::Candles { candles, source }
+        }
+        BollingerBandsWidthData::Slice(slice) => {
+            crate::indicators::moving_averages::ma::MaData::Slice(slice)
+        }
     };
     let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period).unwrap();
     let dev_input = crate::indicators::deviation::DevInput::from_slice(
@@ -456,14 +479,23 @@ impl BollingerBandsWidthBatchBuilder {
         self.range.devdn = (start, end, step);
         self
     }
-    pub fn apply_slice(self, data: &[f64]) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
+    pub fn apply_slice(
+        self,
+        data: &[f64],
+    ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
         bollinger_bands_width_batch_with_kernel(data, &self.range, self.kernel)
     }
-    pub fn apply_candles(self, c: &Candles, src: &str) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
+    pub fn apply_candles(
+        self,
+        c: &Candles,
+        src: &str,
+    ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
         let slice = source_type(c, src);
         self.apply_slice(slice)
     }
-    pub fn with_default_candles(c: &Candles) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
+    pub fn with_default_candles(
+        c: &Candles,
+    ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
         BollingerBandsWidthBatchBuilder::new()
             .kernel(Kernel::Auto)
             .apply_candles(c, "close")
@@ -544,7 +576,12 @@ pub fn bollinger_bands_width_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(BollingerBandsWidthError::InvalidPeriod { period: 0, data_len: 0 }),
+        _ => {
+            return Err(BollingerBandsWidthError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -582,12 +619,21 @@ fn bollinger_bands_width_batch_inner(
 ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(BollingerBandsWidthError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(BollingerBandsWidthError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(BollingerBandsWidthError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(BollingerBandsWidthError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+        return Err(BollingerBandsWidthError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
     }
     let rows = combos.len();
     let cols = data.len();
@@ -598,24 +644,45 @@ fn bollinger_bands_width_batch_inner(
         bollinger_bands_width_row_scalar(data, &inp, first, out_row)
     };
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(BollingerBandsWidthBatchOutput { values, combos, rows, cols })
+    Ok(BollingerBandsWidthBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
     use paste::paste;
 
-    fn check_bbw_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -632,7 +699,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_bbw_default(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_default(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -642,36 +712,67 @@ mod tests {
         Ok(())
     }
 
-    fn check_bbw_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
-        let params = BollingerBandsWidthParams { period: Some(0), ..Default::default() };
+        let params = BollingerBandsWidthParams {
+            period: Some(0),
+            ..Default::default()
+        };
         let input = BollingerBandsWidthInput::from_slice(&data, params);
         let result = bollinger_bands_width_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected error for zero period", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_bbw_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [10.0, 20.0, 30.0];
-        let params = BollingerBandsWidthParams { period: Some(10), ..Default::default() };
+        let params = BollingerBandsWidthParams {
+            period: Some(10),
+            ..Default::default()
+        };
         let input = BollingerBandsWidthInput::from_slice(&data, params);
         let result = bollinger_bands_width_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected error for period > data.len()", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for period > data.len()",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_bbw_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [42.0];
-        let input = BollingerBandsWidthInput::from_slice(&data, BollingerBandsWidthParams::default());
+        let input =
+            BollingerBandsWidthInput::from_slice(&data, BollingerBandsWidthParams::default());
         let result = bollinger_bands_width_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected error for small data", test_name);
+        assert!(
+            result.is_err(),
+            "[{}] Expected error for small data",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_bbw_nan_check(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_bbw_nan_check(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -685,13 +786,19 @@ mod tests {
                     return Ok(());
                 }
             }
-            panic!("All BBWidth values from index {} onward are NaN.", check_index);
+            panic!(
+                "All BBWidth values from index {} onward are NaN.",
+                check_index
+            );
         }
         Ok(())
     }
 
     // Batch grid test: only parity, doesn't check numerical values
-    fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;

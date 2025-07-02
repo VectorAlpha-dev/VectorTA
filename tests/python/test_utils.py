@@ -17,13 +17,17 @@ def load_test_data():
     }
     
     with open(data_path, 'r') as f:
-        reader = csv.DictReader(f)
+        reader = csv.reader(f)
         for row in reader:
-            candles['open'].append(float(row['open']))
-            candles['high'].append(float(row['high']))
-            candles['low'].append(float(row['low']))
-            candles['close'].append(float(row['close']))
-            candles['volume'].append(float(row.get('volume', 0)))
+            # Skip empty rows
+            if len(row) < 6:
+                continue
+            # CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            candles['open'].append(float(row[1]))
+            candles['close'].append(float(row[2]))
+            candles['high'].append(float(row[3]))
+            candles['low'].append(float(row[4]))
+            candles['volume'].append(float(row[5]))
     
     return {k: np.array(v) for k, v in candles.items()}
 
@@ -54,6 +58,36 @@ EXPECTED_OUTPUTS = {
             59238.16030697,
             59222.63528822,
             59165.14427332
+        ]
+    },
+    'cwma': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            59224.641237300435,
+            59213.64831277214,
+            59171.21190130624,
+            59167.01279027576,
+            59039.413552249636
+        ]
+    },
+    'dema': {
+        'default_params': {'period': 30},
+        'last_5_values': [
+            59189.73193987478,
+            59129.24920772847,
+            59058.80282420511,
+            59011.5555611042,
+            58908.370159946775
+        ]
+    },
+    'edcf': {
+        'default_params': {'period': 15},
+        'last_5_values': [
+            59593.332275678375,
+            59731.70263288801,
+            59766.41512339413,
+            59655.66162110993,
+            59332.492883847
         ]
     }
 }

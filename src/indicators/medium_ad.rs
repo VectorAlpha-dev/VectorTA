@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -221,14 +222,16 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
         sorted_window.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median_val = if period % 2 == 1 {
             sorted_window[period / 2]
-        } else {
+        
+            } else {
             0.5 * (sorted_window[period / 2 - 1] + sorted_window[period / 2])
         };
         let mut abs_devs: Vec<f64> = sorted_window.iter().map(|&v| (v - median_val).abs()).collect();
         abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mad = if period % 2 == 1 {
             abs_devs[period / 2]
-        } else {
+        
+            } else {
             0.5 * (abs_devs[period / 2 - 1] + abs_devs[period / 2])
         };
         out[i] = mad;
@@ -431,10 +434,38 @@ fn medium_ad_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+
+                    do_row(row, slice);
+
+
+        }
+
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -460,14 +491,16 @@ unsafe fn medium_ad_row_scalar(
         sorted_window.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median_val = if period % 2 == 1 {
             sorted_window[period / 2]
-        } else {
+        
+            } else {
             0.5 * (sorted_window[period / 2 - 1] + sorted_window[period / 2])
         };
         let mut abs_devs: Vec<f64> = sorted_window.iter().map(|&v| (v - median_val).abs()).collect();
         abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mad = if period % 2 == 1 {
             abs_devs[period / 2]
-        } else {
+        
+            } else {
             0.5 * (abs_devs[period / 2 - 1] + abs_devs[period / 2])
         };
         out[i] = mad;
@@ -495,7 +528,8 @@ unsafe fn medium_ad_row_avx512(
 ) {
     if period <= 32 {
         medium_ad_row_avx512_short(data, first, period, out)
-    } else {
+    
+        } else {
         medium_ad_row_avx512_long(data, first, period, out)
     }
 }
@@ -563,14 +597,16 @@ impl MediumAdStream {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = if self.period % 2 == 1 {
             sorted[self.period / 2]
-        } else {
+        
+            } else {
             0.5 * (sorted[self.period / 2 - 1] + sorted[self.period / 2])
         };
         let mut absdevs: Vec<f64> = sorted.iter().map(|&x| (x - median).abs()).collect();
         absdevs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         if self.period % 2 == 1 {
             absdevs[self.period / 2]
-        } else {
+        
+            } else {
             0.5 * (absdevs[self.period / 2 - 1] + absdevs[self.period / 2])
         }
     }

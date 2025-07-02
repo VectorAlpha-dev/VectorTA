@@ -24,6 +24,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -263,7 +264,8 @@ unsafe fn trix_avx512(
 ) -> Result<TrixOutput, TrixError> {
     if period <= 32 {
         trix_avx512_short(data, period, first)
-    } else {
+    
+        } else {
         trix_avx512_long(data, period, first)
     }
 }
@@ -346,7 +348,8 @@ impl TrixStream {
         // 1) Take ln(value) (or NaN if value was NaN)
         let log_val = if value.is_nan() {
             f64::NAN
-        } else {
+        
+            } else {
             value.ln()
         };
 
@@ -578,7 +581,21 @@ fn trix_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -645,7 +662,8 @@ unsafe fn trix_row_avx512(
 ) {
     if period <= 32 {
         trix_row_avx512_short(data, first, period, out)
-    } else {
+    
+        } else {
         trix_row_avx512_long(data, first, period, out)
     }
 }

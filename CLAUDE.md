@@ -128,3 +128,18 @@ The codebase automatically selects the best SIMD instruction set at runtime:
 Use `detect_best_kernel()` or `detect_best_batch_kernel()` helpers.
 
 **Note**: AVX2 and AVX512 kernels are only available when building with nightly Rust and the `nightly-avx` feature flag.
+
+## CRITICAL: Mass Editing Rust Files
+
+**NEVER use mass editing scripts on Rust files**. Previous attempts to fix compilation errors using automated scripts across 160+ files introduced significant syntax errors, particularly with:
+- Incorrect bracket placement in if-else blocks
+- Malformed `#[cfg()]` conditional compilation blocks
+- Context-unaware pattern matching that broke valid code
+
+**Always make manual, targeted fixes** to Rust files:
+- Fix compilation errors one file at a time
+- Review each change in context before applying
+- Preserve the existing logic of scalar, AVX2, and AVX512 kernels
+- Use the Read tool to understand the full context before making changes
+
+This is especially important when dealing with WASM conditional compilation or any cross-cutting concerns that affect multiple files.

@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -255,7 +256,8 @@ pub unsafe fn stochf_scalar(
     }
     if matype != 0 {
         d_vals.fill(f64::NAN);
-    } else {
+    
+        } else {
         let mut sma_sum = 0.0;
         let mut count = 0;
         for i in 0..len {
@@ -269,9 +271,8 @@ pub unsafe fn stochf_scalar(
                 count += 1;
                 if count == fastd_period {
                     d_vals[i] = sma_sum / (fastd_period as f64);
-                } else {
+} else {
                     d_vals[i] = f64::NAN;
-                }
             } else {
                 sma_sum += v - k_vals[i - fastd_period];
                 d_vals[i] = sma_sum / (fastd_period as f64);
@@ -299,7 +300,8 @@ pub unsafe fn stochf_avx512(
 ) {
     if fastk_period <= 32 {
         stochf_avx512_short(high, low, close, fastk_period, fastd_period, matype, first_valid_idx, k_vals, d_vals);
-    } else {
+    
+        } else {
         stochf_avx512_long(high, low, close, fastk_period, fastd_period, matype, first_valid_idx, k_vals, d_vals);
     }
 }
@@ -399,7 +401,8 @@ impl StochfStream {
             f64::NAN
         } else if self.k_count < self.fastd_period {
             f64::NAN
-        } else {
+        
+            } else {
             let mut sum = 0.0;
             for i in 0..self.fastd_period {
                 sum += self.k_buffer[i];
@@ -571,9 +574,25 @@ fn stochf_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         k_out.par_chunks_mut(cols).zip(d_out.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (k, d))| do_row(row, k, d));
+
+                    .enumerate()
+
+                    .for_each(|(row, (k, d))| do_row(row, k, d));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (k, d)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
+
+                    do_row(row, k, d);
+
+        }
+
     } else {
         for (row, (k, d)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
             do_row(row, k, d);
@@ -607,7 +626,8 @@ unsafe fn stochf_row_scalar(
     }
     if matype != 0 {
         d_out.fill(f64::NAN);
-    } else {
+    
+        } else {
         let mut sma_sum = 0.0;
         let mut count = 0;
         for i in 0..len {
@@ -621,9 +641,8 @@ unsafe fn stochf_row_scalar(
                 count += 1;
                 if count == fastd_period {
                     d_out[i] = sma_sum / (fastd_period as f64);
-                } else {
+} else {
                     d_out[i] = f64::NAN;
-                }
             } else {
                 sma_sum += v - k_out[i - fastd_period];
                 d_out[i] = sma_sum / (fastd_period as f64);
@@ -651,7 +670,8 @@ pub unsafe fn stochf_row_avx512(
 ) {
     if fastk_period <= 32 {
         stochf_row_avx512_short(high, low, close, first, fastk_period, fastd_period, matype, k_out, d_out);
-    } else {
+    
+        } else {
         stochf_row_avx512_long(high, low, close, first, fastk_period, fastd_period, matype, k_out, d_out);
     }
 }

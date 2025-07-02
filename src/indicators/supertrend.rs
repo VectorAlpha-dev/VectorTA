@@ -24,6 +24,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -339,7 +340,8 @@ pub fn supertrend_scalar(
         }
         if prev_close <= prev_upper_band {
             trend[first_valid_idx + i - 1] = prev_upper_band;
-        } else {
+        
+            } else {
             trend[first_valid_idx + i - 1] = prev_lower_band;
         }
     }
@@ -355,7 +357,7 @@ pub fn supertrend_scalar(
             if close[first_valid_idx + i] <= curr_upper_band {
                 trend[first_valid_idx + i] = curr_upper_band;
                 changed[first_valid_idx + i] = 0.0;
-            } else {
+} else {
                 trend[first_valid_idx + i] = curr_lower_band;
                 changed[first_valid_idx + i] = 1.0;
             }
@@ -363,7 +365,7 @@ pub fn supertrend_scalar(
             if close[first_valid_idx + i] >= curr_lower_band {
                 trend[first_valid_idx + i] = curr_lower_band;
                 changed[first_valid_idx + i] = 0.0;
-            } else {
+} else {
                 trend[first_valid_idx + i] = curr_upper_band;
                 changed[first_valid_idx + i] = 1.0;
             }
@@ -407,7 +409,8 @@ pub unsafe fn supertrend_avx512(
         supertrend_avx512_short(
             high, low, close, period, factor, first_valid_idx, atr_values, trend, changed,
         );
-    } else {
+    
+        } else {
         supertrend_avx512_long(
             high, low, close, period, factor, first_valid_idx, atr_values, trend, changed,
         );
@@ -496,7 +499,6 @@ impl SuperTrendStream {
         let atr_opt = self.atr_stream.update(high, low, close);
         if !self.filled || atr_opt.is_none() {
             return None;
-        }
         let idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
         let avg = (self.buffer_high[idx] + self.buffer_low[idx]) / 2.0;
         let atr = atr_opt.unwrap();
@@ -507,14 +509,16 @@ impl SuperTrendStream {
             upper_basic
         } else if self.buffer_close[(self.head + self.period - 2) % self.period] <= self.prev_upper_band {
             f64::min(upper_basic, self.prev_upper_band)
-        } else {
+        
+            } else {
             upper_basic
         };
         let lower_band = if self.prev_lower_band.is_nan() {
             lower_basic
         } else if self.buffer_close[(self.head + self.period - 2) % self.period] >= self.prev_lower_band {
             f64::max(lower_basic, self.prev_lower_band)
-        } else {
+        
+            } else {
             lower_basic
         };
         let prev_trend = self.prev_trend;
@@ -524,7 +528,7 @@ impl SuperTrendStream {
             if close <= upper_band {
                 trend = upper_band;
                 changed = 0.0;
-            } else {
+} else {
                 trend = lower_band;
                 changed = 1.0;
             }
@@ -532,7 +536,7 @@ impl SuperTrendStream {
             if close >= lower_band {
                 trend = lower_band;
                 changed = 0.0;
-            } else {
+} else {
                 trend = upper_band;
                 changed = 1.0;
             }
@@ -815,11 +819,29 @@ fn supertrend_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         trend
-            .par_chunks_mut(cols)
-            .zip(changed.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (tr, ch))| do_row(row, tr, ch));
+
+                    .par_chunks_mut(cols)
+
+                    .zip(changed.par_chunks_mut(cols))
+
+                    .enumerate()
+
+                    .for_each(|(row, (tr, ch))| do_row(row, tr, ch));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, (tr, ch)) in trend.chunks_mut(cols).zip(changed.chunks_mut(cols)).enumerate() {
+
+                    do_row(row, tr, ch);
+
+        }
+
     } else {
         for (row, (tr, ch)) in trend.chunks_mut(cols).zip(changed.chunks_mut(cols)).enumerate() {
             do_row(row, tr, ch);
@@ -912,7 +934,8 @@ unsafe fn supertrend_row_avx512(
             trend,
             changed,
         );
-    } else {
+    
+        } else {
         supertrend_row_avx512_long(
             high,
             low,

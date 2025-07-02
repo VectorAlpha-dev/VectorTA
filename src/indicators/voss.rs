@@ -20,6 +20,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -300,7 +301,8 @@ pub unsafe fn voss_avx512(
 ) {
     if period <= 32 {
         voss_avx512_short(data, period, predict, bandwidth, first, voss, filt)
-    } else {
+    
+        } else {
         voss_avx512_long(data, period, predict, bandwidth, first, voss, filt)
     }
 }
@@ -577,11 +579,41 @@ fn voss_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         voss_vec
-            .par_chunks_mut(cols)
-            .zip(filt_vec.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (vo, fo))| do_row(row, vo, fo));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .zip(filt_vec.par_chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, (vo, fo))| do_row(row, vo, fo));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (vo, fo)) in voss_vec.chunks_mut(cols).zip(filt_vec.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, vo, fo);
+
+
+        }
+
+
     } else {
         for (row, (vo, fo)) in voss_vec.chunks_mut(cols).zip(filt_vec.chunks_mut(cols)).enumerate() {
             do_row(row, vo, fo);

@@ -24,6 +24,8 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -54,11 +56,17 @@ pub struct AroonInput<'a> {
 impl<'a> AroonInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, p: AroonParams) -> Self {
-        Self { data: AroonData::Candles { candles: c }, params: p }
+        Self {
+            data: AroonData::Candles { candles: c },
+            params: p,
+        }
     }
     #[inline]
     pub fn from_slices_hl(high: &'a [f64], low: &'a [f64], p: AroonParams) -> Self {
-        Self { data: AroonData::SlicesHL { high, low }, params: p }
+        Self {
+            data: AroonData::SlicesHL { high, low },
+            params: p,
+        }
     }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
@@ -84,12 +92,17 @@ pub struct AroonBuilder {
 
 impl Default for AroonBuilder {
     fn default() -> Self {
-        Self { length: None, kernel: Kernel::Auto }
+        Self {
+            length: None,
+            kernel: Kernel::Auto,
+        }
     }
 }
 impl AroonBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
     pub fn length(mut self, n: usize) -> Self {
         self.length = Some(n);
@@ -102,19 +115,25 @@ impl AroonBuilder {
     }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<AroonOutput, AroonError> {
-        let p = AroonParams { length: self.length };
+        let p = AroonParams {
+            length: self.length,
+        };
         let i = AroonInput::from_candles(c, p);
         aroon_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<AroonOutput, AroonError> {
-        let p = AroonParams { length: self.length };
+        let p = AroonParams {
+            length: self.length,
+        };
         let i = AroonInput::from_slices_hl(high, low, p);
         aroon_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<AroonStream, AroonError> {
-        let p = AroonParams { length: self.length };
+        let p = AroonParams {
+            length: self.length,
+        };
         AroonStream::try_new(p)
     }
 }
@@ -138,20 +157,31 @@ pub fn aroon(input: &AroonInput) -> Result<AroonOutput, AroonError> {
 
 pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutput, AroonError> {
     let (high, low): (&[f64], &[f64]) = match &input.data {
-        AroonData::Candles { candles } => (source_type(candles, "high"), source_type(candles, "low")),
+        AroonData::Candles { candles } => {
+            (source_type(candles, "high"), source_type(candles, "low"))
+        }
         AroonData::SlicesHL { high, low } => (*high, *low),
     };
     if high.len() != low.len() {
-        return Err(AroonError::MismatchSliceLength { high_len: high.len(), low_len: low.len() });
+        return Err(AroonError::MismatchSliceLength {
+            high_len: high.len(),
+            low_len: low.len(),
+        });
     }
     let len = high.len();
     let length = input.get_length();
 
     if length == 0 || length > len {
-        return Err(AroonError::InvalidLength { length, data_len: len });
+        return Err(AroonError::InvalidLength {
+            length,
+            data_len: len,
+        });
     }
     if len < length {
-        return Err(AroonError::NotEnoughValidData { needed: length, valid: len });
+        return Err(AroonError::NotEnoughValidData {
+            needed: length,
+            valid: len,
+        });
     }
 
     let chosen = match kernel {
@@ -164,25 +194,26 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => aroon_scalar(high, low, length, &mut up, &mut down),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                aroon_scalar(high, low, length, &mut up, &mut down)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => aroon_avx2(high, low, length, &mut up, &mut down),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => aroon_avx512(high, low, length, &mut up, &mut down),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                aroon_avx512(high, low, length, &mut up, &mut down)
+            }
             _ => unreachable!(),
         }
     }
-    Ok(AroonOutput { aroon_up: up, aroon_down: down })
+    Ok(AroonOutput {
+        aroon_up: up,
+        aroon_down: down,
+    })
 }
 
 #[inline]
-pub fn aroon_scalar(
-    high: &[f64],
-    low: &[f64],
-    length: usize,
-    up: &mut [f64],
-    down: &mut [f64],
-) {
+pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down: &mut [f64]) {
     let len = high.len();
     assert!(
         length >= 1 && length <= len,
@@ -238,25 +269,17 @@ pub fn aroon_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn aroon_avx512(
-    high: &[f64],
-    low: &[f64],
-    length: usize,
-    up: &mut [f64],
-    down: &mut [f64],
-) {
-    unsafe { aroon_scalar(high, low, length, up, down); }
+pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down: &mut [f64]) {
+    unsafe {
+        aroon_scalar(high, low, length, up, down);
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn aroon_avx2(
-    high: &[f64],
-    low: &[f64],
-    length: usize,
-    up: &mut [f64],
-    down: &mut [f64],
-) {
-    unsafe { aroon_scalar(high, low, length, up, down); }
+pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down: &mut [f64]) {
+    unsafe {
+        aroon_scalar(high, low, length, up, down);
+    }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -284,11 +307,11 @@ pub unsafe fn aroon_avx512_long(
 #[derive(Debug)]
 pub struct AroonStream {
     length: usize,
-    buf_size: usize,      // = length + 1
+    buf_size: usize, // = length + 1
     buffer_high: Vec<f64>,
     buffer_low: Vec<f64>,
-    head: usize,          // next write position in [0..buf_size)
-    count: usize,         // how many total bars have been pushed
+    head: usize,  // next write position in [0..buf_size)
+    count: usize, // how many total bars have been pushed
 }
 
 impl AroonStream {
@@ -363,10 +386,10 @@ impl AroonStream {
         }
 
         // 7) “Bars ago” for that max:  dist_hi = (cur_idx − max_idx) mod buf_size
-        let dist_hi = ((cur_idx as isize - max_idx as isize)
-            .rem_euclid(self.buf_size as isize)) as usize;
-        let dist_lo = ((cur_idx as isize - min_idx as isize)
-            .rem_euclid(self.buf_size as isize)) as usize;
+        let dist_hi =
+            ((cur_idx as isize - max_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
+        let dist_lo =
+            ((cur_idx as isize - min_idx as isize).rem_euclid(self.buf_size as isize)) as usize;
 
         // 8) Aroon formula: up = (length − dist_hi)/length * 100
         let inv_len = 1.0 / (self.length as f64);
@@ -377,14 +400,15 @@ impl AroonStream {
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct AroonBatchRange {
     pub length: (usize, usize, usize),
 }
 impl Default for AroonBatchRange {
     fn default() -> Self {
-        Self { length: (14, 50, 1) }
+        Self {
+            length: (14, 50, 1),
+        }
     }
 }
 
@@ -394,27 +418,40 @@ pub struct AroonBatchBuilder {
     kernel: Kernel,
 }
 impl AroonBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     #[inline]
     pub fn length_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.length = (start, end, step); self
+        self.range.length = (start, end, step);
+        self
     }
     #[inline]
     pub fn length_static(mut self, x: usize) -> Self {
-        self.range.length = (x, x, 0); self
+        self.range.length = (x, x, 0);
+        self
     }
     pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<AroonBatchOutput, AroonError> {
         aroon_batch_with_kernel(high, low, &self.range, self.kernel)
     }
-    pub fn with_default_slices(high: &[f64], low: &[f64], k: Kernel) -> Result<AroonBatchOutput, AroonError> {
+    pub fn with_default_slices(
+        high: &[f64],
+        low: &[f64],
+        k: Kernel,
+    ) -> Result<AroonBatchOutput, AroonError> {
         AroonBatchBuilder::new().kernel(k).apply_slices(high, low)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<AroonBatchOutput, AroonError> {
         self.apply_slices(source_type(c, "high"), source_type(c, "low"))
     }
     pub fn with_default_candles(c: &Candles) -> Result<AroonBatchOutput, AroonError> {
-        AroonBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)
+        AroonBatchBuilder::new()
+            .kernel(Kernel::Auto)
+            .apply_candles(c)
     }
 }
 
@@ -427,7 +464,9 @@ pub struct AroonBatchOutput {
 }
 impl AroonBatchOutput {
     pub fn row_for_params(&self, p: &AroonParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.length.unwrap_or(14) == p.length.unwrap_or(14))
+        self.combos
+            .iter()
+            .position(|c| c.length.unwrap_or(14) == p.length.unwrap_or(14))
     }
     pub fn up_for(&self, p: &AroonParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -446,7 +485,9 @@ impl AroonBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &AroonBatchRange) -> Vec<AroonParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     let lengths = axis_usize(r.length);
@@ -466,7 +507,12 @@ pub fn aroon_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => { return Err(AroonError::InvalidLength { length: 0, data_len: 0 }) }
+        _ => {
+            return Err(AroonError::InvalidLength {
+                length: 0,
+                data_len: 0,
+            })
+        }
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -505,15 +551,24 @@ fn aroon_batch_inner(
 ) -> Result<AroonBatchOutput, AroonError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AroonError::InvalidLength { length: 0, data_len: 0 });
+        return Err(AroonError::InvalidLength {
+            length: 0,
+            data_len: 0,
+        });
     }
     if high.len() != low.len() {
-        return Err(AroonError::MismatchSliceLength { high_len: high.len(), low_len: low.len() });
+        return Err(AroonError::MismatchSliceLength {
+            high_len: high.len(),
+            low_len: low.len(),
+        });
     }
     let len = high.len();
     let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     if len < max_l {
-        return Err(AroonError::NotEnoughValidData { needed: max_l, valid: len });
+        return Err(AroonError::NotEnoughValidData {
+            needed: max_l,
+            valid: len,
+        });
     }
     let rows = combos.len();
     let cols = len;
@@ -532,16 +587,32 @@ fn aroon_batch_inner(
         }
     };
     if parallel {
-        up.par_chunks_mut(cols)
-            .zip(down.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (u, d))| do_row(row, u, d));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            up.par_chunks_mut(cols)
+                .zip(down.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, (u, d))| do_row(row, u, d));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, (u, d)) in up.chunks_mut(cols).zip(down.chunks_mut(cols)).enumerate() {
+                do_row(row, u, d);
+            }
+        }
     } else {
         for (row, (u, d)) in up.chunks_mut(cols).zip(down.chunks_mut(cols)).enumerate() {
             do_row(row, u, d);
         }
     }
-    Ok(AroonBatchOutput { up, down, combos, rows, cols })
+    Ok(AroonBatchOutput {
+        up,
+        down,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
@@ -607,11 +678,14 @@ pub unsafe fn aroon_row_avx512_long(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
 
-    fn check_aroon_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -623,7 +697,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -666,7 +743,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -681,7 +761,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_zero_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_zero_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let high = [10.0, 11.0, 12.0];
         let low = [9.0, 10.0, 11.0];
@@ -692,7 +775,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_length_exceeds_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_length_exceeds_data(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let high = [10.0, 11.0, 12.0];
         let low = [9.0, 10.0, 11.0];
@@ -703,18 +789,27 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_very_small_data_set(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_very_small_data_set(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let high = [100.0];
         let low = [99.5];
         let params = AroonParams { length: Some(14) };
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon_with_kernel(&input, kernel);
-        assert!(result.is_err(), "Expected error for data smaller than length");
+        assert!(
+            result.is_err(),
+            "Expected error for data smaller than length"
+        );
         Ok(())
     }
 
-    fn check_aroon_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -731,7 +826,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -757,16 +855,26 @@ mod tests {
         Ok(())
     }
 
-    fn check_aroon_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_aroon_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let length = 14;
 
-        let input = AroonInput::from_candles(&candles, AroonParams { length: Some(length) });
+        let input = AroonInput::from_candles(
+            &candles,
+            AroonParams {
+                length: Some(length),
+            },
+        );
         let batch_output = aroon_with_kernel(&input, kernel)?;
 
-        let mut stream = AroonStream::try_new(AroonParams { length: Some(length) })?;
+        let mut stream = AroonStream::try_new(AroonParams {
+            length: Some(length),
+        })?;
         let mut stream_up = Vec::with_capacity(candles.close.len());
         let mut stream_down = Vec::with_capacity(candles.close.len());
         for (&h, &l) in candles.high.iter().zip(&candles.low) {
@@ -784,7 +892,9 @@ mod tests {
         assert_eq!(batch_output.aroon_up.len(), stream_up.len());
         assert_eq!(batch_output.aroon_down.len(), stream_down.len());
         for (i, (&b, &s)) in batch_output.aroon_up.iter().zip(&stream_up).enumerate() {
-            if b.is_nan() && s.is_nan() { continue; }
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
             let diff = (b - s).abs();
             assert!(
                 diff < 1e-8,
@@ -797,7 +907,9 @@ mod tests {
             );
         }
         for (i, (&b, &s)) in batch_output.aroon_down.iter().zip(&stream_down).enumerate() {
-            if b.is_nan() && s.is_nan() { continue; }
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
             let diff = (b - s).abs();
             assert!(
                 diff < 1e-8,
@@ -848,7 +960,10 @@ mod tests {
         check_aroon_streaming
     );
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;

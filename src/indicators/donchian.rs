@@ -25,6 +25,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -386,11 +387,50 @@ fn donchian_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         upper.par_chunks_mut(cols)
-            .zip(middle.par_chunks_mut(cols))
-            .zip(lower.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((upper, middle), lower))| do_row(row, upper, middle, lower));
+
+
+                    .zip(middle.par_chunks_mut(cols))
+
+
+                    .zip(lower.par_chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, ((upper, middle), lower))| do_row(row, upper, middle, lower));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (((upper, middle), lower), row) in upper.chunks_mut(cols)
+
+
+                    .zip(middle.chunks_mut(cols))
+
+
+                    .zip(lower.chunks_mut(cols))
+
+
+                    .zip(0..) {
+
+
+                    do_row(row, upper, middle, lower);
+
+
+        }
+
+
     } else {
         for (((upper, middle), lower), row) in upper.chunks_mut(cols)
             .zip(middle.chunks_mut(cols))
@@ -440,7 +480,8 @@ pub unsafe fn donchian_row_avx512(
 ) {
     if period <= 32 {
         donchian_row_avx512_short(high, low, first, period, upper, middle, lower)
-    } else {
+    
+        } else {
         donchian_row_avx512_long(high, low, first, period, upper, middle, lower)
     }
 }

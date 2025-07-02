@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -247,7 +248,8 @@ pub fn rvi_scalar(
         let down_val = down_smoothed[i];
         if up_val.is_nan() || down_val.is_nan() || (up_val + down_val).abs() < f64::EPSILON {
             out[i] = f64::NAN;
-        } else {
+        
+            } else {
             out[i] = 100.0 * (up_val / (up_val + down_val));
         }
     }
@@ -552,7 +554,21 @@ fn rvi_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -664,7 +680,8 @@ fn compute_diff_same_length(data: &[f64]) -> Vec<f64> {
         let curr = data[i];
         if prev.is_nan() || curr.is_nan() {
             diff[i] = f64::NAN;
-        } else {
+        
+            } else {
             diff[i] = curr - prev;
         }
     }
@@ -679,7 +696,8 @@ fn compute_up_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
             up[i] = f64::NAN;
         } else if d <= 0.0 {
             up[i] = 0.0;
-        } else {
+        
+            } else {
             up[i] = dv;
         }
     }
@@ -694,7 +712,8 @@ fn compute_down_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
             down[i] = f64::NAN;
         } else if d > 0.0 {
             down[i] = 0.0;
-        } else {
+        
+            } else {
             down[i] = dv;
         }
     }
@@ -754,7 +773,8 @@ fn rolling_mean_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
             out[i] = f64::NAN;
             window.clear();
             current_sum = 0.0;
-        } else {
+        
+            } else {
             window.push_back(x);
             current_sum += x;
             if window.len() > period {
@@ -782,7 +802,8 @@ fn rolling_median_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
         if x.is_nan() {
             out[i] = f64::NAN;
             window.clear();
-        } else {
+        
+            } else {
             window.push_back(x);
             if window.len() > period { window.pop_front(); }
             if window.len() == period {
@@ -790,7 +811,7 @@ fn rolling_median_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
                 tmp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let median = if period % 2 == 1 {
                     tmp[period / 2]
-                } else {
+} else {
                     (tmp[period / 2 - 1] + tmp[period / 2]) / 2.0
                 };
                 let mut abs_sum = 0.0;
@@ -815,7 +836,8 @@ fn rolling_sma(data: &[f64], period: usize) -> Vec<f64> {
             out[i] = f64::NAN;
             window_sum = 0.0;
             count = 0;
-        } else {
+        
+            } else {
             window_sum += x;
             count += 1;
             if i >= period {
@@ -823,7 +845,7 @@ fn rolling_sma(data: &[f64], period: usize) -> Vec<f64> {
                 if !old.is_nan() {
                     window_sum -= old;
                     count -= 1;
-                } else {
+} else {
                     out[i] = f64::NAN;
                     continue;
                 }
@@ -854,13 +876,11 @@ fn rolling_ema(data: &[f64], period: usize) -> Vec<f64> {
                 prev_ema += x;
                 if i + 1 == first_window_end {
                     prev_ema /= period as f64;
-                }
-            } else {
+} else {
                 prev_ema += x;
                 prev_ema /= period as f64;
                 out[i] = prev_ema;
                 started = true;
-            }
         } else {
             prev_ema = alpha * x + (1.0 - alpha) * prev_ema;
             out[i] = prev_ema;

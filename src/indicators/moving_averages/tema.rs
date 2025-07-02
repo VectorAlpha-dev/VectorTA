@@ -21,6 +21,8 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, al
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -376,7 +378,8 @@ impl TemaStream {
             self.filled = true;
             let tema_val = 3.0 * self.ema1 - 3.0 * self.ema2 + self.ema3;
             Some(tema_val)
-        } else {
+        
+            } else {
             None
         }
     }
@@ -570,9 +573,25 @@ fn tema_batch_inner(
 
     // ---------- 5. run all rows (optionally in parallel) ----------
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-           .enumerate()
-           .for_each(|(row, slice)| do_row(row, slice));
+
+                   .enumerate()
+
+                   .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -617,7 +636,8 @@ unsafe fn tema_row_avx512(
 ) {
     if period <= 32 {
         tema_row_avx512_short(data, first, period, out)
-    } else {
+    
+        } else {
         tema_row_avx512_long(data, first, period, out)
     }
 }

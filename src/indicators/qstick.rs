@@ -22,6 +22,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -479,7 +480,21 @@ fn qstick_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -576,7 +591,8 @@ impl QstickStream {
         let diff = close - open;
         if self.buffer[self.head].is_nan() {
             self.sum += diff;
-        } else {
+        
+            } else {
             self.sum += diff - self.buffer[self.head];
         }
         self.buffer[self.head] = diff;
@@ -586,7 +602,8 @@ impl QstickStream {
         }
         if self.filled {
             Some(self.sum / (self.period as f64))
-        } else {
+        
+            } else {
             None
         }
     }

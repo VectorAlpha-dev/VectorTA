@@ -23,6 +23,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -320,7 +321,8 @@ pub unsafe fn srsi_avx512(
 ) -> Result<SrsiOutput, SrsiError> {
     if stoch_period <= 32 {
         srsi_avx512_short(data, rsi_period, stoch_period, k, d)
-    } else {
+    
+        } else {
         srsi_avx512_long(data, rsi_period, stoch_period, k, d)
     }
 }
@@ -619,11 +621,41 @@ fn srsi_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         k_vals
-            .par_chunks_mut(cols)
-            .zip(d_vals.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (ks, ds))| do_row(row, ks, ds));
+
+
+                    .par_chunks_mut(cols)
+
+
+                    .zip(d_vals.par_chunks_mut(cols))
+
+
+                    .enumerate()
+
+
+                    .for_each(|(row, (ks, ds))| do_row(row, ks, ds));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (ks, ds)) in k_vals.chunks_mut(cols).zip(d_vals.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, ks, ds);
+
+
+        }
+
+
     } else {
         for (row, (ks, ds)) in k_vals.chunks_mut(cols).zip(d_vals.chunks_mut(cols)).enumerate() {
             do_row(row, ks, ds);

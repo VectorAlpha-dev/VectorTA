@@ -29,6 +29,7 @@ use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -387,7 +388,8 @@ pub unsafe fn vwmacd_avx512(
 ) -> Result<VwmacdOutput, VwmacdError> {
     if slow <= 32 {
         vwmacd_avx512_short(close, volume, fast, slow, signal, fast_ma_type, slow_ma_type, signal_ma_type)
-    } else {
+    
+        } else {
         vwmacd_avx512_long(close, volume, fast, slow, signal, fast_ma_type, slow_ma_type, signal_ma_type)
     }
 }
@@ -471,7 +473,8 @@ pub unsafe fn vwmacd_row_avx512(
 ) {
     if slow <= 32 {
         vwmacd_row_avx512_short(close, volume, fast, slow, signal, fast_ma_type, slow_ma_type, signal_ma_type, out);
-    } else {
+    
+        } else {
         vwmacd_row_avx512_long(close, volume, fast, slow, signal, fast_ma_type, slow_ma_type, signal_ma_type, out);
     }
 }
@@ -768,9 +771,25 @@ fn vwmacd_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         macd.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in macd.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in macd.chunks_mut(cols).enumerate() {
             do_row(row, slice);

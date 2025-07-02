@@ -28,6 +28,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
@@ -288,7 +289,8 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         let c = compare[i];
         lr[i] = if m.is_nan() || c.is_nan() || c == 0.0 {
             f64::NAN
-        } else {
+        
+            } else {
             (m / c).ln()
         };
     }
@@ -338,7 +340,8 @@ pub fn rsmk_scalar(
     for i in (first_valid + lookback)..lr.len() {
         mom[i] = if lr[i].is_nan() || lr[i - lookback].is_nan() {
             f64::NAN
-        } else {
+        
+            } else {
             lr[i] - lr[i - lookback]
         };
     }
@@ -475,7 +478,8 @@ impl RsmkStream {
         let mom_idx = (self.head - self.lookback) % self.buffer_mom.len();
         let mom = if self.head < self.buffer_lr.len() + 1 || self.head < self.lookback + 1 {
             f64::NAN
-        } else {
+        
+            } else {
             let curr = self.buffer_lr[pos];
             let prev = self.buffer_lr[(pos + self.buffer_lr.len() - self.lookback) % self.buffer_lr.len()];
             if curr.is_nan() || prev.is_nan() { f64::NAN } else { curr - prev }
@@ -699,8 +703,32 @@ fn rsmk_batch_inner(
     };
 
     if parallel {
+
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
+
         indicators.par_chunks_mut(cols).zip(signals.par_chunks_mut(cols)).enumerate()
-            .for_each(|(row, (ind_row, sig_row))| do_row(row, ind_row, sig_row));
+
+
+                    .for_each(|(row, (ind_row, sig_row))| do_row(row, ind_row, sig_row));
+
+
+        }
+
+
+        #[cfg(target_arch = "wasm32")] {
+
+
+        for (row, (ind_row, sig_row)) in indicators.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
+
+
+                    do_row(row, ind_row, sig_row);
+
+
+        }
+
+
     } else {
         for (row, (ind_row, sig_row)) in indicators.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
             do_row(row, ind_row, sig_row);

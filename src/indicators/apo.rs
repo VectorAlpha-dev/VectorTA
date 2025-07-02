@@ -24,6 +24,8 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -196,7 +198,10 @@ pub fn apo(input: &ApoInput) -> Result<ApoOutput, ApoError> {
 pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, ApoError> {
     let data: &[f64] = input.as_ref();
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ApoError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ApoError::AllValuesNaN)?;
     let len = data.len();
     let short = input.get_short_period();
     let long = input.get_long_period();
@@ -208,7 +213,10 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
         return Err(ApoError::ShortPeriodNotLessThanLong { short, long });
     }
     if (len - first) < long {
-        return Err(ApoError::NotEnoughValidData { needed: long, valid: len - first });
+        return Err(ApoError::NotEnoughValidData {
+            needed: long,
+            valid: len - first,
+        });
     }
 
     let chosen = match kernel {
@@ -220,17 +228,11 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
 
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                apo_scalar(data, short, long, first, &mut out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => apo_scalar(data, short, long, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                apo_avx2(data, short, long, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => apo_avx2(data, short, long, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                apo_avx512(data, short, long, first, &mut out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => apo_avx512(data, short, long, first, &mut out),
             _ => unreachable!(),
         }
     }
@@ -240,13 +242,7 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
 // --- Scalar Kernel
 
 #[inline]
-pub fn apo_scalar(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
 
@@ -275,26 +271,14 @@ pub fn apo_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn apo_avx2(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn apo_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     // Stub: Use scalar fallback.
     apo_scalar(data, short, long, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn apo_avx512(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn apo_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     // Choose between short/long, stub both to scalar
     if long <= 32 {
         apo_avx512_short(data, short, long, first, out);
@@ -548,7 +532,10 @@ fn apo_batch_inner(
     if combos.is_empty() {
         return Err(ApoError::InvalidPeriod { short: 0, long: 0 });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ApoError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ApoError::AllValuesNaN)?;
     let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
     if data.len() - first < max_long {
         return Err(ApoError::NotEnoughValidData {
@@ -574,10 +561,20 @@ fn apo_batch_inner(
     };
 
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -606,13 +603,7 @@ pub unsafe fn apo_row_scalar(
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn apo_row_avx2(
-    data: &[f64],
-    first: usize,
-    short: usize,
-    long: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn apo_row_avx2(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
     apo_scalar(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -653,16 +644,18 @@ pub unsafe fn apo_row_avx512_long(
     apo_scalar(data, short, long, first, out)
 }
 
-
 // --- Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_apo_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -676,7 +669,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_apo_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -698,7 +694,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_apo_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_default_candles(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -712,7 +711,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_apo_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = ApoParams {
@@ -721,11 +723,18 @@ mod tests {
         };
         let input = ApoInput::from_slice(&input_data, params);
         let res = apo_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] APO should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] APO should fail with zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_apo_period_invalid(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_period_invalid(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
         let params = ApoParams {
@@ -734,11 +743,18 @@ mod tests {
         };
         let input = ApoInput::from_slice(&data_small, params);
         let res = apo_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] APO should fail with invalid period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] APO should fail with invalid period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_apo_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
         let params = ApoParams {
@@ -747,11 +763,18 @@ mod tests {
         };
         let input = ApoInput::from_slice(&single_point, params);
         let res = apo_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] APO should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] APO should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_apo_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -771,7 +794,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_apo_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_apo_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -833,7 +859,10 @@ mod tests {
         check_apo_nan_handling
     );
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;

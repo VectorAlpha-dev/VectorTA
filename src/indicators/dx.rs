@@ -20,6 +20,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -276,28 +277,31 @@ pub fn dx_scalar(
                 let sum_di = plus_di + minus_di;
                 out[i] = if sum_di != 0.0 {
                     100.0 * ((plus_di - minus_di).abs() / sum_di)
-                } else {
+                
+                    } else {
                     0.0
                 };
-            }
         } else {
             plus_dm_sum = plus_dm_sum - (plus_dm_sum / period as f64) + plus_dm;
             minus_dm_sum = minus_dm_sum - (minus_dm_sum / period as f64) + minus_dm;
             tr_sum = tr_sum - (tr_sum / period as f64) + tr;
             let plus_di = if tr_sum != 0.0 {
                 (plus_dm_sum / tr_sum) * 100.0
-            } else {
+            
+                } else {
                 0.0
             };
             let minus_di = if tr_sum != 0.0 {
                 (minus_dm_sum / tr_sum) * 100.0
-            } else {
+            
+                } else {
                 0.0
             };
             let sum_di = plus_di + minus_di;
             out[i] = if sum_di != 0.0 {
                 100.0 * ((plus_di - minus_di).abs() / sum_di)
-            } else {
+            
+                } else {
                 out[i - 1]
             };
         }
@@ -411,12 +415,14 @@ impl DxStream {
         let down_move = self.prev_low - low;
         let plus_dm = if up_move > 0.0 && up_move > down_move {
             up_move
-        } else {
+        
+            } else {
             0.0
         };
         let minus_dm = if down_move > 0.0 && down_move > up_move {
             down_move
-        } else {
+        
+            } else {
             0.0
         };
         let tr1 = high - low;
@@ -439,7 +445,8 @@ impl DxStream {
                 self.prev_close = close;
                 return Some(if sum_di != 0.0 {
                     100.0 * ((plus_di - minus_di).abs() / sum_di)
-                } else {
+                
+                    } else {
                     0.0
                 });
             } else {
@@ -447,19 +454,20 @@ impl DxStream {
                 self.prev_low = low;
                 self.prev_close = close;
                 return None;
-            }
         } else {
             self.plus_dm_sum = self.plus_dm_sum - (self.plus_dm_sum / self.period as f64) + plus_dm;
             self.minus_dm_sum = self.minus_dm_sum - (self.minus_dm_sum / self.period as f64) + minus_dm;
             self.tr_sum = self.tr_sum - (self.tr_sum / self.period as f64) + tr;
             let plus_di = if self.tr_sum != 0.0 {
                 (self.plus_dm_sum / self.tr_sum) * 100.0
-            } else {
+            
+                } else {
                 0.0
             };
             let minus_di = if self.tr_sum != 0.0 {
                 (self.minus_dm_sum / self.tr_sum) * 100.0
-            } else {
+            
+                } else {
                 0.0
             };
             let sum_di = plus_di + minus_di;
@@ -644,10 +652,27 @@ fn dx_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .par_chunks_mut(cols)
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -698,7 +723,8 @@ pub unsafe fn dx_row_avx512(
 ) {
     if period <= 32 {
         dx_row_avx512_short(high, low, close, first, period, out);
-    } else {
+    
+        } else {
         dx_row_avx512_long(high, low, close, first, period, out);
     }
 }

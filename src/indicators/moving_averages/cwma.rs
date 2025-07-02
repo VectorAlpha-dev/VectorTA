@@ -27,6 +27,14 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
@@ -249,6 +257,7 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
 }
 
 #[inline]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub unsafe fn cwma_scalar(
     data: &[f64],
     weights: &[f64],
@@ -262,6 +271,27 @@ pub unsafe fn cwma_scalar(
         let mut acc = 0.0;
         for (k, &w) in weights.iter().enumerate() {
             acc = data[i - k].mul_add(w, acc);
+        }
+        out[i] = acc * inv_norm;
+    }
+}
+
+#[inline]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+pub unsafe fn cwma_scalar(
+    data: &[f64],
+    weights: &[f64],
+    _period: usize,
+    first_val: usize,
+    inv_norm: f64,
+    out: &mut [f64],
+) {
+    let wlen = weights.len();
+    for i in (first_val + wlen)..data.len() {
+        let mut acc = 0.0;
+        for (k, &w) in weights.iter().enumerate() {
+            // Fallback for architectures without mul_add
+            acc = acc + data[i - k] * w;
         }
         out[i] = acc * inv_norm;
     }
@@ -778,9 +808,25 @@ fn cwma_batch_inner(
 
     // 3. run every row, writing directly into `raw`
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         raw.par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+
+                    .enumerate()
+
+                    .for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+
+                    do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
             do_row(row, slice);
@@ -848,7 +894,8 @@ unsafe fn cwma_row_avx512(
 ) {
     if period <= 32 {
         cwma_row_avx512_short(data, first, period, w_ptr, inv_n, out);
-    } else {
+    
+        } else {
         cwma_row_avx512_long(data, first, period, w_ptr, inv_n, out);
     }
 }
@@ -873,7 +920,8 @@ unsafe fn cwma_row_avx512_short(
     let w0 = load_w512_rev(w_ptr);
     let w1 = if chunks >= 2 {
         Some(load_w512_rev(w_ptr.add(STEP)))
-    } else {
+    
+        } else {
         None
     };
 
@@ -1046,11 +1094,165 @@ unsafe fn cwma_row_avx2(
     }
 }
 
+#[cfg(feature = "python")]
+#[pyfunction(name = "cwma")]
+pub fn cwma_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    use pyo3::exceptions::PyValueError;
+    
+    let slice_in = arr_in.as_slice()?;
+    
+    let params = CwmaParams {
+        period: Some(period),
+    };
+    let cwma_in = CwmaInput::from_slice(slice_in, params);
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| -> Result<(), CwmaError> {
+        let result = cwma_with_kernel(&cwma_in, Kernel::Auto)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "CwmaStream")]
+pub struct CwmaStreamPy {
+    stream: CwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = CwmaParams {
+            period: Some(period),
+        };
+        let stream = CwmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(CwmaStreamPy { stream })
+    }
+    
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cwma_batch")]
+pub fn cwma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = CwmaBatchRange {
+        period: period_range,
+    };
+    
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let batch_result = cwma_batch_par_slice(slice_in, &sweep, kernel)?;
+        slice_out.copy_from_slice(&batch_result.values);
+        Ok::<(), CwmaError>(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = CwmaParams {
+        period: Some(period),
+    };
+    let input = CwmaInput::from_slice(data, params);
+    
+    cwma_with_kernel(&input, Kernel::Auto)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = CwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    cwma_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = CwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+    
+    Ok(metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    #[cfg(feature = "proptest")]
     use proptest::prelude::*;
 
     fn check_cwma_partial_params(
@@ -1298,6 +1500,7 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(feature = "proptest")]
     #[allow(clippy::float_cmp)]
     fn check_cwma_property(
         test_name: &str,
@@ -1484,7 +1687,11 @@ mod tests {
         check_cwma_empty_input,
         check_cwma_reinput,
         check_cwma_nan_handling,
-        check_cwma_streaming,
+        check_cwma_streaming
+    );
+    
+    #[cfg(feature = "proptest")]
+    generate_all_cwma_tests!(
         check_cwma_property
     );
 

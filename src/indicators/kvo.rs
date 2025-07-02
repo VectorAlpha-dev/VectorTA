@@ -26,6 +26,7 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -259,7 +260,8 @@ pub unsafe fn kvo_scalar(
         if i == first_valid_idx + 1 {
             short_ema = vf;
             long_ema = vf;
-        } else {
+        
+            } else {
             short_ema = (vf - short_ema) * short_per + short_ema;
             long_ema = (vf - long_ema) * long_per + long_ema;
         }
@@ -297,7 +299,8 @@ pub unsafe fn kvo_avx512(
 ) {
     if short_period <= 32 && long_period <= 32 {
         kvo_avx512_short(high, low, close, volume, short_period, long_period, first_valid_idx, out)
-    } else {
+    
+        } else {
         kvo_avx512_long(high, low, close, volume, short_period, long_period, first_valid_idx, out)
     }
 }
@@ -530,7 +533,19 @@ fn kvo_batch_inner(
         }
     };
     if parallel {
+
+        #[cfg(not(target_arch = "wasm32"))] {
+
         values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| do_row(row, slice));
+
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+
+        for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice);
+
+        }
+
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() { do_row(row, slice); }
     }
@@ -580,7 +595,8 @@ unsafe fn kvo_row_avx512(
 ) {
     if short_period <= 32 && long_period <= 32 {
         kvo_row_avx512_short(high, low, close, volume, first, short_period, long_period, out)
-    } else {
+    
+        } else {
         kvo_row_avx512_long(high, low, close, volume, first, short_period, long_period, out)
     }
 }
@@ -677,7 +693,8 @@ impl KvoStream {
             self.short_ema = vf;
             self.long_ema = vf;
             self.filled = true;
-        } else {
+        
+            } else {
             self.short_ema = (vf - self.short_ema) * self.short_alpha + self.short_ema;
             self.long_ema = (vf - self.long_ema) * self.long_alpha + self.long_ema;
         }

@@ -22,14 +22,21 @@ use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum AtrData<'a> {
-    Candles { candles: &'a Candles },
-    Slices { high: &'a [f64], low: &'a [f64], close: &'a [f64] },
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -57,13 +64,22 @@ pub struct AtrInput<'a> {
 impl<'a> AtrInput<'a> {
     #[inline]
     pub fn from_candles(candles: &'a Candles, params: AtrParams) -> Self {
-        Self { data: AtrData::Candles { candles }, params }
+        Self {
+            data: AtrData::Candles { candles },
+            params,
+        }
     }
     #[inline]
     pub fn from_slices(
-        high: &'a [f64], low: &'a [f64], close: &'a [f64], params: AtrParams
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        params: AtrParams,
     ) -> Self {
-        Self { data: AtrData::Slices { high, low, close }, params }
+        Self {
+            data: AtrData::Slices { high, low, close },
+            params,
+        }
     }
     #[inline]
     pub fn with_default_candles(candles: &'a Candles) -> Self {
@@ -83,34 +99,54 @@ pub struct AtrBuilder {
 
 impl Default for AtrBuilder {
     fn default() -> Self {
-        Self { length: None, kernel: Kernel::Auto }
+        Self {
+            length: None,
+            kernel: Kernel::Auto,
+        }
     }
 }
 
 impl AtrBuilder {
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     #[inline(always)]
-    pub fn length(mut self, n: usize) -> Self { self.length = Some(n); self }
+    pub fn length(mut self, n: usize) -> Self {
+        self.length = Some(n);
+        self
+    }
     #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<AtrOutput, AtrError> {
-        let p = AtrParams { length: self.length };
+        let p = AtrParams {
+            length: self.length,
+        };
         let i = AtrInput::from_candles(c, p);
         atr_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slices(
-        self, high: &[f64], low: &[f64], close: &[f64]
+        self,
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
     ) -> Result<AtrOutput, AtrError> {
-        let p = AtrParams { length: self.length };
+        let p = AtrParams {
+            length: self.length,
+        };
         let i = AtrInput::from_slices(high, low, close, p);
         atr_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<AtrStream, AtrError> {
-        let p = AtrParams { length: self.length };
+        let p = AtrParams {
+            length: self.length,
+        };
         AtrStream::try_new(p)
     }
 }
@@ -120,7 +156,11 @@ pub enum AtrError {
     #[error("Invalid length for ATR calculation (length={length}).")]
     InvalidLength { length: usize },
     #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
-    InconsistentSliceLengths { high_len: usize, low_len: usize, close_len: usize },
+    InconsistentSliceLengths {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+    },
     #[error("No candles available for ATR calculation.")]
     NoCandlesAvailable,
     #[error("Not enough data to calculate ATR: length={length}, data length={data_len}")]
@@ -134,15 +174,23 @@ pub fn atr(input: &AtrInput) -> Result<AtrOutput, AtrError> {
 
 pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, AtrError> {
     let (high, low, close) = match &input.data {
-        AtrData::Candles { candles } => {
-            (candles.select_candle_field("high").map_err(|_| AtrError::NoCandlesAvailable)?,
-             candles.select_candle_field("low").map_err(|_| AtrError::NoCandlesAvailable)?,
-             candles.select_candle_field("close").map_err(|_| AtrError::NoCandlesAvailable)?)
-        }
+        AtrData::Candles { candles } => (
+            candles
+                .select_candle_field("high")
+                .map_err(|_| AtrError::NoCandlesAvailable)?,
+            candles
+                .select_candle_field("low")
+                .map_err(|_| AtrError::NoCandlesAvailable)?,
+            candles
+                .select_candle_field("close")
+                .map_err(|_| AtrError::NoCandlesAvailable)?,
+        ),
         AtrData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
                 return Err(AtrError::InconsistentSliceLengths {
-                    high_len: high.len(), low_len: low.len(), close_len: close.len()
+                    high_len: high.len(),
+                    low_len: low.len(),
+                    close_len: close.len(),
                 });
             }
             (*high, *low, *close)
@@ -158,7 +206,10 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
         return Err(AtrError::NoCandlesAvailable);
     }
     if length > len {
-        return Err(AtrError::NotEnoughData { length, data_len: len });
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: len,
+        });
     }
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -179,9 +230,7 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
 }
 
 #[inline]
-pub fn atr_scalar(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
-) {
+pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     let len = close.len();
     let alpha = 1.0 / length as f64;
     let mut sum_tr = 0.0;
@@ -200,10 +249,10 @@ pub fn atr_scalar(
             if i == length - 1 {
                 rma = sum_tr / length as f64;
                 out[i] = rma;
+            } else {
+                rma += alpha * (tr - rma);
+                out[i] = rma;
             }
-        } else {
-            rma += alpha * (tr - rma);
-            out[i] = rma;
         }
     }
 }
@@ -211,31 +260,35 @@ pub fn atr_scalar(
 // -- AVX2/AVX512 always point to scalar; structuring for parity/stub compatibility --
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn atr_avx512(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
-) {
+pub fn atr_avx512(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     atr_scalar(high, low, close, length, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn atr_avx2(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
-) {
+pub fn atr_avx2(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     atr_scalar(high, low, close, length, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn atr_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &mut [f64],
 ) {
     atr_scalar(high, low, close, length, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn atr_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &mut [f64],
 ) {
     atr_scalar(high, low, close, length, out)
 }
@@ -305,7 +358,9 @@ pub struct AtrBatchRange {
 }
 impl Default for AtrBatchRange {
     fn default() -> Self {
-        Self { length: (14, 30, 1) }
+        Self {
+            length: (14, 30, 1),
+        }
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -314,8 +369,13 @@ pub struct AtrBatchBuilder {
     kernel: Kernel,
 }
 impl AtrBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn kernel(mut self, k: Kernel) -> Self {
+        self.kernel = k;
+        self
+    }
     #[inline]
     pub fn length_range(mut self, start: usize, end: usize, step: usize) -> Self {
         self.range.length = (start, end, step);
@@ -326,13 +386,24 @@ impl AtrBatchBuilder {
         self.range.length = (p, p, 0);
         self
     }
-    pub fn apply_slices(self, high: &[f64], low: &[f64], close: &[f64]) -> Result<AtrBatchOutput, AtrError> {
+    pub fn apply_slices(
+        self,
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+    ) -> Result<AtrBatchOutput, AtrError> {
         atr_batch_with_kernel(high, low, close, &self.range, self.kernel)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<AtrBatchOutput, AtrError> {
-        let high = c.select_candle_field("high").map_err(|_| AtrError::NoCandlesAvailable)?;
-        let low = c.select_candle_field("low").map_err(|_| AtrError::NoCandlesAvailable)?;
-        let close = c.select_candle_field("close").map_err(|_| AtrError::NoCandlesAvailable)?;
+        let high = c
+            .select_candle_field("high")
+            .map_err(|_| AtrError::NoCandlesAvailable)?;
+        let low = c
+            .select_candle_field("low")
+            .map_err(|_| AtrError::NoCandlesAvailable)?;
+        let close = c
+            .select_candle_field("close")
+            .map_err(|_| AtrError::NoCandlesAvailable)?;
         self.apply_slices(high, low, close)
     }
 }
@@ -346,7 +417,9 @@ pub struct AtrBatchOutput {
 }
 impl AtrBatchOutput {
     pub fn row_for_params(&self, p: &AtrParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.length.unwrap_or(14) == p.length.unwrap_or(14))
+        self.combos
+            .iter()
+            .position(|c| c.length.unwrap_or(14) == p.length.unwrap_or(14))
     }
     pub fn values_for(&self, p: &AtrParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -360,13 +433,22 @@ impl AtrBatchOutput {
 fn expand_grid(r: &AtrBatchRange) -> Vec<AtrParams> {
     let (start, end, step) = r.length;
     if step == 0 || start == end {
-        return vec![AtrParams { length: Some(start) }];
+        return vec![AtrParams {
+            length: Some(start),
+        }];
     }
-    (start..=end).step_by(step).map(|l| AtrParams { length: Some(l) }).collect()
+    (start..=end)
+        .step_by(step)
+        .map(|l| AtrParams { length: Some(l) })
+        .collect()
 }
 
 pub fn atr_batch_with_kernel(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &AtrBatchRange, k: Kernel
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &AtrBatchRange,
+    k: Kernel,
 ) -> Result<AtrBatchOutput, AtrError> {
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -384,19 +466,32 @@ pub fn atr_batch_with_kernel(
 
 #[inline(always)]
 pub fn atr_batch_slice(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &AtrBatchRange, kern: Kernel
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &AtrBatchRange,
+    kern: Kernel,
 ) -> Result<AtrBatchOutput, AtrError> {
     atr_batch_inner(high, low, close, sweep, kern, false)
 }
 #[inline(always)]
 pub fn atr_batch_par_slice(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &AtrBatchRange, kern: Kernel
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &AtrBatchRange,
+    kern: Kernel,
 ) -> Result<AtrBatchOutput, AtrError> {
     atr_batch_inner(high, low, close, sweep, kern, true)
 }
 
 fn atr_batch_inner(
-    high: &[f64], low: &[f64], close: &[f64], sweep: &AtrBatchRange, kern: Kernel, parallel: bool
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sweep: &AtrBatchRange,
+    kern: Kernel,
+    parallel: bool,
 ) -> Result<AtrBatchOutput, AtrError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -419,36 +514,51 @@ fn atr_batch_inner(
         }
     };
     if parallel {
-        values
-            .par_chunks_mut(cols)
-            .enumerate()
-            .for_each(|(row, slice)| do_row(row, slice));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
-    Ok(AtrBatchOutput { values, combos, rows, cols })
+    Ok(AtrBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]
-unsafe fn atr_row_scalar(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
-) {
+unsafe fn atr_row_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     atr_scalar(high, low, close, length, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn atr_row_avx2(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
-) {
+unsafe fn atr_row_avx2(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     atr_scalar(high, low, close, length, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn atr_row_avx512(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &mut [f64],
 ) {
     if length <= 32 {
         atr_row_avx512_short(high, low, close, length, out);
@@ -459,24 +569,31 @@ pub unsafe fn atr_row_avx512(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn atr_row_avx512_short(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &mut [f64],
 ) {
     atr_scalar(high, low, close, length, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn atr_row_avx512_long(
-    high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &mut [f64],
 ) {
     atr_scalar(high, low, close, length, out);
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
 
     fn check_atr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -489,8 +606,7 @@ mod tests {
         assert_eq!(result_partial.values.len(), candles.close.len());
         let zero_and_none_params = AtrParams { length: Some(14) };
         let input_zero_and_none = AtrInput::from_candles(&candles, zero_and_none_params);
-        let result_zero_and_none =
-            atr_with_kernel(&input_zero_and_none, kernel)?;
+        let result_zero_and_none = atr_with_kernel(&input_zero_and_none, kernel)?;
         assert_eq!(result_zero_and_none.values.len(), candles.close.len());
         Ok(())
     }
@@ -558,7 +674,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_atr_length_exceeding_data_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_atr_length_exceeding_data_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -571,7 +690,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_atr_very_small_data_set(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_atr_very_small_data_set(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let high = [10.0];
         let low = [5.0];
@@ -583,7 +705,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_atr_with_slice_data_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_atr_with_slice_data_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -659,9 +784,7 @@ mod tests {
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        let output = AtrBatchBuilder::new()
-            .kernel(kernel)
-            .apply_candles(&c)?;
+        let output = AtrBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
 
         let def = AtrParams::default();
         let row = output.values_for(&def).expect("default row missing");

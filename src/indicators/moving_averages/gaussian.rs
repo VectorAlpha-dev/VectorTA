@@ -27,6 +27,7 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -964,6 +965,7 @@ fn gaussian_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<GaussianBatchOutput, GaussianError> {
+#[cfg(not(target_arch = "wasm32"))]
     use rayon::prelude::*;
     use std::{arch::is_x86_feature_detected, mem::MaybeUninit};
 
@@ -1026,8 +1028,15 @@ fn gaussian_batch_inner(
     /* ------------------------------------------------------------
      * 2.  CPU-feature check  +  row-runner selection
      * ---------------------------------------------------------- */
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let have_avx512 = cfg!(target_feature = "avx512f") && is_x86_feature_detected!("avx512f");
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let have_avx512 = false;
+    
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let have_avx2 = cfg!(target_feature = "avx2") && is_x86_feature_detected!("avx2");
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let have_avx2 = false;
 
     let chosen = match kern {
         Kernel::Avx512 if have_avx512 => Kernel::Avx512,
@@ -1065,61 +1074,70 @@ fn gaussian_batch_inner(
      * 4.  Main computation (parallel / serial)
      * ---------------------------------------------------------- */
     if parallel {
-        match chosen {
-            /* ---- AVX-512 (8-row tiles) ---------------------------------- */
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => {
-                let tiles = rows / LANES_AVX512;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match chosen {
+                /* ---- AVX-512 (8-row tiles) ---------------------------------- */
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => {
+                    let tiles = rows / LANES_AVX512;
 
-                raw.par_chunks_exact_mut(cols * LANES_AVX512)
-                    .zip(combos.par_chunks_exact(LANES_AVX512))
-                    .for_each(|(dst_blk, prm_blk)| unsafe {
-                        gaussian_batch_tile_avx512(data, prm_blk, dst_blk, cols);
-                    });
+                    raw.par_chunks_exact_mut(cols * LANES_AVX512)
+                        .zip(combos.par_chunks_exact(LANES_AVX512))
+                        .for_each(|(dst_blk, prm_blk)| unsafe {
+                            gaussian_batch_tile_avx512(data, prm_blk, dst_blk, cols);
+                        });
 
-                raw[tiles * cols * LANES_AVX512..]
-                    .par_chunks_mut(cols)
-                    .enumerate()
-                    .for_each(|(i, dst)| unsafe {
-                        compute_row(
-                            tiles * LANES_AVX512 + i,
-                            dst,
-                            &combos,
-                            data,
-                            cols,
-                            row_runner,
-                        );
-                    });
-            }
+                    raw[tiles * cols * LANES_AVX512..]
+                        .par_chunks_mut(cols)
+                        .enumerate()
+                        .for_each(|(i, dst)| unsafe {
+                            compute_row(
+                                tiles * LANES_AVX512 + i,
+                                dst,
+                                &combos,
+                                data,
+                                cols,
+                                row_runner,
+                            );
+                        });
+                }
 
-            /* ---- AVX-2 (4-row tiles) ------------------------------------ */
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => {
-                let tiles = rows / LANES_AVX2;
+                /* ---- AVX-2 (4-row tiles) ------------------------------------ */
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => {
+                    let tiles = rows / LANES_AVX2;
 
-                raw.par_chunks_exact_mut(cols * LANES_AVX2)
-                    .zip(combos.par_chunks_exact(LANES_AVX2))
-                    .for_each(|(dst_blk, prm_blk)| unsafe {
-                        gaussian_batch_tile_avx2(data, prm_blk, dst_blk, cols);
-                    });
+                    raw.par_chunks_exact_mut(cols * LANES_AVX2)
+                        .zip(combos.par_chunks_exact(LANES_AVX2))
+                        .for_each(|(dst_blk, prm_blk)| unsafe {
+                            gaussian_batch_tile_avx2(data, prm_blk, dst_blk, cols);
+                        });
 
-                raw[tiles * cols * LANES_AVX2..]
-                    .par_chunks_mut(cols)
-                    .enumerate()
-                    .for_each(|(i, dst)| unsafe {
-                        compute_row(tiles * LANES_AVX2 + i, dst, &combos, data, cols, row_runner);
-                    });
-            }
+                    raw[tiles * cols * LANES_AVX2..]
+                        .par_chunks_mut(cols)
+                        .enumerate()
+                        .for_each(|(i, dst)| unsafe {
+                            compute_row(tiles * LANES_AVX2 + i, dst, &combos, data, cols, row_runner);
+                        });
+                }
 
-            /* ---- Scalar fallback (parallel) ----------------------------- */
-            _ => {
-                raw.par_chunks_mut(cols)
-                    .enumerate()
-                    .for_each(|(row, dst)| unsafe {
-                        compute_row(row, dst, &combos, data, cols, row_runner);
-                    });
+                /* ---- Scalar fallback (parallel) ----------------------------- */
+                _ => {
+                    raw.par_chunks_mut(cols)
+                        .enumerate()
+                        .for_each(|(row, dst)| unsafe {
+                            compute_row(row, dst, &combos, data, cols, row_runner);
+                        });
+                }
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // For WASM, always use sequential processing
+            for (row, dst) in raw.chunks_mut(cols).enumerate() {
+                unsafe {
+                    compute_row(row, dst, &combos, data, cols, row_runner);
     } else {
         match chosen {
             /* ---- AVX-512 serial ----------------------------------------- */

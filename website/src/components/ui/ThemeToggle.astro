@@ -17,16 +17,23 @@
   </svg>
 </button>
 
+
 <script>
   const themeToggle = document.getElementById('theme-toggle');
   
   themeToggle?.addEventListener('click', () => {
+    // Get current actual theme (not preference)
     const isDark = document.documentElement.classList.contains('dark');
+    
+    // Toggle theme
     const newTheme = isDark ? 'light' : 'dark';
     
-    // Dispatch custom event for theme change
-    window.dispatchEvent(new CustomEvent('theme-change', {
-      detail: { theme: newTheme }
+    // Save explicit preference (user has manually toggled)
+    localStorage.setItem('theme-preference', newTheme);
+    
+    // Dispatch event to update theme
+    window.dispatchEvent(new CustomEvent('theme-preference-change', {
+      detail: { preference: newTheme }
     }));
   });
 </script>
