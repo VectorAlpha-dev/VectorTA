@@ -187,7 +187,11 @@ pub fn cwma(input: &CwmaInput) -> Result<CwmaOutput, CwmaError> {
     cwma_with_kernel(input, Kernel::Auto)
 }
 
-pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput, CwmaError> {
+#[inline(always)]
+fn cwma_prepare<'a>(
+    input: &'a CwmaInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], Vec<f64>, usize, usize, f64, usize, Kernel), CwmaError> {
     let data: &[f64] = match &input.data {
         CwmaData::Candles { candles, source } => source_type(candles, source),
         CwmaData::Slice(sl) => sl,
@@ -226,33 +230,49 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
     let mut inv_norm = 1.0 / norm;
     inv_norm = inv_norm * (2.0 - norm * inv_norm); 
 
-    // Reserve enough NaN prefix so the first computed value
-    // aligns with the streaming implementation.
-    let warm = first + period - 1 ;
-    let mut out = alloc_with_nan_prefix(len, warm);
+    let warm = first + period - 1;
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
+    Ok((data, weights, period, first, inv_norm, warm, chosen))
+}
+
+#[inline(always)]
+fn cwma_compute_into(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first: usize,
+    inv_norm: f64,
+    chosen: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                cwma_scalar(data, &weights, period, first, inv_norm, &mut out)
+                cwma_scalar(data, weights, period, first, inv_norm, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                cwma_avx2(data, &weights, period, first, inv_norm, &mut out)
+                cwma_avx2(data, weights, period, first, inv_norm, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                cwma_avx512(data, &weights, period, first, inv_norm, &mut out)
+                cwma_avx512(data, weights, period, first, inv_norm, out)
             }
             _ => unreachable!(),
         }
     }
+}
 
+pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput, CwmaError> {
+    let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(input, kernel)?;
+    let len = data.len();
+    let mut out = alloc_with_nan_prefix(len, warm);
+    cwma_compute_into(data, &weights, period, first, inv_norm, chosen, &mut out);
     Ok(CwmaOutput { values: out })
 }
 
@@ -735,6 +755,29 @@ fn cwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CwmaBatchOutput, CwmaError> {
+    let combos = expand_grid(sweep);
+    let cols = data.len();
+    let rows = combos.len();
+    let mut values = vec![0.0; rows * cols];
+    
+    cwma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(CwmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn cwma_batch_inner_into(
+    data: &[f64],
+    sweep: &CwmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<CwmaParams>, CwmaError> {
     if data.is_empty() {
         return Err(CwmaError::EmptyInputData);
     }
@@ -778,14 +821,26 @@ fn cwma_batch_inner(
             flat_w[row * max_p + i] = w;
             norm += w;
         }
-        inv_norms[row] = 1.0 / norm;
+        let mut inv_norm = 1.0 / norm;
+        inv_norm = inv_norm * (2.0 - norm * inv_norm);  // Newton-Raphson refinement
+        inv_norms[row] = inv_norm;
     }
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
 
-    // 1. allocate the big matrix as MaybeUninit and write the NaN prefixes
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    
+    // Use the efficient prefix initialization
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     // 2. closure that fills one row; takes &mut [MaybeUninit<f64>]
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -806,44 +861,31 @@ fn cwma_batch_inner(
         }
     };
 
-    // 3. run every row, writing directly into `raw`
+    // 3. run every row, writing directly into `out_uninit`
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
 
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
-
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    // 4. now that every element is written, transmute to Vec<f64>
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+    // No need to transmute - the memory is already initialized and we're just
+    // reinterpreting back to the original type
 
-    // ---------- 5. package result ----------
-    Ok(CwmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -857,7 +899,7 @@ unsafe fn cwma_row_scalar(
     out: &mut [f64],
 ) {
     let wlen = period - 1;
-    for i in (first + wlen + 1)..data.len() {
+    for i in (first + wlen)..data.len() {
         let mut sum = 0.0;
         for k in 0..wlen {
             let w = *w_ptr.add(k);
@@ -926,7 +968,7 @@ unsafe fn cwma_row_avx512_short(
         None
     };
 
-    for i in (first + wlen + 1)..data.len() {
+    for i in (first + wlen)..data.len() {
         let mut acc = _mm512_fmadd_pd(
             _mm512_loadu_pd(data.as_ptr().add(i - 7)),
             w0,
@@ -1063,7 +1105,7 @@ unsafe fn cwma_row_avx2(
         _ => unreachable!(),
     };
 
-    for i in (first + wlen + 1)..data.len() {
+    for i in (first + wlen)..data.len() {
         let mut acc = _mm256_setzero_pd();
 
         for blk in 0..vec_blks {
@@ -1116,8 +1158,9 @@ pub fn cwma_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     py.allow_threads(|| -> Result<(), CwmaError> {
-        let result = cwma_with_kernel(&cwma_in, Kernel::Auto)?;
-        slice_out.copy_from_slice(&result.values);
+        let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(&cwma_in, Kernel::Auto)?;
+        slice_out[..warm].fill(f64::NAN);
+        cwma_compute_into(data, &weights, period, first, inv_norm, chosen, slice_out);
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1172,14 +1215,21 @@ pub fn cwma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    py.allow_threads(|| {
+    let combos = py.allow_threads(|| {
         let kernel = match Kernel::Auto {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        let batch_result = cwma_batch_par_slice(slice_in, &sweep, kernel)?;
-        slice_out.copy_from_slice(&batch_result.values);
-        Ok::<(), CwmaError>(())
+        let simd = match kernel {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512Batch => Kernel::Avx512,
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        cwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
@@ -1205,7 +1255,7 @@ pub fn cwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = CwmaInput::from_slice(data, params);
     
-    cwma_with_kernel(&input, Kernel::Auto)
+    cwma_with_kernel(&input, Kernel::Scalar)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1223,7 +1273,7 @@ pub fn cwma_batch_js(
     };
 
     // Use the existing batch function with parallel=false for WASM
-    cwma_batch_inner(data, &sweep, Kernel::Auto, false)
+    cwma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

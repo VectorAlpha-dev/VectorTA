@@ -250,9 +250,11 @@ pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: 
                 rma = sum_tr / length as f64;
                 out[i] = rma;
             } else {
-                rma += alpha * (tr - rma);
-                out[i] = rma;
+                out[i] = f64::NAN;
             }
+        } else {
+            rma += alpha * (tr - rma);
+            out[i] = rma;
         }
     }
 }

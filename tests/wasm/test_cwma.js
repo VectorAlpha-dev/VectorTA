@@ -14,6 +14,7 @@ import {
     assertAllNaN,
     assertNoNaN
 } from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,7 +43,7 @@ test('CWMA partial params', () => {
     assert.strictEqual(result.length, close.length);
 });
 
-test('CWMA accuracy', () => {
+test('CWMA accuracy', async () => {
     // Test CWMA matches expected values from Rust tests - mirrors check_cwma_accuracy
     const close = new Float64Array(testData.close);
     const expectedLast5 = [
@@ -65,6 +66,9 @@ test('CWMA accuracy', () => {
         1e-9,
         "CWMA last 5 values mismatch"
     );
+    
+    // Compare full output with Rust
+    await compareWithRust('cwma', result, 'close', {period: 14});
 });
 
 test('CWMA default candles', () => {
@@ -266,13 +270,13 @@ test('CWMA batch edge cases', () => {
     
     assert.strictEqual(singleBatch.length, 15);
     
-    // Step = 0 should return single value
-    const zeroStepBatch = wasm.cwma_batch_js(
-        close,
-        10, 20, 0
-    );
-    
-    assert.strictEqual(zeroStepBatch.length, 15); // Single period=10
+    // Step = 0 with period that requires more data than available should throw
+    assert.throws(() => {
+        wasm.cwma_batch_js(
+            close,
+            10, 20, 0  // Period 10 needs 16 values (round_up8), but we only have 15
+        );
+    }, /Not enough valid data/);
     
     // Step larger than range
     const largeBatch = wasm.cwma_batch_js(

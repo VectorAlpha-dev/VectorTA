@@ -17,6 +17,7 @@ except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close
+from rust_comparison import compare_with_rust
 
 
 class TestCwma:
@@ -56,6 +57,9 @@ class TestCwma:
             rtol=1e-9,
             msg="CWMA last 5 values mismatch"
         )
+        
+        # Compare full output with Rust
+        compare_with_rust('cwma', result, 'close', {'period': 14})
     
     def test_cwma_default_candles(self, test_data):
         """Test CWMA with default parameters - mirrors check_cwma_default_candles"""

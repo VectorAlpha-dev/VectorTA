@@ -571,12 +571,25 @@ fn eri_batch_inner(
     };
 
     if parallel {
-        bull.par_chunks_mut(cols)
-            .zip(bear.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (bull_row, bear_row))| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            bull.par_chunks_mut(cols)
+                .zip(bear.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, (bull_row, bear_row))| {
+                    let _ = do_row(row, bull_row, bear_row);
+                });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, (bull_row, bear_row)) in bull
+                .chunks_mut(cols)
+                .zip(bear.chunks_mut(cols))
+                .enumerate()
+            {
                 let _ = do_row(row, bull_row, bear_row);
-            });
+            }
+        }
     } else {
         for (row, (bull_row, bear_row)) in bull
             .chunks_mut(cols)

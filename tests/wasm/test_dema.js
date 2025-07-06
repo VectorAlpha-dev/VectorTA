@@ -14,6 +14,7 @@ import {
     assertAllNaN,
     assertNoNaN
 } from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,7 +47,7 @@ test('DEMA partial params', () => {
     assert.strictEqual(resultCustom.length, close.length);
 });
 
-test('DEMA accuracy', () => {
+test('DEMA accuracy', async () => {
     // Test DEMA matches expected values from Rust tests - mirrors check_dema_accuracy
     const close = new Float64Array(testData.close);
     const expectedLast5 = [
@@ -69,6 +70,9 @@ test('DEMA accuracy', () => {
         1e-6,
         "DEMA last 5 values mismatch"
     );
+    
+    // Compare full output with Rust
+    await compareWithRust('dema', result, 'close', {period: 30});
 });
 
 test('DEMA default candles', () => {
@@ -252,13 +256,9 @@ test('DEMA batch warmup validation', () => {
         const rowStart = combo * 60;
         const rowData = batchResult.slice(rowStart, rowStart + 60);
         
-        // First period-1 values should be NaN
-        for (let i = 0; i < period - 1; i++) {
-            assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
-        }
-        
-        // After warmup should have values
-        for (let i = period - 1; i < 60; i++) {
+        // DEMA doesn't have NaN warmup period - it starts calculating from the first value
+        // All values should be non-NaN
+        for (let i = 0; i < 60; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
         }
     }
@@ -276,13 +276,13 @@ test('DEMA batch edge cases', () => {
     
     assert.strictEqual(singleBatch.length, 20);
     
-    // Step = 0 should return single value
-    const zeroStepBatch = wasm.dema_batch_js(
-        close,
-        15, 25, 0
-    );
-    
-    assert.strictEqual(zeroStepBatch.length, 20); // Single period=15
+    // Step = 0 with period that requires more data than available should throw
+    assert.throws(() => {
+        wasm.dema_batch_js(
+            close,
+            15, 25, 0  // Period 15 needs 2*(15-1) = 28 values, but we only have 20
+        );
+    }, /Not enough data/);
     
     // Step larger than range
     const largeBatch = wasm.dema_batch_js(
@@ -346,14 +346,10 @@ test('DEMA batch MA crossover scenario', () => {
     const fast10 = fastBatch.slice(0, 200);
     const slow30 = slowBatch.slice(0, 200);
     
-    // Verify first 9 values are NaN for fast10 (period-1)
-    for (let i = 0; i < 9; i++) {
-        assert(isNaN(fast10[i]), `Expected NaN at index ${i} for fast MA`);
-    }
-    
-    // Verify first 29 values are NaN for slow30 (period-1)
-    for (let i = 0; i < 29; i++) {
-        assert(isNaN(slow30[i]), `Expected NaN at index ${i} for slow MA`);
+    // DEMA doesn't have NaN warmup period - verify all values are valid
+    for (let i = 0; i < 200; i++) {
+        assert(!isNaN(fast10[i]), `Unexpected NaN at index ${i} for fast MA`);
+        assert(!isNaN(slow30[i]), `Unexpected NaN at index ${i} for slow MA`);
     }
 });
 

@@ -18,8 +18,12 @@ def load_test_data():
     
     with open(data_path, 'r') as f:
         reader = csv.reader(f)
+        first_row = True
         for row in reader:
-            # Skip empty rows
+            # Skip header row and empty rows
+            if first_row:
+                first_row = False
+                continue
             if len(row) < 6:
                 continue
             # CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
@@ -88,6 +92,16 @@ EXPECTED_OUTPUTS = {
             59766.41512339413,
             59655.66162110993,
             59332.492883847
+        ]
+    },
+    'ema': {
+        'default_params': {'period': 9},
+        'last_five': [
+            59302.2,
+            59277.9,
+            59230.2,
+            59215.1,
+            59103.1
         ]
     }
 }

@@ -200,6 +200,8 @@ pub enum HwmaError {
     AllValuesNaN,
     #[error("hwma: Parameters (na, nb, nc) must be in (0,1). Received: na={na}, nb={nb}, nc={nc}")]
     InvalidParams { na: f64, nb: f64, nc: f64 },
+    #[error("hwma: Invalid output buffer size: expected = {expected}, actual = {actual}")]
+    InvalidOutputBuffer { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -246,6 +248,67 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     }
 
     Ok(HwmaOutput { values: out })
+}
+
+#[inline]
+pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
+    hwma_with_kernel_into(input, Kernel::Auto, out)
+}
+
+pub fn hwma_with_kernel_into(
+    input: &HwmaInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), HwmaError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(HwmaError::EmptyData);
+    }
+    
+    // Ensure output buffer is the correct size
+    if out.len() != len {
+        return Err(HwmaError::InvalidOutputBuffer {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+    
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HwmaError::AllValuesNaN)?;
+    let na = input.get_na();
+    let nb = input.get_nb();
+    let nc = input.get_nc();
+
+    if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
+        return Err(HwmaError::InvalidParams { na, nb, nc });
+    }
+    if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
+        return Err(HwmaError::InvalidParams { na, nb, nc });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // Initialize NaN prefix
+    out[..first].fill(f64::NAN);
+    
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => hwma_scalar(data, na, nb, nc, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => hwma_avx2(data, na, nb, nc, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => hwma_avx512(data, na, nb, nc, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
 }
 
 #[inline(always)]
@@ -699,6 +762,99 @@ fn hwma_batch_inner(
 }
 
 #[inline(always)]
+fn hwma_batch_inner_into(
+    data: &[f64],
+    sweep: &HwmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<(Vec<HwmaParams>, usize, usize), HwmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(HwmaError::EmptyData);
+    }
+    let len = data.len();
+    if len == 0 {
+        return Err(HwmaError::EmptyData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HwmaError::AllValuesNaN)?;
+    for prm in &combos {
+        let na = prm.na.unwrap();
+        let nb = prm.nb.unwrap();
+        let nc = prm.nc.unwrap();
+        if !na.is_finite() || !nb.is_finite() || !nc.is_finite() {
+            return Err(HwmaError::InvalidParams { na, nb, nc });
+        }
+        if !(na > 0.0 && na < 1.0 && nb > 0.0 && nb < 1.0 && nc > 0.0 && nc < 1.0) {
+            return Err(HwmaError::InvalidParams { na, nb, nc });
+        }
+    }
+    let rows = combos.len();
+    let cols = len;
+    
+    // Ensure output buffer is the correct size
+    if out.len() != rows * cols {
+        return Err(HwmaError::InvalidOutputBuffer {
+            expected: rows * cols,
+            actual: out.len(),
+        });
+    }
+    
+    let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
+
+    // Cast output to MaybeUninit for initialization
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ----- closure that fills one row ------------------------------------------
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let prm = &combos[row];
+        let na = prm.na.unwrap();
+        let nb = prm.nb.unwrap();
+        let nc = prm.nc.unwrap();
+
+        match kern {
+            Kernel::Scalar => hwma_row_scalar(data, first, na, nb, nc, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => hwma_row_avx2(data, first, na, nb, nc, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => hwma_row_avx512(data, first, na, nb, nc, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ----- run every row -----------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok((combos, rows, cols))
+}
+
+#[inline(always)]
 unsafe fn hwma_row_scalar(data: &[f64], first: usize, na: f64, nb: f64, nc: f64, out: &mut [f64]) {
     hwma_scalar(data, na, nb, nc, first, out);
 }
@@ -751,6 +907,216 @@ pub unsafe fn hwma_row_avx512_long(
 #[inline(always)]
 pub fn expand_grid_hwma(r: &HwmaBatchRange) -> Vec<HwmaParams> {
     expand_grid(r)
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use numpy::ndarray::{Array1, Array2};
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "hwma")]
+pub fn hwma_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    na: f64,
+    nb: f64,
+    nc: f64,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::PyArrayMethods;
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    
+    // Pre-allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Prepare HWMA input
+    let hwma_in = HwmaInput::from_slice(slice_in, HwmaParams {
+        na: Some(na),
+        nb: Some(nb),
+        nc: Some(nc),
+    });
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), HwmaError> {
+        hwma_into(&hwma_in, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(format!("HWMA error: {}", e)))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "hwma_batch")]
+pub fn hwma_batch_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    na_range: (f64, f64, f64),
+    nb_range: (f64, f64, f64),
+    nc_range: (f64, f64, f64),
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::PyArrayMethods;
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let sweep = HwmaBatchRange {
+        na: na_range,
+        nb: nb_range,
+        nc: nc_range,
+    };
+    
+    // Expand grid to get all combinations
+    let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("Invalid parameter ranges"));
+    }
+    
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Heavy work without the GIL
+    let (_, final_rows, final_cols) = py.allow_threads(|| -> Result<(Vec<HwmaParams>, usize, usize), HwmaError> {
+        // Detect best kernel
+        let kernel = match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            _ => Kernel::Scalar,
+        };
+        
+        // Use the new _into function with parallel=true
+        hwma_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(format!("HWMA batch error: {}", e)))?;
+    
+    // Extract metadata
+    let na_values: Vec<f64> = combos.iter().map(|c| c.na.unwrap()).collect();
+    let nb_values: Vec<f64> = combos.iter().map(|c| c.nb.unwrap()).collect();
+    let nc_values: Vec<f64> = combos.iter().map(|c| c.nc.unwrap()).collect();
+    
+    // Reshape to 2D
+    let out_2d = out_arr.reshape((final_rows, final_cols))?;
+    
+    // Create dictionary output
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_2d)?;
+    dict.set_item("na_values", na_values)?;
+    dict.set_item("nb_values", nb_values)?;
+    dict.set_item("nc_values", nc_values)?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "HwmaStream")]
+pub struct HwmaStreamPy {
+    inner: HwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl HwmaStreamPy {
+    #[new]
+    pub fn new(na: f64, nb: f64, nc: f64) -> PyResult<Self> {
+        let params = HwmaParams {
+            na: Some(na),
+            nb: Some(nb),
+            nc: Some(nc),
+        };
+        match HwmaStream::try_new(params) {
+            Ok(stream) => Ok(Self { inner: stream }),
+            Err(e) => Err(PyValueError::new_err(format!("HwmaStream error: {}", e))),
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_js(data: &[f64], na: f64, nb: f64, nc: f64) -> Result<Vec<f64>, JsValue> {
+    let params = HwmaParams {
+        na: Some(na),
+        nb: Some(nb),
+        nc: Some(nc),
+    };
+    let input = HwmaInput::from_slice(data, params);
+    match hwma_with_kernel(&input, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("HWMA error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_batch_js(
+    data: &[f64],
+    na_start: f64,
+    na_end: f64,
+    na_step: f64,
+    nb_start: f64,
+    nb_end: f64,
+    nb_step: f64,
+    nc_start: f64,
+    nc_end: f64,
+    nc_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = HwmaBatchRange {
+        na: (na_start, na_end, na_step),
+        nb: (nb_start, nb_end, nb_step),
+        nc: (nc_start, nc_end, nc_step),
+    };
+    match hwma_batch_slice(data, &sweep, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("HWMA batch error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_batch_metadata_js(
+    na_start: f64,
+    na_end: f64,
+    na_step: f64,
+    nb_start: f64,
+    nb_end: f64,
+    nb_step: f64,
+    nc_start: f64,
+    nc_end: f64,
+    nc_step: f64,
+) -> Vec<f64> {
+    let sweep = HwmaBatchRange {
+        na: (na_start, na_end, na_step),
+        nb: (nb_start, nb_end, nb_step),
+        nc: (nc_start, nc_end, nc_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let mut result = Vec::new();
+    
+    for combo in combos {
+        result.push(combo.na.unwrap());
+        result.push(combo.nb.unwrap());
+        result.push(combo.nc.unwrap());
+    }
+    
+    result
 }
 
 #[cfg(test)]

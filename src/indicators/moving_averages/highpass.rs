@@ -29,7 +29,19 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use std::mem::MaybeUninit;
-use thiserror::Error; // add near the other use lines
+use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::ndarray::{Array1, Array2};
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for HighPassInput<'a> {
     #[inline(always)]
@@ -162,6 +174,8 @@ pub enum HighPassError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("highpass: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("highpass: Invalid output buffer size: expected = {expected}, actual = {actual}")]
+    InvalidOutputBuffer { expected: usize, actual: usize },
     #[error(
         "highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}"
     )]
@@ -171,6 +185,14 @@ pub enum HighPassError {
 #[inline]
 pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, HighPassError> {
     highpass_with_kernel(input, Kernel::Auto)
+}
+
+#[inline]
+fn highpass_into(
+    input: &HighPassInput,
+    out: &mut [f64],
+) -> Result<(), HighPassError> {
+    highpass_with_kernel_into(input, Kernel::Auto, out)
 }
 
 pub fn highpass_with_kernel(
@@ -231,6 +253,77 @@ pub fn highpass_with_kernel(
     }
 
     Ok(HighPassOutput { values: out })
+}
+
+fn highpass_with_kernel_into(
+    input: &HighPassInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), HighPassError> {
+    let data: &[f64] = match &input.data {
+        HighPassData::Candles { candles, source } => source_type(candles, source),
+        HighPassData::Slice(sl) => sl,
+    };
+
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
+    
+    // Ensure output buffer is the correct size
+    if out.len() != data.len() {
+        return Err(HighPassError::InvalidOutputBuffer {
+            expected: data.len(),
+            actual: out.len(),
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HighPassError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+    if len <= 2 || period == 0 || period > len {
+        return Err(HighPassError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if len - first < period {
+        return Err(HighPassError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    let k = 1.0;
+    let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
+    let cos_val = two_pi_k_div.cos();
+    if cos_val.abs() < 1e-15 {
+        return Err(HighPassError::InvalidAlpha { cos_val });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    let warm = first + period;
+    // Initialize NaN prefix
+    out[..warm].fill(f64::NAN);
+    
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => highpass_scalar(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => highpass_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => highpass_avx512(data, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
 }
 
 // Scalar implementation
@@ -460,99 +553,17 @@ fn highpass_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<HighPassBatchOutput, HighPassError> {
+    // Get combos to calculate dimensions
     let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(HighPassError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-    if data.is_empty() {
-        return Err(HighPassError::EmptyInputData);
-    }
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(HighPassError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
-        return Err(HighPassError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
-        });
-    }
-
-    for c in &combos {
-        let period = c.period.unwrap();
-        let k = 1.0;
-        let cos_val = (2.0 * std::f64::consts::PI * k / period as f64).cos();
-        if cos_val.abs() < 1e-15 {
-            return Err(HighPassError::InvalidAlpha { cos_val });
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // after the usual validation checks …
-
     let rows = combos.len();
     let cols = data.len();
-
-    /* ---------- 1.  NaN prefixes per-row ---------- */
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
-    /* ---------- 2.  allocate big matrix ---------- */
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
-
-    /* ---------- 3.  row worker ---------- */
-    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-        let period = combos[row].period.unwrap();
-
-        // reinterpret just this row as &mut [f64]
-        let out_row =
-            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-
-        match kern {
-            Kernel::Scalar => highpass_row_scalar(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => highpass_row_avx2(data, first, period, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => highpass_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
-        }
-    };
-
-    /* ---------- 4.  run every row ---------- */
-    if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
-        }
-
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
-
-        }
-    } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
-        }
-    }
-
-    /* ---------- 5.  transmute to Vec<f64> ---------- */
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
+    
+    // Allocate output buffer
+    let mut values = vec![0.0; rows * cols];
+    
+    // Delegate to the _into version which contains all the logic
+    highpass_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
     Ok(HighPassBatchOutput {
         values,
         combos,
@@ -946,4 +957,264 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+/// highpass_batch_inner_into writes directly to the output buffer
+#[inline(always)]
+fn highpass_batch_inner_into(
+    data: &[f64],
+    sweep: &HighPassBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<HighPassParams>, HighPassError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(HighPassError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HighPassError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(HighPassError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+
+    for c in &combos {
+        let period = c.period.unwrap();
+        let k = 1.0;
+        let cos_val = (2.0 * std::f64::consts::PI * k / period as f64).cos();
+        if cos_val.abs() < 1e-15 {
+            return Err(HighPassError::InvalidAlpha { cos_val });
+        }
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+
+    // ---------- per-row warm-up lengths ----------
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // Reinterpret output slice as MaybeUninit
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    // Initialize NaN prefixes
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ---------- 2. worker that fills one row ----------
+    let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+
+        // Re-interpret this row as &mut [f64]
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
+        match kern {
+            Kernel::Scalar => highpass_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => highpass_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => highpass_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "highpass", signature = (arr_in, period=48))]
+pub fn highpass_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: Option<usize>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    
+    // Build input struct with optional period (defaults to 48)
+    let params = HighPassParams {
+        period: period,
+    };
+    let hp_in = HighPassInput::from_slice(slice_in, params);
+    
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), HighPassError> {
+        highpass_into(&hp_in, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "highpass_batch")]
+pub fn highpass_batch_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use pyo3::types::PyDict;
+    
+    let slice_in = arr_in.as_slice()?;
+    
+    let sweep = HighPassBatchRange {
+        period: period_range,
+    };
+    
+    // Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        highpass_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "HighPassStream")]
+pub struct HighPassStreamPy {
+    inner: HighPassStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl HighPassStreamPy {
+    #[new]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = HighPassParams {
+            period: Some(period),
+        };
+        match HighPassStream::try_new(params) {
+            Ok(stream) => Ok(Self { inner: stream }),
+            Err(e) => Err(PyValueError::new_err(format!("HighPassStream error: {}", e))),
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        Some(self.inner.update(value))
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = HighPassParams {
+        period: Some(period),
+    };
+    let input = HighPassInput::from_slice(data, params);
+    match highpass(&input) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("HighPass error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = HighPassBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    match highpass_batch_with_kernel(data, &sweep, Kernel::Auto) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("HighPass batch error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<f64> {
+    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
+        vec![period_start]
+    } else {
+        (period_start..=period_end).step_by(period_step).collect()
+    };
+    
+    let mut result = Vec::new();
+    for &period in &periods {
+        result.push(period as f64);
+    }
+    result
 }

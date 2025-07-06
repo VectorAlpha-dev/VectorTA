@@ -39,6 +39,7 @@ use wasm_bindgen::prelude::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -188,7 +189,11 @@ pub fn dema(input: &DemaInput) -> Result<DemaOutput, DemaError> {
     dema_with_kernel(input, Kernel::Auto)
 }
 
-pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput, DemaError> {
+#[inline(always)]
+fn dema_prepare<'a>(
+    input: &'a DemaInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, usize, Kernel), DemaError> {
     let data: &[f64] = match &input.data {
         DemaData::Candles { candles, source } => source_type(candles, source),
         DemaData::Slice(sl) => sl,
@@ -223,18 +228,35 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
         other => other,
     };
 
-    let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+    let warm = first + period - 1;
 
-    // ---------- NEW: choose the right implementation ----------
+    Ok((data, period, first, warm, chosen))
+}
+
+#[inline(always)]
+fn dema_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    chosen: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
         match chosen {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => dema_avx512(data, period, first, &mut out),
+            Kernel::Avx512 => dema_avx512(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => dema_avx2(data, period, first, &mut out),
-            _ => dema_scalar(data, period, first, &mut out),
+            Kernel::Avx2 => dema_avx2(data, period, first, out),
+            _ => dema_scalar(data, period, first, out),
         }
     }
+}
+
+pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput, DemaError> {
+    let (data, period, first, warm, chosen) = dema_prepare(input, kernel)?;
+    let len = data.len();
+    let mut out = alloc_with_nan_prefix(len, warm);
+    dema_compute_into(data, period, first, chosen, &mut out);
     Ok(DemaOutput { values: out })
 }
 
@@ -502,7 +524,6 @@ fn dema_batch_with_kernel(
     dema_batch_par_slice(data, sweep, simd)
 }
 
-use std::mem::MaybeUninit; // Add this if not already present at the top of the file
 
 #[inline(always)]
 fn dema_batch_inner(
@@ -511,6 +532,29 @@ fn dema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DemaBatchOutput, DemaError> {
+    let combos = expand_grid(sweep);
+    let cols = data.len();
+    let rows = combos.len();
+    let mut values = vec![0.0; rows * cols];
+    
+    dema_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(DemaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn dema_batch_inner_into(
+    data: &[f64],
+    sweep: &DemaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<DemaParams>, DemaError> {
     // ── 1. validation ──────────────────────────────────────────────────────
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -541,16 +585,30 @@ fn dema_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    
+    // Verify output buffer size
+    if out.len() != rows * cols {
+        return Err(DemaError::InvalidPeriod { period: 0 }); // TODO: better error
+    }
 
-    // ── 2. allocate uninitialised matrix + NaN warm-ups ────────────────────
-    let mut raw = make_uninit_matrix(rows, cols);
-
+    // ── 2. Initialize NaN warm-ups using efficient method ────────────────────
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + 2 * (c.period.unwrap() - 1))
+        .map(|c| first + 2 * (c.period.unwrap() - 1))  // DEMA needs 2*(period-1) warmup
         .collect();
+    
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
 
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     // ── 3. per-row kernel closure; *dst_mu* is &mut [MaybeUninit<f64>] ─────
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -570,41 +628,23 @@ fn dema_batch_inner(
 
     // ── 4. run every row kernel, parallel or sequential ────────────────────
     if parallel {
-
         #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
-
         #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
-
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    // ── 5. all rows are initialised → safe to transmute to Vec<f64> ───────
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(DemaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 #[inline(always)]
 unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -1095,8 +1135,9 @@ pub fn dema_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     py.allow_threads(|| -> Result<(), DemaError> {
-        let result = dema_with_kernel(&dema_in, Kernel::Auto)?;
-        slice_out.copy_from_slice(&result.values);
+        let (data, period, first, warm, chosen) = dema_prepare(&dema_in, Kernel::Auto)?;
+        slice_out[..warm].fill(f64::NAN);
+        dema_compute_into(data, period, first, chosen, slice_out);
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1151,14 +1192,12 @@ pub fn dema_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    py.allow_threads(|| {
+    let combos = py.allow_threads(|| {
         let kernel = match Kernel::Auto {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        let batch_result = dema_batch_par_slice(slice_in, &sweep, kernel)?;
-        slice_out.copy_from_slice(&batch_result.values);
-        Ok::<(), DemaError>(())
+        dema_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
@@ -1184,7 +1223,7 @@ pub fn dema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = DemaInput::from_slice(data, params);
     
-    dema_with_kernel(&input, Kernel::Auto)
+    dema_with_kernel(&input, Kernel::Scalar)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1202,7 +1241,7 @@ pub fn dema_batch_js(
     };
 
     // Use the existing batch function with parallel=false for WASM
-    dema_batch_inner(data, &sweep, Kernel::Auto, false)
+    dema_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

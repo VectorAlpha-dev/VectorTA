@@ -514,7 +514,16 @@ fn kst_batch_inner(data: &[f64], sweep: &KstBatchRange, kern: Kernel, parallel: 
         Ok::<(), KstError>(())
     };
     if parallel {
-        lines.par_chunks_mut(cols).zip(signals.par_chunks_mut(cols)).enumerate().for_each(|(row, (lrow, srow))| { let _ = do_row(row, lrow, srow); });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            lines.par_chunks_mut(cols).zip(signals.par_chunks_mut(cols)).enumerate().for_each(|(row, (lrow, srow))| { let _ = do_row(row, lrow, srow); });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, (lrow, srow)) in lines.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
+                let _ = do_row(row, lrow, srow);
+            }
+        }
     } else {
         for (row, (lrow, srow)) in lines.chunks_mut(cols).zip(signals.chunks_mut(cols)).enumerate() {
             let _ = do_row(row, lrow, srow);

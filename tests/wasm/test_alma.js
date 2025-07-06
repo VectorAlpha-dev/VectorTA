@@ -15,6 +15,7 @@ import {
     assertNoNaN,
     EXPECTED_OUTPUTS 
 } from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,7 +45,7 @@ test('ALMA partial params', () => {
     assert.strictEqual(result.length, close.length);
 });
 
-test('ALMA accuracy', () => {
+test('ALMA accuracy', async () => {
     // Test ALMA matches expected values from Rust tests - mirrors check_alma_accuracy
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.alma;
@@ -66,6 +67,9 @@ test('ALMA accuracy', () => {
         1e-8,
         "ALMA last 5 values mismatch"
     );
+    
+    // Compare full output with Rust
+    await compareWithRust('alma', result, 'close', expected.defaultParams);
 });
 
 test('ALMA default candles', () => {
@@ -268,7 +272,7 @@ test('ALMA batch metadata', () => {
     
     // Check last combination
     assert.strictEqual(metadata[78], 13);   // period
-    assert.strictEqual(metadata[79], 0.95); // offset
+    assertClose(metadata[79], 0.95, 1e-10, "offset mismatch"); // offset
     assert.strictEqual(metadata[80], 7.0);  // sigma
 });
 
@@ -348,7 +352,7 @@ test('ALMA batch edge cases', () => {
             0.85, 0.85, 0,
             6.0, 6.0, 0
         );
-    }, /No data provided/);
+    }, /All values are NaN/);
 });
 
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings

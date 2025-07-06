@@ -675,14 +675,27 @@ fn minmax_batch_inner(
     };
 
     if parallel {
-        is_min
-            .par_chunks_mut(cols)
-            .zip(is_max.par_chunks_mut(cols))
-            .zip(last_min.par_chunks_mut(cols).zip(last_max.par_chunks_mut(cols)))
-            .enumerate()
-            .for_each(|(row, ((min, max), (lmin, lmax)))| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            is_min
+                .par_chunks_mut(cols)
+                .zip(is_max.par_chunks_mut(cols))
+                .zip(last_min.par_chunks_mut(cols).zip(last_max.par_chunks_mut(cols)))
+                .enumerate()
+                .for_each(|(row, ((min, max), (lmin, lmax)))| {
+                    do_row(row, min, max, lmin, lmax)
+                });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, ((min, max), (lmin, lmax))) in is_min.chunks_mut(cols)
+                .zip(is_max.chunks_mut(cols))
+                .zip(last_min.chunks_mut(cols).zip(last_max.chunks_mut(cols)))
+                .enumerate()
+            {
                 do_row(row, min, max, lmin, lmax)
-            });
+            }
+        }
     } else {
         for (row, ((min, max), (lmin, lmax))) in is_min.chunks_mut(cols)
             .zip(is_max.chunks_mut(cols))

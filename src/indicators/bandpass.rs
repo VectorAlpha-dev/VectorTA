@@ -618,9 +618,18 @@ fn bandpass_batch_inner(
         bandpass_with_kernel(&input, kern)
     };
     if parallel {
-        outputs.par_iter_mut().enumerate().for_each(|(row, slot)| {
-            *slot = do_row(row).ok();
-        });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            outputs.par_iter_mut().enumerate().for_each(|(row, slot)| {
+                *slot = do_row(row).ok();
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slot) in outputs.iter_mut().enumerate() {
+                *slot = do_row(row).ok();
+            }
+        }
     } else {
         for (row, slot) in outputs.iter_mut().enumerate() {
             *slot = do_row(row).ok();

@@ -744,6 +744,106 @@ pub fn gaussian_batch_par_slice(
 }
 
 #[inline(always)]
+fn gaussian_into(
+    input: &GaussianInput,
+    out: &mut [f64],
+) -> Result<(), GaussianError> {
+    gaussian_with_kernel_into(input, Kernel::Auto, out)
+}
+
+#[inline(always)]
+fn gaussian_with_kernel_into(
+    input: &GaussianInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), GaussianError> {
+    let (data, period, poles, first, chosen) = gaussian_prepare(input, kernel)?;
+    
+    // Initialize NaN prefix
+    out[..first + period - 1].fill(f64::NAN);
+    
+    // Compute directly into output buffer
+    gaussian_compute_into(data, period, poles, first, chosen, out);
+    
+    Ok(())
+}
+
+#[inline(always)]
+fn gaussian_prepare<'a>(
+    input: &'a GaussianInput,
+    kernel: Kernel,
+) -> Result<(
+    /*data*/ &'a [f64],
+    /*period*/ usize,
+    /*poles*/ usize,
+    /*first*/ usize,
+    /*chosen*/ Kernel,
+), GaussianError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    
+    if len == 0 {
+        return Err(GaussianError::NoData);
+    }
+    
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(GaussianError::AllValuesNaN)?;
+    
+    let period = input.params.period.unwrap_or(14);
+    let poles = input.params.poles.unwrap_or(4);
+    
+    if period == 0 || period > len {
+        return Err(GaussianError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    
+    if !(1..=4).contains(&poles) {
+        return Err(GaussianError::InvalidPoles { poles });
+    }
+    
+    if len - first < period {
+        return Err(GaussianError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    
+    Ok((data, period, poles, first, chosen))
+}
+
+#[inline(always)]
+fn gaussian_compute_into(
+    data: &[f64],
+    period: usize,
+    poles: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                gaussian_scalar(data, period, poles, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => gaussian_avx2(data, period, poles, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => gaussian_avx512(data, period, poles, out),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[inline(always)]
 fn alpha_from(period: usize, poles: usize) -> f64 {
     let beta = {
         let numerator = 1.0 - (2.0 * PI / period as f64).cos();
@@ -1017,13 +1117,24 @@ fn gaussian_batch_inner(
      * ---------------------------------------------------------- */
     let mut raw = make_uninit_matrix(rows, cols);
 
-    raw.par_chunks_mut(cols)
-        .zip(warm.par_iter())
-        .for_each(|(row, &w)| {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        raw.par_chunks_mut(cols)
+            .zip(warm.par_iter())
+            .for_each(|(row, &w)| {
+                for cell in &mut row[..w] {
+                    cell.write(f64::NAN);
+                }
+            });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (row, &w) in raw.chunks_mut(cols).zip(warm.iter()) {
             for cell in &mut row[..w] {
                 cell.write(f64::NAN);
             }
-        });
+        }
+    }
 
     /* ------------------------------------------------------------
      * 2.  CPU-feature check  +  row-runner selection
@@ -1652,4 +1763,312 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy;
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+// Helper function for batch operations with output buffer
+#[inline(always)]
+fn gaussian_batch_inner_into(
+    data: &[f64],
+    sweep: &GaussianBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<GaussianParams>, GaussianError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() || data.is_empty() {
+        return Err(GaussianError::NoData);
+    }
+    let cols = data.len();
+    let rows = combos.len();
+    
+    if out.len() != rows * cols {
+        return Err(GaussianError::InvalidPeriod {
+            period: 0,
+            data_len: out.len(),
+        });
+    }
+
+    let first_valid = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(GaussianError::AllValuesNaN)?;
+
+    for c in &combos {
+        let period = c.period.unwrap_or(14);
+        let poles = c.poles.unwrap_or(4);
+        if period == 0 || period > cols {
+            return Err(GaussianError::InvalidPeriod {
+                period,
+                data_len: cols,
+            });
+        }
+        if !(1..=4).contains(&poles) {
+            return Err(GaussianError::InvalidPoles { poles });
+        }
+        if cols - first_valid < period {
+            return Err(GaussianError::NotEnoughValidData {
+                needed: period,
+                valid: cols - first_valid,
+            });
+        }
+    }
+
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            let w = first_valid + c.period.unwrap_or(14);
+            w.min(cols)
+        })
+        .collect();
+
+    // Reinterpret output slice as MaybeUninit
+    let raw = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    // Initialize NaN prefixes
+    unsafe { init_matrix_prefixes(raw, cols, &warm) };
+
+    // Determine kernel
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    type RowRunner = unsafe fn(&[f64], &GaussianParams, &mut [f64]);
+    let row_runner: RowRunner = match chosen {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => gaussian_row_avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => gaussian_row_avx2,
+        _ => gaussian_row_scalar,
+    };
+
+    // Process rows
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+        row_runner(data, &combos[row], dst);
+    };
+
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            raw.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "gaussian")]
+pub fn gaussian_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    poles: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    
+    // Build input struct
+    let params = GaussianParams {
+        period: Some(period),
+        poles: Some(poles),
+    };
+    let gaussian_in = GaussianInput::from_slice(slice_in, params);
+    
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), GaussianError> {
+        gaussian_into(&gaussian_in, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "GaussianStream")]
+pub struct GaussianStreamPy {
+    stream: GaussianStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl GaussianStreamPy {
+    #[new]
+    fn new(period: usize, poles: usize) -> PyResult<Self> {
+        let params = GaussianParams {
+            period: Some(period),
+            poles: Some(poles),
+        };
+        let stream = GaussianStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GaussianStreamPy { stream })
+    }
+    
+    fn update(&mut self, value: f64) -> Option<f64> {
+        Some(self.stream.update(value))
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "gaussian_batch")]
+pub fn gaussian_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    poles_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = GaussianBatchRange {
+        period: period_range,
+        poles: poles_range,
+    };
+    
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        gaussian_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    let dict = PyDict::new(py);
+    // Build dict with the GIL
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap_or(14) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "poles",
+        combos
+            .iter()
+            .map(|p| p.poles.unwrap_or(4) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_js(data: &[f64], period: usize, poles: usize) -> Result<Vec<f64>, JsValue> {
+    let params = GaussianParams {
+        period: Some(period),
+        poles: Some(poles),
+    };
+    let input = GaussianInput::from_slice(data, params);
+    
+    gaussian_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    poles_start: usize,
+    poles_end: usize,
+    poles_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = GaussianBatchRange {
+        period: (period_start, period_end, period_step),
+        poles: (poles_start, poles_end, poles_step),
+    };
+    
+    gaussian_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    poles_start: usize,
+    poles_end: usize,
+    poles_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = GaussianBatchRange {
+        period: (period_start, period_end, period_step),
+        poles: (poles_start, poles_end, poles_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .flat_map(|combo| vec![
+            combo.period.unwrap_or(14) as f64,
+            combo.poles.unwrap_or(4) as f64
+        ])
+        .collect();
+    
+    Ok(metadata)
 }

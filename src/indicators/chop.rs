@@ -337,9 +337,9 @@ pub unsafe fn chop_scalar(
             }
             if (i - first_valid_idx) == (drift - 1) {
                 rma_atr = sum_tr / drift as f64;
-            } else {
-                rma_atr += alpha * (tr - rma_atr);
             }
+        } else {
+            rma_atr += alpha * (tr - rma_atr);
         }
         prev_close = close[i];
 

@@ -914,6 +914,29 @@ fn alma_batch_inner(
     parallel: bool,
 ) -> Result<AlmaBatchOutput, AlmaError> {
     let combos = expand_grid(sweep);
+    let cols = data.len();
+    let rows = combos.len();
+    let mut values = vec![0.0; rows * cols];
+    
+    alma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(AlmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn alma_batch_inner_into(
+    data: &[f64],
+    sweep: &AlmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<AlmaParams>, AlmaError> {
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(AlmaError::InvalidPeriod {
             period: 0,
@@ -977,8 +1000,18 @@ fn alma_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     // ---------------------------------------------------------------------------
     // 2. closure that writes one row; it receives &mut [MaybeUninit<f64>]
@@ -1014,34 +1047,24 @@ fn alma_batch_inner(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            raw.par_chunks_mut(cols)
+            out_uninit.par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // 4. transmute the *fully initialised* matrix to Vec<f64>; now sound
-    // ---------------------------------------------------------------------------
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(AlmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -1196,7 +1219,7 @@ unsafe fn alma_row_avx512_short(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
-pub(crate) unsafe fn alma_row_avx512_long(
+unsafe fn alma_row_avx512_long(
     data: &[f64],
     first: usize,
     period: usize,
@@ -1954,16 +1977,20 @@ pub fn alma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 3. Heavy work without the GIL
-    py.allow_threads(|| {
+    let combos = py.allow_threads(|| {
         // Resolve Kernel::Auto to a specific kernel
         let kernel = match Kernel::Auto {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        let batch_result = alma_batch_par_slice(slice_in, &sweep, kernel)?;
-        // Copy the results into our pre-allocated buffer
-        slice_out.copy_from_slice(&batch_result.values);
-        Ok::<(), AlmaError>(())
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        alma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -2008,7 +2035,7 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
     };
     let input = AlmaInput::from_slice(data, params);
 
-    alma_with_kernel(&input, Kernel::Auto)
+    alma_with_kernel(&input, Kernel::Scalar)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -2034,7 +2061,7 @@ pub fn alma_batch_js(
     };
 
     // Use the existing batch function with parallel=false for WASM
-    alma_batch_inner(data, &sweep, Kernel::Auto, false)
+    alma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

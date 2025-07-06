@@ -15,7 +15,8 @@ function loadTestData() {
     const records = parse(content, { 
         columns: false,
         skip_empty_lines: true,
-        cast: true
+        cast: true,
+        from_line: 2  // Skip header row
     });
     
     const candles = {
@@ -128,6 +129,16 @@ const EXPECTED_OUTPUTS = {
             59766.41512339413,
             59655.66162110993,
             59332.492883847
+        ]
+    },
+    ema: {
+        defaultParams: { period: 9 },
+        lastFive: [
+            59302.2,
+            59277.9,
+            59230.2,
+            59215.1,
+            59103.1
         ]
     }
 };

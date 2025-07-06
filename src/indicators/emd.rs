@@ -885,14 +885,26 @@ fn emd_batch_inner(
         lb.copy_from_slice(&out.lowerband);
     };
         if parallel {
-            upperband
-                .par_chunks_mut(cols)
-                .zip(middleband.par_chunks_mut(cols))
-                .zip(lowerband.par_chunks_mut(cols))
-                .enumerate()
-                .for_each(|(row, ((ub, mb), lb))| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                upperband
+                    .par_chunks_mut(cols)
+                    .zip(middleband.par_chunks_mut(cols))
+                    .zip(lowerband.par_chunks_mut(cols))
+                    .enumerate()
+                    .for_each(|(row, ((ub, mb), lb))| {
+                        do_row(row, ub, mb, lb);
+                    });
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for row in 0..rows {
+                    let ub = &mut upperband[row * cols..(row + 1) * cols];
+                    let mb = &mut middleband[row * cols..(row + 1) * cols];
+                    let lb = &mut lowerband[row * cols..(row + 1) * cols];
                     do_row(row, ub, mb, lb);
-                });
+                }
+            }
         } else {
             for row in 0..rows {
                 let ub = &mut upperband[row * cols..(row + 1) * cols];

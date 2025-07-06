@@ -17,6 +17,7 @@ except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
+from rust_comparison import compare_with_rust
 
 
 class TestAlma:
@@ -53,6 +54,9 @@ class TestAlma:
             rtol=1e-8,
             msg="ALMA last 5 values mismatch"
         )
+        
+        # Compare full output with Rust
+        compare_with_rust('alma', result, 'close', expected['default_params'])
     
     def test_alma_default_candles(self, test_data):
         """Test ALMA with default parameters - mirrors check_alma_default_candles"""

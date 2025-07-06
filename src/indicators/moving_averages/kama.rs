@@ -184,8 +184,8 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
     if period == 0 || period > len {
         return Err(KamaError::InvalidPeriod { period, data_len: len });
     }
-    if (len - first) < period {
-        return Err(KamaError::NotEnoughData { needed: period, valid: len - first });
+    if (len - first) <= period {
+        return Err(KamaError::NotEnoughData { needed: period + 1, valid: len - first });
     }
 
     let chosen = match kernel {
@@ -679,8 +679,8 @@ fn kama_batch_inner(
     }
     let first = data.iter().position(|x| !x.is_nan()).ok_or(KamaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
-        return Err(KamaError::NotEnoughData { needed: max_p, valid: data.len() - first });
+    if data.len() - first <= max_p {
+        return Err(KamaError::NotEnoughData { needed: max_p + 1, valid: data.len() - first });
     }
     let rows = combos.len();
     let cols = data.len();
@@ -793,6 +793,233 @@ pub unsafe fn kama_row_avx512(
 #[inline(always)]
 pub fn expand_grid_kama(r: &KamaBatchRange) -> Vec<KamaParams> {
     expand_grid(r)
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "kama")]
+pub fn kama_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice = data.as_slice()?;
+    let params = KamaParams {
+        period: Some(period),
+    };
+    let input = KamaInput::from_slice(slice, params);
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Compute without GIL
+    py.allow_threads(|| -> Result<(), KamaError> {
+        let result = kama_with_kernel(&input, Kernel::Auto)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "kama_batch")]
+pub fn kama_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    let slice = data.as_slice()?;
+    let sweep = KamaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute without GIL
+    let combos = py.allow_threads(|| -> Result<Vec<KamaParams>, KamaError> {
+        let output = kama_batch_par_slice(slice, &sweep, simd_kernel)?;
+        slice_out.copy_from_slice(&output.values);
+        Ok(output.combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    Ok((out_arr, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "kama_batch_with_metadata")]
+pub fn kama_batch_with_metadata_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    // This is identical to kama_batch_py - just call it
+    kama_batch_py(py, data, period_start, period_end, period_step)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "kama_batch_2d")]
+pub fn kama_batch_2d_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<usize>)> {
+    let slice = data.as_slice()?;
+    let sweep = KamaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute without GIL
+    let combos = py.allow_threads(|| -> Result<Vec<KamaParams>, KamaError> {
+        let output = kama_batch_par_slice(slice, &sweep, simd_kernel)?;
+        slice_out.copy_from_slice(&output.values);
+        Ok(output.combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    // Reshape to 2D
+    let out_2d = out_arr.reshape((rows, cols))?;
+    
+    Ok((out_2d, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "KamaStream")]
+pub struct KamaStreamPy {
+    inner: KamaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl KamaStreamPy {
+    #[new]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = KamaParams {
+            period: Some(period),
+        };
+        match KamaStream::try_new(params) {
+            Ok(stream) => Ok(Self { inner: stream }),
+            Err(e) => Err(PyValueError::new_err(format!("KamaStream error: {}", e))),
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = KamaParams {
+        period: Some(period),
+    };
+    let input = KamaInput::from_slice(data, params);
+    match kama_with_kernel(&input, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("KAMA error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = KamaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    match kama_batch_slice(data, &sweep, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("KAMA batch error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<f64> {
+    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
+        vec![period_start]
+    } else {
+        (period_start..=period_end).step_by(period_step).collect()
+    };
+    
+    let mut result = Vec::new();
+    for &period in &periods {
+        result.push(period as f64);
+    }
+    result
 }
 
 #[cfg(test)]

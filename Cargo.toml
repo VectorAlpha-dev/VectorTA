@@ -12,6 +12,7 @@ harness = false
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 csv = "1.1"
 ndarray = "0.16.1"
 chrono = "0.4.39"
@@ -24,7 +25,7 @@ anyhow = "1.0.98"
 aligned-vec = "0.6.4"
 libc = "0.2.172"
 itertools = "0.14.0"
-wasm-bindgen = { version = "0.2.1", optional = true }
+wasm-bindgen = { version = "0.2.95", optional = true }
 pyo3 = { version = "0.25.0", optional = true, features = ["extension-module"] }
 numpy = { version = "0.25.0", optional = true }
 proptest = { version = "1.7.0", optional = true }
@@ -54,10 +55,14 @@ doctest = false
 name = "my_project"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate_references"
+path = "src/bin/generate_references.rs"
+
 [profile.release]
 opt-level       = 3
-lto             = "thin"
-codegen-units   = 256
+lto             = "fat"
+codegen-units   = 255
 incremental = false
 panic           = "abort"
 overflow-checks = false

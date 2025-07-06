@@ -695,13 +695,26 @@ fn kdj_batch_inner(
         res
     };
     if parallel {
-        k_vals.par_chunks_mut(cols)
-            .zip(d_vals.par_chunks_mut(cols))
-            .zip(j_vals.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, ((out_k, out_d), out_j))| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            k_vals.par_chunks_mut(cols)
+                .zip(d_vals.par_chunks_mut(cols))
+                .zip(j_vals.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, ((out_k, out_d), out_j))| {
+                    let _ = do_row(row, out_k, out_d, out_j);
+                });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, ((out_k, out_d), out_j)) in k_vals.chunks_mut(cols)
+                .zip(d_vals.chunks_mut(cols))
+                .zip(j_vals.chunks_mut(cols))
+                .enumerate()
+            {
                 let _ = do_row(row, out_k, out_d, out_j);
-            });
+            }
+        }
     } else {
         for (row, ((out_k, out_d), out_j)) in k_vals.chunks_mut(cols)
             .zip(d_vals.chunks_mut(cols))

@@ -160,6 +160,8 @@ pub enum JmaError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("jma: Invalid phase: {phase}")]
     InvalidPhase { phase: f64 },
+    #[error("jma: Invalid output buffer size: expected = {expected}, actual = {actual}")]
+    InvalidOutputBuffer { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -212,6 +214,73 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
         }
     }
     Ok(JmaOutput { values: out })
+}
+
+#[inline]
+pub fn jma_into(input: &JmaInput, out: &mut [f64]) -> Result<(), JmaError> {
+    jma_with_kernel_into(input, Kernel::Auto, out)
+}
+
+pub fn jma_with_kernel_into(
+    input: &JmaInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), JmaError> {
+    let data: &[f64] = match &input.data {
+        JmaData::Candles { candles, source } => source_type(candles, source),
+        JmaData::Slice(sl) => sl,
+    };
+    let len = data.len();
+    
+    // Ensure output buffer is the correct size
+    if out.len() != len {
+        return Err(JmaError::InvalidOutputBuffer {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
+    let period = input.get_period();
+    let phase = input.get_phase();
+    let power = input.get_power();
+
+    if period == 0 || period > len {
+        return Err(JmaError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(JmaError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    if phase.is_nan() || phase.is_infinite() {
+        return Err(JmaError::InvalidPhase { phase });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    let warm = first + period;
+    // Initialize NaN prefix
+    out[..warm].fill(f64::NAN);
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                jma_scalar(data, period, phase, power, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                jma_avx2(data, period, phase, power, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                jma_avx512(data, period, phase, power, first, out)
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 #[inline]
@@ -733,6 +802,85 @@ fn jma_batch_inner(
 }
 
 #[inline(always)]
+fn jma_batch_inner_into(
+    data: &[f64],
+    sweep: &JmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<(Vec<JmaParams>, usize, usize), JmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(JmaError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(JmaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(JmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Ensure output buffer is the correct size
+    if out.len() != rows * cols {
+        return Err(JmaError::InvalidOutputBuffer {
+            expected: rows * cols,
+            actual: out.len(),
+        });
+    }
+    
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // Cast output to MaybeUninit for initialization
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ---------- closure that fills ONE row ---------------------------
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let prm = &combos[row];
+        let period = prm.period.unwrap();
+        let phase = prm.phase.unwrap();
+        let power = prm.power.unwrap();
+
+        match kern {
+            Kernel::Scalar => jma_row_scalar(data, first, period, phase, power, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => jma_row_avx2(data, first, period, phase, power, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => jma_row_avx512(data, first, period, phase, power, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ---------- run every row ----------------------------------------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok((combos, rows, cols))
+}
+
+#[inline(always)]
 unsafe fn jma_row_scalar(
     data: &[f64],
     first: usize,
@@ -1003,4 +1151,241 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray};
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "jma")]
+#[pyo3(signature = (arr_in, period, phase=50.0, power=2))]
+pub fn jma_py<'py>(
+    py: Python<'py>,
+    arr_in: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    phase: f64,
+    power: u32,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::PyArrayMethods;
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    
+    // Pre-allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Prepare JMA input
+    let jma_in = JmaInput::from_slice(slice_in, JmaParams {
+        period: Some(period),
+        phase: Some(phase),
+        power: Some(power),
+    });
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), JmaError> {
+        jma_into(&jma_in, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(format!("JMA error: {}", e)))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+use ndarray::{Array2, Array1};
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "jma_batch")]
+#[pyo3(signature = (arr_in, period_range, phase_range=(50.0, 50.0, 0.0), power_range=(2, 2, 0)))]
+pub fn jma_batch_py<'py>(
+    py: Python<'py>,
+    arr_in: PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    phase_range: (f64, f64, f64),
+    power_range: (u32, u32, u32),
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray2, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let sweep = JmaBatchRange {
+        period: period_range,
+        phase: phase_range,
+        power: power_range,
+    };
+    
+    // Expand grid to get all combinations
+    let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("Invalid parameter ranges"));
+    }
+    
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Heavy work without the GIL
+    let (_, final_rows, final_cols) = py.allow_threads(|| -> Result<(Vec<JmaParams>, usize, usize), JmaError> {
+        // Detect best kernel
+        let kernel = match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            _ => Kernel::Scalar,
+        };
+        
+        // Use the new _into function with parallel=true
+        jma_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(format!("JMA batch error: {}", e)))?;
+    
+    // Extract metadata and convert to NumPy arrays for zero-copy
+    let periods = combos
+        .iter()
+        .map(|c| c.period.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+    let phases = combos
+        .iter()
+        .map(|c| c.phase.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+    let powers = combos
+        .iter()
+        .map(|c| c.power.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
+    
+    // Reshape to 2D
+    let out_2d = out_arr.reshape((final_rows, final_cols))?;
+    
+    // Create dictionary output
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_2d)?;
+    dict.set_item("periods", periods)?;
+    dict.set_item("phases", phases)?;
+    dict.set_item("powers", powers)?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "JmaStream")]
+pub struct JmaStreamPy {
+    inner: JmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl JmaStreamPy {
+    #[new]
+    #[pyo3(signature = (period, phase=50.0, power=2))]
+    fn new(period: usize, phase: f64, power: u32) -> PyResult<Self> {
+        let params = JmaParams {
+            period: Some(period),
+            phase: Some(phase),
+            power: Some(power),
+        };
+        
+        let stream = JmaStream::try_new(params)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        
+        Ok(Self { inner: stream })
+    }
+    
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_js(data: &[f64], period: usize, phase: f64, power: u32) -> Result<Vec<f64>, JsValue> {
+    let params = JmaParams {
+        period: Some(period),
+        phase: Some(phase),
+        power: Some(power),
+    };
+    
+    let input = JmaInput::from_slice(data, params);
+    
+    match jma_with_kernel(&input, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    phase_start: f64,
+    phase_end: f64,
+    phase_step: f64,
+    power_start: u32,
+    power_end: u32,
+    power_step: u32,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = JmaBatchRange {
+        period: (period_start, period_end, period_step),
+        phase: (phase_start, phase_end, phase_step),
+        power: (power_start, power_end, power_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    jma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    phase_start: f64,
+    phase_end: f64,
+    phase_step: f64,
+    power_start: u32,
+    power_end: u32,
+    power_step: u32,
+) -> Vec<f64> {
+    let mut metadata = Vec::new();
+    
+    let mut current_period = period_start;
+    while current_period <= period_end {
+        let mut current_phase = phase_start;
+        while current_phase <= phase_end || (phase_step == 0.0 && current_phase == phase_start) {
+            let mut current_power = power_start;
+            while current_power <= power_end || (power_step == 0 && current_power == power_start) {
+                metadata.push(current_period as f64);
+                metadata.push(current_phase);
+                metadata.push(current_power as f64);
+                
+                if power_step == 0 { break; }
+                current_power += power_step;
+            }
+            if phase_step == 0.0 { break; }
+            current_phase += phase_step;
+        }
+        if period_step == 0 { break; }
+        current_period += period_step;
+    }
+    
+    metadata
 }

@@ -17,6 +17,7 @@ except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close
+from rust_comparison import compare_with_rust
 
 
 class TestDema:
@@ -60,6 +61,9 @@ class TestDema:
             rtol=1e-6,
             msg="DEMA last 5 values mismatch"
         )
+        
+        # Compare full output with Rust
+        compare_with_rust('dema', result, 'close', {'period': 30})
     
     def test_dema_default_candles(self, test_data):
         """Test DEMA with default parameters - mirrors check_dema_default_candles"""

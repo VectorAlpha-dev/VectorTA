@@ -189,7 +189,11 @@ pub fn edcf(input: &EdcfInput) -> Result<EdcfOutput, EdcfError> {
     edcf_with_kernel(input, Kernel::Auto)
 }
 
-pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput, EdcfError> {
+#[inline(always)]
+fn edcf_prepare<'a>(
+    input: &'a EdcfInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, usize, Kernel), EdcfError> {
     let data: &[f64] = match &input.data {
         EdcfData::Candles { candles, source } => source_type(candles, source),
         EdcfData::Slice(sl) => sl,
@@ -221,21 +225,39 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
     }
 
     let warm = first + 2 * period;
-    let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    
+    Ok((data, period, first, warm, chosen))
+}
+
+#[inline(always)]
+fn edcf_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    chosen: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => edcf_scalar(data, period, first, &mut out),
+            Kernel::Scalar | Kernel::ScalarBatch => edcf_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => edcf_avx2(data, period, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => edcf_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => edcf_avx512(data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => edcf_avx512(data, period, first, out),
             _ => unreachable!(),
         }
     }
+}
+
+pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput, EdcfError> {
+    let (data, period, first, warm, chosen) = edcf_prepare(input, kernel)?;
+    let len = data.len();
+    let mut out = alloc_with_nan_prefix(len, warm);
+    edcf_compute_into(data, period, first, chosen, &mut out);
     Ok(EdcfOutput { values: out })
 }
 
@@ -640,6 +662,36 @@ fn edcf_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(EdcfError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    
+    let result_combos = edcf_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(EdcfBatchOutput {
+        values,
+        combos: result_combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn edcf_batch_inner_into(
+    data: &[f64],
+    sweep: &EdcfBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<EdcfParams>, EdcfError> {
     // ─────────────────── guards unchanged ───────────────────
     if data.is_empty() {
         return Err(EdcfError::NoData);
@@ -667,15 +719,17 @@ fn edcf_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // ─────────────────── 1️⃣ allocate as MaybeUninit ───────────────────
-    let mut raw = make_uninit_matrix(rows, cols);
+    // ─────────────────── 1️⃣ reinterpret as MaybeUninit ───────────────────
+    let raw = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+    };
 
     // ─────────────────── 2️⃣ seed NaN prefixes ────────────────────────
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + 2 * c.period.unwrap())
         .collect();
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // ─────────────────── 3️⃣ per-row kernel writes into MaybeUninit ───
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -730,15 +784,7 @@ fn edcf_batch_inner(
         }
     }
 
-    // ─────────────────── 4️⃣ now every element is initialised ──────────
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(EdcfBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -1195,8 +1241,9 @@ pub fn edcf_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     py.allow_threads(|| -> Result<(), EdcfError> {
-        let result = edcf_with_kernel(&edcf_in, Kernel::Auto)?;
-        slice_out.copy_from_slice(&result.values);
+        let (data, period, first, warm, chosen) = edcf_prepare(&edcf_in, Kernel::Auto)?;
+        slice_out[..warm].fill(f64::NAN);
+        edcf_compute_into(data, period, first, chosen, slice_out);
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1244,21 +1291,22 @@ pub fn edcf_batch_py<'py>(
         period: period_range,
     };
     
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let rows = expand_grid(&sweep).len();
     let cols = slice_in.len();
     
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    py.allow_threads(|| {
-        let kernel = match Kernel::Auto {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
+    let combos = py.allow_threads(|| {
+        let kernel = match detect_best_batch_kernel() {
+            Kernel::ScalarBatch => Kernel::Scalar,
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2Batch => Kernel::Avx2,
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512Batch => Kernel::Avx512,
+            _ => Kernel::Scalar,
         };
-        let batch_result = edcf_batch_par_slice(slice_in, &sweep, kernel)?;
-        slice_out.copy_from_slice(&batch_result.values);
-        Ok::<(), EdcfError>(())
+        edcf_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
@@ -1284,7 +1332,7 @@ pub fn edcf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = EdcfInput::from_slice(data, params);
     
-    edcf_with_kernel(&input, Kernel::Auto)
+    edcf_with_kernel(&input, Kernel::Scalar)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1302,7 +1350,7 @@ pub fn edcf_batch_js(
     };
 
     // Use the existing batch function with parallel=false for WASM
-    edcf_batch_inner(data, &sweep, Kernel::Auto, false)
+    edcf_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

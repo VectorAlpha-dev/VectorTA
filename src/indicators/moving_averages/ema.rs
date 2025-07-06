@@ -29,6 +29,13 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy;
+
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -173,7 +180,21 @@ pub fn ema(input: &EmaInput) -> Result<EmaOutput, EmaError> {
     ema_with_kernel(input, Kernel::Auto)
 }
 
-pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, EmaError> {
+#[inline(always)]
+fn ema_prepare<'a>(
+    input: &'a EmaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*first*/ usize,
+        /*alpha*/ f64,
+        /*beta*/ f64,
+        /*chosen*/ Kernel,
+    ),
+    EmaError,
+> {
     let data: &[f64] = match &input.data {
         EmaData::Candles { candles, source } => source_type(candles, source),
         EmaData::Slice(sl) => sl,
@@ -203,21 +224,52 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
         });
     }
 
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let beta = 1.0 - alpha;
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = alloc_with_nan_prefix(len, first);
+
+    Ok((data, period, first, alpha, beta, chosen))
+}
+
+#[inline(always)]
+fn ema_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    alpha: f64,
+    beta: f64,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => ema_scalar(data, period, first, &mut out),
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                ema_scalar_into(data, period, first, alpha, beta, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => ema_avx2(data, period, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                ema_avx2_into(data, period, first, alpha, beta, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => ema_avx512(data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                ema_avx512_into(data, period, first, alpha, beta, out)
+            }
             _ => unreachable!(),
         }
     }
+}
+
+pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, EmaError> {
+    let (data, period, first, alpha, beta, chosen) = ema_prepare(input, kernel)?;
+    
+    let mut out = alloc_with_nan_prefix(data.len(), first);
+    ema_compute_into(data, period, first, alpha, beta, chosen, &mut out);
+    
+    Ok(EmaOutput { values: out })
 }
 
 #[inline(always)]
@@ -227,10 +279,23 @@ pub unsafe fn ema_scalar(
     first_val: usize,
     out: &mut Vec<f64>,
 ) -> Result<EmaOutput, EmaError> {
-    let len = data.len();
     let alpha = 2.0 / (period as f64 + 1.0);
-    let one_m = 1.0 - alpha;
+    let beta = 1.0 - alpha;
+    ema_scalar_into(data, period, first_val, alpha, beta, out);
+    let values = std::mem::take(out);
+    Ok(EmaOutput { values })
+}
 
+#[inline(always)]
+unsafe fn ema_scalar_into(
+    data: &[f64],
+    _period: usize,
+    first_val: usize,
+    alpha: f64,
+    beta: f64,
+    out: &mut [f64],
+) {
+    let len = data.len();
     debug_assert_eq!(out.len(), len);
 
     let mut prev = *data.get_unchecked(first_val);
@@ -240,13 +305,11 @@ pub unsafe fn ema_scalar(
     let mut dst = out.as_mut_ptr().add(first_val + 1);
     for _ in (first_val + 1)..len {
         let x = *src;
-        prev = one_m.mul_add(prev, alpha * x);
+        prev = beta.mul_add(prev, alpha * x);
         *dst = prev;
         src = src.add(1);
         dst = dst.add(1);
     }
-    let values = std::mem::take(out);
-    Ok(EmaOutput { values })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -262,6 +325,19 @@ pub unsafe fn ema_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+unsafe fn ema_avx2_into(
+    data: &[f64],
+    period: usize,
+    first_val: usize,
+    alpha: f64,
+    beta: f64,
+    out: &mut [f64],
+) {
+    ema_scalar_into(data, period, first_val, alpha, beta, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
 pub unsafe fn ema_avx512(
     data: &[f64],
     period: usize,
@@ -269,6 +345,19 @@ pub unsafe fn ema_avx512(
     out: &mut Vec<f64>,
 ) -> Result<EmaOutput, EmaError> {
     ema_scalar(data, period, first_val, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn ema_avx512_into(
+    data: &[f64],
+    period: usize,
+    first_val: usize,
+    alpha: f64,
+    beta: f64,
+    out: &mut [f64],
+) {
+    ema_scalar_into(data, period, first_val, alpha, beta, out)
 }
 
 #[derive(Debug, Clone)]
@@ -468,6 +557,29 @@ fn ema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EmaBatchOutput, EmaError> {
+    let combos = expand_grid(sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    
+    let mut values = vec![f64::NAN; rows * cols];
+    let returned_combos = ema_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(EmaBatchOutput {
+        values,
+        combos: returned_combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn ema_batch_inner_into(
+    data: &[f64],
+    sweep: &EmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<EmaParams>, EmaError> {
     // ------------ boiler-plate unchanged -----------------------------------
     let combos = expand_grid(sweep);
     if combos.is_empty() {
@@ -497,9 +609,11 @@ fn ema_batch_inner(
     let cols = data.len();
 
     // ------------ 1. allocate & warm-up prefixes ---------------------------
-    let mut raw = make_uninit_matrix(rows, cols);
+    let raw = unsafe {
+        core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
+    };
     let warm: Vec<usize> = vec![first; rows]; // same warm-up for every row
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // ------------ 2. row-kernel closure on MaybeUninit rows ---------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -545,15 +659,7 @@ fn ema_batch_inner(
         }
     }
 
-    // ------------ 4. soundly transmute to Vec<f64> -------------------------
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(EmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -953,4 +1059,174 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// ====== PYTHON BINDINGS ======
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ema")]
+pub fn ema_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = arr_in.as_slice()?;
+
+    let params = EmaParams {
+        period: Some(period),
+    };
+    let ema_in = EmaInput::from_slice(slice_in, params);
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    py.allow_threads(|| -> Result<(), EmaError> {
+        let (data, period, first, alpha, beta, chosen) = ema_prepare(&ema_in, Kernel::Auto)?;
+        // Initialize NaN prefix
+        slice_out[..first].fill(f64::NAN);
+        // Compute directly into output buffer
+        ema_compute_into(data, period, first, alpha, beta, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ema_batch")]
+pub fn ema_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = EmaBatchRange {
+        period: period_range,
+    };
+
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    let returned_combos = py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        
+        // Map batch kernel to single-row kernel
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => kernel,
+        };
+        
+        ema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        returned_combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "EmaStream")]
+pub struct EmaStreamPy {
+    inner: EmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl EmaStreamPy {
+    #[new]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = EmaParams {
+            period: Some(period),
+        };
+        let inner = EmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    pub fn update(&mut self, value: f64) -> f64 {
+        self.inner.update(value).unwrap_or(f64::NAN)
+    }
+}
+
+// ====== WASM BINDINGS ======
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = EmaParams {
+        period: Some(period),
+    };
+    let input = EmaInput::from_slice(data, params);
+
+    ema_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = EmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    ema_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = EmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
 }

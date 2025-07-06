@@ -14,6 +14,7 @@ import {
     assertAllNaN,
     assertNoNaN
 } from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,7 +47,7 @@ test('EDCF partial params', () => {
     assert.strictEqual(resultCustom.length, close.length);
 });
 
-test('EDCF accuracy', () => {
+test('EDCF accuracy', async () => {
     // Test EDCF matches expected values from Rust tests - mirrors check_edcf_accuracy_last_five
     // Note: Rust test uses "hl2" source, we need to calculate it
     const hl2 = new Float64Array(testData.high.length);
@@ -74,6 +75,9 @@ test('EDCF accuracy', () => {
         1e-8,
         "EDCF last 5 values mismatch"
     );
+    
+    // Compare full output with Rust
+    await compareWithRust('edcf', result, 'hl2', { period: 15 });
 });
 
 test('EDCF default candles', () => {

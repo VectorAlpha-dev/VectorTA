@@ -193,6 +193,50 @@ pub fn linreg_with_kernel(input: &LinRegInput, kernel: Kernel) -> Result<LinRegO
     Ok(LinRegOutput { values: out })
 }
 
+/// Compute LinReg directly into pre-allocated output slice (zero-copy)
+pub fn linreg_compute_into(
+    input: &LinRegInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), LinRegError> {
+    let data: &[f64] = input.as_ref();
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(LinRegError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(LinRegError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(LinRegError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    if out.len() != len {
+        return Err(LinRegError::InvalidPeriod { period: out.len(), data_len: len });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    let warm = first + period;
+    // Initialize warmup period with NaN
+    out[..warm].fill(f64::NAN);
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => linreg_scalar(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => linreg_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => linreg_avx512(data, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 
 #[inline]
 fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -448,6 +492,95 @@ fn linreg_batch_inner(
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(LinRegBatchOutput { values, combos, rows, cols })
+}
+
+/// Batch compute LinReg directly into pre-allocated output slice (zero-copy)
+pub fn linreg_batch_inner_into(
+    data: &[f64],
+    sweep: &LinRegBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<LinRegParams>, LinRegError> {
+    // ------------- 0. prelim checks -------------
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(LinRegError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan())
+        .ok_or(LinRegError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(LinRegError::NotEnoughValidData {
+            needed: max_p,
+            valid : data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Validate output slice size
+    if out.len() != rows * cols {
+        return Err(LinRegError::InvalidPeriod { 
+            period: out.len(), 
+            data_len: rows * cols 
+        });
+    }
+
+    // ------------- 1. cast output slice to MaybeUninit -------------
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    // per-row prefix length that must stay NaN
+    let warm: Vec<usize> =
+        combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // paint the prefixes with NaN
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ------------- 2. per-row worker ------------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this single row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
+        match kern {
+            Kernel::Scalar => linreg_row_scalar (data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   => linreg_row_avx2   (data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => linreg_row_avx512 (data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ------------- 3. run every row -------------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")] {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
 }
 // --- ROW SCALAR/SIMD (all AVX just call scalar for parity) ---
 
@@ -793,4 +926,225 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "linreg")]
+pub fn linreg_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice_in = data.as_slice()?;  // zero-copy read
+    let params = LinRegParams {
+        period: Some(period),
+    };
+    let input = LinRegInput::from_slice(slice_in, params);
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Compute directly into pre-allocated array (zero-copy)
+    py.allow_threads(|| -> Result<(), LinRegError> {
+        linreg_compute_into(&input, Kernel::Auto, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "linreg_batch")]
+pub fn linreg_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    let slice_in = data.as_slice()?;  // zero-copy read
+    let sweep = LinRegBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute directly into pre-allocated array (zero-copy)
+    let combos = py.allow_threads(|| -> Result<Vec<LinRegParams>, LinRegError> {
+        linreg_batch_inner_into(slice_in, &sweep, simd_kernel, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    Ok((out_arr, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "linreg_batch_with_metadata")]
+pub fn linreg_batch_with_metadata_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    // This is identical to linreg_batch_py - just call it
+    linreg_batch_py(py, data, period_start, period_end, period_step)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "linreg_batch_2d")]
+pub fn linreg_batch_2d_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<usize>)> {
+    let slice_in = data.as_slice()?;  // zero-copy read
+    let sweep = LinRegBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate output array as 1D
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute directly into pre-allocated array (zero-copy)
+    let combos = py.allow_threads(|| -> Result<Vec<LinRegParams>, LinRegError> {
+        linreg_batch_inner_into(slice_in, &sweep, simd_kernel, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    // Reshape to 2D
+    let out_2d = out_arr.reshape((rows, cols))?;
+    
+    Ok((out_2d, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "LinRegStream")]
+pub struct LinRegStreamPy {
+    inner: LinRegStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl LinRegStreamPy {
+    #[new]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = LinRegParams {
+            period: Some(period),
+        };
+        match LinRegStream::try_new(params) {
+            Ok(stream) => Ok(Self { inner: stream }),
+            Err(e) => Err(PyValueError::new_err(format!("LinRegStream error: {}", e))),
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linreg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = LinRegParams {
+        period: Some(period),
+    };
+    let input = LinRegInput::from_slice(data, params);
+    match linreg_with_kernel(&input, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("LINREG error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linreg_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = LinRegBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    match linreg_batch_slice(data, &sweep, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("LINREG batch error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linreg_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<f64> {
+    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
+        vec![period_start]
+    } else {
+        (period_start..=period_end).step_by(period_step).collect()
+    };
+    
+    let mut result = Vec::new();
+    for &period in &periods {
+        result.push(period as f64);
+    }
+    result
 }

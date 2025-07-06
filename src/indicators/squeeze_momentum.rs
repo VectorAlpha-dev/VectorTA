@@ -518,10 +518,19 @@ pub fn squeeze_momentum_batch_with_kernel(
         result
     };
 
-    momentum
-        .par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row, slice)| { do_row(row, slice); });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        momentum
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(row, slice)| { do_row(row, slice); });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (row, slice) in momentum.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
 
     Ok(SqueezeMomentumBatchOutput { momentum, combos, rows, cols })
 }

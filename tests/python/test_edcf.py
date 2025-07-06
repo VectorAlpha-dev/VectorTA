@@ -17,6 +17,7 @@ except ImportError:
         pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
 from test_utils import load_test_data, assert_close
+from rust_comparison import compare_with_rust
 
 
 class TestEdcf:
@@ -61,6 +62,9 @@ class TestEdcf:
             rtol=1e-8,
             msg="EDCF last 5 values mismatch"
         )
+        
+        # Compare full output with Rust
+        compare_with_rust('edcf', result, 'hl2', {'period': 15})
     
     def test_edcf_default_candles(self, test_data):
         """Test EDCF with default parameters - mirrors check_edcf_with_default_candles"""

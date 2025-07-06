@@ -587,6 +587,233 @@ pub fn expand_grid_jsa(r: &JsaBatchRange) -> Vec<JsaParams> {
     expand_grid(r)
 }
 
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "jsa")]
+pub fn jsa_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice = data.as_slice()?;
+    let params = JsaParams {
+        period: Some(period),
+    };
+    let input = JsaInput::from_slice(slice, params);
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Compute without GIL
+    py.allow_threads(|| -> Result<(), JsaError> {
+        let result = jsa_with_kernel(&input, Kernel::Auto)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "jsa_batch")]
+pub fn jsa_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    let slice = data.as_slice()?;
+    let sweep = JsaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute without GIL
+    let combos = py.allow_threads(|| -> Result<Vec<JsaParams>, JsaError> {
+        let output = jsa_batch_par_slice(slice, &sweep, simd_kernel)?;
+        slice_out.copy_from_slice(&output.values);
+        Ok(output.combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    Ok((out_arr, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "jsa_batch_with_metadata")]
+pub fn jsa_batch_with_metadata_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
+    // This is identical to jsa_batch_py - just call it
+    jsa_batch_py(py, data, period_start, period_end, period_step)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "jsa_batch_2d")]
+pub fn jsa_batch_2d_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<usize>)> {
+    let slice = data.as_slice()?;
+    let sweep = JsaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Expand grid to get combinations
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice.len();
+    
+    // Pre-allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Use the best available kernel
+    let kernel = detect_best_batch_kernel();
+    let simd_kernel = match kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => Kernel::Scalar,
+    };
+    
+    // Compute without GIL
+    let combos = py.allow_threads(|| -> Result<Vec<JsaParams>, JsaError> {
+        let output = jsa_batch_par_slice(slice, &sweep, simd_kernel)?;
+        slice_out.copy_from_slice(&output.values);
+        Ok(output.combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Extract periods
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    
+    // Reshape to 2D
+    let out_2d = out_arr.reshape((rows, cols))?;
+    
+    Ok((out_2d, periods))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "JsaStream")]
+pub struct JsaStreamPy {
+    inner: JsaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl JsaStreamPy {
+    #[new]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = JsaParams {
+            period: Some(period),
+        };
+        match JsaStream::try_new(params) {
+            Ok(stream) => Ok(Self { inner: stream }),
+            Err(e) => Err(PyValueError::new_err(format!("JsaStream error: {}", e))),
+        }
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// WASM bindings
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jsa_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = JsaParams {
+        period: Some(period),
+    };
+    let input = JsaInput::from_slice(data, params);
+    match jsa_with_kernel(&input, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("JSA error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jsa_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = JsaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    match jsa_batch_slice(data, &sweep, Kernel::Scalar) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&format!("JSA batch error: {}", e))),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jsa_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<f64> {
+    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
+        vec![period_start]
+    } else {
+        (period_start..=period_end).step_by(period_step).collect()
+    };
+    
+    let mut result = Vec::new();
+    for &period in &periods {
+        result.push(period as f64);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

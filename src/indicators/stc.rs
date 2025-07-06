@@ -520,7 +520,16 @@ fn stc_batch_inner(
     };
 
     if parallel {
-        values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| { do_row(row, slice).unwrap(); });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values.par_chunks_mut(cols).enumerate().for_each(|(row, slice)| { do_row(row, slice).unwrap(); });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice).unwrap();
+            }
+        }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice).unwrap();

@@ -572,10 +572,19 @@ fn vpci_batch_inner(
     };
 
     if parallel {
-        vpci.par_chunks_mut(cols)
-            .zip(vpcis.par_chunks_mut(cols))
-            .enumerate()
-            .for_each(|(row, (v, vs))| { let _ = do_row(row, v, vs); });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            vpci.par_chunks_mut(cols)
+                .zip(vpcis.par_chunks_mut(cols))
+                .enumerate()
+                .for_each(|(row, (v, vs))| { let _ = do_row(row, v, vs); });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, (v, vs)) in vpci.chunks_mut(cols).zip(vpcis.chunks_mut(cols)).enumerate() {
+                let _ = do_row(row, v, vs);
+            }
+        }
     } else {
         for (row, (v, vs)) in vpci.chunks_mut(cols).zip(vpcis.chunks_mut(cols)).enumerate() {
             let _ = do_row(row, v, vs);

@@ -15,12 +15,13 @@ from pathlib import Path
 
 def ensure_module_built():
     """Check if Python module is built, provide helpful message if not"""
-    wheel_dir = Path(__file__).parent.parent.parent / 'target/wheels'
-    if not wheel_dir.exists() or not list(wheel_dir.glob('*.whl')):
+    try:
+        import my_project
+        return True
+    except ImportError:
         print("ERROR: Python module not built!")
         print("Please run: maturin develop --features python")
         return False
-    return True
 
 def run_tests():
     """Run all indicator tests with parallel execution"""

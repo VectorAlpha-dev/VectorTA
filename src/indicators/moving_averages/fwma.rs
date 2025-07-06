@@ -25,6 +25,12 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -177,17 +183,26 @@ pub fn fwma(input: &FwmaInput) -> Result<FwmaOutput, FwmaError> {
     fwma_with_kernel(input, Kernel::Auto)
 }
 
-pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput, FwmaError> {
-    let data: &[f64] = match &input.data {
-        FwmaData::Candles { candles, source } => source_type(candles, source),
-        FwmaData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn fwma_prepare<'a>(
+    input: &'a FwmaInput,
+    kernel: Kernel,
+) -> Result<(
+    /*data*/ &'a [f64],
+    /*fib*/ Vec<f64>,
+    /*period*/ usize,
+    /*first*/ usize,
+    /*chosen*/ Kernel,
+), FwmaError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(FwmaError::AllValuesNaN);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(FwmaError::AllValuesNaN)?;
-    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
@@ -214,29 +229,50 @@ pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput,
     for w in &mut fib {
         *w /= fib_sum;
     }
-    let warm = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
+    Ok((data, fib, period, first, chosen))
+}
+
+#[inline(always)]
+fn fwma_compute_into(
+    data: &[f64],
+    fib: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                fwma_scalar(data, &fib, period, first, &mut out)
+                fwma_scalar(data, fib, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                fwma_avx2(data, &fib, period, first, &mut out)
+                fwma_avx2(data, fib, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                fwma_avx512(data, &fib, period, first, &mut out)
+                fwma_avx512(data, fib, period, first, out)
             }
             _ => unreachable!(),
         }
     }
+}
+
+pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput, FwmaError> {
+    let (data, fib, period, first, chosen) = fwma_prepare(input, kernel)?;
+    
+    let warm = first + period - 1;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    
+    fwma_compute_into(data, &fib, period, first, chosen, &mut out);
+    
     Ok(FwmaOutput { values: out })
 }
 
@@ -735,6 +771,35 @@ fn fwma_batch_inner(
         });
     }
 
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    
+    fwma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(FwmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+#[inline(always)]
+fn fwma_batch_inner_into(
+    data: &[f64],
+    sweep: &FwmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<FwmaParams>, FwmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(FwmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -772,18 +837,22 @@ fn fwma_batch_inner(
 
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap())
+        .map(|c| first + c.period.unwrap() - 1)
         .collect();
-    // 1. allocate uninitialised matrix and write NaN prefixes
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    
+    // Reinterpret out slice as MaybeUninit
+    let out_ptr = out.as_mut_ptr() as *mut MaybeUninit<f64>;
+    let raw = unsafe { core::slice::from_raw_parts_mut(out_ptr, out.len()) };
+    
+    // Initialize NaN prefixes
+    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // 2. per-row closure works on &mut [MaybeUninit<f64>]
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period  = combos[row].period.unwrap();
         let fib_ptr = flat_fib.as_ptr().add(row * max_p);
 
-        // Cast *just this slice* to &mut [f64] – we’re about to fully initialise it.
+        // Cast *just this slice* to &mut [f64] – we're about to fully initialise it.
         let dst = core::slice::from_raw_parts_mut(
             dst_mu.as_mut_ptr() as *mut f64,
             dst_mu.len(),
@@ -800,25 +869,15 @@ fn fwma_batch_inner(
 
     // 3. run every row kernel – no element is read before it is written
     if parallel {
-
         #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+            raw.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
-
         #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
-
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
@@ -826,15 +885,7 @@ fn fwma_batch_inner(
         }
     }
 
-    // 4. now the whole matrix is initialised – transmute once, soundly
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(FwmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline]
@@ -1180,4 +1231,213 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    
+    #[test]
+    fn print_actual_fwma_values() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).unwrap();
+        
+        println!("\nCandle data info:");
+        println!("Total candles: {}", candles.close.len());
+        println!("Last 10 close prices:");
+        let close_len = candles.close.len();
+        for i in (close_len - 10)..close_len {
+            println!("  [{}]: {}", i - (close_len - 10), candles.close[i]);
+        }
+        
+        let input = FwmaInput::with_default_candles(&candles);
+        let result = fwma(&input).unwrap();
+        
+        println!("\nFWMA results (period = 5):");
+        println!("Last 5 values:");
+        let result_len = result.values.len();
+        for i in (result_len - 5)..result_len {
+            println!("  [{}]: {:.12}", i - (result_len - 5), result.values[i]);
+        }
+        
+        // Check against expected
+        let expected_last_five = [
+            59273.583333333336,
+            59252.5,
+            59167.083333333336,
+            59151.0,
+            58940.333333333336,
+        ];
+        
+        println!("\nExpected values:");
+        for (i, val) in expected_last_five.iter().enumerate() {
+            println!("  [{}]: {:.12}", i, val);
+        }
+        
+        println!("\nDifferences:");
+        for i in 0..5 {
+            let actual = result.values[result_len - 5 + i];
+            let expected = expected_last_five[i];
+            println!("  [{}]: {:.12} (diff: {:.2e})", i, actual - expected, (actual - expected).abs());
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fwma")]
+pub fn fwma_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = arr_in.as_slice()?;
+
+    let params = FwmaParams {
+        period: Some(period),
+    };
+    let fwma_in = FwmaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), FwmaError> {
+        let (data, fib, per, first, chosen) = fwma_prepare(&fwma_in, Kernel::Auto)?;
+        // Prefix initialize exactly once
+        slice_out[..first + per - 1].fill(f64::NAN);
+        fwma_compute_into(data, &fib, per, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "FwmaStream")]
+pub struct FwmaStreamPy {
+    stream: FwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl FwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = FwmaParams {
+            period: Some(period),
+        };
+        let stream =
+            FwmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(FwmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated FWMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fwma_batch")]
+pub fn fwma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = FwmaBatchRange {
+        period: period_range,
+    };
+
+    // Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy work without the GIL
+    let kernel = detect_best_batch_kernel();
+    let simd = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512Batch => Kernel::Avx512,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    
+    let combos = py.allow_threads(|| {
+        fwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = FwmaParams {
+        period: Some(period),
+    };
+    let input = FwmaInput::from_slice(data, params);
+
+    fwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = FwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    fwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<f64> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        (start..=end).step_by(step).collect()
+    }
+
+    let periods = axis_usize((period_start, period_end, period_step));
+    periods.into_iter().map(|p| p as f64).collect()
 }
