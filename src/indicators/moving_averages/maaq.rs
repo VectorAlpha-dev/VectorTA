@@ -209,129 +209,18 @@ pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, MaaqError> {
     maaq_with_kernel(input, Kernel::Auto)
 }
 
-pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput, MaaqError> {
-    let data: &[f64] = match &input.data {
-        MaaqData::Candles { candles, source } => source_type(candles, source),
-        MaaqData::Slice(sl) => sl,
-    };
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(MaaqError::AllValuesNaN)?;
-
-    let len = data.len();
-    let period = input.get_period();
-    let fast_p = input.get_fast_period();
-    let slow_p = input.get_slow_period();
-
-    if period == 0 || fast_p == 0 || slow_p == 0 {
-        return Err(MaaqError::ZeroPeriods {
-            period,
-            fast_p,
-            slow_p,
-        });
-    }
-    if period > len {
-        return Err(MaaqError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if (len - first) < period {
-        return Err(MaaqError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-
-    let warm  = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other        => other,
-    };
-
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                // `out` is written in-place
-                maaq_scalar(data, period, fast_p, slow_p, first, &mut out)?;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                maaq_avx2(data, period, fast_p, slow_p, first, &mut out)?;
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                maaq_avx512(data, period, fast_p, slow_p, first, &mut out)?;
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    Ok(MaaqOutput { values: out })
-}
-
-/// Compute MAAQ directly into pre-allocated output slice (zero-copy)
-pub fn maaq_compute_into(
-    input: &MaaqInput,
+#[inline(always)]
+fn maaq_compute_into(
+    data: &[f64],
+    period: usize,
+    fast_p: usize,
+    slow_p: usize,
+    first: usize,
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), MaaqError> {
-    let data: &[f64] = match &input.data {
-        MaaqData::Candles { candles, source } => source_type(candles, source),
-        MaaqData::Slice(sl) => sl,
-    };
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(MaaqError::AllValuesNaN)?;
-
-    let len = data.len();
-    let period = input.get_period();
-    let fast_p = input.get_fast_period();
-    let slow_p = input.get_slow_period();
-
-    if period == 0 || fast_p == 0 || slow_p == 0 {
-        return Err(MaaqError::ZeroPeriods {
-            period,
-            fast_p,
-            slow_p,
-        });
-    }
-    if period > len {
-        return Err(MaaqError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if (len - first) < period {
-        return Err(MaaqError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-    if out.len() != len {
-        return Err(MaaqError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
-        });
-    }
-
-    let warm = first + period;
-    // Initialize warmup period with NaN
-    out[..warm].fill(f64::NAN);
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 maaq_scalar(data, period, fast_p, slow_p, first, out)?;
             }
@@ -346,9 +235,80 @@ pub fn maaq_compute_into(
             _ => unreachable!(),
         }
     }
-
     Ok(())
 }
+
+#[inline(always)]
+fn maaq_prepare<'a>(
+    input: &'a MaaqInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*fast_p*/ usize,
+        /*slow_p*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    MaaqError,
+> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(MaaqError::AllValuesNaN);
+    }
+    
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(MaaqError::AllValuesNaN)?;
+    
+    let period = input.get_period();
+    let fast_p = input.get_fast_period();
+    let slow_p = input.get_slow_period();
+    
+    // Validation
+    if period == 0 || fast_p == 0 || slow_p == 0 {
+        return Err(MaaqError::ZeroPeriods {
+            period,
+            fast_p,
+            slow_p,
+        });
+    }
+    if period > len {
+        return Err(MaaqError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if len - first < period {
+        return Err(MaaqError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    
+    // Kernel auto-detection only once
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    
+    Ok((data, period, fast_p, slow_p, first, chosen))
+}
+
+pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput, MaaqError> {
+    let (data, period, fast_p, slow_p, first, chosen) = maaq_prepare(input, kernel)?;
+    
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    
+    maaq_compute_into(data, period, fast_p, slow_p, first, chosen, &mut out)?;
+    
+    Ok(MaaqOutput { values: out })
+}
+
 
 #[inline]
 pub fn maaq_scalar(
@@ -1302,7 +1262,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
+use numpy::{PyArray1, PyReadonlyArray1, PyArrayMethods, IntoPyArray};
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -1328,7 +1288,10 @@ pub fn maaq_py<'py>(
     
     // Compute directly into pre-allocated array (zero-copy)
     py.allow_threads(|| -> Result<(), MaaqError> {
-        maaq_compute_into(&input, Kernel::Auto, slice_out)
+        let (data, per, fast_p, slow_p, first, chosen) = maaq_prepare(&input, Kernel::Auto)?;
+        let warm = first + per;
+        slice_out[..warm].fill(f64::NAN);
+        maaq_compute_into(data, per, fast_p, slow_p, first, chosen, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
@@ -1341,142 +1304,78 @@ pub fn maaq_py<'py>(
 pub fn maaq_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    fast_period_start: usize,
-    fast_period_end: usize,
-    fast_period_step: usize,
-    slow_period_start: usize,
-    slow_period_end: usize,
-    slow_period_step: usize,
-) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice = data.as_slice()?;
-    let range = MaaqBatchRange {
-        period: (period_start, period_end, period_step),
-        fast_period: (fast_period_start, fast_period_end, fast_period_step),
-        slow_period: (slow_period_start, slow_period_end, slow_period_step),
+    period_range: (usize, usize, usize),
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    let sweep = MaaqBatchRange {
+        period: period_range,
+        fast_period: fast_period_range,
+        slow_period: slow_period_range,
     };
     
-    // Calculate the number of combinations
-    let combos = expand_grid(&range);
-    let num_combos = combos.len();
-    let output_len = num_combos * slice.len();
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
     
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [output_len], false) };
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Compute directly into pre-allocated array (zero-copy)
-    py.allow_threads(|| -> Result<(), MaaqError> {
-        let kernel = detect_best_batch_kernel();
-        maaq_batch_inner_into(slice, &range, kernel, true, slice_out)?;
-        Ok(())
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        maaq_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "fast_periods",
+        combos
+            .iter()
+            .map(|p| p.fast_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slow_periods",
+        combos
+            .iter()
+            .map(|p| p.slow_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict)
 }
 
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "maaq_batch_with_metadata")]
-pub fn maaq_batch_with_metadata_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    fast_period_start: usize,
-    fast_period_end: usize,
-    fast_period_step: usize,
-    slow_period_start: usize,
-    slow_period_end: usize,
-    slow_period_step: usize,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<(usize, usize, usize)>)> {
-    let slice = data.as_slice()?;
-    let range = MaaqBatchRange {
-        period: (period_start, period_end, period_step),
-        fast_period: (fast_period_start, fast_period_end, fast_period_step),
-        slow_period: (slow_period_start, slow_period_end, slow_period_step),
-    };
-    
-    // Calculate metadata
-    let combos = expand_grid(&range);
-    let metadata: Vec<(usize, usize, usize)> = combos
-        .iter()
-        .map(|p| (
-            p.period.unwrap_or(11),
-            p.fast_period.unwrap_or(2),
-            p.slow_period.unwrap_or(30),
-        ))
-        .collect();
-    let output_len = combos.len() * slice.len();
-    
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [output_len], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Compute directly into pre-allocated array (zero-copy)
-    py.allow_threads(|| -> Result<(), MaaqError> {
-        let kernel = detect_best_batch_kernel();
-        maaq_batch_inner_into(slice, &range, kernel, true, slice_out)?;
-        Ok(())
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok((out_arr, metadata))
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "maaq_batch_2d")]
-pub fn maaq_batch_2d_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    fast_period_start: usize,
-    fast_period_end: usize,
-    fast_period_step: usize,
-    slow_period_start: usize,
-    slow_period_end: usize,
-    slow_period_step: usize,
-) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<(usize, usize, usize)>)> {
-    let slice = data.as_slice()?;
-    let range = MaaqBatchRange {
-        period: (period_start, period_end, period_step),
-        fast_period: (fast_period_start, fast_period_end, fast_period_step),
-        slow_period: (slow_period_start, slow_period_end, slow_period_step),
-    };
-    
-    // Calculate metadata
-    let combos = expand_grid(&range);
-    let num_combos = combos.len();
-    let metadata: Vec<(usize, usize, usize)> = combos
-        .iter()
-        .map(|p| (
-            p.period.unwrap_or(11),
-            p.fast_period.unwrap_or(2),
-            p.slow_period.unwrap_or(30),
-        ))
-        .collect();
-    
-    // Pre-allocate 2D array
-    let out_2d = unsafe { PyArray2::<f64>::new(py, [num_combos, slice.len()], false) };
-    let slice_out = unsafe { out_2d.as_slice_mut()? };
-    
-    // Compute directly into pre-allocated array (zero-copy)
-    py.allow_threads(|| -> Result<(), MaaqError> {
-        let kernel = detect_best_batch_kernel();
-        maaq_batch_inner_into(slice, &range, kernel, true, slice_out)?;
-        Ok(())
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok((out_2d, metadata))
-}
 
 #[cfg(feature = "python")]
 #[pyclass(name = "MaaqStream")]

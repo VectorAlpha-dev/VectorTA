@@ -145,6 +145,9 @@ impl JsaBuilder {
 
 #[derive(Debug, Error)]
 pub enum JsaError {
+    #[error("jsa: Input data slice is empty.")]
+    EmptyInputData,
+
     #[error("jsa: All values are NaN.")]
     AllValuesNaN,
 
@@ -153,6 +156,9 @@ pub enum JsaError {
 
     #[error("jsa: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("jsa: Invalid output buffer size: expected = {expected}, actual = {actual}")]
+    InvalidOutputBuffer { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -165,6 +171,11 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         JsaData::Candles { candles, source } => source_type(candles, source),
         JsaData::Slice(sl) => sl,
     };
+
+    // Check for empty input data
+    if data.is_empty() {
+        return Err(JsaError::EmptyInputData);
+    }
 
     let first = data.iter().position(|x| !x.is_nan()).ok_or(JsaError::AllValuesNaN)?;
     let len = data.len();
@@ -195,6 +206,69 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         }
     }
     Ok(JsaOutput { values: out })
+}
+
+#[inline]
+pub fn jsa_into(input: &JsaInput, out: &mut [f64]) -> Result<(), JsaError> {
+    jsa_with_kernel_into(input, Kernel::Auto, out)
+}
+
+pub fn jsa_with_kernel_into(
+    input: &JsaInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), JsaError> {
+    let data: &[f64] = match &input.data {
+        JsaData::Candles { candles, source } => source_type(candles, source),
+        JsaData::Slice(sl) => sl,
+    };
+    
+    // Check for empty input data
+    if data.is_empty() {
+        return Err(JsaError::EmptyInputData);
+    }
+    
+    let len = data.len();
+    
+    // Ensure output buffer is the correct size
+    if out.len() != len {
+        return Err(JsaError::InvalidOutputBuffer {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(JsaError::AllValuesNaN)?;
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(JsaError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(JsaError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+
+    let warm = first + period;
+    
+    // Initialize NaN prefix
+    out[..warm].fill(f64::NAN);
+    
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => jsa_scalar(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => jsa_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => jsa_avx512(data, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -284,8 +358,7 @@ impl JsaStream {
         let out = if self.filled {
             let past = self.buffer[self.head];
             Some((value + past) * 0.5)
-        
-            } else {
+        } else {
             None
         };
         self.buffer[self.head] = value;
@@ -436,6 +509,11 @@ fn jsa_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<JsaBatchOutput, JsaError> {
+    // Check for empty input data
+    if data.is_empty() {
+        return Err(JsaError::EmptyInputData);
+    }
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(JsaError::InvalidPeriod { period: 0, data_len: 0 });
@@ -519,6 +597,90 @@ fn jsa_batch_inner(
 }
 
 #[inline(always)]
+fn jsa_batch_inner_into(
+    data: &[f64],
+    sweep: &JsaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<(Vec<JsaParams>, usize, usize), JsaError> {
+    // Check for empty input data
+    if data.is_empty() {
+        return Err(JsaError::EmptyInputData);
+    }
+    
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(JsaError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(JsaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(JsaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Ensure output buffer is the correct size
+    if out.len() != rows * cols {
+        return Err(JsaError::InvalidOutputBuffer {
+            expected: rows * cols,
+            actual: out.len(),
+        });
+    }
+    
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+
+    // Cast output to MaybeUninit for initialization
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ---------- closure that fills ONE row ---------------------------
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+
+        match kern {
+            Kernel::Scalar => jsa_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => jsa_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => jsa_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ---------- run every row ----------------------------------------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok((combos, rows, cols))
+}
+
+#[inline(always)]
 unsafe fn jsa_row_scalar(
     data: &[f64],
     first: usize,
@@ -552,8 +714,7 @@ unsafe fn jsa_row_avx512(
 ) {
     if period <= 32 {
         jsa_row_avx512_short(data, first, period, out);
-    
-        } else {
+    } else {
         jsa_row_avx512_long(data, first, period, out);
     }
 }
@@ -593,7 +754,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, IntoPyArray};
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -603,23 +766,23 @@ pub fn jsa_py<'py>(
     data: PyReadonlyArray1<'py, f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice = data.as_slice()?;
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+    
+    // Pre-allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // Prepare JSA input
     let params = JsaParams {
         period: Some(period),
     };
-    let input = JsaInput::from_slice(slice, params);
+    let input = JsaInput::from_slice(slice_in, params);
     
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Compute without GIL
+    // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), JsaError> {
-        let result = jsa_with_kernel(&input, Kernel::Auto)?;
-        slice_out.copy_from_slice(&result.values);
-        Ok(())
+        jsa_into(&input, slice_out)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    .map_err(|e| PyValueError::new_err(format!("JSA error: {}", e)))?;
     
     Ok(out_arr)
 }
@@ -633,107 +796,60 @@ pub fn jsa_batch_py<'py>(
     period_start: usize,
     period_end: usize,
     period_step: usize,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
-    let slice = data.as_slice()?;
+) -> PyResult<Bound<'py, PyDict>> {
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
     let sweep = JsaBatchRange {
         period: (period_start, period_end, period_step),
     };
     
-    // Expand grid to get combinations
+    // Expand grid to get all combinations
     let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("Invalid parameter ranges"));
+    }
+    
     let rows = combos.len();
-    let cols = slice.len();
+    let cols = slice_in.len();
     
-    // Pre-allocate output array
+    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
     
-    // Use the best available kernel
-    let kernel = detect_best_batch_kernel();
-    let simd_kernel = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar,
-    };
-    
-    // Compute without GIL
-    let combos = py.allow_threads(|| -> Result<Vec<JsaParams>, JsaError> {
-        let output = jsa_batch_par_slice(slice, &sweep, simd_kernel)?;
-        slice_out.copy_from_slice(&output.values);
-        Ok(output.combos)
+    // Heavy work without the GIL
+    let (_, final_rows, final_cols) = py.allow_threads(|| -> Result<(Vec<JsaParams>, usize, usize), JsaError> {
+        // Detect best kernel
+        let kernel = match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            _ => Kernel::Scalar,
+        };
+        
+        // Use the new _into function with parallel=true
+        jsa_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    .map_err(|e| PyValueError::new_err(format!("JSA batch error: {}", e)))?;
     
-    // Extract periods
-    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-    
-    Ok((out_arr, periods))
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "jsa_batch_with_metadata")]
-pub fn jsa_batch_with_metadata_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
-    // This is identical to jsa_batch_py - just call it
-    jsa_batch_py(py, data, period_start, period_end, period_step)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "jsa_batch_2d")]
-pub fn jsa_batch_2d_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<usize>)> {
-    let slice = data.as_slice()?;
-    let sweep = JsaBatchRange {
-        period: (period_start, period_end, period_step),
-    };
-    
-    // Expand grid to get combinations
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
-    let cols = slice.len();
-    
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Use the best available kernel
-    let kernel = detect_best_batch_kernel();
-    let simd_kernel = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar,
-    };
-    
-    // Compute without GIL
-    let combos = py.allow_threads(|| -> Result<Vec<JsaParams>, JsaError> {
-        let output = jsa_batch_par_slice(slice, &sweep, simd_kernel)?;
-        slice_out.copy_from_slice(&output.values);
-        Ok(output.combos)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    // Extract periods
-    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    // Extract metadata and convert to NumPy arrays for zero-copy
+    let periods = combos
+        .iter()
+        .map(|c| c.period.unwrap())
+        .collect::<Vec<_>>()
+        .into_pyarray(py);
     
     // Reshape to 2D
-    let out_2d = out_arr.reshape((rows, cols))?;
+    let out_2d = out_arr.reshape((final_rows, final_cols))?;
     
-    Ok((out_2d, periods))
+    // Create dictionary output
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_2d)?;
+    dict.set_item("periods", periods)?;
+    
+    Ok(dict)
 }
+
+// Note: jsa_batch_with_metadata_py is no longer needed since jsa_batch_py now returns metadata in the dictionary
+
+// Note: jsa_batch_2d_py is no longer needed since jsa_batch_py now returns a 2D array in the dictionary
 
 #[cfg(feature = "python")]
 #[pyclass(name = "JsaStream")]
@@ -788,10 +904,11 @@ pub fn jsa_batch_js(
     let sweep = JsaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    match jsa_batch_slice(data, &sweep, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("JSA batch error: {}", e))),
-    }
+    
+    // Use the existing batch function with parallel=false for WASM
+    jsa_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]

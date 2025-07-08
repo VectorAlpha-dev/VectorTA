@@ -33,6 +33,18 @@ use std::f64::consts::PI;
 use thiserror::Error;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyArray2};
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 impl<'a> AsRef<[f64]> for SinWmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -162,6 +174,8 @@ impl SinWmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SinWmaError {
+    #[error("sinwma: No data provided (empty slice).")]
+    EmptyInputData,
     #[error("sinwma: All values are NaN.")]
     AllValuesNaN,
     #[error("sinwma: Invalid period: period = {period}, data length = {data_len}")]
@@ -178,19 +192,48 @@ pub fn sinwma(input: &SinWmaInput) -> Result<SinWmaOutput, SinWmaError> {
 }
 
 pub fn sinwma_with_kernel(input: &SinWmaInput, kernel: Kernel) -> Result<SinWmaOutput, SinWmaError> {
-    let data: &[f64] = match &input.data {
-        SinWmaData::Candles { candles, source } => source_type(candles, source),
-        SinWmaData::Slice(sl) => sl,
-    };
+    let (data, weights, period, first, chosen) = sinwma_prepare(input, kernel)?;
+    
+    let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+    
+    sinwma_compute_into(data, &weights, period, first, chosen, &mut out);
+    
+    Ok(SinWmaOutput { values: out })
+}
 
+#[inline(always)]
+fn sinwma_prepare<'a>(
+    input: &'a SinWmaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*weights*/ AVec<f64>,
+        /*period*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    SinWmaError,
+> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    
+    if len == 0 {
+        return Err(SinWmaError::EmptyInputData);
+    }
+    
+    if data.is_empty() {
+        return Err(SinWmaError::EmptyInputData);
+    }
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(SinWmaError::AllValuesNaN)?;
-
-    let len = data.len();
+    
     let period = input.get_period();
-
+    
+    // Validation checks
     if period == 0 || period > len {
         return Err(SinWmaError::InvalidPeriod {
             period,
@@ -203,51 +246,60 @@ pub fn sinwma_with_kernel(input: &SinWmaInput, kernel: Kernel) -> Result<SinWmaO
             valid: len - first,
         });
     }
-
-    let mut sines: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    sines.resize(period, 0.0);
+    
+    // Build weights once
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+    weights.resize(period, 0.0);
     let mut sum_sines = 0.0;
     for k in 0..period {
         let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
         let val = angle.sin();
-        sines[k] = val;
+        weights[k] = val;
         sum_sines += val;
     }
-
+    
     if sum_sines.abs() < f64::EPSILON {
         return Err(SinWmaError::ZeroSumSines { sum_sines });
     }
     let inv_sum = 1.0 / sum_sines;
-    for w in &mut sines[..] {
+    for w in &mut weights[..] {
         *w *= inv_sum;
     }
-
-    let warm  = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);   
-
+    
+    // Kernel auto-detection only once
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other => other,
+        k => k,
     };
+    
+    Ok((data, weights, period, first, chosen))
+}
 
+#[inline(always)]
+fn sinwma_compute_into(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                sinwma_scalar(data, &sines, period, first, &mut out)
+                sinwma_scalar(data, weights, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                sinwma_avx2(data, &sines, period, first, &mut out)
+                sinwma_avx2(data, weights, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                sinwma_avx512(data, &sines, period, first, &mut out)
+                sinwma_avx512(data, weights, period, first, out)
             }
             _ => unreachable!(),
         }
     }
-
-    Ok(SinWmaOutput { values: out })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -572,6 +624,10 @@ fn sinwma_batch_inner(
         });
     }
 
+    if data.is_empty() {
+        return Err(SinWmaError::EmptyInputData);
+    }
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -591,7 +647,7 @@ fn sinwma_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     let warm: Vec<usize> = combos.iter()
-                                .map(|c| first + c.period.unwrap())
+                                .map(|c| first + c.period.unwrap() - 1)
                                 .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);          // Vec<MaybeUninit<f64>>
@@ -663,6 +719,124 @@ fn sinwma_batch_inner(
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(SinWmaBatchOutput { values, combos, rows, cols })
+}
+
+#[inline(always)]
+fn sinwma_batch_inner_into(
+    data: &[f64],
+    sweep: &SinWmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<SinWmaParams>, SinWmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(SinWmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    if data.is_empty() {
+        return Err(SinWmaError::EmptyInputData);
+    }
+    
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SinWmaError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
+        .map(|c| c.period.unwrap())
+        .max()
+        .unwrap();
+    if data.len() - first < max_p {
+        return Err(SinWmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Collect warm-up lengths per row once
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // Closure that writes one row; it receives &mut [MaybeUninit<f64>]
+    // and casts *only* that slice to &mut [f64] for the kernel call
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+
+        // Build the (normalised) sine-weight vector for this period
+        let mut sines: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+        sines.resize(period, 0.0);
+        let mut sum = 0.0;
+        for k in 0..period {
+            let a = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
+            let v = a.sin();
+            sines[k] = v;
+            sum += v;
+        }
+        let inv_sum = 1.0 / sum;
+        for w in &mut sines[..] {
+            *w *= inv_sum;
+        }
+
+        // Cast the row slice (which is definitely ours to mutate) to f64
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
+        match kern {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                sinwma_row_scalar(data, first, period, sines.as_ptr(), dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                sinwma_row_avx2(data, first, period, sines.as_ptr(), dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                sinwma_row_avx512(data, first, period, sines.as_ptr(), dst)
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    // Run every row directly into the output buffer
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(r, sl)| do_row(r, sl));
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(r, sl);
+            }
+        }
+    } else {
+        for (r, sl) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(r, sl);
+        }
+    }
+
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -1023,4 +1197,258 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sinwma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Sine Weighted Moving Average (SINWMA) of the input data.
+///
+/// Parameters
+/// ----------
+/// data : numpy.ndarray
+///     Input data array
+/// period : int
+///     The period for the SINWMA calculation (must be >= 2)
+/// kernel : str, optional
+///     Kernel to use: 'auto' (default), 'scalar', 'avx2', 'avx512'
+///
+/// Returns
+/// -------
+/// numpy.ndarray
+///     SINWMA values
+///
+/// Raises
+/// ------
+/// ValueError
+///     If period is invalid or data is insufficient
+pub fn sinwma_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice_in = data.as_slice()?;
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // Build input struct
+    let params = SinWmaParams {
+        period: Some(period),
+    };
+    let sinwma_in = SinWmaInput::from_slice(slice_in, params);
+    
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), SinWmaError> {
+        let (data, weights, per, first, chosen) = sinwma_prepare(&sinwma_in, kern)?;
+        // Initialize with NaN exactly once
+        slice_out[..first + per - 1].fill(f64::NAN);
+        sinwma_compute_into(data, &weights, per, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SinWmaStream")]
+/// Streaming Sine Weighted Moving Average calculator.
+///
+/// This class maintains internal state to calculate SINWMA values
+/// incrementally as new data points arrive.
+pub struct SinWmaStreamPy {
+    stream: SinWmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SinWmaStreamPy {
+    #[new]
+    /// Create a new SINWMA stream calculator.
+    ///
+    /// Parameters
+    /// ----------
+    /// period : int
+    ///     The period for the SINWMA calculation
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If period is invalid
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SinWmaParams {
+            period: Some(period),
+        };
+        let stream = SinWmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SinWmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated SINWMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sinwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SINWMA for multiple periods efficiently in a single pass.
+///
+/// Parameters
+/// ----------
+/// data : numpy.ndarray
+///     Input data array
+/// period_range : tuple[int, int, int]
+///     Range of periods as (start, end, step)
+/// kernel : str, optional
+///     Kernel to use: 'auto' (default), 'scalar', 'avx2', 'avx512'
+///
+/// Returns
+/// -------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' (1D array)
+///
+/// Raises
+/// ------
+/// ValueError
+///     If parameters are invalid or data is insufficient
+pub fn sinwma_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let slice_in = data.as_slice()?;
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    let sweep = SinWmaBatchRange {
+        period: period_range,
+    };
+    
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        sinwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SinWmaParams {
+        period: Some(period),
+    };
+    let input = SinWmaInput::from_slice(data, params);
+    
+    sinwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SinWmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Use the existing batch function with parallel=false for WASM
+    sinwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<u32> {
+    let sweep = SinWmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    combos.iter()
+        .map(|p| p.period.unwrap() as u32)
+        .collect()
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize,
+) -> Vec<u32> {
+    let sweep = SinWmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    vec![combos.len() as u32, data_len as u32]
 }

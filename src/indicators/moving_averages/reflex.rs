@@ -32,6 +32,18 @@ use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyArray2};
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 impl<'a> AsRef<[f64]> for ReflexInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -165,55 +177,19 @@ pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, ReflexError> {
 }
 
 pub fn reflex_with_kernel(input: &ReflexInput, kernel: Kernel) -> Result<ReflexOutput, ReflexError> {
-    let data: &[f64] = match &input.data {
-        ReflexData::Candles { candles, source } => source_type(candles, source),
-        ReflexData::Slice(sl) => sl,
-    };
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+    let (data, period, first, chosen) = reflex_prepare(input, kernel)?;
     let len = data.len();
-    let period = input.get_period();
-
-    if len == 0 {
-        return Err(ReflexError::NoData);
-    }
-    if period < 2 {
-        return Err(ReflexError::InvalidPeriod { period });
-    }
-    if period > len {
-        return Err(ReflexError::NotEnoughData {
-            needed: period,
-            found: len,
-        });
-    }
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
+    
     let warm = first + period;
-    let mut out = alloc_with_nan_prefix(len, period);
+    let mut out = alloc_with_nan_prefix(len, warm);
+    
+    reflex_compute_into(data, period, first, chosen, &mut out);
+    
+    // Reflex fills zeros for the first period values
     for x in &mut out[..period.min(len)] {
         *x = 0.0;
     }
-
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                reflex_scalar(data, period, first, &mut out)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                reflex_avx2(data, period, first, &mut out)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                reflex_avx512(data, period, first, &mut out)
-            }
-            _ => unreachable!(),
-        }
-    }
-
+    
     Ok(ReflexOutput { values: out })
 }
 
@@ -319,6 +295,79 @@ pub unsafe fn reflex_avx512_short(data: &[f64], period: usize, first: usize, out
 #[inline]
 pub unsafe fn reflex_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     reflex_scalar(data, period, first, out)
+}
+
+// --- Zero-copy prepare/compute pattern ---
+
+#[inline(always)]
+fn reflex_prepare<'a>(
+    input: &'a ReflexInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    ReflexError,
+> {
+    let data: &[f64] = match &input.data {
+        ReflexData::Candles { candles, source } => source_type(candles, source),
+        ReflexData::Slice(sl) => sl,
+    };
+    
+    let len = data.len();
+    if len == 0 {
+        return Err(ReflexError::NoData);
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+    let period = input.get_period();
+    
+    if period < 2 {
+        return Err(ReflexError::InvalidPeriod { period });
+    }
+    if period > len - first {
+        return Err(ReflexError::NotEnoughData {
+            needed: period,
+            found: len - first,
+        });
+    }
+    
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    
+    Ok((data, period, first, chosen))
+}
+
+#[inline(always)]
+fn reflex_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
+    // No need to fill warmup - reflex implementations handle this
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                reflex_scalar(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                reflex_avx2(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                reflex_avx512(data, period, first, out)
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 // --- Streaming API ---
@@ -724,6 +773,312 @@ unsafe fn reflex_row_avx512_short(data: &[f64], first: usize, period: usize, out
 #[inline(always)]
 unsafe fn reflex_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     reflex_scalar(data, period, first, out)
+}
+
+// --- Zero-copy batch operations ---
+
+#[inline(always)]
+fn reflex_batch_inner_into(
+    data: &[f64],
+    sweep: &ReflexBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<ReflexBatchMetadata, ReflexError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(ReflexError::InvalidPeriod { period: 0 });
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(ReflexError::NotEnoughData { needed: max_p, found: data.len() - first });
+    }
+    
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Write into the provided output buffer
+    let do_row = |row: usize, dst: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
+        
+        // Fill warmup with zeros
+        for x in &mut dst[..period.min(cols)] {
+            *x = 0.0;
+        }
+        
+        match kern {
+            Kernel::Scalar => reflex_row_scalar(data, first, period, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   => reflex_row_avx2  (data, first, period, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => reflex_row_avx512(data, first, period, dst),
+            _ => unreachable!(),
+        }
+    };
+    
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    
+    Ok(ReflexBatchMetadata { 
+        combos, 
+        rows, 
+        cols 
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct ReflexBatchMetadata {
+    pub combos: Vec<ReflexParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+// --- Python bindings ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "reflex")]
+#[pyo3(signature = (data, period = 20, kernel = None), text_signature = "(data, period=20, kernel=None)")]
+pub fn reflex_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    r#"Compute Reflex indicator.
+    
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Input data array
+    period : int, default=20
+        Period for the indicator (must be >= 2)
+    kernel : str, optional
+        Kernel to use:
+        - 'auto' or None: Auto-detect best kernel (default)
+        - 'scalar': Use scalar implementation
+        - 'avx2': Use AVX2 implementation (if available)
+        - 'avx512': Use AVX512 implementation (if available)
+    
+    Returns
+    -------
+    numpy.ndarray
+        Reflex values
+    "#;
+    
+    let data_slice = data.as_slice()?;
+    let params = ReflexParams { period: Some(period) };
+    let input = ReflexInput::from_slice(data_slice, params);
+    
+    let kernel_enum = match kernel {
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some("auto") | None => Kernel::Auto,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // Use prepare/compute_into pattern
+    let (data, period, first, chosen) = reflex_prepare(&input, kernel_enum)
+        .map_err(|e| PyValueError::new_err(format!("reflex error: {}", e)))?;
+    
+    let len = data.len();
+    let warm = first + period;
+    
+    // Release GIL during computation
+    let mut output = vec![f64::NAN; len];
+    py.allow_threads(|| {
+        reflex_compute_into(data, period, first, chosen, &mut output);
+    });
+    
+    // Reflex fills zeros for the first period values
+    for x in &mut output[..period.min(len)] {
+        *x = 0.0;
+    }
+    
+    Ok(output.into_pyarray(py).into())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "reflex_batch")]
+#[pyo3(signature = (data, periods, kernel = None), text_signature = "(data, periods, kernel=None)")]
+pub fn reflex_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    periods: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Py<PyDict>> {
+    r#"Compute Reflex indicator for multiple periods.
+    
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Input data array
+    periods : tuple of int
+        (start, end, step) for period range
+    kernel : str, optional
+        Kernel to use (see reflex() for options)
+    
+    Returns
+    -------
+    dict
+        Dictionary with 'values' (2D array) and 'periods' (list)
+    "#;
+    
+    let data_slice = data.as_slice()?;
+    
+    let kernel_enum = match kernel {
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some("auto") | None => Kernel::Auto,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    let range = ReflexBatchRange { period: periods };
+    
+    // Pre-calculate metadata
+    let combos = expand_grid(&range);
+    let rows = combos.len();
+    let cols = data_slice.len();
+    
+    // Allocate output buffer
+    let mut output = vec![f64::NAN; rows * cols];
+    
+    // Release GIL during computation
+    let metadata = py.allow_threads(|| {
+        let simd = match kernel_enum {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            Kernel::Auto => match detect_best_batch_kernel() {
+                Kernel::Avx512Batch => Kernel::Avx512,
+                Kernel::Avx2Batch => Kernel::Avx2,
+                _ => Kernel::Scalar,
+            },
+            _ => Kernel::Scalar,
+        };
+        
+        reflex_batch_inner_into(data_slice, &range, simd, true, &mut output)
+    }).map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
+    
+    // Create output dictionary
+    let dict = PyDict::new(py);
+    
+    // Convert to numpy array and reshape
+    let np_array = output.into_pyarray(py);
+    let reshaped = np_array.reshape([rows, cols])?;
+    dict.set_item("values", reshaped)?;
+    
+    // Add periods array
+    dict.set_item("periods", 
+        metadata.combos
+            .iter()
+            .map(|c| c.period.unwrap_or(20) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
+    
+    Ok(dict.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ReflexStream")]
+pub struct ReflexStreamPy {
+    inner: ReflexStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ReflexStreamPy {
+    #[new]
+    #[pyo3(signature = (period = 20))]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = ReflexParams { period: Some(period) };
+        let inner = ReflexStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(format!("reflex stream error: {}", e)))?;
+        Ok(Self { inner })
+    }
+    
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// --- WASM bindings ---
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = ReflexParams { period: Some(period) };
+    let input = ReflexInput::from_slice(data, params);
+    
+    let output = reflex(&input)
+        .map_err(|e| JsValue::from_str(&format!("reflex error: {}", e)))?;
+    
+    Ok(output.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let range = ReflexBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let output = reflex_batch_with_kernel(data, &range, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&format!("reflex batch error: {}", e)))?;
+    
+    Ok(output.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Vec<usize> {
+    let range = ReflexBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    combos.iter().map(|c| c.period.unwrap_or(20)).collect()
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize,
+) -> Vec<usize> {
+    let range = ReflexBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    vec![combos.len(), data_len]
 }
 
 // -- Test coverage macros: ALMA parity --

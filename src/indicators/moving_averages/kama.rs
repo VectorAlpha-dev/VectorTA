@@ -26,7 +26,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -168,12 +167,17 @@ pub fn kama(input: &KamaInput) -> Result<KamaOutput, KamaError> {
     kama_with_kernel(input, Kernel::Auto)
 }
 
-pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput, KamaError> {
-    let data: &[f64] = match &input.data {
-        KamaData::Candles { candles, source } => source_type(candles, source),
-        KamaData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn kama_prepare<'a>(
+    input: &'a KamaInput,
+    kernel: Kernel,
+) -> Result<(
+    /*data*/ &'a [f64],
+    /*period*/ usize,
+    /*first*/ usize,
+    /*chosen*/ Kernel,
+), KamaError> {
+    let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
         return Err(KamaError::NoData);
@@ -193,19 +197,37 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
         other => other,
     };
 
-    let warm = first + period;                 // prefix that must stay NaN
-    let mut out = alloc_with_nan_prefix(len, warm);
+    Ok((data, period, first, chosen))
+}
+
+#[inline(always)]
+fn kama_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => kama_scalar(data, period, first, &mut out),
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => kama_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => kama_avx2(data, period, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => kama_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => kama_avx512(data, period, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => kama_avx512(data, period, first, out),
             _ => unreachable!(),
         }
     }
+}
 
+pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput, KamaError> {
+    let (data, period, first, chosen) = kama_prepare(input, kernel)?;
+    
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    
+    kama_compute_into(data, period, first, chosen, &mut out);
+    
     Ok(KamaOutput { values: out })
 }
 
@@ -674,6 +696,29 @@ fn kama_batch_inner(
     parallel: bool,
 ) -> Result<KamaBatchOutput, KamaError> {
     let combos = expand_grid(sweep);
+    let cols = data.len();
+    let rows = combos.len();
+    let mut values = vec![0.0; rows * cols];
+    
+    kama_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(KamaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+fn kama_batch_inner_into(
+    data: &[f64],
+    sweep: &KamaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<KamaParams>, KamaError> {
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(KamaError::InvalidPeriod { period: 0, data_len: 0 });
     }
@@ -686,14 +731,24 @@ fn kama_batch_inner(
     let cols = data.len();
 
     /* ---------------------------------------------------------------
-    * 1.  allocate un-initialised matrix and write the NaN prefixes
+    * 1.  prepare warmup periods and initialize NaN prefixes
     * ------------------------------------------------------------- */
     let warm: Vec<usize> = combos.iter()
                                 .map(|c| first + c.period.unwrap())
                                 .collect();
 
-    let mut raw = make_uninit_matrix(rows, cols);     // Vec<MaybeUninit<f64>>
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     /* ---------------------------------------------------------------
     * 2.  helper that fills a single row
@@ -701,60 +756,43 @@ fn kama_batch_inner(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period  = combos[row].period.unwrap();
 
-        // cast this row to &mut [f64] once, then pass to the kernel
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        // Cast the row slice (which is definitely ours to mutate) to f64
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar => kama_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::ScalarBatch => kama_row_scalar(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => kama_row_avx2  (data, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx2Batch => kama_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => kama_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 | Kernel::Avx512Batch => kama_row_avx512(data, first, period, dst),
             _ => unreachable!(),
         }
     };
 
     /* ---------------------------------------------------------------
-    * 3.  run every row, writing **directly** into `raw`
+    * 3.  run every row kernel; no element is read before it is written
     * ------------------------------------------------------------- */
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
                 .enumerate()
-
                 .for_each(|(row, slice)| do_row(row, slice));
-
         }
 
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    /* ---------------------------------------------------------------
-    * 4.  turn the fully-initialised buffer into Vec<f64>
-    * ------------------------------------------------------------- */
-    let values: Vec<f64> = unsafe { core::mem::transmute(raw) };
-
-    /* ---------------------------------------------------------------
-    * 5.  package result
-    * ------------------------------------------------------------- */
-    Ok(KamaBatchOutput { values, combos, rows, cols })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -808,26 +846,32 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[pyo3(name = "kama")]
 pub fn kama_py<'py>(
     py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
+    arr_in: PyReadonlyArray1<'py, f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice = data.as_slice()?;
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    
+    // Build input struct
     let params = KamaParams {
         period: Some(period),
     };
-    let input = KamaInput::from_slice(slice, params);
+    let kama_in = KamaInput::from_slice(slice_in, params);
     
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
     
-    // Compute without GIL
+    // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), KamaError> {
-        let result = kama_with_kernel(&input, Kernel::Auto)?;
-        slice_out.copy_from_slice(&result.values);
+        let (data, per, first, chosen) = kama_prepare(&kama_in, Kernel::Auto)?;
+        // Prefix initialize exactly once
+        slice_out[..first + per].fill(f64::NAN);
+        kama_compute_into(data, per, first, chosen, slice_out);
         Ok(())
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
     
     Ok(out_arr)
 }
@@ -838,110 +882,59 @@ pub fn kama_py<'py>(
 pub fn kama_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
-    let slice = data.as_slice()?;
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
     let sweep = KamaBatchRange {
-        period: (period_start, period_end, period_step),
+        period: period_range,
     };
     
-    // Expand grid to get combinations
+    // 1. Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
     let rows = combos.len();
-    let cols = slice.len();
+    let cols = slice_in.len();
     
-    // Pre-allocate output array
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Use the best available kernel
-    let kernel = detect_best_batch_kernel();
-    let simd_kernel = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar,
-    };
-    
-    // Compute without GIL
-    let combos = py.allow_threads(|| -> Result<Vec<KamaParams>, KamaError> {
-        let output = kama_batch_par_slice(slice, &sweep, simd_kernel)?;
-        slice_out.copy_from_slice(&output.values);
-        Ok(output.combos)
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        kama_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Extract periods
-    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     
-    Ok((out_arr, periods))
+    Ok(dict)
 }
 
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "kama_batch_with_metadata")]
-pub fn kama_batch_with_metadata_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Vec<usize>)> {
-    // This is identical to kama_batch_py - just call it
-    kama_batch_py(py, data, period_start, period_end, period_step)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "kama_batch_2d")]
-pub fn kama_batch_2d_py<'py>(
-    py: Python<'py>,
-    data: PyReadonlyArray1<'py, f64>,
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> PyResult<(Bound<'py, numpy::PyArray2<f64>>, Vec<usize>)> {
-    let slice = data.as_slice()?;
-    let sweep = KamaBatchRange {
-        period: (period_start, period_end, period_step),
-    };
-    
-    // Expand grid to get combinations
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
-    let cols = slice.len();
-    
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Use the best available kernel
-    let kernel = detect_best_batch_kernel();
-    let simd_kernel = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar,
-    };
-    
-    // Compute without GIL
-    let combos = py.allow_threads(|| -> Result<Vec<KamaParams>, KamaError> {
-        let output = kama_batch_par_slice(slice, &sweep, simd_kernel)?;
-        slice_out.copy_from_slice(&output.values);
-        Ok(output.combos)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    // Extract periods
-    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-    
-    // Reshape to 2D
-    let out_2d = out_arr.reshape((rows, cols))?;
-    
-    Ok((out_2d, periods))
-}
 
 #[cfg(feature = "python")]
 #[pyclass(name = "KamaStream")]

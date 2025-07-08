@@ -5,6 +5,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -18,13 +19,34 @@ const projectRoot = path.join(__dirname, '../..');
  * @returns {Promise<Object>} Rust output data
  */
 export async function getRustOutput(indicatorName, source = 'close') {
-    // Build the reference generator if needed
-    try {
-        await execAsync('cargo build --release --bin generate_references', {
-            cwd: projectRoot
-        });
-    } catch (error) {
-        throw new Error(`Failed to build reference generator: ${error.message}`);
+    // Check if the reference generator binary already exists
+    const binaryPath = path.join(projectRoot, 'target', 'release', 'generate_references');
+    const binaryExists = existsSync(binaryPath) || existsSync(binaryPath + '.exe');
+    
+    if (!binaryExists) {
+        // Build the reference generator if needed
+        // Try multiple times in case of intermittent build issues
+        let buildError;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await execAsync('cargo build --release --bin generate_references', {
+                    cwd: projectRoot,
+                    env: { ...process.env, CARGO_INCREMENTAL: '0' } // Disable incremental compilation
+                });
+                buildError = null;
+                break;
+            } catch (error) {
+                buildError = error;
+                if (attempt < 2) {
+                    // Wait a bit before retrying
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+        }
+        
+        if (buildError) {
+            throw new Error(`Failed to build reference generator: ${buildError.message}`);
+        }
     }
     
     // Run the reference generator

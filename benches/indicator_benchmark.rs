@@ -5,7 +5,56 @@ use criterion::{
 use my_project::utilities::enums::Kernel;
 use once_cell::sync::Lazy;
 use paste::paste;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Import moving averages separately
+use my_project::indicators::moving_averages::{
+    alma::{alma_with_kernel, AlmaBatchBuilder, AlmaInput},
+    cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaInput},
+    dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
+    edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
+    ehlers_itrend::{
+        ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput,
+    },
+    ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
+    epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
+    frama::{frama_with_kernel, FramaBatchBuilder, FramaInput},
+    fwma::{fwma_with_kernel, FwmaBatchBuilder, FwmaInput},
+    gaussian::{gaussian_with_kernel, GaussianBatchBuilder, GaussianInput},
+    highpass::{highpass_with_kernel, HighPassBatchBuilder, HighPassInput},
+    highpass_2_pole::{
+        highpass_2_pole_with_kernel, HighPass2BatchBuilder, HighPass2Input,
+    },
+    hma::{hma_with_kernel, HmaBatchBuilder, HmaInput},
+    hwma::{hwma_with_kernel, HwmaBatchBuilder, HwmaInput},
+    jma::{jma_with_kernel, JmaBatchBuilder, JmaInput},
+    jsa::{jsa_with_kernel, JsaBatchBuilder, JsaInput},
+    kama::{kama_with_kernel, KamaBatchBuilder, KamaInput},
+    linreg::{linreg_with_kernel, LinRegBatchBuilder, LinRegInput},
+    maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqInput},
+    mama::{mama_with_kernel, MamaBatchBuilder, MamaInput},
+    mwdx::{mwdx_with_kernel, MwdxBatchBuilder, MwdxInput},
+    nma::{nma_with_kernel, NmaBatchBuilder, NmaInput},
+    pwma::{pwma_with_kernel, PwmaBatchBuilder, PwmaInput},
+    reflex::{reflex_with_kernel, ReflexBatchBuilder, ReflexInput},
+    sinwma::{sinwma_with_kernel, SinWmaBatchBuilder, SinWmaInput},
+    sma::{sma_with_kernel, SmaBatchBuilder, SmaInput},
+    smma::{smma_with_kernel, SmmaBatchBuilder, SmmaInput},
+    sqwma::{sqwma_with_kernel, SqwmaBatchBuilder, SqwmaInput},
+    srwma::{srwma_with_kernel, SrwmaBatchBuilder, SrwmaInput},
+    supersmoother::{supersmoother_with_kernel, SuperSmootherBatchBuilder, SuperSmootherInput},
+    supersmoother_3_pole::{supersmoother_3_pole_with_kernel, SuperSmoother3PoleBatchBuilder, SuperSmoother3PoleInput},
+    swma::{swma_with_kernel, SwmaBatchBuilder, SwmaInput},
+    tema::{tema_with_kernel, TemaBatchBuilder, TemaInput},
+    tilson::{tilson_with_kernel, TilsonBatchBuilder, TilsonInput},
+    trendflex::{trendflex_with_kernel, TrendFlexBatchBuilder, TrendFlexInput},
+    trima::{trima_with_kernel, TrimaBatchBuilder, TrimaInput},
+    vpwma::{vpwma_with_kernel, VpwmaBatchBuilder, VpwmaInput},
+    vwma::{vwma_with_kernel, VwmaInput, VwmaParams},
+    wilders::{wilders_with_kernel, WildersBatchBuilder, WildersInput},
+    wma::{wma_with_kernel, WmaBatchBuilder, WmaInput},
+    zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
+};
 
 use my_project::indicators::{
     acosc::{acosc as acosc_raw, AcoscInput},
@@ -14,7 +63,6 @@ use my_project::indicators::{
     adx::{adx as adx_raw, AdxInput},
     adxr::{adxr as adxr_raw, AdxrInput},
     alligator::{alligator as alligator_raw, AlligatorInput},
-    alma::{alma_with_kernel, AlmaBatchBuilder, AlmaData, AlmaInput},
     ao::{ao as ao_raw, AoInput},
     apo::{apo as apo_raw, ApoInput},
     aroon::{aroon as aroon_raw, AroonInput},
@@ -38,11 +86,9 @@ use my_project::indicators::{
     correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
     correlation_cycle::{correlation_cycle as correlation_cycle_raw, CorrelationCycleInput},
     cvi::{cvi as cvi_raw, CviInput},
-    cwma::{cwma_with_kernel, CwmaBatchBuilder, CwmaData, CwmaInput},
     damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
     dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
     decycler::{decycler as decycler_raw, DecyclerInput},
-    dema::{dema_with_kernel, DemaBatchBuilder, DemaData, DemaInput},
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
     dm::{dm as dm_raw, DmInput},
@@ -50,35 +96,22 @@ use my_project::indicators::{
     dpo::{dpo as dpo_raw, DpoInput},
     dti::{dti as dti_raw, DtiInput},
     dx::{dx as dx_raw, DxInput},
-    edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfData, EdcfInput},
     efi::{efi as efi_raw, EfiInput},
-    ehlers_itrend::{
-        ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendData, EhlersITrendInput,
-    },
-    ema::{ema_with_kernel, EmaBatchBuilder, EmaData, EmaInput},
     emd::{emd as emd_raw, EmdInput},
     emv::{emv as emv_raw, EmvInput},
-    epma::{epma_with_kernel, EpmaBatchBuilder, EpmaData, EpmaInput},
     er::{er as er_raw, ErInput},
     eri::{eri as eri_raw, EriInput},
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, FoscInput},
-    frama::{frama_with_kernel, FramaBatchBuilder, FramaData, FramaInput},
-    fwma::{fwma_with_kernel, FwmaBatchBuilder, FwmaData, FwmaInput},
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
-    gaussian::{gaussian_with_kernel, GaussianBatchBuilder, GaussianData, GaussianInput},
     heikin_ashi_candles::{heikin_ashi_candles as heikin_ashi_candles_raw, HeikinAshiInput},
-    highpass::{highpass_with_kernel, HighPassBatchBuilder, HighPassData, HighPassInput},
-    highpass_2_pole::{
-        highpass_2_pole_with_kernel, HighPass2BatchBuilder, HighPass2Data, HighPass2Input,
-    },
-    hma::{hma_with_kernel, HmaBatchBuilder, HmaData, HmaInput},
     ht_dcperiod::{ht_dcperiod as ht_dcperiod_raw, HtDcPeriodInput},
-    hwma::{hwma_with_kernel, HwmaBatchBuilder, HwmaData, HwmaInput},
+    ht_dcphase::{ht_dcphase as ht_dcphase_raw, HtDcPhaseInput},
+    ht_phasor::{ht_phasor as ht_phasor_raw, HtPhasorInput},
+    ht_sine::{ht_sine as ht_sine_raw, HtSineInput},
+    ht_trendline::{ht_trendline as ht_trendline_raw, HtTrendlineInput},
+    ht_trendmode::{ht_trendmode as ht_trendmode_raw, HtTrendModeInput},
     ift_rsi::{ift_rsi as ift_rsi_raw, IftRsiInput},
-    jma::{jma_with_kernel, JmaBatchBuilder, JmaData, JmaInput},
-    jsa::{jsa_with_kernel, JsaBatchBuilder, JsaData, JsaInput},
-    kama::{kama_with_kernel, KamaBatchBuilder, KamaData, KamaInput},
     kaufmanstop::{kaufmanstop as kaufmanstop_raw, KaufmanstopInput},
     kdj::{kdj as kdj_raw, KdjInput},
     keltner::{keltner as keltner_raw, KeltnerInput},
@@ -90,12 +123,9 @@ use my_project::indicators::{
         linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput,
     },
     linearreg_slope::{linearreg_slope as linearreg_slope_raw, LinearRegSlopeInput},
-    linreg::{linreg_with_kernel, LinRegBatchBuilder, LinRegData, LinRegInput},
     lrsi::{lrsi as lrsi_raw, LrsiInput},
-    maaq::{maaq_with_kernel, MaaqBatchBuilder, MaaqData, MaaqInput},
     mab::{mab as mab_raw, MabInput},
     macd::{macd as macd_raw, MacdInput},
-    mama::{mama_with_kernel, MamaBatchBuilder, MamaData, MamaInput},
     marketefi::{marketefi as marketfi_raw, MarketefiInput},
     mass::{mass as mass_raw, MassInput},
     mean_ad::{mean_ad as mean_ad_raw, MeanAdInput},
@@ -107,66 +137,50 @@ use my_project::indicators::{
     minmax::{minmax as minmax_raw, MinmaxInput},
     mom::{mom as mom_raw, MomInput},
     msw::{msw as msw_raw, MswInput},
-    mwdx::{mwdx as mwdx_raw, MwdxInput},
     natr::{natr as natr_raw, NatrInput},
-    nma::{nma as nma_raw, NmaInput},
+    nvi::{nvi as nvi_raw, NviInput},
+    obv::{obv as obv_raw, ObvInput},
+    pfe::{pfe as pfe_raw, PfeInput},
     pivot::{pivot as pivot_raw, PivotInput},
     pma::{pma as pma_raw, PmaInput},
     ppo::{ppo as ppo_raw, PpoInput},
     pvi::{pvi as pvi_raw, PviInput},
-    pwma::{pwma as pwma_raw, PwmaInput},
     qstick::{qstick as qstick_raw, QstickInput},
-    reflex::{reflex as reflex_raw, ReflexInput},
     roc::{roc as roc_raw, RocInput},
     rocp::{rocp as rocp_raw, RocpInput},
     rocr::{rocr as rocr_raw, RocrInput},
     rsi::{rsi as rsi_raw, RsiInput},
+    rsmk::{rsmk as rsmk_raw, RsmkInput},
     rvi::{rvi as rvi_raw, RviInput},
     safezonestop::{safezonestop as safezonestop_raw, SafeZoneStopInput},
     sar::{sar as sar_raw, SarInput},
-    sinwma::{sinwma as sinwma_raw, SinWmaInput},
-    sma::{sma as sma_raw, SmaInput},
-    smma::{smma as smma_raw, SmmaInput},
     squeeze_momentum::{squeeze_momentum as squeeze_momentum_raw, SqueezeMomentumInput},
-    sqwma::{sqwma as sqwma_raw, SqwmaInput},
     srsi::{srsi as srsi_raw, SrsiInput},
-    srwma::{srwma as srwma_raw, SrwmaInput},
     stc::{stc as stc_raw, StcInput},
     stddev::{stddev as stddev_raw, StdDevInput},
+    stoch::{stoch as stoch_raw, StochInput},
     stochf::{stochf as stochf_raw, StochfInput},
-    supersmoother::{supersmoother as supersmoother_raw, SuperSmootherInput},
-    supersmoother_3_pole::{
-        supersmoother_3_pole as supersmoother_3_pole_raw, SuperSmoother3PoleInput,
-    },
-    swma::{swma as swma_raw, SwmaInput},
-    tema::{tema as tema_raw, TemaInput},
-    tilson::{tilson as tilson_raw, TilsonInput},
-    trendflex::{trendflex as trendflex_raw, TrendFlexInput},
-    trima::{trima as trima_raw, TrimaInput},
+    supertrend::{supertrend as supertrend_raw, SuperTrendInput},
     trix::{trix as trix_raw, TrixInput},
+    tsf::{tsf as tsf_raw, TsfInput},
     tsi::{tsi as tsi_raw, TsiInput},
     ttm_trend::{ttm_trend as ttm_trend_raw, TtmTrendInput},
     ui::{ui as ui_raw, UiInput},
     ultosc::{ultosc as ultosc_raw, UltOscInput},
     var::{var as var_raw, VarInput},
     vi::{vi as vi_raw, ViInput},
-    vidya::{vidya as vidya_raw, VidyaInput},
-    vlma::{vlma as vlma_raw, VlmaInput},
+    vidya::{vidya_with_kernel, VidyaBatchBuilder, VidyaInput},
+    vlma::{vlma_with_kernel, VlmaBatchBuilder, VlmaInput},
     vosc::{vosc as vosc_raw, VoscInput},
     voss::{voss as voss_raw, VossInput},
     vpci::{vpci as vpci_raw, VpciInput},
     vpt::{vpt as vpt_raw, VptInput},
-    vpwma::{vpwma as vpwma_raw, VpwmaInput},
     vwap::{vwap as vwap_raw, VwapInput},
-    vwma::{vwma as vwma_raw, VwmaInput},
     vwmacd::{vwmacd as vwmacd_raw, VwmacdInput},
     wad::{wad as wad_raw, WadInput},
     wavetrend::{wavetrend as wavetrend_raw, WavetrendInput},
     wclprice::{wclprice as wclprice_raw, WclpriceInput},
-    wilders::{wilders as wilders_raw, WildersInput},
     willr::{willr as willr_raw, WillrInput},
-    wma::{wma as wma_raw, WmaInput},
-    zlema::{zlema as zlema_raw, ZlemaInput},
     zscore::{zscore as zscore_raw, ZscoreInput},
 };
 
@@ -245,6 +259,11 @@ pub type HighPassInputS = HighPassInput<'static>;
 pub type HighPass2InputS = HighPass2Input<'static>;
 pub type HmaInputS = HmaInput<'static>;
 pub type HtDcPeriodInputS = HtDcPeriodInput<'static>;
+pub type HtDcPhaseInputS = HtDcPhaseInput<'static>;
+pub type HtPhasorInputS = HtPhasorInput<'static>;
+pub type HtSineInputS = HtSineInput<'static>;
+pub type HtTrendlineInputS = HtTrendlineInput<'static>;
+pub type HtTrendModeInputS = HtTrendModeInput<'static>;
 pub type HwmaInputS = HwmaInput<'static>;
 pub type IftRsiInputS = IftRsiInput<'static>;
 pub type JmaInputS = JmaInput<'static>;
@@ -256,7 +275,7 @@ pub type KeltnerInputS = KeltnerInput<'static>;
 pub type KstInputS = KstInput<'static>;
 pub type KurtosisInputS = KurtosisInput<'static>;
 pub type KvoInputS = KvoInput<'static>;
-pub type Linearreg_angleInputS = Linearreg_angleInput<'static>;
+pub type LinearregAngleInputS = Linearreg_angleInput<'static>;
 pub type LinearRegInterceptInputS = LinearRegInterceptInput<'static>;
 pub type LinearRegSlopeInputS = LinearRegSlopeInput<'static>;
 pub type LinRegInputS = LinRegInput<'static>;
@@ -279,6 +298,9 @@ pub type MswInputS = MswInput<'static>;
 pub type MwdxInputS = MwdxInput<'static>;
 pub type NatrInputS = NatrInput<'static>;
 pub type NmaInputS = NmaInput<'static>;
+pub type NviInputS = NviInput<'static>;
+pub type ObvInputS = ObvInput<'static>;
+pub type PfeInputS = PfeInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
 pub type PmaInputS = PmaInput<'static>;
 pub type PpoInputS = PpoInput<'static>;
@@ -290,6 +312,7 @@ pub type RocInputS = RocInput<'static>;
 pub type RocpInputS = RocpInput<'static>;
 pub type RocrInputS = RocrInput<'static>;
 pub type RsiInputS = RsiInput<'static>;
+pub type RsmkInputS = RsmkInput<'static>;
 pub type RviInputS = RviInput<'static>;
 pub type SafeZoneStopInputS = SafeZoneStopInput<'static>;
 pub type SarInputS = SarInput<'static>;
@@ -302,8 +325,10 @@ pub type SrsiInputS = SrsiInput<'static>;
 pub type SrwmaInputS = SrwmaInput<'static>;
 pub type StcInputS = StcInput<'static>;
 pub type StdDevInputS = StdDevInput<'static>;
+pub type StochInputS = StochInput<'static>;
 pub type StochfInputS = StochfInput<'static>;
 pub type SuperSmootherInputS = SuperSmootherInput<'static>;
+pub type SupertrendInputS = SuperTrendInput<'static>;
 pub type SuperSmoother3PoleInputS = SuperSmoother3PoleInput<'static>;
 pub type SwmaInputS = SwmaInput<'static>;
 pub type TemaInputS = TemaInput<'static>;
@@ -311,6 +336,7 @@ pub type TilsonInputS = TilsonInput<'static>;
 pub type TrendFlexInputS = TrendFlexInput<'static>;
 pub type TrimaInputS = TrimaInput<'static>;
 pub type TrixInputS = TrixInput<'static>;
+pub type TsfInputS = TsfInput<'static>;
 pub type TsiInputS = TsiInput<'static>;
 pub type TtmTrendInputS = TtmTrendInput<'static>;
 pub type UiInputS = UiInput<'static>;
@@ -489,6 +515,30 @@ macro_rules! make_batch_wrappers {
     };
 }
 
+// Special implementation for RsmkInputS which requires two candle sets
+impl InputLen for RsmkInputS {
+    fn with_len(len: usize) -> Self {
+        match len {
+            10_000    => RsmkInput::with_default_candles(&*CANDLES_10K, &*CANDLES_10K),
+            100_000   => RsmkInput::with_default_candles(&*CANDLES_100K, &*CANDLES_100K),
+            1_000_000 => RsmkInput::with_default_candles(&*CANDLES_1M, &*CANDLES_1M),
+            _ => panic!("unsupported len {len}"),
+        }
+    }
+}
+
+// Special implementation for VwmaInputS which requires volume data
+impl InputLen for VwmaInputS {
+    fn with_len(len: usize) -> Self {
+        match len {
+            10_000    => VwmaInput::from_candles(&*CANDLES_10K, "close", VwmaParams::default()),
+            100_000   => VwmaInput::from_candles(&*CANDLES_100K, "close", VwmaParams::default()),
+            1_000_000 => VwmaInput::from_candles(&*CANDLES_1M, "close", VwmaParams::default()),
+            _ => panic!("unsupported len {len}"),
+        }
+    }
+}
+
 impl_input_len!(
     AcoscInputS,
     AdInputS,
@@ -550,6 +600,11 @@ impl_input_len!(
     HighPass2InputS,
     HmaInputS,
     HtDcPeriodInputS,
+    HtDcPhaseInputS,
+    HtPhasorInputS,
+    HtSineInputS,
+    HtTrendlineInputS,
+    HtTrendModeInputS,
     HwmaInputS,
     IftRsiInputS,
     JmaInputS,
@@ -561,7 +616,7 @@ impl_input_len!(
     KstInputS,
     KurtosisInputS,
     KvoInputS,
-    Linearreg_angleInputS,
+    LinearregAngleInputS,
     LinearRegInterceptInputS,
     LinearRegSlopeInputS,
     LinRegInputS,
@@ -584,6 +639,9 @@ impl_input_len!(
     MwdxInputS,
     NatrInputS,
     NmaInputS,
+    NviInputS,
+    ObvInputS,
+    PfeInputS,
     PivotInputS,
     PmaInputS,
     PpoInputS,
@@ -607,8 +665,10 @@ impl_input_len!(
     SrwmaInputS,
     StcInputS,
     StdDevInputS,
+    StochInputS,
     StochfInputS,
     SuperSmootherInputS,
+    SupertrendInputS,
     SuperSmoother3PoleInputS,
     SwmaInputS,
     TemaInputS,
@@ -616,6 +676,7 @@ impl_input_len!(
     TrendFlexInputS,
     TrimaInputS,
     TrixInputS,
+    TsfInputS,
     TsiInputS,
     TtmTrendInputS,
     UiInputS,
@@ -630,7 +691,6 @@ impl_input_len!(
     VptInputS,
     VpwmaInputS,
     VwapInputS,
-    VwmaInputS,
     VwmacdInputS,
     WadInputS,
     WavetrendInputS,
@@ -690,6 +750,11 @@ bench_wrappers! {
     (gatorosc_bench, gatorosc_raw, GatorOscInputS),
     (heikin_ashi_candles_bench, heikin_ashi_candles_raw, HeikinAshiInputS),
     (ht_dcperiod_bench, ht_dcperiod_raw, HtDcPeriodInputS),
+    (ht_dcphase_bench, ht_dcphase_raw, HtDcPhaseInputS),
+    (ht_phasor_bench, ht_phasor_raw, HtPhasorInputS),
+    (ht_sine_bench, ht_sine_raw, HtSineInputS),
+    (ht_trendline_bench, ht_trendline_raw, HtTrendlineInputS),
+    (ht_trendmode_bench, ht_trendmode_raw, HtTrendModeInputS),
     (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
     (kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
     (kdj_bench, kdj_raw, KdjInputS),
@@ -697,7 +762,7 @@ bench_wrappers! {
     (kst_bench, kst_raw, KstInputS),
     (kurtosis_bench, kurtosis_raw, KurtosisInputS),
     (kvo_bench, kvo_raw, KvoInputS),
-    (linearreg_angle_bench, linearreg_angle_raw, Linearreg_angleInputS),
+    (linearreg_angle_bench, linearreg_angle_raw, LinearregAngleInputS),
     (linearreg_intercept_bench, linearreg_intercept_raw, LinearRegInterceptInputS),
     (linearreg_slope_bench, linearreg_slope_raw, LinearRegSlopeInputS),
     (lrsi_bench, lrsi_raw, LrsiInputS),
@@ -714,64 +779,48 @@ bench_wrappers! {
     (minmax_bench, minmax_raw, MinmaxInputS),
     (mom_bench, mom_raw, MomInputS),
     (msw_bench, msw_raw, MswInputS),
-    (mwdx_bench, mwdx_raw, MwdxInputS),
     (natr_bench, natr_raw, NatrInputS),
-    (nma_bench, nma_raw, NmaInputS),
+    (nvi_bench, nvi_raw, NviInputS),
+    (obv_bench, obv_raw, ObvInputS),
+    (pfe_bench, pfe_raw, PfeInputS),
     (pivot_bench, pivot_raw, PivotInputS),
     (pma_bench, pma_raw, PmaInputS),
     (ppo_bench, ppo_raw, PpoInputS),
     (pvi_bench, pvi_raw, PviInputS),
-    (pwma_bench, pwma_raw, PwmaInputS),
     (qstick_bench, qstick_raw, QstickInputS),
-    (reflex_bench, reflex_raw, ReflexInputS),
     (roc_bench, roc_raw, RocInputS),
     (rocp_bench, rocp_raw, RocpInputS),
     (rocr_bench, rocr_raw, RocrInputS),
     (rsi_bench, rsi_raw, RsiInputS),
+    (rsmk_bench, rsmk_raw, RsmkInputS),
     (rvi_bench, rvi_raw, RviInputS),
     (safezonestop_bench, safezonestop_raw, SafeZoneStopInputS),
     (sar_bench, sar_raw, SarInputS),
-    (sinwma_bench, sinwma_raw, SinWmaInputS),
-    (sma_bench, sma_raw, SmaInputS),
-    (smma_bench, smma_raw, SmmaInputS),
     (squeeze_momentum_bench, squeeze_momentum_raw, SqueezeMomentumInputS),
-    (sqwma_bench, sqwma_raw, SqwmaInputS),
     (srsi_bench, srsi_raw, SrsiInputS),
-    (srwma_bench, srwma_raw, SrwmaInputS),
     (stc_bench, stc_raw, StcInputS),
     (stddev_bench, stddev_raw, StdDevInputS),
+    (stoch_bench, stoch_raw, StochInputS),
     (stochf_bench, stochf_raw, StochfInputS),
-    (supersmoother_bench, supersmoother_raw, SuperSmootherInputS),
-    (supersmoother_3_pole_bench, supersmoother_3_pole_raw, SuperSmoother3PoleInputS),
-    (swma_bench, swma_raw, SwmaInputS),
-    (tema_bench, tema_raw, TemaInputS),
-    (tilson_bench, tilson_raw, TilsonInputS),
-    (trendflex_bench, trendflex_raw, TrendFlexInputS),
-    (trima_bench, trima_raw, TrimaInputS),
+    (supertrend_bench, supertrend_raw, SupertrendInputS),
     (trix_bench, trix_raw, TrixInputS),
+    (tsf_bench, tsf_raw, TsfInputS),
     (tsi_bench, tsi_raw, TsiInputS),
     (ttm_trend_bench, ttm_trend_raw, TtmTrendInputS),
     (ui_bench, ui_raw, UiInputS),
     (ultosc_bench, ultosc_raw, UltOscInputS),
     (var_bench, var_raw, VarInputS),
     (vi_bench, vi_raw, ViInputS),
-    (vidya_bench, vidya_raw, VidyaInputS),
-    (vlma_bench, vlma_raw, VlmaInputS),
     (vosc_bench, vosc_raw, VoscInputS),
     (voss_bench, voss_raw, VossInputS),
     (vpci_bench, vpci_raw, VpciInputS),
     (vpt_bench, vpt_raw, VptInputS),
-    (vpwma_bench, vpwma_raw, VpwmaInputS),
     (vwap_bench, vwap_raw, VwapInputS),
-    (vwma_bench, vwma_raw, VwmaInputS),
     (vwmacd_bench, vwmacd_raw, VwmacdInputS),
     (wad_bench, wad_raw, WadInputS),
     (wavetrend_bench, wavetrend_raw, WavetrendInputS),
     (wclprice_bench, wclprice_raw, WclpriceInputS),
-    (wilders_bench, wilders_raw, WildersInputS),
     (willr_bench, willr_raw, WillrInputS),
-    (wma_bench, wma_raw, WmaInputS),
-    (zlema_bench, zlema_raw, ZlemaInputS),
     (zscore_bench, zscore_raw, ZscoreInputS),
 }
 
@@ -826,6 +875,11 @@ bench_scalars!(
     gatorosc_bench    => GatorOscInputS,
     heikin_ashi_candles_bench => HeikinAshiInputS,
     ht_dcperiod_bench => HtDcPeriodInputS,
+    ht_dcphase_bench => HtDcPhaseInputS,
+    ht_phasor_bench => HtPhasorInputS,
+    ht_sine_bench => HtSineInputS,
+    ht_trendline_bench => HtTrendlineInputS,
+    ht_trendmode_bench => HtTrendModeInputS,
     ift_rsi_bench     => IftRsiInputS,
     kaufmanstop_bench => KaufmanstopInputS,
     kdj_bench         => KdjInputS,
@@ -834,7 +888,7 @@ bench_scalars!(
     kurtosis_bench    => KurtosisInputS,
     kvo_bench         => KvoInputS,
 
-    linearreg_angle_bench     => Linearreg_angleInputS,
+    linearreg_angle_bench     => LinearregAngleInputS,
     linearreg_intercept_bench => LinearRegInterceptInputS,
     linearreg_slope_bench     => LinearRegSlopeInputS,
     lrsi_bench                => LrsiInputS,
@@ -852,65 +906,49 @@ bench_scalars!(
     minmax_bench    => MinmaxInputS,
     mom_bench       => MomInputS,
     msw_bench       => MswInputS,
-    mwdx_bench      => MwdxInputS,
 
     natr_bench   => NatrInputS,
-    nma_bench    => NmaInputS,
+    nvi_bench    => NviInputS,
+    obv_bench    => ObvInputS,
+    pfe_bench    => PfeInputS,
     pivot_bench  => PivotInputS,
     pma_bench    => PmaInputS,
     ppo_bench    => PpoInputS,
     pvi_bench    => PviInputS,
-    pwma_bench   => PwmaInputS,
     qstick_bench => QstickInputS,
-    reflex_bench => ReflexInputS,
     roc_bench    => RocInputS,
     rocp_bench   => RocpInputS,
     rocr_bench   => RocrInputS,
     rsi_bench    => RsiInputS,
+    rsmk_bench   => RsmkInputS,
     rvi_bench    => RviInputS,
     safezonestop_bench => SafeZoneStopInputS,
     sar_bench    => SarInputS,
-    sinwma_bench => SinWmaInputS,
-    sma_bench    => SmaInputS,
-    smma_bench   => SmmaInputS,
     squeeze_momentum_bench => SqueezeMomentumInputS,
-    sqwma_bench  => SqwmaInputS,
     srsi_bench   => SrsiInputS,
-    srwma_bench  => SrwmaInputS,
     stc_bench    => StcInputS,
     stddev_bench => StdDevInputS,
+    stoch_bench  => StochInputS,
     stochf_bench => StochfInputS,
-    supersmoother_bench => SuperSmootherInputS,
-    supersmoother_3_pole_bench => SuperSmoother3PoleInputS,
-    swma_bench   => SwmaInputS,
-    tema_bench   => TemaInputS,
-    tilson_bench => TilsonInputS,
-    trendflex_bench => TrendFlexInputS,
-    trima_bench  => TrimaInputS,
+    supertrend_bench => SupertrendInputS,
     trix_bench   => TrixInputS,
+    tsf_bench    => TsfInputS,
     tsi_bench    => TsiInputS,
     ttm_trend_bench => TtmTrendInputS,
     ui_bench     => UiInputS,
     ultosc_bench => UltOscInputS,
     var_bench    => VarInputS,
     vi_bench     => ViInputS,
-    vidya_bench  => VidyaInputS,
-    vlma_bench   => VlmaInputS,
     vosc_bench   => VoscInputS,
     voss_bench   => VossInputS,
     vpci_bench   => VpciInputS,
     vpt_bench    => VptInputS,
-    vpwma_bench  => VpwmaInputS,
     vwap_bench   => VwapInputS,
-    vwma_bench   => VwmaInputS,
     vwmacd_bench => VwmacdInputS,
     wad_bench    => WadInputS,
     wavetrend_bench => WavetrendInputS,
     wclprice_bench => WclpriceInputS,
-    wilders_bench   => WildersInputS,
     willr_bench     => WillrInputS,
-    wma_bench       => WmaInputS,
-    zlema_bench     => ZlemaInputS,
     zscore_bench    => ZscoreInputS
 );
 
@@ -934,6 +972,29 @@ make_kernel_wrappers!(kama, kama_with_kernel, KamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(linreg, linreg_with_kernel, LinRegInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(maaq, maaq_with_kernel, MaaqInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mama, mama_with_kernel, MamaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(mwdx, mwdx_with_kernel, MwdxInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(nma, nma_with_kernel, NmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(pwma, pwma_with_kernel, PwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(reflex, reflex_with_kernel, ReflexInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(sinwma, sinwma_with_kernel, SinWmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(sma, sma_with_kernel, SmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(smma, smma_with_kernel, SmmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(sqwma, sqwma_with_kernel, SqwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(srwma, srwma_with_kernel, SrwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(supersmoother, supersmoother_with_kernel, SuperSmootherInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(supersmoother_3_pole, supersmoother_3_pole_with_kernel, SuperSmoother3PoleInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(swma, swma_with_kernel, SwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tema, tema_with_kernel, TemaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tilson, tilson_with_kernel, TilsonInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(trendflex, trendflex_with_kernel, TrendFlexInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(trima, trima_with_kernel, TrimaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(wma, wma_with_kernel, WmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(zlema, zlema_with_kernel, ZlemaInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     alma_batch, AlmaBatchBuilder, AlmaInputS;
@@ -995,12 +1056,34 @@ make_batch_wrappers!(kama_batch, KamaBatchBuilder, KamaInputS; ScalarBatch, Avx2
 make_batch_wrappers!(linreg_batch, LinRegBatchBuilder, LinRegInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(maaq_batch, MaaqBatchBuilder, MaaqInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(mama_batch, MamaBatchBuilder, MamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(mwdx_batch, MwdxBatchBuilder, MwdxInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(nma_batch, NmaBatchBuilder, NmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(pwma_batch, PwmaBatchBuilder, PwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(reflex_batch, ReflexBatchBuilder, ReflexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(sinwma_batch, SinWmaBatchBuilder, SinWmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(sma_batch, SmaBatchBuilder, SmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(smma_batch, SmmaBatchBuilder, SmmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(sqwma_batch, SqwmaBatchBuilder, SqwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(srwma_batch, SrwmaBatchBuilder, SrwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(supersmoother_batch, SuperSmootherBatchBuilder, SuperSmootherInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(supersmoother_3_pole_batch, SuperSmoother3PoleBatchBuilder, SuperSmoother3PoleInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(swma_batch, SwmaBatchBuilder, SwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(tema_batch, TemaBatchBuilder, TemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(trima_batch, TrimaBatchBuilder, TrimaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(vpwma_batch, VpwmaBatchBuilder, VpwmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(wilders_batch, WildersBatchBuilder, WildersInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(wma_batch, WmaBatchBuilder, WmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(zlema_batch, ZlemaBatchBuilder, ZlemaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     alma_batch => AlmaInputS; Some(232);
     alma_batch_scalarbatch,
     alma_batch_avx2batch,
-    alma_batch_avx512batch,
+    alma_batch_avx512batch
 );
 
 bench_variants!(
@@ -1134,6 +1217,160 @@ bench_variants!(
     mama_batch_scalarbatch,
     mama_batch_avx2batch,
     mama_batch_avx512batch,
+);
+
+bench_variants!(
+    mwdx_batch => MwdxInputS; Some(227);
+    mwdx_batch_scalarbatch,
+    mwdx_batch_avx2batch,
+    mwdx_batch_avx512batch,
+);
+
+bench_variants!(
+    nma_batch => NmaInputS; Some(227);
+    nma_batch_scalarbatch,
+    nma_batch_avx2batch,
+    nma_batch_avx512batch,
+);
+
+bench_variants!(
+    pwma_batch => PwmaInputS; Some(227);
+    pwma_batch_scalarbatch,
+    pwma_batch_avx2batch,
+    pwma_batch_avx512batch,
+);
+
+bench_variants!(
+    reflex_batch => ReflexInputS; Some(227);
+    reflex_batch_scalarbatch,
+    reflex_batch_avx2batch,
+    reflex_batch_avx512batch,
+);
+
+bench_variants!(
+    sinwma_batch => SinWmaInputS; Some(227);
+    sinwma_batch_scalarbatch,
+    sinwma_batch_avx2batch,
+    sinwma_batch_avx512batch,
+);
+
+bench_variants!(
+    sma_batch => SmaInputS; Some(227);
+    sma_batch_scalarbatch,
+    sma_batch_avx2batch,
+    sma_batch_avx512batch,
+);
+
+bench_variants!(
+    smma_batch => SmmaInputS; Some(227);
+    smma_batch_scalarbatch,
+    smma_batch_avx2batch,
+    smma_batch_avx512batch,
+);
+
+bench_variants!(
+    sqwma_batch => SqwmaInputS; Some(227);
+    sqwma_batch_scalarbatch,
+    sqwma_batch_avx2batch,
+    sqwma_batch_avx512batch,
+);
+
+bench_variants!(
+    srwma_batch => SrwmaInputS; Some(227);
+    srwma_batch_scalarbatch,
+    srwma_batch_avx2batch,
+    srwma_batch_avx512batch,
+);
+
+bench_variants!(
+    supersmoother_batch => SuperSmootherInputS; Some(227);
+    supersmoother_batch_scalarbatch,
+    supersmoother_batch_avx2batch,
+    supersmoother_batch_avx512batch,
+);
+
+bench_variants!(
+    supersmoother_3_pole_batch => SuperSmoother3PoleInputS; Some(227);
+    supersmoother_3_pole_batch_scalarbatch,
+    supersmoother_3_pole_batch_avx2batch,
+    supersmoother_3_pole_batch_avx512batch,
+);
+
+bench_variants!(
+    swma_batch => SwmaInputS; Some(227);
+    swma_batch_scalarbatch,
+    swma_batch_avx2batch,
+    swma_batch_avx512batch,
+);
+
+bench_variants!(
+    tema_batch => TemaInputS; Some(227);
+    tema_batch_scalarbatch,
+    tema_batch_avx2batch,
+    tema_batch_avx512batch,
+);
+
+bench_variants!(
+    tilson_batch => TilsonInputS; Some(227);
+    tilson_batch_scalarbatch,
+    tilson_batch_avx2batch,
+    tilson_batch_avx512batch,
+);
+
+bench_variants!(
+    trendflex_batch => TrendFlexInputS; Some(227);
+    trendflex_batch_scalarbatch,
+    trendflex_batch_avx2batch,
+    trendflex_batch_avx512batch,
+);
+
+bench_variants!(
+    trima_batch => TrimaInputS; Some(227);
+    trima_batch_scalarbatch,
+    trima_batch_avx2batch,
+    trima_batch_avx512batch,
+);
+
+bench_variants!(
+    vidya_batch => VidyaInputS; Some(227);
+    vidya_batch_scalarbatch,
+    vidya_batch_avx2batch,
+    vidya_batch_avx512batch,
+);
+
+bench_variants!(
+    vlma_batch => VlmaInputS; Some(227);
+    vlma_batch_scalarbatch,
+    vlma_batch_avx2batch,
+    vlma_batch_avx512batch,
+);
+
+bench_variants!(
+    vpwma_batch => VpwmaInputS; Some(227);
+    vpwma_batch_scalarbatch,
+    vpwma_batch_avx2batch,
+    vpwma_batch_avx512batch,
+);
+
+bench_variants!(
+    wilders_batch => WildersInputS; Some(227);
+    wilders_batch_scalarbatch,
+    wilders_batch_avx2batch,
+    wilders_batch_avx512batch,
+);
+
+bench_variants!(
+    wma_batch => WmaInputS; Some(227);
+    wma_batch_scalarbatch,
+    wma_batch_avx2batch,
+    wma_batch_avx512batch,
+);
+
+bench_variants!(
+    zlema_batch => ZlemaInputS; Some(227);
+    zlema_batch_scalarbatch,
+    zlema_batch_avx2batch,
+    zlema_batch_avx512batch,
 );
 
 bench_variants!(
@@ -1276,6 +1513,167 @@ bench_variants!(
     mama_avx512,
 );
 
+bench_variants!(
+    mwdx => MwdxInputS; None;
+    mwdx_scalar,
+    mwdx_avx2,
+    mwdx_avx512,
+);
+
+bench_variants!(
+    nma => NmaInputS; None;
+    nma_scalar,
+    nma_avx2,
+    nma_avx512,
+);
+
+bench_variants!(
+    pwma => PwmaInputS; None;
+    pwma_scalar,
+    pwma_avx2,
+    pwma_avx512,
+);
+
+bench_variants!(
+    reflex => ReflexInputS; None;
+    reflex_scalar,
+    reflex_avx2,
+    reflex_avx512,
+);
+
+bench_variants!(
+    sinwma => SinWmaInputS; None;
+    sinwma_scalar,
+    sinwma_avx2,
+    sinwma_avx512,
+);
+
+bench_variants!(
+    sma => SmaInputS; None;
+    sma_scalar,
+    sma_avx2,
+    sma_avx512,
+);
+
+bench_variants!(
+    smma => SmmaInputS; None;
+    smma_scalar,
+    smma_avx2,
+    smma_avx512,
+);
+
+bench_variants!(
+    sqwma => SqwmaInputS; None;
+    sqwma_scalar,
+    sqwma_avx2,
+    sqwma_avx512,
+);
+
+bench_variants!(
+    srwma => SrwmaInputS; None;
+    srwma_scalar,
+    srwma_avx2,
+    srwma_avx512,
+);
+
+bench_variants!(
+    supersmoother => SuperSmootherInputS; None;
+    supersmoother_scalar,
+    supersmoother_avx2,
+    supersmoother_avx512,
+);
+
+bench_variants!(
+    supersmoother_3_pole => SuperSmoother3PoleInputS; None;
+    supersmoother_3_pole_scalar,
+    supersmoother_3_pole_avx2,
+    supersmoother_3_pole_avx512,
+);
+
+bench_variants!(
+    swma => SwmaInputS; None;
+    swma_scalar,
+    swma_avx2,
+    swma_avx512,
+);
+
+bench_variants!(
+    tema => TemaInputS; None;
+    tema_scalar,
+    tema_avx2,
+    tema_avx512,
+);
+
+bench_variants!(
+    tilson => TilsonInputS; None;
+    tilson_scalar,
+    tilson_avx2,
+    tilson_avx512,
+);
+
+bench_variants!(
+    trendflex => TrendFlexInputS; None;
+    trendflex_scalar,
+    trendflex_avx2,
+    trendflex_avx512,
+);
+
+bench_variants!(
+    trima => TrimaInputS; None;
+    trima_scalar,
+    trima_avx2,
+    trima_avx512,
+);
+
+bench_variants!(
+    vidya => VidyaInputS; None;
+    vidya_scalar,
+    vidya_avx2,
+    vidya_avx512,
+);
+
+bench_variants!(
+    vlma => VlmaInputS; None;
+    vlma_scalar,
+    vlma_avx2,
+    vlma_avx512,
+);
+
+bench_variants!(
+    vpwma => VpwmaInputS; None;
+    vpwma_scalar,
+    vpwma_avx2,
+    vpwma_avx512,
+);
+
+bench_variants!(
+    vwma => VwmaInputS; None;
+    vwma_scalar,
+    vwma_avx2,
+    vwma_avx512,
+);
+
+bench_variants!(
+    wilders => WildersInputS; None;
+    wilders_scalar,
+    wilders_avx2,
+    wilders_avx512,
+);
+
+bench_variants!(
+    wma => WmaInputS; None;
+    wma_scalar,
+    wma_avx2,
+    wma_avx512,
+);
+
+bench_variants!(
+    zlema => ZlemaInputS; None;
+    zlema_scalar,
+    zlema_avx2,
+    zlema_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_alma,
@@ -1317,5 +1715,50 @@ criterion_main!(
     benches_maaq,
     benches_maaq_batch,
     benches_mama,
-    benches_mama_batch
+    benches_mama_batch,
+    benches_mwdx,
+    benches_mwdx_batch,
+    benches_nma,
+    benches_nma_batch,
+    benches_pwma,
+    benches_pwma_batch,
+    benches_reflex,
+    benches_reflex_batch,
+    benches_sinwma,
+    benches_sinwma_batch,
+    benches_sma,
+    benches_sma_batch,
+    benches_smma,
+    benches_smma_batch,
+    benches_sqwma,
+    benches_sqwma_batch,
+    benches_srwma,
+    benches_srwma_batch,
+    benches_supersmoother,
+    benches_supersmoother_batch,
+    benches_supersmoother_3_pole,
+    benches_supersmoother_3_pole_batch,
+    benches_swma,
+    benches_swma_batch,
+    benches_tema,
+    benches_tema_batch,
+    benches_tilson,
+    benches_tilson_batch,
+    benches_trendflex,
+    benches_trendflex_batch,
+    benches_trima,
+    benches_trima_batch,
+    benches_vidya,
+    benches_vidya_batch,
+    benches_vlma,
+    benches_vlma_batch,
+    benches_vpwma,
+    benches_vpwma_batch,
+    benches_vwma,
+    benches_wilders,
+    benches_wilders_batch,
+    benches_wma,
+    benches_wma_batch,
+    benches_zlema,
+    benches_zlema_batch
 );

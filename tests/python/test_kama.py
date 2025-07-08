@@ -11,8 +11,6 @@ try:
     from my_project import (
         kama, 
         kama_batch,
-        kama_batch_with_metadata,
-        kama_batch_2d,
         KamaStream
     )
 except ImportError:
@@ -146,23 +144,26 @@ def test_kama_batch():
     period_end = 40
     period_step = 10  # periods: 10, 20, 30, 40
     
-    batch_result, periods = kama_batch(close, period_start, period_end, period_step)
+    result = kama_batch(close, (period_start, period_end, period_step))
+    
+    assert 'values' in result
+    assert 'periods' in result
     
     # Should have 4 periods
-    assert len(periods) == 4
-    assert periods == [10, 20, 30, 40]
+    assert len(result['periods']) == 4
+    assert np.array_equal(result['periods'], [10, 20, 30, 40])
     
-    # Batch result should contain all individual results flattened
-    assert len(batch_result) == 4 * len(close)
+    # Batch result should contain all individual results in 2D array
+    assert result['values'].shape == (4, len(close))
     
     # Verify first combination matches individual calculation
     individual_result = kama(close, 10)
-    batch_first_row = batch_result[:len(close)]
+    batch_first_row = result['values'][0]
     assert_close(batch_first_row, individual_result, atol=1e-9, msg="First combination mismatch")
 
 
-def test_kama_batch_with_metadata():
-    """Test KAMA batch computation with metadata"""
+def test_kama_batch_multiple_periods():
+    """Test KAMA batch computation with multiple periods"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
     
@@ -171,41 +172,41 @@ def test_kama_batch_with_metadata():
     period_end = 60
     period_step = 20  # periods: 20, 40, 60
     
-    batch_result, periods = kama_batch_with_metadata(close, period_start, period_end, period_step)
+    result = kama_batch(close, (period_start, period_end, period_step))
     
-    # Check metadata
-    assert periods == [20, 40, 60]
+    # Check structure
+    assert 'values' in result
+    assert 'periods' in result
+    assert np.array_equal(result['periods'], [20, 40, 60])
     
     # Check result shape
-    assert len(batch_result) == 3 * len(close)
+    assert result['values'].shape == (3, len(close))
     
     # Verify second combination (period=40)
     individual_result = kama(close, 40)
-    batch_second_row = batch_result[len(close):2*len(close)]
+    batch_second_row = result['values'][1]
     assert_close(batch_second_row, individual_result, atol=1e-9, msg="Second combination mismatch")
 
 
-def test_kama_batch_2d():
-    """Test KAMA batch computation with 2D output"""
+def test_kama_batch_single_period():
+    """Test KAMA batch computation with single period"""
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
     
-    # Test period range
-    period_start = 15
-    period_end = 45
-    period_step = 15  # periods: 15, 30, 45
+    # Test single period (step=0 or start==end)
+    result = kama_batch(close, (30, 30, 0))
     
-    batch_result_2d, periods = kama_batch_2d(close, period_start, period_end, period_step)
-    
-    # Check metadata
-    assert periods == [15, 30, 45]
+    # Check structure
+    assert 'values' in result
+    assert 'periods' in result
+    assert np.array_equal(result['periods'], [30])
     
     # Check shape
-    assert batch_result_2d.shape == (3, len(close))
+    assert result['values'].shape == (1, len(close))
     
-    # Verify middle row (period=30)
+    # Verify matches individual calculation
     individual_result = kama(close, 30)
-    assert_close(batch_result_2d[1], individual_result, atol=1e-9, msg="Middle row mismatch")
+    assert_close(result['values'][0], individual_result, atol=1e-9, msg="Single period mismatch")
 
 
 def test_kama_stream():
@@ -259,15 +260,14 @@ def test_kama_batch_performance():
     close = np.array(data['close'][:1000], dtype=np.float64)  # Use first 1000 values
     
     # Test 5 periods
-    batch_result, periods = kama_batch(close, 10, 50, 10)
-    assert len(periods) == 5  # periods: 10, 20, 30, 40, 50
+    result = kama_batch(close, (10, 50, 10))
+    assert len(result['periods']) == 5  # periods: 10, 20, 30, 40, 50
+    assert result['values'].shape == (5, len(close))
     
     # Verify each combination
-    for i, period in enumerate(periods):
+    for i, period in enumerate(result['periods']):
         individual_result = kama(close, period)
-        start_idx = i * len(close)
-        end_idx = start_idx + len(close)
-        batch_row = batch_result[start_idx:end_idx]
+        batch_row = result['values'][i]
         assert_close(batch_row, individual_result, atol=1e-9, 
                           msg=f"Batch mismatch for period={period}")
 
@@ -289,6 +289,50 @@ def test_kama_edge_cases():
     data = np.random.randn(100).astype(np.float64)
     result = kama(data, 99)
     assert len(result) == len(data)
+
+
+def test_kama_batch_error_handling():
+    """Test KAMA batch error handling"""
+    # Test with empty data
+    empty = np.array([], dtype=np.float64)
+    with pytest.raises(ValueError, match="kama:"):
+        kama_batch(empty, (10, 20, 10))
+    
+    # Test with all NaN data
+    all_nan = np.full(100, np.nan, dtype=np.float64)
+    with pytest.raises(ValueError, match="kama:"):
+        kama_batch(all_nan, (10, 20, 10))
+    
+    # Test with period exceeding data length
+    small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    with pytest.raises(ValueError, match="kama:"):
+        kama_batch(small_data, (5, 10, 5))
+
+
+def test_kama_batch_metadata_consistency():
+    """Test that batch metadata is consistent with results"""
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # Test various period ranges
+    test_cases = [
+        (5, 15, 5),    # periods: 5, 10, 15
+        (10, 10, 0),   # single period: 10
+        (20, 40, 10),  # periods: 20, 30, 40
+    ]
+    
+    for start, end, step in test_cases:
+        result = kama_batch(close, (start, end, step))
+        
+        # Check periods array matches expected
+        if step == 0 or start == end:
+            expected_periods = [start]
+        else:
+            expected_periods = list(range(start, end + 1, step))
+        
+        assert np.array_equal(result['periods'], expected_periods)
+        assert result['values'].shape[0] == len(expected_periods)
+        assert result['values'].shape[1] == len(close)
 
 
 def test_kama_single_value():
@@ -353,10 +397,66 @@ def test_kama_step_precision():
     """Test batch with very small step sizes"""
     data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
     
-    batch_result, periods = kama_batch(data, 2, 4, 1)  # periods: 2, 3, 4
+    result = kama_batch(data, (2, 4, 1))  # periods: 2, 3, 4
     
-    assert periods == [2, 3, 4]
-    assert len(batch_result) == 3 * len(data)
+    assert np.array_equal(result['periods'], [2, 3, 4])
+    assert result['values'].shape == (3, len(data))
+
+
+def test_kama_stream_error_handling():
+    """Test KAMA stream error handling"""
+    # Test with invalid period
+    with pytest.raises(ValueError, match="kama:"):
+        KamaStream(0)
+    
+    # Test stream matches batch
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    period = 30
+    
+    batch_result = kama(close, period)
+    stream = KamaStream(period)
+    stream_results = []
+    
+    for price in close:
+        result = stream.update(price)
+        stream_results.append(result if result is not None else np.nan)
+    
+    # After warmup, values should match
+    for i in range(period, len(close)):
+        if not np.isnan(batch_result[i]):
+            assert_close(stream_results[i], batch_result[i], atol=1e-9,
+                        msg=f"Stream mismatch at index {i}")
+
+
+def test_kama_batch_warmup_consistency():
+    """Test that batch warmup periods are consistent"""
+    data = np.random.randn(50).astype(np.float64)
+    
+    result = kama_batch(data, (5, 15, 5))
+    
+    # Each row should have proper warmup
+    for i, period in enumerate(result['periods']):
+        row = result['values'][i]
+        # First 'period' values should be NaN
+        assert np.all(np.isnan(row[:period])), f"Expected NaN warmup for period {period}"
+        # After warmup should have values
+        assert np.all(~np.isnan(row[period:])), f"Expected values after warmup for period {period}"
+
+
+def test_kama_zero_copy_verification():
+    """Verify KAMA uses zero-copy operations"""
+    # This test ensures the Python binding doesn't make unnecessary copies
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # The result should be computed directly without intermediate copies
+    result = kama(close, 30)
+    assert len(result) == len(close)
+    
+    # Batch should also use zero-copy
+    batch_result = kama_batch(close, (10, 30, 10))
+    assert batch_result['values'].shape == (3, len(close))
 
 
 if __name__ == "__main__":

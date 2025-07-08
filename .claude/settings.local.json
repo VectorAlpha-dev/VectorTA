@@ -88,7 +88,24 @@
       "Bash(/mnt/c/Rust Projects/my_project/.venv/bin/python -m pytest tests/python/test_maaq.py::test_maaq_batch -xvs)",
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:rustwasm.github.io)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(awk:*)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:rust-gpu.github.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(nvcc:*)",
+      "Bash(.venv/bin/python -m pytest tests/python/test_srwma.py -v)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(timeout:*)",
+      "Bash(./test_error_taxonomy:*)",
+      "Bash(cat:*)",
+      "Bash(./bench_alma_simple)"
     ],
     "deny": []
   }

@@ -20,6 +20,20 @@ use my_project::indicators::moving_averages::kama::{kama, KamaInput, KamaParams}
 use my_project::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
 use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
 use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
+use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
+use my_project::indicators::moving_averages::nma::{nma, NmaInput, NmaParams};
+use my_project::indicators::moving_averages::pwma::{pwma, PwmaInput, PwmaParams};
+use my_project::indicators::moving_averages::reflex::{reflex, ReflexInput, ReflexParams};
+use my_project::indicators::moving_averages::sinwma::{sinwma, SinWmaInput, SinWmaParams};
+use my_project::indicators::moving_averages::sma::{sma, SmaInput, SmaParams};
+use my_project::indicators::moving_averages::smma::{smma, SmmaInput, SmmaParams};
+use my_project::indicators::moving_averages::sqwma::{sqwma, SqwmaInput, SqwmaParams};
+use my_project::indicators::moving_averages::srwma::{srwma, SrwmaInput, SrwmaParams};
+use my_project::indicators::moving_averages::supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput, SuperSmoother3PoleParams};
+use my_project::indicators::moving_averages::supersmoother::{supersmoother, SuperSmootherInput, SuperSmootherParams};
+use my_project::indicators::moving_averages::swma::{swma, SwmaInput, SwmaParams};
+use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams};
+use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -28,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama");
+        eprintln!("Available indicators: alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -369,6 +383,218 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "mama_values": result.mama_values,
                 "fama_values": result.fama_values,
                 "length": result.mama_values.len()
+            })
+        },
+        "mwdx" => {
+            let params = MwdxParams::default();
+            let factor = params.factor.unwrap_or(0.2);
+            let input = MwdxInput::from_candles(&candles, source, params);
+            let result = mwdx(&input)?;
+            json!({
+                "indicator": "mwdx",
+                "source": source,
+                "params": {
+                    "factor": factor
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "nma" => {
+            let params = NmaParams::default();
+            let period = params.period.unwrap_or(40);
+            let input = NmaInput::from_candles(&candles, source, params);
+            let result = nma(&input)?;
+            json!({
+                "indicator": "nma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "pwma" => {
+            let params = PwmaParams::default();
+            let period = params.period.unwrap_or(5);
+            let input = PwmaInput::from_candles(&candles, source, params);
+            let result = pwma(&input)?;
+            json!({
+                "indicator": "pwma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "reflex" => {
+            let params = ReflexParams::default();
+            let period = params.period.unwrap_or(20);
+            let input = ReflexInput::from_candles(&candles, source, params);
+            let result = reflex(&input)?;
+            json!({
+                "indicator": "reflex",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "sinwma" => {
+            let params = SinWmaParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = SinWmaInput::from_candles(&candles, source, params);
+            let result = sinwma(&input)?;
+            json!({
+                "indicator": "sinwma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "sma" => {
+            let params = SmaParams::default();
+            let period = params.period.unwrap_or(9);
+            let input = SmaInput::from_candles(&candles, source, params);
+            let result = sma(&input)?;
+            json!({
+                "indicator": "sma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "smma" => {
+            let params = SmmaParams::default();
+            let period = params.period.unwrap_or(7);
+            let input = SmmaInput::from_candles(&candles, source, params);
+            let result = smma(&input)?;
+            json!({
+                "indicator": "smma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "sqwma" => {
+            let params = SqwmaParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = SqwmaInput::from_candles(&candles, source, params);
+            let result = sqwma(&input)?;
+            json!({
+                "indicator": "sqwma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "srwma" => {
+            let params = SrwmaParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = SrwmaInput::from_candles(&candles, source, params);
+            let result = srwma(&input)?;
+            json!({
+                "indicator": "srwma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "supersmoother_3_pole" => {
+            let params = SuperSmoother3PoleParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = SuperSmoother3PoleInput::from_candles(&candles, source, params);
+            let result = supersmoother_3_pole(&input)?;
+            json!({
+                "indicator": "supersmoother_3_pole",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "supersmoother" => {
+            let params = SuperSmootherParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = SuperSmootherInput::from_candles(&candles, source, params);
+            let result = supersmoother(&input)?;
+            json!({
+                "indicator": "supersmoother",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "swma" => {
+            let params = SwmaParams::default();
+            let period = params.period.unwrap_or(5);
+            let input = SwmaInput::from_candles(&candles, source, params);
+            let result = swma(&input)?;
+            json!({
+                "indicator": "swma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "tema" => {
+            let params = TemaParams::default();
+            let period = params.period.unwrap_or(9);
+            let input = TemaInput::from_candles(&candles, source, params);
+            let result = tema(&input)?;
+            json!({
+                "indicator": "tema",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "tilson" => {
+            let params = TilsonParams::default();
+            let period = params.period.unwrap_or(5);
+            let volume_factor = params.volume_factor.unwrap_or(0.0);
+            let input = TilsonInput::from_candles(&candles, source, params);
+            let result = tilson(&input)?;
+            json!({
+                "indicator": "tilson",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "volume_factor": volume_factor
+                },
+                "values": result.values,
+                "length": result.values.len()
             })
         },
         _ => {

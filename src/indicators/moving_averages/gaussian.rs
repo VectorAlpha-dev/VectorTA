@@ -355,6 +355,7 @@ pub fn gaussian_with_kernel(
                 gaussian_scalar(data, period, poles, &mut out)
             }
 
+            
             Kernel::Auto => unreachable!(),
         }
     }

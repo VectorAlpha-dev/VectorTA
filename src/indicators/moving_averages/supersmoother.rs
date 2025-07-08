@@ -804,3 +804,237 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supersmoother")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the SuperSmoother filter (2-pole) of the input data.
+///
+/// SuperSmoother is a double-pole smoothing filter that reduces high-frequency noise
+/// while preserving trend information. It provides better smoothing than EMA with
+/// similar lag characteristics.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Smoothing period, must be >= 1 and <= data length.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SuperSmoother values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period = 0, exceeds data length, all NaN, etc).
+pub fn supersmoother_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // ---------- build input struct -------------------------------------------------
+    let params = SuperSmootherParams {
+        period: Some(period),
+    };
+    let ss_in = SuperSmootherInput::from_slice(slice_in, params);
+
+    // ---------- allocate NumPy output buffer ---------------------------------------
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), SuperSmootherError> {
+        let result = supersmoother_with_kernel(&ss_in, kern)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SuperSmootherStream")]
+pub struct SuperSmootherStreamPy {
+    stream: SuperSmootherStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SuperSmootherStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SuperSmootherParams {
+            period: Some(period),
+        };
+        let stream =
+            SuperSmootherStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SuperSmootherStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated SuperSmoother value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value, None)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supersmoother_batch")]
+#[pyo3(signature = (data, period_start, period_end, period_step, kernel=None))]
+/// Compute SuperSmoother for multiple periods in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_start : int
+///     Starting period value.
+/// period_end : int
+///     Ending period value (inclusive).
+/// period_step : int
+///     Step size between periods.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array, rows=periods, cols=data length)
+///     and 'periods' array.
+pub fn supersmoother_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = SuperSmootherBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    let result = py.allow_threads(|| {
+        supersmoother_batch_with_kernel(slice_in, &sweep, kern)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build return dict with the GIL
+    let dict = PyDict::new(py);
+    let rows = result.rows;
+    let cols = result.cols;
+    
+    // Convert flat values to 2D numpy array
+    let values_arr = result.values.into_pyarray(py);
+    dict.set_item("values", values_arr.reshape((rows, cols))?)?;
+    
+    // Extract periods from combos
+    dict.set_item(
+        "periods",
+        result.combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SuperSmootherParams {
+        period: Some(period),
+    };
+    let input = SuperSmootherInput::from_slice(data, params);
+
+    supersmoother_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SuperSmootherBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    supersmoother_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SuperSmootherBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+
+    Ok(metadata)
+}

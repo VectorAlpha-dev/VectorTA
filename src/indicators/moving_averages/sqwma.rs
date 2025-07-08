@@ -17,6 +17,17 @@
 //! - **`Ok(SqwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(SqwmaError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
@@ -222,7 +233,7 @@ pub fn sqwma_scalar(
     data: &[f64],
     weights: &[f64],   // length = period - 1
     period: usize,
-    _first: usize,
+    first: usize,
     weight_sum: f64,
     out: &mut [f64],
 ) {
@@ -230,7 +241,7 @@ pub fn sqwma_scalar(
     let p4 = p_minus_1 & !3;
     let n = data.len();
 
-    for j in (period + 1)..n {
+    for j in (first + period + 1)..n {
         let mut sum = 0.0;
         let mut k = 0;
         while k < p4 {
@@ -900,4 +911,342 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sqwma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Square Weighted Moving Average (SQWMA) of the input data.
+///
+/// SQWMA applies squared weights to recent data points, with the most recent 
+/// value receiving (period)^2 weight, and each preceding value's weight 
+/// decreasing quadratically.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Window size (number of data points, must be >= 2).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SQWMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period < 2, period > data length, etc).
+pub fn sqwma_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // ---------- build input struct -------------------------------------------------
+    let params = SqwmaParams { period: Some(period) };
+    let sqwma_in = SqwmaInput::from_slice(slice_in, params);
+
+    // ---------- allocate NumPy output buffer ---------------------------------------
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), SqwmaError> {
+        // Prepare computation
+        let data = sqwma_in.as_ref();
+        let first = data.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
+        let len = data.len();
+        let period = sqwma_in.get_period();
+        
+        if period < 2 || period > len {
+            return Err(SqwmaError::InvalidPeriod { period, data_len: len });
+        }
+        if (len - first) < period {
+            return Err(SqwmaError::NotEnoughValidData {
+                needed: period,
+                valid: len - first,
+            });
+        }
+        
+        // Build weights
+        let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period - 1);
+        for i in 0..(period - 1) {
+            weights.push((period as f64 - i as f64).powi(2));
+        }
+        let weight_sum: f64 = weights.iter().sum();
+        
+        // prefix initialise exactly once
+        let warm = first + period + 1;
+        slice_out[..warm].fill(f64::NAN);
+        
+        // Select kernel
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+        
+        // Compute directly into output
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    sqwma_scalar(data, &weights, period, first, weight_sum, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    sqwma_avx2(data, &weights, period, first, weight_sum, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    sqwma_avx512(data, &weights, period, first, weight_sum, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SqwmaStream")]
+pub struct SqwmaStreamPy {
+    stream: SqwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SqwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SqwmaParams { period: Some(period) };
+        let stream = SqwmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SqwmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated SQWMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sqwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SQWMA for multiple parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn sqwma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = SqwmaBatchRange {
+        period: period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // 3. Heavy work without the GIL
+    let combos_result = py.allow_threads(|| -> Result<Vec<SqwmaParams>, SqwmaError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        
+        // Inline batch processing logic to write directly to our pre-allocated buffer
+        let combos = expand_grid(&sweep);
+        if combos.is_empty() {
+            return Err(SqwmaError::InvalidPeriod { period: 0, data_len: 0 });
+        }
+        
+        let first = slice_in.iter().position(|x| !x.is_nan()).ok_or(SqwmaError::AllValuesNaN)?;
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if slice_in.len() - first < max_p {
+            return Err(SqwmaError::NotEnoughValidData {
+                needed: max_p,
+                valid: slice_in.len() - first,
+            });
+        }
+        
+        // Build flat weights
+        let mut weight_sums = vec![0.0; rows];
+        let cap = rows * max_p;
+        let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
+        flat_w.resize(cap, 0.0);
+
+        for (row, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap();
+            for i in 0..(period - 1) {
+                flat_w[row * max_p + i] = (period as f64 - i as f64).powi(2);
+            }
+            let start = row * max_p;
+            let end = start + (period - 1);
+            weight_sums[row] = flat_w[start..end].iter().sum();
+        }
+        
+        // Initialize with NaN prefixes
+        let warm: Vec<usize> = combos
+            .iter()
+            .map(|c| (first + c.period.unwrap() + 1).min(cols))
+            .collect();
+        
+        // Convert output to uninit for prefix initialization
+        let slice_mu = unsafe {
+            std::slice::from_raw_parts_mut(
+                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                slice_out.len()
+            )
+        };
+        unsafe { init_matrix_prefixes(slice_mu, cols, &warm); }
+        
+        // Process each row
+        for (row, _) in combos.iter().enumerate() {
+            let period = combos[row].period.unwrap();
+            let w_ptr = unsafe { flat_w.as_ptr().add(row * max_p) };
+            let w_sum = weight_sums[row];
+            let p_minus = period - 1;
+            
+            let out_row = &mut slice_out[row * cols..(row + 1) * cols];
+            
+            unsafe {
+                match simd {
+                    Kernel::Scalar => sqwma_row_scalar(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => sqwma_row_avx2(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => sqwma_row_avx512(slice_in, first, period, p_minus, w_ptr, w_sum, out_row),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos_result
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sqwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SqwmaParams { period: Some(period) };
+    let input = SqwmaInput::from_slice(data, params);
+
+    sqwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sqwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SqwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    sqwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sqwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SqwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let periods: Vec<f64> = combos
+        .iter()
+        .map(|c| c.period.unwrap() as f64)
+        .collect();
+    
+    Ok(periods)
 }

@@ -259,6 +259,11 @@ fn alma_compute_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 alma_avx512(data, weights, period, first, inv_n, out)
             }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                alma_scalar(data, weights, period, first, inv_n, out)
+            }
             _ => unreachable!(),
         }
     }
@@ -736,6 +741,13 @@ impl AlmaBatchBuilder {
     pub fn new() -> Self {
         Self::default()
     }
+    
+    /// Set the kernel to use for batch computation.
+    /// 
+    /// Note: Batch kernels must be explicitly specified if parallel
+    /// is desired.
+    /// compared to CPU implementations. Users should validate that GPU precision
+    /// meets their requirements before using in production.
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
@@ -1037,7 +1049,12 @@ fn alma_batch_inner_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 alma_row_avx512(data, first, period, max_p, w_ptr, inv_n, dst)
             }
-            _ => unreachable!(),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fall back to scalar on non-AVX systems
+                alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
+            }
+            Kernel::Auto => unreachable!(),
         }
     };
 
@@ -1384,6 +1401,8 @@ unsafe fn long_kernel_with_tail(
         }
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1878,21 +1897,85 @@ mod tests {
             }
         };
     }
+    
+    fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        let output = AlmaBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(9, 20, 1)
+            .offset_range(0.5, 1.0, 0.1)
+            .sigma_range(3.0, 9.0, 1.0)
+            .apply_candles(&c, "close")?;
+
+        // Check we got the expected number of parameter combinations
+        let expected_combos = 12 * 6 * 7; // periods * offsets * sigmas
+        assert_eq!(output.combos.len(), expected_combos);
+        assert_eq!(output.rows, expected_combos);
+        assert_eq!(output.cols, c.close.len());
+
+        Ok(())
+    }
+    
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_sweep);
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "alma")]
+#[pyo3(signature = (data, period, offset, sigma, kernel=None))]
+/// Compute the Arnaud Legoux Moving Average (ALMA) of the input data.
+///
+/// ALMA uses a Gaussian distribution as weights for the moving average calculation,
+/// with adjustable offset and sigma parameters to control the curve's responsiveness
+/// and smoothness.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window.
+/// offset : float
+///     Controls the Gaussian center (0.0 to 1.0, typically 0.85).
+/// sigma : float
+///     Controls the Gaussian width (typically 6.0).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of ALMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (sigma <= 0, offset out of range, etc).
 pub fn alma_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
     offset: f64,
     sigma: f64,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{PyArray1, PyArrayMethods};
 
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
 
     // ---------- build input struct -------------------------------------------------
     let params = AlmaParams {
@@ -1908,7 +1991,7 @@ pub fn alma_py<'py>(
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AlmaError> {
-        let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, Kernel::Auto)?;
+        let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, kern)?;
         // prefix initialise exactly once
         slice_out[..first + per - 1].fill(f64::NAN);
         alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
@@ -1916,7 +1999,7 @@ pub fn alma_py<'py>(
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
 
-    Ok(out_arr)
+    Ok(out_arr.into())
 }
 
 #[cfg(feature = "python")]
@@ -1949,12 +2032,34 @@ impl AlmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "alma_batch")]
+#[pyo3(signature = (data, period_range, offset_range, sigma_range, kernel=None))]
+/// Compute ALMA for multiple parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// offset_range : tuple
+///     (start, end, step) for offset values to compute.
+/// sigma_range : tuple
+///     (start, end, step) for sigma values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array), 'periods', 'offsets', and 'sigmas' arrays.
 pub fn alma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     offset_range: (f64, f64, f64),
     sigma_range: (f64, f64, f64),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
@@ -1976,10 +2081,19 @@ pub fn alma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
     // 3. Heavy work without the GIL
     let combos = py.allow_threads(|| {
         // Resolve Kernel::Auto to a specific kernel
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };

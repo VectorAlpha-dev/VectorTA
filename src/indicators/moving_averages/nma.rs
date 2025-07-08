@@ -167,18 +167,29 @@ pub fn nma(input: &NmaInput) -> Result<NmaOutput, NmaError> {
     nma_with_kernel(input, Kernel::Auto)
 }
 
-pub fn nma_with_kernel(input: &NmaInput, kernel: Kernel) -> Result<NmaOutput, NmaError> {
-    let data: &[f64] = match &input.data {
-        NmaData::Candles { candles, source } => source_type(candles, source),
-        NmaData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn nma_prepare<'a>(
+    input: &'a NmaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*first*/ usize,
+        /*ln_values*/ Vec<f64>,
+        /*sqrt_diffs*/ Vec<f64>,
+        /*chosen*/ Kernel,
+    ),
+    NmaError,
+> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(NmaError::AllValuesNaN)?;
 
-    let len = data.len();
     let period = input.get_period();
 
     if period == 0 || period > len {
@@ -194,30 +205,64 @@ pub fn nma_with_kernel(input: &NmaInput, kernel: Kernel) -> Result<NmaOutput, Nm
         });
     }
 
+    // Pre-compute ln values
+    let mut ln_values = Vec::with_capacity(len);
+    ln_values.extend(data.iter().map(|&val| {
+        let clamped = val.max(1e-10);
+        clamped.ln() * 1000.0
+    }));
+
+    // Pre-compute sqrt differences
+    let mut sqrt_diffs = Vec::with_capacity(period);
+    for i in 0..period {
+        let s0 = (i as f64).sqrt();
+        let s1 = ((i + 1) as f64).sqrt();
+        sqrt_diffs.push(s1 - s0);
+    }
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
-    let warm  = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
+    Ok((data, period, first, ln_values, sqrt_diffs, chosen))
+}
 
+#[inline(always)]
+fn nma_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    ln_values: &[f64],
+    sqrt_diffs: &[f64],
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                nma_scalar(data, period, first, &mut out)
+                nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                nma_avx2(data, period, first, &mut out)
+                nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                nma_avx512(data, period, first, &mut out)
+                nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
             }
             _ => unreachable!(),
         }
     }
+}
+
+pub fn nma_with_kernel(input: &NmaInput, kernel: Kernel) -> Result<NmaOutput, NmaError> {
+    let (data, period, first, ln_values, sqrt_diffs, chosen) = nma_prepare(input, kernel)?;
+
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+
+    nma_compute_into(data, period, first, &ln_values, &sqrt_diffs, chosen, &mut out);
 
     Ok(NmaOutput { values: out })
 }
@@ -243,6 +288,34 @@ pub fn nma_scalar(
         let s1 = ((i + 1) as f64).sqrt();
         sqrt_diffs.push(s1 - s0);
     }
+
+    for j in (first + period)..len {
+        let mut num = 0.0;
+        let mut denom = 0.0;
+
+        for i in 0..period {
+            let oi = (ln_values[j - i] - ln_values[j - i - 1]).abs();
+            num += oi * sqrt_diffs[i];
+            denom += oi;
+        }
+
+        let ratio = if denom == 0.0 { 0.0 } else { num / denom };
+
+        let i = period - 1;
+        out[j] = data[j - i] * ratio + data[j - i - 1] * (1.0 - ratio);
+    }
+}
+
+#[inline]
+pub fn nma_scalar_with_precomputed(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    ln_values: &[f64],
+    sqrt_diffs: &[f64],
+    out: &mut [f64],
+) {
+    let len = data.len();
 
     for j in (first + period)..len {
         let mut num = 0.0;
@@ -553,6 +626,98 @@ fn nma_batch_inner(
 }
 
 #[inline(always)]
+fn nma_batch_inner_into(
+    data: &[f64],
+    sweep: &NmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<NmaParams>, NmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(NmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(NmaError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
+        .map(|c| c.period.unwrap())
+        .max()
+        .unwrap();
+    if data.len() - first < max_p + 1 {
+        return Err(NmaError::NotEnoughValidData {
+            needed: max_p + 1,
+            valid: data.len() - first,
+        });
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // Closure that writes ONE row
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+
+        // Cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
+        match kern {
+            Kernel::Scalar => nma_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => nma_row_avx2(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => nma_row_avx512(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // Drive the whole matrix
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+#[inline(always)]
 unsafe fn nma_row_scalar(
     data: &[f64],
     first: usize,
@@ -668,25 +833,229 @@ impl NmaStream {
     fn dot_ring(&self) -> f64 {
         let mut num = 0.0;
         let mut denom = 0.0;
-        let mut idx = self.head;
+        
+        // Calculate starting position for the newest value
+        let newest_idx = (self.head + self.period) % (self.period + 1);
+        
         for i in 0..self.period {
-            let curr = self.ln_buffer[(idx + self.period) % (self.period + 1)];
-            let prev = self.ln_buffer[(idx + self.period - 1) % (self.period + 1)];
+            // Access in reverse order like batch: newest to oldest
+            let curr_idx = (newest_idx + self.period + 1 - i) % (self.period + 1);
+            let prev_idx = (newest_idx + self.period - i) % (self.period + 1);
+            
+            let curr = self.ln_buffer[curr_idx];
+            let prev = self.ln_buffer[prev_idx];
             let oi = (curr - prev).abs();
+            
             num += oi * self.sqrt_diffs[i];
             denom += oi;
-            idx = (idx + self.period) % (self.period + 1);
         }
+        
         let ratio = if denom == 0.0 { 0.0 } else { num / denom };
-        let val_idx = (self.head + 1) % (self.period + 1);
+        
+        // Get the values for final interpolation
         let i = self.period - 1;
-        let x1 = self.buffer[(val_idx + self.period - i) % (self.period + 1)];
-        let x2 = self.buffer[(val_idx + self.period - i - 1) % (self.period + 1)];
+        let x1_idx = (newest_idx + self.period + 1 - i) % (self.period + 1);
+        let x2_idx = (newest_idx + self.period - i) % (self.period + 1);
+        
+        let x1 = self.buffer[x1_idx];
+        let x2 = self.buffer[x2_idx];
+        
         x1 * ratio + x2 * (1.0 - ratio)
     }
 }
 
 // Expand grid for batch
+
+// Python bindings
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "nma")]
+pub fn nma_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice_in = data.as_slice()?;
+    let params = NmaParams {
+        period: Some(period),
+    };
+    let nma_in = NmaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), NmaError> {
+        let (data, period, first, ln_values, sqrt_diffs, chosen) = nma_prepare(&nma_in, Kernel::Auto)?;
+        // Initialize prefix with NaN
+        let warm = first + period;
+        slice_out[..warm].fill(f64::NAN);
+        nma_compute_into(data, period, first, &ln_values, &sqrt_diffs, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "NmaStream")]
+pub struct NmaStreamPy {
+    stream: NmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl NmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = NmaParams {
+            period: Some(period),
+        };
+        let stream =
+            NmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(NmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated NMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "nma_batch")]
+pub fn nma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, PyDict>> {
+    let slice_in = data.as_slice()?;
+    let sweep = NmaBatchRange {
+        period: period_range,
+    };
+
+    // Expand grid to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant
+        nma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = NmaParams {
+        period: Some(period),
+    };
+    let input = NmaInput::from_slice(data, params);
+
+    nma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = NmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    nma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = NmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+
+    Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize,
+) -> Vec<usize> {
+    let sweep = NmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&sweep);
+    vec![combos.len(), data_len]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

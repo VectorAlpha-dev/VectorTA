@@ -17,6 +17,17 @@
 //! - **`Ok(SmmaOutput)`** on success, containing a `Vec<f64>` matching the input.
 //! - **`Err(SmmaError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
@@ -139,6 +150,8 @@ impl SmmaBuilder {
 
 #[derive(Debug, Error)]
 pub enum SmmaError {
+    #[error("smma: Input data slice is empty.")]
+    EmptyInputData,
     #[error("smma: All values are NaN.")]
     AllValuesNaN,
     #[error("smma: Invalid period: period = {period}, data length = {data_len}")]
@@ -157,6 +170,11 @@ pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput,
         SmmaData::Candles { candles, source } => source_type(candles, source),
         SmmaData::Slice(sl) => sl,
     };
+
+    // Check for empty input first
+    if data.is_empty() {
+        return Err(SmmaError::EmptyInputData);
+    }
 
     let first = data.iter().position(|x| !x.is_nan()).ok_or(SmmaError::AllValuesNaN)?;
     let len = data.len();
@@ -230,6 +248,71 @@ pub unsafe fn smma_avx512_short(data: &[f64], period: usize, first: usize, out: 
 #[inline]
 pub unsafe fn smma_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     smma_scalar(data, period, first, out)
+}
+
+#[inline(always)]
+fn smma_prepare<'a>(
+    input: &'a SmmaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    SmmaError,
+> {
+    let data: &[f64] = input.as_ref();
+    
+    // Check for empty input first
+    if data.is_empty() {
+        return Err(SmmaError::EmptyInputData);
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SmmaError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(SmmaError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(SmmaError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    Ok((data, period, first, chosen))
+}
+
+#[inline(always)]
+fn smma_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                smma_scalar(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                smma_avx2(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                smma_avx512(data, period, first, out)
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[inline]
@@ -380,6 +463,11 @@ pub fn smma_batch_par_slice(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel) 
 }
 #[inline(always)]
 fn smma_batch_inner(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel, parallel: bool) -> Result<SmmaBatchOutput, SmmaError> {
+    // Check for empty input first
+    if data.is_empty() {
+        return Err(SmmaError::EmptyInputData);
+    }
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(SmmaError::InvalidPeriod { period: 0, data_len: 0 });
@@ -466,6 +554,98 @@ fn smma_batch_inner(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel, parallel
 
     Ok(SmmaBatchOutput { values, combos, rows, cols })
 }
+
+#[inline(always)]
+fn smma_batch_inner_into(
+    data: &[f64],
+    sweep: &SmmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<SmmaParams>, SmmaError> {
+    // Check for empty input first
+    if data.is_empty() {
+        return Err(SmmaError::EmptyInputData);
+    }
+    
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(SmmaError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SmmaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(SmmaError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+    }
+    
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Collect warm-up lengths per row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+    
+    // Closure that writes one row
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+        
+        // Cast the row slice to f64
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+        
+        match kern {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                smma_row_scalar(data, first, period, dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                smma_row_avx2(data, first, period, dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                smma_row_avx512(data, first, period, dst)
+            }
+            _ => unreachable!(),
+        }
+    };
+    
+    // Run every row kernel
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    
+    Ok(combos)
+}
+
 #[inline(always)]
 pub unsafe fn smma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     smma_scalar(data, period, first, out)
@@ -501,6 +681,8 @@ mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    #[cfg(feature = "proptest")]
+    use proptest::prelude::*;
 
     fn check_smma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -565,6 +747,20 @@ mod tests {
         assert!(res.is_err(), "[{}] SMMA should fail with insufficient data", test_name);
         Ok(())
     }
+    fn check_smma_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let empty: Vec<f64> = vec![];
+        let params = SmmaParams { period: Some(7) };
+        let input = SmmaInput::from_slice(&empty, params);
+        let res = smma_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] SMMA should fail with empty input", test_name);
+        if let Err(SmmaError::EmptyInputData) = res {
+            // Good, expected error type
+        } else {
+            panic!("[{}] Expected EmptyInputData error, got {:?}", test_name, res);
+        }
+        Ok(())
+    }
     fn check_smma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -617,6 +813,77 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(feature = "proptest")]
+    fn check_smma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        use proptest::prelude::*;
+        skip_if_unsupported!(kernel, test_name);
+
+        // Property test strategy: generate period and matching data length
+        let strat = (1usize..=64) // period
+            .prop_flat_map(|period| {
+                (
+                    prop::collection::vec(
+                        (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                        period..400, // len >= period
+                    ),
+                    Just(period),
+                )
+            });
+
+        proptest::test_runner::TestRunner::default()
+            .run(&strat, |(data, period)| {
+                let params = SmmaParams { period: Some(period) };
+                let input = SmmaInput::from_slice(&data, params);
+                
+                match smma_with_kernel(&input, kernel) {
+                    Ok(output) => {
+                        // Property 1: Output length equals input length
+                        prop_assert_eq!(output.values.len(), data.len());
+                        
+                        // Property 2: First period-1 values are NaN
+                        for i in 0..period-1 {
+                            prop_assert!(output.values[i].is_nan(), 
+                                "Expected NaN at index {} but got {}", i, output.values[i]);
+                        }
+                        
+                        // Property 3: Values after warmup are finite (not NaN or inf)
+                        for i in period-1..output.values.len() {
+                            prop_assert!(output.values[i].is_finite(), 
+                                "Expected finite value at index {} but got {}", i, output.values[i]);
+                        }
+                        
+                        // Property 4: SMMA is bounded by min/max of input window
+                        if let Some(first_valid) = data.iter().position(|&x| !x.is_nan()) {
+                            for i in (first_valid + period - 1)..output.values.len() {
+                                let window_start = i.saturating_sub(period - 1);
+                                let window = &data[window_start..=i];
+                                if let (Some(&min), Some(&max)) = (
+                                    window.iter().filter(|x| x.is_finite()).min_by(|a, b| a.partial_cmp(b).unwrap()),
+                                    window.iter().filter(|x| x.is_finite()).max_by(|a, b| a.partial_cmp(b).unwrap())
+                                ) {
+                                    prop_assert!(output.values[i] >= min && output.values[i] <= max,
+                                        "SMMA value {} at index {} outside bounds [{}, {}]", 
+                                        output.values[i], i, min, max);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // If it errors, it should be for a valid reason
+                        prop_assert!(
+                            matches!(e, SmmaError::EmptyInputData | 
+                                       SmmaError::AllValuesNaN | 
+                                       SmmaError::InvalidPeriod { .. } |
+                                       SmmaError::NotEnoughValidData { .. }),
+                            "Unexpected error type: {:?}", e
+                        );
+                    }
+                }
+                Ok(())
+            })?;
+        
+        Ok(())
+    }
     macro_rules! generate_all_smma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -647,10 +914,14 @@ mod tests {
         check_smma_zero_period,
         check_smma_period_exceeds_length,
         check_smma_very_small_dataset,
+        check_smma_empty_input,
         check_smma_reinput,
         check_smma_nan_handling,
         check_smma_streaming
     );
+    
+    #[cfg(feature = "proptest")]
+    generate_all_smma_tests!(check_smma_property);
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -688,3 +959,237 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "smma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Smoothed Moving Average (SMMA) of the input data.
+///
+/// SMMA uses a recursive smoothing formula where the first value is the mean
+/// of the first `period` points and subsequent values use a blend of the prior
+/// SMMA and the new point.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SMMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period <= 0, insufficient data, etc).
+pub fn smma_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    let slice_in = data.as_slice()?;
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // Build input struct
+    let params = SmmaParams { period: Some(period) };
+    let smma_in = SmmaInput::from_slice(slice_in, params);
+    
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), SmmaError> {
+        let (data, period, first, chosen) = smma_prepare(&smma_in, kern)?;
+        // Initialize entire output with NaN first
+        slice_out.fill(f64::NAN);
+        // Compute SMMA starting from the appropriate index
+        smma_compute_into(data, period, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SmmaStream")]
+pub struct SmmaStreamPy {
+    stream: SmmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SmmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SmmaParams { period: Some(period) };
+        let stream = SmmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SmmaStreamPy { stream })
+    }
+    
+    /// Updates the stream with a new value and returns the calculated SMMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "smma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SMMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn smma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let slice_in = data.as_slice()?;
+    
+    let sweep = SmmaBatchRange { period: period_range };
+    
+    // Expand grid to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        smma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    
+    Ok(dict.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smma")]
+/// Compute the Smoothed Moving Average (SMMA) of the input data.
+pub fn smma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SmmaParams { period: Some(period) };
+    let input = SmmaInput::from_slice(data, params);
+    
+    match smma(&input) {
+        Ok(output) => Ok(output.values),
+        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smma_batch")]
+/// Compute SMMA for multiple period values in a single pass.
+pub fn smma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SmmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    smma_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smma_batch_metadata")]
+/// Get metadata about the batch computation (periods used)
+pub fn smma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize
+) -> Vec<usize> {
+    let range = SmmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    combos.iter().map(|c| c.period.unwrap_or(7)).collect()
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smma_batch_rows_cols")]
+/// Get the dimensions of the batch output
+pub fn smma_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize
+) -> Vec<usize> {
+    let range = SmmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    vec![combos.len(), data_len]
+}
+

@@ -27,6 +27,14 @@ use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 impl<'a> AsRef<[f64]> for PwmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -160,12 +168,21 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, PwmaError> {
     pwma_with_kernel(input, Kernel::Auto)
 }
 
-pub fn pwma_with_kernel(input: &PwmaInput, kernel: Kernel) -> Result<PwmaOutput, PwmaError> {
-    let data: &[f64] = match &input.data {
-        PwmaData::Candles { candles, source } => source_type(candles, source),
-        PwmaData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn pwma_prepare<'a>(
+    input: &'a PwmaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*weights*/ Vec<f64>,
+        /*period*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    PwmaError,
+> {
+    let data: &[f64] = input.as_ref();
     let first = data.iter().position(|x| !x.is_nan()).ok_or(PwmaError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
@@ -176,31 +193,49 @@ pub fn pwma_with_kernel(input: &PwmaInput, kernel: Kernel) -> Result<PwmaOutput,
 
     let weights = pascal_weights(period)?;
 
-    let warm = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
-
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other => other,
+        k => k,
     };
 
+    Ok((data, weights, period, first, chosen))
+}
+
+#[inline(always)]
+fn pwma_compute_into(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                pwma_scalar(data, &weights, period, first, &mut out)
+                pwma_scalar(data, weights, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                pwma_avx2(data, &weights, period, first, &mut out)
+                pwma_avx2(data, weights, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                pwma_avx512(data, &weights, period, first, &mut out)
+                pwma_avx512(data, weights, period, first, out)
             }
             _ => unreachable!(),
         }
     }
+}
 
+pub fn pwma_with_kernel(input: &PwmaInput, kernel: Kernel) -> Result<PwmaOutput, PwmaError> {
+    let (data, weights, period, first, chosen) = pwma_prepare(input, kernel)?;
+    
+    let warm = first + period - 1;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    
+    pwma_compute_into(data, &weights, period, first, chosen, &mut out);
+    
     Ok(PwmaOutput { values: out })
 }
 
@@ -547,6 +582,89 @@ fn pwma_batch_inner(
 }
 
 #[inline(always)]
+fn pwma_batch_inner_into(
+    data: &[f64],
+    sweep: &PwmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<PwmaParams>, PwmaError> {
+    let combos = expand_grid_pwma(sweep);
+    if combos.is_empty() {
+        return Err(PwmaError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(PwmaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(PwmaError::InvalidPeriod { period: max_p, data_len: data.len() });
+    }
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Pre-compute all weights
+    let mut weights = AVec::<f64>::with_capacity(CACHELINE_ALIGN, rows * max_p);
+    weights.resize(rows * max_p, 0.0);
+    for (row, prm) in combos.iter().enumerate() {
+        let period = prm.period.unwrap();
+        let row_weights = pascal_weights(period)?;
+        for (i, w) in row_weights.iter().enumerate() {
+            weights[row * max_p + i] = *w;
+        }
+    }
+    
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // Closure that fills a single row
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+        let w_ptr = weights.as_ptr().add(row * max_p);
+
+        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+
+        match kern {
+            Kernel::Scalar => pwma_row_scalar(data, first, period, max_p, w_ptr, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => pwma_row_avx2(data, first, period, max_p, w_ptr, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => pwma_row_avx512(data, first, period, max_p, w_ptr, dst),
+            _ => unreachable!(),
+        }
+    };
+
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+#[inline(always)]
 unsafe fn pwma_row_scalar(
     data: &[f64],
     first: usize,
@@ -864,4 +982,179 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pwma")]
+pub fn pwma_py<'py>(
+    py: Python<'py>,
+    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = arr_in.as_slice()?;
+
+    let params = PwmaParams {
+        period: Some(period),
+    };
+    let pwma_in = PwmaInput::from_slice(slice_in, params);
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    py.allow_threads(|| -> Result<(), PwmaError> {
+        let (data, weights, per, first, chosen) = pwma_prepare(&pwma_in, Kernel::Auto)?;
+        slice_out[..first + per - 1].fill(f64::NAN);
+        pwma_compute_into(data, &weights, per, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "PwmaStream")]
+pub struct PwmaStreamPy {
+    stream: PwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = PwmaParams {
+            period: Some(period),
+        };
+        let stream = PwmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PwmaStreamPy { stream })
+    }
+
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pwma_batch")]
+pub fn pwma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = PwmaBatchRange {
+        period: period_range,
+    };
+
+    let combos = expand_grid_pwma(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    let combos = py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        pwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = PwmaParams {
+        period: Some(period),
+    };
+    let input = PwmaInput::from_slice(data, params);
+
+    pwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = PwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    pwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = PwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid_pwma(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+
+    Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize,
+) -> Vec<usize> {
+    let sweep = PwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let combos = expand_grid_pwma(&sweep);
+    let rows = combos.len();
+    let cols = data_len;
+    
+    vec![rows, cols]
 }

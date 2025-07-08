@@ -85,7 +85,30 @@ async function runTests() {
     }
     
     try {
-        execSync(cmd, { stdio: 'inherit' });
+        // For better stability with concurrent cargo builds, run tests in smaller batches
+        const batchSize = 5; // Run 5 test files at a time
+        const testFilePaths = testFiles.map(f => path.join(testDir, f));
+        
+        if (pattern && testFiles.includes(`test_${pattern}.js`)) {
+            // Single file case
+            execSync(cmd, { stdio: 'inherit' });
+        } else if (testFilePaths.length <= batchSize) {
+            // Small number of tests, run all at once
+            execSync(cmd, { stdio: 'inherit' });
+        } else {
+            // Run tests in batches
+            for (let i = 0; i < testFilePaths.length; i += batchSize) {
+                const batch = testFilePaths.slice(i, i + batchSize);
+                const batchCmd = `node --experimental-wasm-modules --test ${args.includes('--verbose') || args.includes('-v') ? '--test-reporter=spec' : '--test-reporter=dot'} ${batch.map(f => `"${f}"`).join(' ')}`;
+                
+                if (i > 0) {
+                    process.stdout.write('\n'); // Add newline between batches
+                }
+                
+                execSync(batchCmd, { stdio: 'inherit' });
+            }
+        }
+        
         const elapsed = (Date.now() - startTime) / 1000;
         console.log(`\n✓ All tests passed in ${elapsed.toFixed(2)}s`);
         process.exit(0);

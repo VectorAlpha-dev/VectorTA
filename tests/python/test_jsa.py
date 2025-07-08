@@ -11,8 +11,6 @@ try:
     from my_project import (
         jsa, 
         jsa_batch,
-        jsa_batch_with_metadata,
-        jsa_batch_2d,
         JsaStream
     )
 except ImportError:
@@ -137,19 +135,26 @@ def test_jsa_batch():
     period_end = 40
     period_step = 10  # periods: 10, 20, 30, 40
     
-    batch_result, periods = jsa_batch(close, period_start, period_end, period_step)
+    result = jsa_batch(close, period_start, period_end, period_step)
+    
+    # Check that we get a dictionary
+    assert isinstance(result, dict)
+    assert 'values' in result
+    assert 'periods' in result
+    
+    batch_result = result['values']
+    periods = result['periods']
     
     # Should have 4 periods
     assert len(periods) == 4
-    assert periods == [10, 20, 30, 40]
+    assert list(periods) == [10, 20, 30, 40]
     
-    # Batch result should contain all individual results flattened
-    assert len(batch_result) == 4 * len(close)
+    # Batch result should be 2D array
+    assert batch_result.shape == (4, len(close))
     
     # Verify first combination matches individual calculation
     individual_result = jsa(close, 10)
-    batch_first_row = batch_result[:len(close)]
-    assert_close(batch_first_row, individual_result, atol=1e-9, msg="First combination mismatch")
+    assert_close(batch_result[0], individual_result, atol=1e-9, msg="First combination mismatch")
 
 
 def test_jsa_batch_with_metadata():
@@ -162,18 +167,21 @@ def test_jsa_batch_with_metadata():
     period_end = 60
     period_step = 20  # periods: 20, 40, 60
     
-    batch_result, periods = jsa_batch_with_metadata(close, period_start, period_end, period_step)
+    # Since jsa_batch now returns dict with metadata, we can just use that
+    result = jsa_batch(close, period_start, period_end, period_step)
+    
+    batch_result = result['values']
+    periods = result['periods']
     
     # Check metadata
-    assert periods == [20, 40, 60]
+    assert list(periods) == [20, 40, 60]
     
     # Check result shape
-    assert len(batch_result) == 3 * len(close)
+    assert batch_result.shape == (3, len(close))
     
     # Verify second combination (period=40)
     individual_result = jsa(close, 40)
-    batch_second_row = batch_result[len(close):2*len(close)]
-    assert_close(batch_second_row, individual_result, atol=1e-9, msg="Second combination mismatch")
+    assert_close(batch_result[1], individual_result, atol=1e-9, msg="Second combination mismatch")
 
 
 def test_jsa_batch_2d():
@@ -186,10 +194,14 @@ def test_jsa_batch_2d():
     period_end = 45
     period_step = 15  # periods: 15, 30, 45
     
-    batch_result_2d, periods = jsa_batch_2d(close, period_start, period_end, period_step)
+    # Since jsa_batch now returns 2D by default, we can just use that
+    result = jsa_batch(close, period_start, period_end, period_step)
+    
+    batch_result_2d = result['values']
+    periods = result['periods']
     
     # Check metadata
-    assert periods == [15, 30, 45]
+    assert list(periods) == [15, 30, 45]
     
     # Check shape
     assert batch_result_2d.shape == (3, len(close))
@@ -250,17 +262,18 @@ def test_jsa_batch_performance():
     close = np.array(data['close'][:1000], dtype=np.float64)  # Use first 1000 values
     
     # Test 5 periods
-    batch_result, periods = jsa_batch(close, 10, 50, 10)
+    result = jsa_batch(close, 10, 50, 10)
+    
+    batch_result = result['values']
+    periods = result['periods']
+    
     assert len(periods) == 5  # periods: 10, 20, 30, 40, 50
     
     # Verify each combination
     for i, period in enumerate(periods):
         individual_result = jsa(close, period)
-        start_idx = i * len(close)
-        end_idx = start_idx + len(close)
-        batch_row = batch_result[start_idx:end_idx]
-        assert_close(batch_row, individual_result, atol=1e-9, 
-                          msg=f"Batch mismatch for period={period}")
+        assert_close(batch_result[i], individual_result, atol=1e-9, 
+                     msg=f"Batch mismatch for period={period}")
 
 
 def test_jsa_edge_cases():
@@ -356,10 +369,13 @@ def test_jsa_step_precision():
     """Test batch with very small step sizes"""
     data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
     
-    batch_result, periods = jsa_batch(data, 2, 4, 1)  # periods: 2, 3, 4
+    result = jsa_batch(data, 2, 4, 1)  # periods: 2, 3, 4
     
-    assert periods == [2, 3, 4]
-    assert len(batch_result) == 3 * len(data)
+    batch_result = result['values']
+    periods = result['periods']
+    
+    assert list(periods) == [2, 3, 4]
+    assert batch_result.shape == (3, len(data))
 
 
 if __name__ == "__main__":

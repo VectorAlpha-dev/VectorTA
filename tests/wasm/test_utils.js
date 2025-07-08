@@ -140,8 +140,52 @@ const EXPECTED_OUTPUTS = {
             59215.1,
             59103.1
         ]
+    },
+    sqwma: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59229.72287968442,
+            59211.30867850099,
+            59172.516765286,
+            59167.73471400394,
+            59067.97928994083
+        ]
+    },
+    srwma: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59344.28384704595,
+            59282.09151629659,
+            59192.76580529367,
+            59178.04767548977,
+            59110.03801260874
+        ]
+    },
+    supersmoother_3_pole: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59072.13481064446,
+            59089.08032603,
+            59111.35711851466,
+            59133.14402399381,
+            59121.91820047289
+        ]
+    },
+    supersmoother: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59140.98229179739,
+            59172.03593376982,
+            59179.40342783722,
+            59171.22758152845,
+            59127.859841077094
+        ]
     }
 };
+
+// Convenience constants for individual indicators
+const EXPECTED_SUPERSMOOTHER_3_POLE = EXPECTED_OUTPUTS.supersmoother_3_pole.last5Values;
+const EXPECTED_SUPERSMOOTHER = EXPECTED_OUTPUTS.supersmoother.last5Values;
 
 export { 
     loadTestData, 
@@ -150,5 +194,7 @@ export {
     isNaN,
     assertAllNaN,
     assertNoNaN,
-    EXPECTED_OUTPUTS 
+    EXPECTED_OUTPUTS,
+    EXPECTED_SUPERSMOOTHER_3_POLE,
+    EXPECTED_SUPERSMOOTHER
 };

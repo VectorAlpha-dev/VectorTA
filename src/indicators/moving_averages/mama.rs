@@ -23,7 +23,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
 use std::convert::AsRef;
@@ -198,13 +197,22 @@ pub fn mama(input: &MamaInput) -> Result<MamaOutput, MamaError> {
     mama_with_kernel(input, Kernel::Auto)
 }
 
-pub fn mama_with_kernel(
-    input:  &MamaInput,
+#[inline(always)]
+fn mama_prepare<'a>(
+    input: &'a MamaInput,
     kernel: Kernel,
-) -> Result<MamaOutput, MamaError> {
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*fast_limit*/ f64,
+        /*slow_limit*/ f64,
+        /*chosen*/ Kernel,
+    ),
+    MamaError,
+> {
     /* ---------- 0. validate ---------------------------------------- */
     let data = input.as_ref();
-    let len  = data.len();
+    let len = data.len();
     if len < 10 {
         return Err(MamaError::NotEnoughData { needed: 10, found: len });
     }
@@ -218,17 +226,26 @@ pub fn mama_with_kernel(
         return Err(MamaError::InvalidSlowLimit { slow_limit });
     }
 
-    /* ---------- 1. allocate outputs with NaN warm-up --------------- */
-    const WARM: usize = 10;
-    let mut mama_values = alloc_with_nan_prefix(len, WARM);
-    let mut fama_values = alloc_with_nan_prefix(len, WARM);
-
-    /* ---------- 2. choose kernel & run it in-place ----------------- */
+    /* ---------- kernel auto-detection only once ---------- */
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other        => other,
+        k => k,
     };
 
+    Ok((data, fast_limit, slow_limit, chosen))
+}
+
+pub fn mama_with_kernel(
+    input:  &MamaInput,
+    kernel: Kernel,
+) -> Result<MamaOutput, MamaError> {
+    let (data, fast_limit, slow_limit, chosen) = mama_prepare(input, kernel)?;
+
+    /* ---------- allocate outputs -------------------------------- */
+    let mut mama_values = vec![0.0; data.len()];
+    let mut fama_values = vec![0.0; data.len()];
+
+    /* ---------- run kernel in-place ----------------- */
     unsafe {
         match chosen {
             /* ---- scalar (one-row) ---------------------------------- */
@@ -271,36 +288,17 @@ pub fn mama_compute_into(
     out_mama: &mut [f64],
     out_fama: &mut [f64],
 ) -> Result<(), MamaError> {
-    /* ---------- 0. validate ---------------------------------------- */
-    let data = input.as_ref();
-    let len = data.len();
-    if len < 10 {
-        return Err(MamaError::NotEnoughData { needed: 10, found: len });
-    }
-    if out_mama.len() != len || out_fama.len() != len {
-        return Err(MamaError::NotEnoughData { needed: len, found: out_mama.len() });
+    let (data, fast_limit, slow_limit, chosen) = mama_prepare(input, kernel)?;
+    
+    /* ---------- validate output buffer sizes ----------------------- */
+    if out_mama.len() != data.len() || out_fama.len() != data.len() {
+        return Err(MamaError::NotEnoughData { needed: data.len(), found: out_mama.len() });
     }
 
-    let fast_limit = input.get_fast_limit();
-    let slow_limit = input.get_slow_limit();
-    if fast_limit <= 0.0 || fast_limit.is_nan() || fast_limit.is_infinite() {
-        return Err(MamaError::InvalidFastLimit { fast_limit });
-    }
-    if slow_limit <= 0.0 || slow_limit.is_nan() || slow_limit.is_infinite() {
-        return Err(MamaError::InvalidSlowLimit { slow_limit });
-    }
+    // MAMA produces values from the first data point
+    // No NaN warmup period needed as the algorithm starts immediately
 
-    /* ---------- 1. initialize warm-up with NaN --------------------- */
-    const WARM: usize = 10;
-    out_mama[..WARM].fill(f64::NAN);
-    out_fama[..WARM].fill(f64::NAN);
-
-    /* ---------- 2. choose kernel & run it in-place ----------------- */
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
+    /* ---------- run kernel in-place -------------------------------- */
     unsafe {
         match chosen {
             /* ---- scalar (one-row) ---------------------------------- */
@@ -909,6 +907,19 @@ fn mama_batch_inner(
             found: data.len(),
         });
     }
+    
+    // Validate all parameter combinations
+    for combo in &combos {
+        let fast_limit = combo.fast_limit.unwrap_or(0.5);
+        let slow_limit = combo.slow_limit.unwrap_or(0.05);
+        
+        if fast_limit <= 0.0 || fast_limit.is_nan() || fast_limit.is_infinite() {
+            return Err(MamaError::InvalidFastLimit { fast_limit });
+        }
+        if slow_limit <= 0.0 || slow_limit.is_nan() || slow_limit.is_infinite() {
+            return Err(MamaError::InvalidSlowLimit { slow_limit });
+        }
+    }
 
     // ---------- 1. matrix allocation ----------
     let rows = combos.len();
@@ -1024,6 +1035,19 @@ pub fn mama_batch_inner_into(
             needed: 10,
             found: data.len(),
         });
+    }
+    
+    // Validate all parameter combinations
+    for combo in &combos {
+        let fast_limit = combo.fast_limit.unwrap_or(0.5);
+        let slow_limit = combo.slow_limit.unwrap_or(0.05);
+        
+        if fast_limit <= 0.0 || fast_limit.is_nan() || fast_limit.is_infinite() {
+            return Err(MamaError::InvalidFastLimit { fast_limit });
+        }
+        if slow_limit <= 0.0 || slow_limit.is_nan() || slow_limit.is_infinite() {
+            return Err(MamaError::InvalidSlowLimit { slow_limit });
+        }
     }
 
     let rows = combos.len();
@@ -1331,7 +1355,8 @@ mod python_bindings {
     use super::*;
     use pyo3::prelude::*;
     use pyo3::exceptions::PyValueError;
-    use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods, IntoPyArray};
     use std::collections::HashMap;
     
     #[pyfunction]
@@ -1341,7 +1366,7 @@ mod python_bindings {
         data: PyReadonlyArray1<'py, f64>,
         fast_limit: f64,
         slow_limit: f64,
-    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    ) -> PyResult<Bound<'py, PyDict>> {
         let slice_in = data.as_slice()?;  // zero-copy read
         let params = MamaParams {
             fast_limit: Some(fast_limit),
@@ -1357,11 +1382,34 @@ mod python_bindings {
         
         // Compute directly into pre-allocated arrays (zero-copy)
         py.allow_threads(|| -> Result<(), MamaError> {
-            mama_compute_into(&input, Kernel::Auto, mama_slice, fama_slice)
+            let (data, fast_limit, slow_limit, chosen) = mama_prepare(&input, Kernel::Auto)?;
+            // MAMA produces values from the first data point
+            // The algorithm uses adaptive techniques that start immediately
+            unsafe {
+                match chosen {
+                    Kernel::Scalar | Kernel::ScalarBatch => {
+                        mama_scalar_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 | Kernel::Avx2Batch => {
+                        mama_avx2_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 | Kernel::Avx512Batch => {
+                        mama_avx2_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
         
-        Ok((mama_arr, fama_arr))
+        // Return dict with "mama" and "fama" keys
+        let dict = PyDict::new(py);
+        dict.set_item("mama", mama_arr)?;
+        dict.set_item("fama", fama_arr)?;
+        Ok(dict)
     }
     
     #[pyfunction]
@@ -1369,17 +1417,13 @@ mod python_bindings {
     pub fn mama_batch_py<'py>(
         py: Python<'py>,
         data: PyReadonlyArray1<'py, f64>,
-        fast_limit_start: f64,
-        fast_limit_end: f64,
-        fast_limit_step: f64,
-        slow_limit_start: f64,
-        slow_limit_end: f64,
-        slow_limit_step: f64,
-    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+        fast_limit_range: (f64, f64, f64),
+        slow_limit_range: (f64, f64, f64),
+    ) -> PyResult<Bound<'py, PyDict>> {
         let slice_in = data.as_slice()?;
         let sweep = MamaBatchRange {
-            fast_limit: (fast_limit_start, fast_limit_end, fast_limit_step),
-            slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
+            fast_limit: fast_limit_range,
+            slow_limit: slow_limit_range,
         };
         
         // 1. Expand grid once to know rows*cols
@@ -1394,7 +1438,7 @@ mod python_bindings {
         let fama_slice = unsafe { fama_arr.as_slice_mut()? };
         
         // 3. Heavy work without the GIL
-        py.allow_threads(|| -> Result<(), MamaError> {
+        let combos = py.allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
             let kernel = match Kernel::Auto {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1406,134 +1450,32 @@ mod python_bindings {
                 _ => unreachable!(),
             };
             // Use the _into variant that writes directly to our pre-allocated buffers
-            mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)?;
-            Ok(())
-        })
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        
-        Ok((mama_arr, fama_arr))
-    }
-    
-    #[pyfunction]
-    #[pyo3(name = "mama_batch_with_metadata")]
-    pub fn mama_batch_with_metadata_py<'py>(
-        py: Python<'py>,
-        data: PyReadonlyArray1<'py, f64>,
-        fast_limit_start: f64,
-        fast_limit_end: f64,
-        fast_limit_step: f64,
-        slow_limit_start: f64,
-        slow_limit_end: f64,
-        slow_limit_step: f64,
-    ) -> PyResult<(
-        (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>),
-        Vec<(f64, f64)>
-    )> {
-        let slice_in = data.as_slice()?;
-        let sweep = MamaBatchRange {
-            fast_limit: (fast_limit_start, fast_limit_end, fast_limit_step),
-            slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
-        };
-        
-        // 1. Expand grid once to know rows*cols
-        let combos = expand_grid(&sweep);
-        let rows = combos.len();
-        let cols = slice_in.len();
-        
-        // 2. Pre-allocate NumPy arrays
-        let mama_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-        let fama_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-        let mama_slice = unsafe { mama_arr.as_slice_mut()? };
-        let fama_slice = unsafe { fama_arr.as_slice_mut()? };
-        
-        // 3. Heavy work without the GIL
-        let combos = py.allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
-            let kernel = match Kernel::Auto {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
-            let simd = match kernel {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => unreachable!(),
-            };
             mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
         
-        // Extract metadata as tuples
-        let metadata: Vec<(f64, f64)> = combos.iter()
-            .map(|p| (
-                p.fast_limit.unwrap_or(0.5),
-                p.slow_limit.unwrap_or(0.05)
-            ))
-            .collect();
+        // 4. Build dict with the GIL
+        let dict = PyDict::new(py);
+        dict.set_item("mama_values", mama_arr.reshape((rows, cols))?)?;
+        dict.set_item("fama_values", fama_arr.reshape((rows, cols))?)?;
+        dict.set_item(
+            "fast_limits",
+            combos
+                .iter()
+                .map(|p| p.fast_limit.unwrap_or(0.5))
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item(
+            "slow_limits",
+            combos
+                .iter()
+                .map(|p| p.slow_limit.unwrap_or(0.05))
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
         
-        Ok(((mama_arr, fama_arr), metadata))
-    }
-    
-    #[pyfunction]
-    #[pyo3(name = "mama_batch_2d")]
-    pub fn mama_batch_2d_py<'py>(
-        py: Python<'py>,
-        data: PyReadonlyArray1<'py, f64>,
-        fast_limit_start: f64,
-        fast_limit_end: f64,
-        fast_limit_step: f64,
-        slow_limit_start: f64,
-        slow_limit_end: f64,
-        slow_limit_step: f64,
-    ) -> PyResult<(
-        (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>),
-        Vec<(f64, f64)>
-    )> {
-        let slice_in = data.as_slice()?;
-        let sweep = MamaBatchRange {
-            fast_limit: (fast_limit_start, fast_limit_end, fast_limit_step),
-            slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
-        };
-        
-        // 1. Expand grid once to know rows*cols
-        let combos = expand_grid(&sweep);
-        let rows = combos.len();
-        let cols = slice_in.len();
-        
-        // 2. Pre-allocate NumPy arrays as 1D
-        let mama_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-        let fama_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-        let mama_slice = unsafe { mama_arr.as_slice_mut()? };
-        let fama_slice = unsafe { fama_arr.as_slice_mut()? };
-        
-        // 3. Heavy work without the GIL
-        let combos = py.allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
-            let kernel = match Kernel::Auto {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
-            let simd = match kernel {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => unreachable!(),
-            };
-            mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)
-        })
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        
-        // Extract metadata
-        let metadata: Vec<(f64, f64)> = combos.iter()
-            .map(|p| (
-                p.fast_limit.unwrap_or(0.5),
-                p.slow_limit.unwrap_or(0.05)
-            ))
-            .collect();
-        
-        // Reshape to 2D
-        let mama_2d = mama_arr.reshape((rows, cols))?;
-        let fama_2d = fama_arr.reshape((rows, cols))?;
-        
-        Ok(((mama_2d, fama_2d), metadata))
+        Ok(dict)
     }
     
     #[pyclass]
@@ -1563,7 +1505,7 @@ mod python_bindings {
 
 // Re-export Python bindings at module level
 #[cfg(feature = "python")]
-pub use python_bindings::{mama_py, mama_batch_py, mama_batch_with_metadata_py, mama_batch_2d_py, MamaStreamPy};
+pub use python_bindings::{mama_py, mama_batch_py, MamaStreamPy};
 
 // WASM bindings
 #[cfg(feature = "wasm")]

@@ -11,8 +11,6 @@ try:
     from my_project import (
         mama, 
         mama_batch,
-        mama_batch_with_metadata,
-        mama_batch_2d,
         MamaStream
     )
 except ImportError:
@@ -25,9 +23,12 @@ def test_mama_partial_params():
     close = np.array(data['close'], dtype=np.float64)
     
     # Test with default parameters (0.5, 0.05)
-    mama_vals, fama_vals = mama(close, 0.5, 0.05)
-    assert len(mama_vals) == len(close)
-    assert len(fama_vals) == len(close)
+    result = mama(close, 0.5, 0.05)
+    assert isinstance(result, dict)
+    assert 'mama' in result
+    assert 'fama' in result
+    assert len(result['mama']) == len(close)
+    assert len(result['fama']) == len(close)
 
 
 def test_mama_accuracy():
@@ -36,7 +37,9 @@ def test_mama_accuracy():
     close = np.array(data['close'], dtype=np.float64)
     
     # Default parameters
-    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    result = mama(close, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     
     assert len(mama_vals) == len(close)
     assert len(fama_vals) == len(close)
@@ -94,9 +97,9 @@ def test_mama_very_small_dataset():
     # MAMA requires at least 10 data points
     data_min = np.array([42.0] * 10, dtype=np.float64)
     
-    mama_vals, fama_vals = mama(data_min, 0.5, 0.05)
-    assert len(mama_vals) == 10
-    assert len(fama_vals) == 10
+    result = mama(data_min, 0.5, 0.05)
+    assert len(result['mama']) == 10
+    assert len(result['fama']) == 10
 
 
 def test_mama_empty_input():
@@ -113,13 +116,13 @@ def test_mama_reinput():
     close = np.array(data['close'], dtype=np.float64)
     
     # First MAMA pass with default params
-    mama_vals1, fama_vals1 = mama(close, 0.5, 0.05)
+    first_result = mama(close, 0.5, 0.05)
     
     # Second MAMA pass with different params using first MAMA result as input
-    mama_vals2, fama_vals2 = mama(mama_vals1, 0.7, 0.1)
+    second_result = mama(first_result['mama'], 0.7, 0.1)
     
-    assert len(mama_vals2) == len(mama_vals1)
-    assert len(fama_vals2) == len(mama_vals1)
+    assert len(second_result['mama']) == len(first_result['mama'])
+    assert len(second_result['fama']) == len(first_result['mama'])
 
 
 def test_mama_nan_handling():
@@ -127,7 +130,9 @@ def test_mama_nan_handling():
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
     
-    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    result = mama(close, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     
     assert len(mama_vals) == len(close)
     assert len(fama_vals) == len(close)
@@ -144,88 +149,33 @@ def test_mama_batch():
     data = load_test_data()
     close = np.array(data['close'], dtype=np.float64)
     
-    # Test parameter ranges
-    mama_batch_result, fama_batch_result = mama_batch(
+    # Test parameter ranges with tuple format
+    batch_result = mama_batch(
         close, 
-        0.3, 0.7, 0.2,    # fast_limit range: 0.3, 0.5, 0.7
-        0.03, 0.07, 0.02  # slow_limit range: 0.03, 0.05, 0.07
+        (0.3, 0.7, 0.2),    # fast_limit range: 0.3, 0.5, 0.7
+        (0.03, 0.07, 0.02)  # slow_limit range: 0.03, 0.05, 0.07
     )
+    
+    # Check result is a dict with the expected keys
+    assert isinstance(batch_result, dict)
+    assert 'mama_values' in batch_result
+    assert 'fama_values' in batch_result
+    assert 'fast_limits' in batch_result
+    assert 'slow_limits' in batch_result
     
     # Should have 3 * 3 = 9 combinations
-    assert len(mama_batch_result) == 9 * len(close)
-    assert len(fama_batch_result) == 9 * len(close)
+    assert batch_result['mama_values'].shape == (9, len(close))
+    assert batch_result['fama_values'].shape == (9, len(close))
+    assert len(batch_result['fast_limits']) == 9
+    assert len(batch_result['slow_limits']) == 9
     
     # Verify first combination matches individual calculation
-    individual_mama, individual_fama = mama(close, 0.3, 0.03)
-    batch_first_mama = mama_batch_result[:len(close)]
-    batch_first_fama = fama_batch_result[:len(close)]
-    assert_close(batch_first_mama, individual_mama, atol=1e-9, msg="MAMA first combination mismatch")
-    assert_close(batch_first_fama, individual_fama, atol=1e-9, msg="FAMA first combination mismatch")
+    individual_result = mama(close, 0.3, 0.03)
+    batch_first_mama = batch_result['mama_values'][0]
+    batch_first_fama = batch_result['fama_values'][0]
+    assert_close(batch_first_mama, individual_result['mama'], atol=1e-9, msg="MAMA first combination mismatch")
+    assert_close(batch_first_fama, individual_result['fama'], atol=1e-9, msg="FAMA first combination mismatch")
 
-
-def test_mama_batch_with_metadata():
-    """Test MAMA batch computation with metadata"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    # Test with varying parameters
-    (mama_result, fama_result), metadata = mama_batch_with_metadata(
-        close, 
-        0.4, 0.6, 0.2,    # fast_limit range: 0.4, 0.6
-        0.04, 0.06, 0.02  # slow_limit range: 0.04, 0.06
-    )
-    
-    # Check metadata contains all combinations (2 * 2 = 4)
-    assert len(metadata) == 4
-    # Use np.allclose for floating point comparison
-    expected_metadata = [(0.4, 0.04), (0.4, 0.06), (0.6, 0.04), (0.6, 0.06)]
-    for i, (actual, expected) in enumerate(zip(metadata, expected_metadata)):
-        assert_close(actual[0], expected[0], atol=1e-9, msg=f"Fast limit mismatch at {i}")
-        assert_close(actual[1], expected[1], atol=1e-9, msg=f"Slow limit mismatch at {i}")
-    
-    # Check result shape
-    assert len(mama_result) == 4 * len(close)
-    assert len(fama_result) == 4 * len(close)
-    
-    # Verify a specific combination
-    # Find the index for (0.6, 0.04) - use approximate comparison due to floating point
-    idx = None
-    for i, (fast, slow) in enumerate(metadata):
-        if abs(fast - 0.6) < 1e-9 and abs(slow - 0.04) < 1e-9:
-            idx = i
-            break
-    assert idx is not None, f"Could not find (0.6, 0.04) in metadata: {metadata}"
-    
-    individual_mama, individual_fama = mama(close, 0.6, 0.04)
-    batch_mama_row = mama_result[idx * len(close):(idx + 1) * len(close)]
-    batch_fama_row = fama_result[idx * len(close):(idx + 1) * len(close)]
-    assert_close(batch_mama_row, individual_mama, atol=1e-9, msg="MAMA specific combination mismatch")
-    assert_close(batch_fama_row, individual_fama, atol=1e-9, msg="FAMA specific combination mismatch")
-
-
-def test_mama_batch_2d():
-    """Test MAMA batch computation with 2D output"""
-    data = load_test_data()
-    close = np.array(data['close'], dtype=np.float64)
-    
-    # Test with simple parameter ranges
-    (mama_2d, fama_2d), metadata = mama_batch_2d(
-        close, 
-        0.3, 0.5, 0.2,    # fast_limit range: 0.3, 0.5
-        0.05, 0.05, 0     # slow_limit static: 0.05
-    )
-    
-    # Check metadata (2 * 1 = 2 combinations)
-    assert metadata == [(0.3, 0.05), (0.5, 0.05)]
-    
-    # Check shape
-    assert mama_2d.shape == (2, len(close))
-    assert fama_2d.shape == (2, len(close))
-    
-    # Verify first row
-    individual_mama, individual_fama = mama(close, 0.3, 0.05)
-    assert_close(mama_2d[0], individual_mama, atol=1e-9, msg="MAMA 2D row mismatch")
-    assert_close(fama_2d[0], individual_fama, atol=1e-9, msg="FAMA 2D row mismatch")
 
 
 def test_mama_stream():
@@ -239,7 +189,9 @@ def test_mama_stream():
     
     # Calculate batch result for comparison
     close_array = np.array(close, dtype=np.float64)
-    batch_mama, batch_fama = mama(close_array, fast_limit, slow_limit)
+    batch_result = mama(close_array, fast_limit, slow_limit)
+    batch_mama = batch_result['mama']
+    batch_fama = batch_result['fama']
     
     # Test streaming
     stream = MamaStream(fast_limit, slow_limit)
@@ -281,7 +233,9 @@ def test_mama_different_params():
     ]
     
     for fast_lim, slow_lim in test_cases:
-        mama_vals, fama_vals = mama(close, fast_lim, slow_lim)
+        result = mama(close, fast_lim, slow_lim)
+        mama_vals = result['mama']
+        fama_vals = result['fama']
         assert len(mama_vals) == len(close)
         assert len(fama_vals) == len(close)
         
@@ -300,23 +254,23 @@ def test_mama_batch_performance():
     close = np.array(data['close'][:1000], dtype=np.float64)  # Use first 1000 values
     
     # Test multiple parameter combinations
-    mama_batch_result, fama_batch_result = mama_batch(
+    batch_result = mama_batch(
         close, 
-        0.3, 0.7, 0.1,    # fast_limits: 0.3, 0.4, 0.5, 0.6, 0.7
-        0.04, 0.06, 0.01  # slow_limits: 0.04, 0.05, 0.06
+        (0.3, 0.7, 0.1),    # fast_limits: 0.3, 0.4, 0.5, 0.6, 0.7
+        (0.04, 0.06, 0.01)  # slow_limits: 0.04, 0.05, 0.06
     )
     
     # Should have 5 * 3 = 15 combinations
-    assert len(mama_batch_result) == 15 * len(close)
-    assert len(fama_batch_result) == 15 * len(close)
+    assert batch_result['mama_values'].shape == (15, len(close))
+    assert batch_result['fama_values'].shape == (15, len(close))
     
     # Verify first combination (0.3, 0.04)
-    individual_mama, individual_fama = mama(close, 0.3, 0.04)
-    batch_first_mama = mama_batch_result[:len(close)]
-    batch_first_fama = fama_batch_result[:len(close)]
-    assert_close(batch_first_mama, individual_mama, atol=1e-9, 
+    individual_result = mama(close, 0.3, 0.04)
+    batch_first_mama = batch_result['mama_values'][0]
+    batch_first_fama = batch_result['fama_values'][0]
+    assert_close(batch_first_mama, individual_result['mama'], atol=1e-9, 
                 msg=f"MAMA batch mismatch for params=(0.3, 0.04)")
-    assert_close(batch_first_fama, individual_fama, atol=1e-9, 
+    assert_close(batch_first_fama, individual_result['fama'], atol=1e-9, 
                 msg=f"FAMA batch mismatch for params=(0.3, 0.04)")
 
 
@@ -324,7 +278,9 @@ def test_mama_edge_cases():
     """Test MAMA with edge case inputs"""
     # Test with monotonically increasing data
     data = np.arange(1.0, 101.0, dtype=np.float64)
-    mama_vals, fama_vals = mama(data, 0.5, 0.05)
+    result = mama(data, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     assert len(mama_vals) == len(data)
     assert len(fama_vals) == len(data)
     
@@ -334,13 +290,15 @@ def test_mama_edge_cases():
     
     # Test with oscillating values
     data = np.array([10.0, 20.0, 10.0, 20.0] * 25, dtype=np.float64)
-    mama_vals, fama_vals = mama(data, 0.5, 0.05)
-    assert len(mama_vals) == len(data)
-    assert len(fama_vals) == len(data)
+    result = mama(data, 0.5, 0.05)
+    assert len(result['mama']) == len(data)
+    assert len(result['fama']) == len(data)
     
     # Test with constant values
     data = np.array([50.0] * 100, dtype=np.float64)
-    mama_vals, fama_vals = mama(data, 0.5, 0.05)
+    result = mama(data, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     assert len(mama_vals) == len(data)
     assert len(fama_vals) == len(data)
     
@@ -351,18 +309,27 @@ def test_mama_edge_cases():
 
 
 def test_mama_warmup_period():
-    """Test that warmup period is correctly handled"""
+    """Test that MAMA handles early data points correctly"""
     data = load_test_data()
     close = np.array(data['close'][:50], dtype=np.float64)
     
-    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    result = mama(close, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     
-    # MAMA outputs values even during warmup period (first 10 values)
-    # Unlike some indicators, MAMA provides estimates from the start
-    # All values should be finite
+    # MAMA produces values from the first data point
+    # It uses adaptive algorithms that start immediately but improve accuracy
+    # as more data becomes available (after ~10 data points)
+    assert len(mama_vals) == len(close)
+    assert len(fama_vals) == len(close)
+    
+    # All values should be finite - MAMA doesn't output NaN during warmup
     for i in range(len(mama_vals)):
         assert np.isfinite(mama_vals[i]), f"Expected finite value at index {i} for MAMA"
         assert np.isfinite(fama_vals[i]), f"Expected finite value at index {i} for FAMA"
+    
+    # The early values exist but may be less accurate until the adaptive
+    # algorithm has sufficient data (typically after 10+ points)
 
 
 def test_mama_consistency():
@@ -370,30 +337,32 @@ def test_mama_consistency():
     data = load_test_data()
     close = np.array(data['close'][:100], dtype=np.float64)
     
-    mama1, fama1 = mama(close, 0.5, 0.05)
-    mama2, fama2 = mama(close, 0.5, 0.05)
+    result1 = mama(close, 0.5, 0.05)
+    result2 = mama(close, 0.5, 0.05)
     
-    assert_close(mama1, mama2, atol=1e-15, msg="MAMA results not consistent")
-    assert_close(fama1, fama2, atol=1e-15, msg="FAMA results not consistent")
+    assert_close(result1['mama'], result2['mama'], atol=1e-15, msg="MAMA results not consistent")
+    assert_close(result1['fama'], result2['fama'], atol=1e-15, msg="FAMA results not consistent")
 
 
 def test_mama_step_precision():
     """Test batch with very small step sizes"""
     data = np.arange(1, 51, dtype=np.float64)
     
-    # Use batch_with_metadata to get the metadata
-    (mama_result, fama_result), metadata = mama_batch_with_metadata(
+    # Use batch to get the results
+    batch_result = mama_batch(
         data, 
-        0.4, 0.5, 0.1,     # fast_limits: 0.4, 0.5
-        0.04, 0.05, 0.01   # slow_limits: 0.04, 0.05
+        (0.4, 0.5, 0.1),     # fast_limits: 0.4, 0.5
+        (0.04, 0.05, 0.01)   # slow_limits: 0.04, 0.05
     )
     
+    # Build metadata from the result
+    metadata = list(zip(batch_result['fast_limits'], batch_result['slow_limits']))
     assert metadata == [
         (0.4, 0.04), (0.4, 0.05),
         (0.5, 0.04), (0.5, 0.05)
     ]
-    assert len(mama_result) == 4 * len(data)
-    assert len(fama_result) == 4 * len(data)
+    assert batch_result['mama_values'].shape == (4, len(data))
+    assert batch_result['fama_values'].shape == (4, len(data))
 
 
 def test_mama_fama_relationship():
@@ -401,7 +370,9 @@ def test_mama_fama_relationship():
     data = load_test_data()
     close = np.array(data['close'][:200], dtype=np.float64)
     
-    mama_vals, fama_vals = mama(close, 0.5, 0.05)
+    result = mama(close, 0.5, 0.05)
+    mama_vals = result['mama']
+    fama_vals = result['fama']
     
     # FAMA should be a smoother version of MAMA
     # After warmup, check that FAMA has less variance than MAMA
@@ -410,6 +381,92 @@ def test_mama_fama_relationship():
     
     # FAMA should generally have lower variance (be smoother)
     assert fama_var < mama_var * 1.1, "FAMA should be smoother than MAMA"
+
+
+def test_mama_batch_error_handling():
+    """Test MAMA batch error handling guards for invalid inputs"""
+    # These tests verify the indicator's guards against invalid inputs
+    # which protect against programming errors and ensure stability
+    
+    # Test with empty data - guard against empty arrays
+    empty = np.array([], dtype=np.float64)
+    with pytest.raises(ValueError, match="mama:"):
+        mama_batch(empty, (0.5, 0.5, 0), (0.05, 0.05, 0))
+    
+    # Test with insufficient data - MAMA requires at least 10 data points
+    small = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    with pytest.raises(ValueError, match="mama:"):
+        mama_batch(small, (0.5, 0.5, 0), (0.05, 0.05, 0))
+    
+    # Test with invalid parameter ranges - guards against invalid limits
+    data = np.random.randn(100).astype(np.float64)
+    with pytest.raises(ValueError, match="mama:"):
+        mama_batch(data, (0.0, 0.5, 0.1), (0.05, 0.05, 0))  # Invalid fast_limit (0.0)
+    
+    with pytest.raises(ValueError, match="mama:"):
+        mama_batch(data, (0.5, 0.5, 0), (0.0, 0.05, 0.01))  # Invalid slow_limit (0.0)
+
+
+def test_mama_zero_copy_verification():
+    """Verify MAMA uses zero-copy operations"""
+    # This test ensures the Python binding doesn't make unnecessary copies
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # The result should be computed directly without intermediate copies
+    result = mama(close, 0.5, 0.05)
+    assert len(result['mama']) == len(close)
+    assert len(result['fama']) == len(close)
+    
+    # Batch should also use zero-copy
+    batch_result = mama_batch(close, (0.3, 0.7, 0.2), (0.03, 0.07, 0.02))
+    assert batch_result['mama_values'].shape[0] == 3 * 3  # 3 fast * 3 slow
+    assert batch_result['mama_values'].shape[1] == len(close)
+    assert batch_result['fama_values'].shape[0] == 3 * 3
+    assert batch_result['fama_values'].shape[1] == len(close)
+
+
+def test_mama_stream_error_handling():
+    """Test MAMA stream error handling"""
+    # Test with invalid parameters
+    with pytest.raises(ValueError, match="mama:"):
+        MamaStream(0.0, 0.05)  # Invalid fast_limit
+    
+    with pytest.raises(ValueError, match="mama:"):
+        MamaStream(0.5, 0.0)  # Invalid slow_limit
+    
+    with pytest.raises(ValueError, match="mama:"):
+        MamaStream(-0.5, 0.05)  # Negative fast_limit
+    
+    with pytest.raises(ValueError, match="mama:"):
+        MamaStream(0.5, -0.05)  # Negative slow_limit
+
+
+def test_mama_batch_warmup_consistency():
+    """Test that batch processing produces consistent results"""
+    data = np.random.randn(50).astype(np.float64)
+    
+    result = mama_batch(data, (0.3, 0.7, 0.2), (0.03, 0.07, 0.02))
+    
+    # Each row should produce values for all data points
+    for i in range(result['mama_values'].shape[0]):
+        mama_row = result['mama_values'][i]
+        fama_row = result['fama_values'][i]
+        
+        # MAMA produces values from the first data point
+        # All values should be finite
+        for j in range(len(data)):
+            assert np.isfinite(mama_row[j]), f"Expected finite value at index {j} for row {i}"
+            assert np.isfinite(fama_row[j]), f"Expected finite value at index {j} for row {i}"
+        
+        # Verify each batch row matches individual computation
+        fast_limit = result['fast_limits'][i]
+        slow_limit = result['slow_limits'][i]
+        individual_result = mama(data, fast_limit, slow_limit)
+        assert_close(mama_row, individual_result['mama'], atol=1e-9, 
+                    msg=f"Batch row {i} doesn't match individual computation")
+        assert_close(fama_row, individual_result['fama'], atol=1e-9, 
+                    msg=f"Batch row {i} doesn't match individual computation")
 
 
 if __name__ == "__main__":

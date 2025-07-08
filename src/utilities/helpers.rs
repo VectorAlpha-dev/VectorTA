@@ -9,40 +9,34 @@ static BEST_BATCH: OnceLock<Kernel> = OnceLock::new();
 
 #[inline(always)]
 pub fn detect_best_kernel() -> Kernel {
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    {
-        *BEST_SINGLE.get_or_init(|| {
+    *BEST_SINGLE.get_or_init(|| {
+        
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        {
             if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("fma") {
                 return Kernel::Avx512;
             }
             if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 return Kernel::Avx2;
             }
-            Kernel::Scalar
-        })
-    }
-
-    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-    {
+        }
+        
         Kernel::Scalar
-    }
+    })
 }
 
 #[inline(always)]
 pub fn detect_best_batch_kernel() -> Kernel {
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    {
-        *BEST_BATCH.get_or_init(|| match detect_best_kernel() {
+    *BEST_BATCH.get_or_init(|| {
+        
+        match detect_best_kernel() {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => Kernel::Avx512Batch,
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => Kernel::Avx2Batch,
             _ => Kernel::ScalarBatch,
-        })
-    }
-
-    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-    {
-        Kernel::ScalarBatch
-    }
+        }
+    })
 }
 
 #[macro_export]
@@ -50,6 +44,8 @@ macro_rules! skip_if_unsupported {
     ($kernel:expr, $test_name:expr) => {{
         use $crate::utilities::enums::Kernel;
         use std::arch::is_x86_feature_detected;
+
+        
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {

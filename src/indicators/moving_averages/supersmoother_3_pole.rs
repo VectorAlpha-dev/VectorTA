@@ -841,3 +841,222 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supersmoother_3_pole")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the 3-Pole SuperSmoother filter of the input data.
+///
+/// The 3-Pole SuperSmoother is a smoothing filter developed by John Ehlers
+/// that provides strong noise suppression while remaining responsive to trend changes.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     The smoothing period (must be >= 1).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SuperSmoother3Pole values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period <= 0, period > data length, all NaN data).
+pub fn supersmoother_3_pole_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = SuperSmoother3PoleParams { period: Some(period) };
+    let ss3p_in = SuperSmoother3PoleInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), SuperSmoother3PoleError> {
+        let result = supersmoother_3_pole_with_kernel(&ss3p_in, kern)?;
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SuperSmoother3PoleStream")]
+pub struct SuperSmoother3PoleStreamPy {
+    stream: SuperSmoother3PoleStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SuperSmoother3PoleStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SuperSmoother3PoleParams { period: Some(period) };
+        let stream = SuperSmoother3PoleStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SuperSmoother3PoleStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated SuperSmoother3Pole value.
+    fn update(&mut self, value: f64) -> f64 {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supersmoother_3_pole_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SuperSmoother3Pole for multiple period combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' array.
+pub fn supersmoother_3_pole_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = SuperSmoother3PoleBatchRange {
+        period: period_range,
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Run batch computation without GIL
+    let output = py
+        .allow_threads(|| supersmoother_3_pole_batch_with_kernel(slice_in, &sweep, kern))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Create return dictionary
+    let dict = PyDict::new(py);
+
+    // Values as 2D array
+    let values_array = output
+        .values
+        .into_pyarray(py)
+        .reshape([output.rows, output.cols])?;
+    dict.set_item("values", values_array)?;
+
+    // Periods array
+    let periods: Vec<f64> = output
+        .combos
+        .iter()
+        .map(|c| c.period.unwrap() as f64)
+        .collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok(dict.into())
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SuperSmoother3PoleParams { period: Some(period) };
+    let input = SuperSmoother3PoleInput::from_slice(data, params);
+
+    supersmoother_3_pole_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SuperSmoother3PoleBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    supersmoother_3_pole_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SuperSmoother3PoleBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}

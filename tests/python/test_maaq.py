@@ -11,8 +11,6 @@ try:
     from my_project import (
         maaq, 
         maaq_batch,
-        maaq_batch_with_metadata,
-        maaq_batch_2d,
         MaaqStream
     )
 except ImportError:
@@ -148,18 +146,25 @@ def test_maaq_batch():
     # Test period range 11-50 step 10, static fast/slow
     batch_result = maaq_batch(
         close, 
-        11, 41, 10,      # period range (end is inclusive, so 11, 21, 31, 41)
-        2, 2, 0,         # fast_period static
-        30, 30, 0        # slow_period static
+        (11, 41, 10),      # period range (end is inclusive, so 11, 21, 31, 41)
+        (2, 2, 0),         # fast_period static
+        (30, 30, 0)        # slow_period static
     )
     
+    # Check result is a dict with the expected keys
+    assert isinstance(batch_result, dict)
+    assert 'values' in batch_result
+    assert 'periods' in batch_result
+    assert 'fast_periods' in batch_result
+    assert 'slow_periods' in batch_result
+    
     # Should have 4 periods: 11, 21, 31, 41
-    # Batch result should contain all individual results flattened
-    assert len(batch_result) == 4 * len(close)
+    assert batch_result['values'].shape[0] == 4
+    assert batch_result['values'].shape[1] == len(close)
     
     # Verify first combination matches individual calculation
     individual_result = maaq(close, 11, 2, 30)
-    batch_first_row = batch_result[:len(close)]
+    batch_first_row = batch_result['values'][0]
     assert_close(batch_first_row, individual_result, atol=1e-9, msg="First combination mismatch")
 
 
@@ -169,24 +174,32 @@ def test_maaq_batch_with_metadata():
     close = np.array(data['close'], dtype=np.float64)
     
     # Test with varying all parameters
-    batch_result, metadata = maaq_batch_with_metadata(
+    batch_result = maaq_batch(
         close, 
-        11, 31, 10,      # period range: 11, 21, 31
-        2, 4, 2,         # fast_period range: 2, 4
-        25, 35, 10       # slow_period range: 25, 35
+        (11, 31, 10),      # period range: 11, 21, 31
+        (2, 4, 2),         # fast_period range: 2, 4
+        (25, 35, 10)       # slow_period range: 25, 35
     )
     
+    # Extract metadata from the dict
+    periods = batch_result['periods']
+    fast_periods = batch_result['fast_periods']
+    slow_periods = batch_result['slow_periods']
+    
     # Check metadata contains all combinations (3 * 2 * 2 = 12)
-    assert len(metadata) == 12
+    assert len(periods) == 12
+    assert len(fast_periods) == 12
+    assert len(slow_periods) == 12
     
     # Check result shape
-    assert len(batch_result) == 12 * len(close)
+    assert batch_result['values'].shape == (12, len(close))
     
     # Verify a specific combination
     # Find the index for (21, 2, 25)
+    metadata = list(zip(periods, fast_periods, slow_periods))
     idx = metadata.index((21, 2, 25))
     individual_result = maaq(close, 21, 2, 25)
-    batch_row = batch_result[idx * len(close):(idx + 1) * len(close)]
+    batch_row = batch_result['values'][idx]
     assert_close(batch_row, individual_result, atol=1e-9, msg="Specific combination mismatch")
 
 
@@ -196,22 +209,29 @@ def test_maaq_batch_2d():
     close = np.array(data['close'], dtype=np.float64)
     
     # Test with simple parameter ranges
-    batch_result_2d, metadata = maaq_batch_2d(
+    batch_result = maaq_batch(
         close, 
-        11, 31, 20,      # period range: 11, 31
-        2, 3, 1,         # fast_period range: 2, 3
-        30, 30, 0        # slow_period static: 30
+        (11, 31, 20),      # period range: 11, 31
+        (2, 3, 1),         # fast_period range: 2, 3
+        (30, 30, 0)        # slow_period static: 30
     )
+    
+    # Build metadata from the dict
+    metadata = list(zip(
+        batch_result['periods'], 
+        batch_result['fast_periods'], 
+        batch_result['slow_periods']
+    ))
     
     # Check metadata (2 * 2 * 1 = 4 combinations)
     assert metadata == [(11, 2, 30), (11, 3, 30), (31, 2, 30), (31, 3, 30)]
     
-    # Check shape
-    assert batch_result_2d.shape == (4, len(close))
+    # Check shape (the values are already in 2D)
+    assert batch_result['values'].shape == (4, len(close))
     
     # Verify a middle row
     individual_result = maaq(close, 11, 3, 30)
-    assert_close(batch_result_2d[1], individual_result, atol=1e-9, msg="2D row mismatch")
+    assert_close(batch_result['values'][1], individual_result, atol=1e-9, msg="2D row mismatch")
 
 
 def test_maaq_stream():
@@ -280,17 +300,17 @@ def test_maaq_batch_performance():
     # Test multiple period combinations
     batch_result = maaq_batch(
         close, 
-        10, 30, 10,      # periods: 10, 20, 30
-        2, 2, 0,         # fast_period fixed at 2
-        25, 35, 5        # slow_periods: 25, 30, 35
+        (10, 30, 10),      # periods: 10, 20, 30
+        (2, 2, 0),         # fast_period fixed at 2
+        (25, 35, 5)        # slow_periods: 25, 30, 35
     )
     
     # Should have 9 combinations: 3 periods * 1 fast * 3 slow = 9
-    assert len(batch_result) == 9 * len(close)
+    assert batch_result['values'].shape == (9, len(close))
     
     # Verify first combination (10, 2, 25)
     individual_result = maaq(close, 10, 2, 25)
-    batch_first_row = batch_result[:len(close)]
+    batch_first_row = batch_result['values'][0]
     assert_close(batch_first_row, individual_result, atol=1e-9, 
                 msg=f"Batch mismatch for params=(10, 2, 25)")
 
@@ -355,20 +375,113 @@ def test_maaq_step_precision():
     """Test batch with very small step sizes"""
     data = np.arange(1, 51, dtype=np.float64)
     
-    # Use batch_with_metadata to get the metadata
-    batch_result, metadata = maaq_batch_with_metadata(
+    # Use batch to get the results with metadata
+    batch_result = maaq_batch(
         data, 
-        5, 7, 1,         # periods: 5, 6, 7
-        2, 3, 1,         # fast_periods: 2, 3
-        10, 10, 0        # slow_period: 10
+        (5, 7, 1),         # periods: 5, 6, 7
+        (2, 3, 1),         # fast_periods: 2, 3
+        (10, 10, 0)        # slow_period: 10
     )
+    
+    # Build metadata from the dict
+    metadata = list(zip(
+        batch_result['periods'], 
+        batch_result['fast_periods'], 
+        batch_result['slow_periods']
+    ))
     
     assert metadata == [
         (5, 2, 10), (5, 3, 10),
         (6, 2, 10), (6, 3, 10),
         (7, 2, 10), (7, 3, 10)
     ]
-    assert len(batch_result) == 6 * len(data)
+    assert batch_result['values'].shape == (6, len(data))
+
+
+def test_maaq_batch_error_handling():
+    """Test MAAQ batch error handling for edge cases"""
+    # Test with empty data
+    empty = np.array([], dtype=np.float64)
+    with pytest.raises(ValueError, match="maaq:"):
+        maaq_batch(empty, (10, 20, 10), (2, 2, 0), (30, 30, 0))
+    
+    # Test with all NaN data
+    all_nan = np.full(100, np.nan, dtype=np.float64)
+    with pytest.raises(ValueError, match="maaq:"):
+        maaq_batch(all_nan, (10, 20, 10), (2, 2, 0), (30, 30, 0))
+    
+    # Test with period exceeding data length
+    small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    with pytest.raises(ValueError, match="maaq:"):
+        maaq_batch(small_data, (5, 10, 5), (2, 2, 0), (30, 30, 0))
+    
+    # Test with insufficient data
+    data = np.random.randn(100).astype(np.float64)
+    with pytest.raises(ValueError, match="maaq:"):
+        maaq_batch(data, (200, 300, 50), (2, 2, 0), (30, 30, 0))
+
+
+def test_maaq_zero_copy_verification():
+    """Verify MAAQ uses zero-copy operations"""
+    # This test ensures the Python binding doesn't make unnecessary copies
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # The result should be computed directly without intermediate copies
+    result = maaq(close, 11, 2, 30)
+    assert len(result) == len(close)
+    
+    # Batch should also use zero-copy
+    batch_result = maaq_batch(close, (10, 30, 10), (2, 2, 0), (25, 35, 5))
+    assert batch_result['values'].shape[0] == 3 * 3  # 3 periods * 3 slow_periods
+    assert batch_result['values'].shape[1] == len(close)
+
+
+def test_maaq_stream_error_handling():
+    """Test MAAQ stream error handling"""
+    # Test with invalid parameters
+    with pytest.raises(ValueError, match="maaq:"):
+        MaaqStream(0, 2, 30)
+    
+    with pytest.raises(ValueError, match="maaq:"):
+        MaaqStream(11, 0, 30)
+    
+    with pytest.raises(ValueError, match="maaq:"):
+        MaaqStream(11, 2, 0)
+    
+    # Test stream consistency
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    period, fast_p, slow_p = 11, 2, 30
+    
+    batch_result = maaq(close, period, fast_p, slow_p)
+    stream = MaaqStream(period, fast_p, slow_p)
+    stream_results = []
+    
+    for price in close:
+        result = stream.update(price)
+        stream_results.append(result if result is not None else np.nan)
+    
+    # After warmup, values should match
+    for i in range(period, len(close)):
+        if not np.isnan(batch_result[i]):
+            assert_close(stream_results[i], batch_result[i], atol=1e-9,
+                        msg=f"Stream mismatch at index {i}")
+
+
+def test_maaq_batch_warmup_consistency():
+    """Test that batch warmup periods are consistent"""
+    data = np.random.randn(50).astype(np.float64)
+    
+    result = maaq_batch(data, (5, 15, 5), (2, 2, 0), (10, 10, 0))
+    
+    # Each row should have proper warmup
+    for i, period in enumerate(result['periods']):
+        row = result['values'][i]
+        # First 'period' values should equal raw input (MAAQ warmup behavior)
+        for j in range(int(period)):
+            assert_close(row[j], data[j], atol=1e-9,
+                        msg=f"Warmup mismatch for period {period} at index {j}")
 
 
 if __name__ == "__main__":

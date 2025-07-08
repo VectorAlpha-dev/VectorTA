@@ -9,6 +9,7 @@
 pub mod indicators;
 pub mod utilities;
 
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod _rayon_one_big_stack {
     use ctor::ctor;

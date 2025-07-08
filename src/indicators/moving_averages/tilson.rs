@@ -31,6 +31,17 @@ use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 impl<'a> AsRef<[f64]> for TilsonInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -175,6 +186,9 @@ impl TilsonBuilder {
 
 #[derive(Debug, Error)]
 pub enum TilsonError {
+    #[error("tilson: Input data slice is empty.")]
+    EmptyInputData,
+
     #[error("tilson: All values are NaN.")]
     AllValuesNaN,
 
@@ -198,6 +212,10 @@ pub fn tilson_with_kernel(input: &TilsonInput, kernel: Kernel) -> Result<TilsonO
         TilsonData::Candles { candles, source } => source_type(candles, source),
         TilsonData::Slice(sl) => sl,
     };
+
+    if data.is_empty() {
+        return Err(TilsonError::EmptyInputData);
+    }
 
     let first = data.iter().position(|x| !x.is_nan()).ok_or(TilsonError::AllValuesNaN)?;
 
@@ -594,6 +612,11 @@ fn tilson_batch_inner(
     if combos.is_empty() {
         return Err(TilsonError::InvalidPeriod { period: 0, data_len: 0 });
     }
+    
+    if data.is_empty() {
+        return Err(TilsonError::EmptyInputData);
+    }
+    
     let first = data.iter().position(|x| !x.is_nan()).ok_or(TilsonError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < 6 * (max_p - 1) + 1 {
@@ -882,6 +905,19 @@ mod tests {
         Ok(())
     }
 
+    fn check_tilson_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data: [f64; 0] = [];
+        let params = TilsonParams { period: Some(5), volume_factor: Some(0.0) };
+        let input = TilsonInput::from_slice(&input_data, params);
+        let res = tilson_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] TILSON should fail with empty input", test_name);
+        if let Err(e) = res {
+            assert!(matches!(e, TilsonError::EmptyInputData), "[{}] Expected EmptyInputData error", test_name);
+        }
+        Ok(())
+    }
+
     fn check_tilson_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
@@ -1031,6 +1067,7 @@ mod tests {
         check_tilson_accuracy,
         check_tilson_default_candles,
         check_tilson_zero_period,
+        check_tilson_empty_input,
         check_tilson_period_exceeds_length,
         check_tilson_very_small_dataset,
         check_tilson_reinput,
@@ -1091,4 +1128,463 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// ========== Helper Functions for Bindings ==========
+
+/// Centralized validation and preparation for Tilson calculation
+#[inline]
+fn tilson_prepare<'a>(
+    input: &'a TilsonInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], usize, f64, usize, usize, Kernel), TilsonError> {
+    let data: &[f64] = input.as_ref();
+    
+    if data.is_empty() {
+        return Err(TilsonError::EmptyInputData);
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TilsonError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+    let v_factor = input.get_volume_factor();
+    
+    if period == 0 || period > len {
+        return Err(TilsonError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(TilsonError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    if v_factor.is_nan() || v_factor.is_infinite() {
+        return Err(TilsonError::InvalidVolumeFactor { v_factor });
+    }
+    
+    let lookback_total = 6 * (period - 1);
+    if (len - first) < lookback_total + 1 {
+        return Err(TilsonError::NotEnoughValidData { needed: lookback_total + 1, valid: len - first });
+    }
+    
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    
+    Ok((data, period, v_factor, first, len, chosen))
+}
+
+/// Compute Tilson directly into pre-allocated output buffer
+#[inline]
+fn tilson_compute_into(
+    data: &[f64],
+    period: usize,
+    v_factor: f64,
+    first: usize,
+    chosen: Kernel,
+    out: &mut [f64],
+) -> Result<(), TilsonError> {
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                tilson_scalar(data, period, v_factor, first, out)?
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                tilson_avx2(data, period, v_factor, first, out)?
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                tilson_avx512(data, period, v_factor, first, out)?
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                tilson_scalar(data, period, v_factor, first, out)?
+            }
+            Kernel::Auto => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+/// Optimized batch calculation that writes directly to pre-allocated buffer
+#[inline(always)]
+fn tilson_batch_inner_into(
+    data: &[f64],
+    sweep: &TilsonBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<TilsonParams>, TilsonError> {
+    // ---------- 0. parameter checks ----------
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(TilsonError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    
+    if data.is_empty() {
+        return Err(TilsonError::EmptyInputData);
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TilsonError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    
+    if data.len() - first < 6 * (max_p - 1) + 1 {
+        return Err(TilsonError::NotEnoughValidData {
+            needed: 6 * (max_p - 1) + 1,
+            valid: data.len() - first,
+        });
+    }
+    
+    // ---------- 1. matrix dimensions ----------
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // ---------- 2. build per-row warm-up lengths ----------
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| (6 * (c.period.unwrap() - 1) + first).min(cols))
+        .collect();
+    
+    // ---------- 3. reinterpret output slice as MaybeUninit for efficient initialization ----------
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+    
+    // ---------- 4. closure that fills ONE row ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+        let v_factor = combos[row].volume_factor.unwrap();
+        
+        // cast this row to &mut [f64] so the row-kernel can write normally
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+        
+        match kern {
+            Kernel::Scalar | Kernel::ScalarBatch => tilson_row_scalar(data, first, period, v_factor, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => tilson_row_avx2(data, first, period, v_factor, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => tilson_row_avx512(data, first, period, v_factor, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch => tilson_row_scalar(data, first, period, v_factor, out_row),
+            _ => unreachable!(),
+        }
+    };
+    
+    // ---------- 5. run all rows (optionally in parallel) ----------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+    
+    Ok(combos)
+}
+
+// ========== Python Bindings ==========
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tilson")]
+#[pyo3(signature = (data, period, volume_factor=None, kernel=None))]
+/// Compute the Tilson T3 Moving Average of the input data.
+///
+/// The Tilson T3 is a moving average with reduced lag achieved through multiple
+/// iterations of exponential smoothing.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window (must be >= 1).
+/// volume_factor : float, optional
+///     Controls the depth of T3 smoothing. Range [0.0, 1.0].
+///     Default is 0.0. Higher values = more smoothing.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of Tilson T3 values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period is zero, exceeds data length, etc).
+pub fn tilson_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    volume_factor: Option<f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // ---------- build input struct -------------------------------------------------
+    let params = TilsonParams { 
+        period: Some(period),
+        volume_factor: volume_factor.or(Some(0.0))
+    };
+    let tilson_in = TilsonInput::from_slice(slice_in, params);
+    
+    // ---------- allocate NumPy output buffer ---------------------------------------
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), TilsonError> {
+        let (data, period, v_factor, first, _len, chosen) = tilson_prepare(&tilson_in, kern)?;
+        
+        // Initialize NaN prefix
+        let lookback = 6 * (period - 1);
+        let warm = (first + lookback).min(slice_out.len());
+        slice_out[..warm].fill(f64::NAN);
+        
+        // Compute Tilson
+        tilson_compute_into(data, period, v_factor, first, chosen, slice_out)?;
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TilsonStream")]
+pub struct TilsonStreamPy {
+    stream: TilsonStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TilsonStreamPy {
+    #[new]
+    fn new(period: usize, volume_factor: Option<f64>) -> PyResult<Self> {
+        let params = TilsonParams { 
+            period: Some(period),
+            volume_factor: volume_factor.or(Some(0.0))
+        };
+        let stream = TilsonStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TilsonStreamPy { stream })
+    }
+    
+    /// Updates the stream with a new value and returns the calculated Tilson value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tilson_batch")]
+#[pyo3(signature = (data, period_range, volume_factor_range=None, kernel=None))]
+/// Compute Tilson T3 for multiple parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// volume_factor_range : tuple, optional
+///     (start, end, step) for volume_factor values. Default is (0.0, 0.0, 0.0).
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array), 'periods', and 'volume_factors' arrays.
+pub fn tilson_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    volume_factor_range: Option<(f64, f64, f64)>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = TilsonBatchRange {
+        period: period_range,
+        volume_factor: volume_factor_range.unwrap_or((0.0, 0.0, 0.0)),
+    };
+    
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+    
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        
+        // Determine if we should use parallel processing
+        let parallel = !cfg!(target_arch = "wasm32") && rows > 1 && cols > 1000;
+        
+        tilson_batch_inner_into(slice_in, &sweep, kernel, parallel, slice_out)?;
+        Ok::<Vec<TilsonParams>, TilsonError>(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // 4. Reshape the flat output array to 2D
+    let reshaped = out_arr.reshape([rows, cols])?;
+    
+    // 5. Extract periods and volume_factors as separate arrays
+    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+    let v_factors: Vec<f64> = combos.iter().map(|c| c.volume_factor.unwrap()).collect();
+    
+    // 6. Create output dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("values", reshaped)?;
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("volume_factors", v_factors.into_pyarray(py))?;
+    
+    Ok(dict.into())
+}
+
+// ========== WASM Bindings ==========
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tilson_js)]
+/// Compute the Tilson T3 Moving Average.
+///
+/// # Arguments
+/// * `data` - Input data array
+/// * `period` - Period (must be >= 1)
+/// * `volume_factor` - Volume factor (0.0 to 1.0), defaults to 0.0
+///
+/// # Returns
+/// Array of Tilson values, same length as input
+pub fn tilson_js(data: &[f64], period: usize, volume_factor: Option<f64>) -> Result<Vec<f64>, JsValue> {
+    let params = TilsonParams { 
+        period: Some(period),
+        volume_factor: volume_factor.or(Some(0.0))
+    };
+    let input = TilsonInput::from_slice(data, params);
+    
+    tilson(&input)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tilson_batch_js)]
+/// Compute Tilson for multiple parameter combinations in a single pass.
+///
+/// # Arguments
+/// * `data` - Input data array
+/// * `period_start`, `period_end`, `period_step` - Period range parameters
+/// * `v_factor_start`, `v_factor_end`, `v_factor_step` - Volume factor range parameters
+///
+/// # Returns
+/// Flattened array of values (row-major order)
+pub fn tilson_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    v_factor_start: f64,
+    v_factor_end: f64,
+    v_factor_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TilsonBatchRange {
+        period: (period_start, period_end, period_step),
+        volume_factor: (v_factor_start, v_factor_end, v_factor_step),
+    };
+    
+    let output = tilson_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tilson_batch_metadata_js)]
+/// Get metadata about batch computation.
+///
+/// # Arguments
+/// * Period and volume factor range parameters (same as tilson_batch_js)
+///
+/// # Returns
+/// Array containing [periods array, volume_factors array] flattened
+pub fn tilson_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    v_factor_start: f64,
+    v_factor_end: f64,
+    v_factor_step: f64,
+) -> Vec<f64> {
+    let sweep = TilsonBatchRange {
+        period: (period_start, period_end, period_step),
+        volume_factor: (v_factor_start, v_factor_end, v_factor_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let mut result = Vec::with_capacity(combos.len() * 2);
+    
+    // First, all periods
+    for combo in &combos {
+        result.push(combo.period.unwrap() as f64);
+    }
+    
+    // Then, all volume factors
+    for combo in &combos {
+        result.push(combo.volume_factor.unwrap());
+    }
+    
+    result
 }

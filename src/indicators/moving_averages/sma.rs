@@ -23,11 +23,22 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 use std::mem::MaybeUninit;
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for SmaInput<'a> {
     #[inline(always)]
@@ -204,6 +215,64 @@ pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, Sm
     }
 
     Ok(SmaOutput { values: out })
+}
+
+/// Prepare SMA computation by validating inputs and returning intermediate values for zero-copy operations
+#[inline]
+fn sma_prepare<'a>(
+    input: &'a SmaInput,
+    kernel: Kernel,
+) -> Result<(usize, usize, Kernel), SmaError> {
+    let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(SmaError::EmptyData);
+    }
+    let period = input.get_period();
+    let len = data.len();
+    if period == 0 || period > len {
+        return Err(SmaError::InvalidPeriod { period, data_len: len });
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
+    if len - first < period {
+        return Err(SmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    Ok((period, first, chosen))
+}
+
+/// Compute SMA into a pre-allocated output buffer for zero-copy operations
+#[inline]
+fn sma_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                sma_scalar(data, period, first, out);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                sma_avx2(data, period, first, out);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                sma_avx512(data, period, first, out);
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[inline(always)]
@@ -489,13 +558,54 @@ fn sma_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    
+    let mut raw = make_uninit_matrix(rows, cols);
+    sma_batch_inner_into(data, sweep, kern, parallel, &mut raw)?;
+
+    // ---- finished: transmute into a Vec<f64> -----------------------------------
+    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+    Ok(SmaBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+/// Zero-copy batch computation that writes directly into pre-allocated buffer
+#[inline(always)]
+fn sma_batch_inner_into(
+    data: &[f64],
+    sweep: &SmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    raw: &mut [MaybeUninit<f64>],
+) -> Result<Vec<SmaParams>, SmaError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(SmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    if data.is_empty() {
+        return Err(SmaError::EmptyData);
+    }
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SmaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(SmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+    let cols = data.len();
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)   // first valid SMA index for that row
         .collect();
 
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // ---- closure that writes one row ------------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -508,35 +618,27 @@ fn sma_batch_inner(
         );
 
         match kern {
-            Kernel::Scalar => sma_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::ScalarBatch => sma_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => sma_row_avx2  (data, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx2Batch => sma_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => sma_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 | Kernel::Avx512Batch => sma_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
 
     // ---- run every row, filling `raw` in-place ---------------------------------
     if parallel {
-
         #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+            raw.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
 
         #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
@@ -544,14 +646,7 @@ fn sma_batch_inner(
         }
     }
 
-    // ---- finished: transmute into a Vec<f64> -----------------------------------
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-    Ok(SmaBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -611,6 +706,296 @@ unsafe fn sma_row_avx512_long(
     out: &mut [f64],
 ) {
     sma_scalar(data, period, first, out);
+}
+
+// ============================================================================
+// Python Bindings
+// ============================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Simple Moving Average (SMA) of the input data.
+///
+/// The SMA is the average of the last N data points, where N is the period.
+/// It is a lagging indicator that smooths price data.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (empty data, invalid period, etc).
+pub fn sma_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    let data_slice = data.as_slice()?;
+    let params = SmaParams { period: Some(period) };
+    let input = SmaInput::from_slice(data_slice, params);
+
+    // Use prepare/compute pattern for zero-copy
+    let (period, first, chosen_kernel) = sma_prepare(&input, kern)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let len = data_slice.len();
+    let warm = first + period - 1;
+
+    // Allocate output array
+    let out_array = unsafe { PyArray1::<f64>::new(py, [data_slice.len()], false) };
+    let out_slice = unsafe { out_array.as_slice_mut()? };
+
+    // Initialize with NaN up to warmup
+    for i in 0..warm {
+        out_slice[i] = f64::NAN;
+    }
+
+    // Compute SMA values
+    py.allow_threads(|| {
+        sma_compute_into(data_slice, period, first, chosen_kernel, out_slice);
+    });
+
+    Ok(out_array.into())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' (list of periods).
+pub fn sma_batch_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let kern = kernel.map(|k| {
+        match k {
+            "auto" => Ok(Kernel::Auto),
+            "scalar" => Ok(Kernel::ScalarBatch),
+            "avx2" => Ok(Kernel::Avx2Batch),
+            "avx512" => Ok(Kernel::Avx512Batch),
+            _ => Err(PyValueError::new_err(format!("Unknown kernel: {}", k)))
+        }
+    }).transpose()?.unwrap_or(Kernel::Auto);
+
+    let data_slice = data.as_slice()?;
+    let range = SmaBatchRange { period: period_range };
+
+    // Validate and prepare
+    let combos = expand_grid(&range);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("Invalid period range"));
+    }
+    if data_slice.is_empty() {
+        return Err(PyValueError::new_err("Empty data"));
+    }
+
+    let rows = combos.len();
+    let cols = data_slice.len();
+
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Convert to MaybeUninit slice for batch computation
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            slice_out.len()
+        )
+    };
+
+    // Perform batch computation with zero-copy
+    let combos = py.allow_threads(|| -> Result<Vec<SmaParams>, SmaError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        sma_batch_inner_into(
+            data_slice,
+            &range,
+            simd,
+            true, // parallel
+            out_uninit
+        )
+    }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Create result dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    
+    // Extract periods into a numpy array
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap_or(9) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SmaStream")]
+/// Streaming SMA calculator that processes values one at a time.
+///
+/// This is useful for real-time data processing where you receive
+/// price updates incrementally.
+///
+/// Parameters:
+/// -----------
+/// period : int
+///     Number of values in the moving average window.
+///
+/// Example:
+/// --------
+/// >>> stream = SmaStream(14)
+/// >>> for price in prices:
+/// ...     sma_value = stream.update(price)
+/// ...     if sma_value is not None:
+/// ...         print(f"SMA: {sma_value}")
+pub struct SmaStreamPy {
+    inner: SmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SmaStreamPy {
+    #[new]
+    #[pyo3(signature = (period))]
+    pub fn new(period: usize) -> PyResult<Self> {
+        let params = SmaParams { period: Some(period) };
+        let inner = SmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Update the SMA with a new value.
+    ///
+    /// Parameters:
+    /// -----------
+    /// value : float
+    ///     New price value to add to the stream.
+    ///
+    /// Returns:
+    /// --------
+    /// float or None
+    ///     The current SMA value, or None if not enough data yet.
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.inner.update(value)
+    }
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "sma")]
+/// Compute Simple Moving Average (SMA) for the given data
+pub fn sma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SmaParams { period: Some(period) };
+    let input = SmaInput::from_slice(data, params);
+    
+    sma(&input)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smaBatch")]
+/// Compute SMA for multiple periods in a single pass
+pub fn sma_batch_js(
+    data: &[f64], 
+    period_start: usize,
+    period_end: usize,
+    period_step: usize
+) -> Result<Vec<f64>, JsValue> {
+    let range = SmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    sma_batch_with_kernel(data, &range, Kernel::Auto)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smaBatchMetadata")]
+/// Get metadata about the batch computation (periods used)
+pub fn sma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize
+) -> Vec<usize> {
+    let range = SmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    combos.iter().map(|c| c.period.unwrap_or(9)).collect()
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smaBatchRowsCols")]
+/// Get the dimensions of the batch output
+pub fn sma_batch_rows_cols_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    data_len: usize
+) -> Vec<usize> {
+    let range = SmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    let combos = expand_grid(&range);
+    vec![combos.len(), data_len]
 }
 
 

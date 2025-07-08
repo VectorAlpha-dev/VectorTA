@@ -29,6 +29,17 @@ use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 
 // ========== Input Data Types ==========
 
@@ -106,6 +117,8 @@ pub struct TemaOutput {
 
 #[derive(Debug, Error)]
 pub enum TemaError {
+    #[error("tema: Input data slice is empty.")]
+    EmptyInputData,
     #[error("tema: All values are NaN.")]
     AllValuesNaN,
     #[error("tema: Invalid period: period = {period}, data length = {data_len}")]
@@ -178,6 +191,10 @@ pub fn tema_with_kernel(input: &TemaInput, kernel: Kernel) -> Result<TemaOutput,
         TemaData::Slice(sl) => sl,
     };
 
+    if data.is_empty() {
+        return Err(TemaError::EmptyInputData);
+    }
+
     let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
@@ -238,19 +255,19 @@ pub fn tema_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64
         let price = data[i];
 
         ema1 = ema1 * per1 + price * per;
-        if i == (period - 1) {
+        if i == first_val + (period - 1) {
             ema2 = ema1;
         }
-        if i >= (period - 1) {
+        if i >= first_val + (period - 1) {
             ema2 = ema2 * per1 + ema1 * per;
         }
-        if i == 2 * (period - 1) {
+        if i == first_val + 2 * (period - 1) {
             ema3 = ema2;
         }
-        if i >= 2 * (period - 1) {
+        if i >= first_val + 2 * (period - 1) {
             ema3 = ema3 * per1 + ema2 * per;
         }
-        if i >= lookback {
+        if i >= first_val + lookback {
             out[i] = 3.0 * ema1 - 3.0 * ema2 + ema3;
         }
     }
@@ -544,7 +561,7 @@ fn tema_batch_inner(
     // ---------- 2. build per-row warm-up lengths ----------
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + (c.period.unwrap() - 1) * 3)   // (period-1)*3 matches tema_scalar
+        .map(|c| (first + (c.period.unwrap() - 1) * 3).min(cols))   // (period-1)*3 matches tema_scalar, clamped to cols
         .collect();
 
     // ---------- 3. allocate rows×cols uninitialised, fill NaN prefixes ----------
@@ -744,6 +761,18 @@ mod tests {
         assert!(res.is_err(), "[{}] TEMA should fail with zero period", test_name);
         Ok(())
     }
+    fn check_tema_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let input_data: [f64; 0] = [];
+        let params = TemaParams { period: Some(9) };
+        let input = TemaInput::from_slice(&input_data, params);
+        let res = tema_with_kernel(&input, kernel);
+        assert!(res.is_err(), "[{}] TEMA should fail with empty input", test_name);
+        if let Err(e) = res {
+            assert!(matches!(e, TemaError::EmptyInputData), "[{}] Expected EmptyInputData error", test_name);
+        }
+        Ok(())
+    }
     fn check_tema_period_exceeds_length(
         test_name: &str,
         kernel: Kernel,
@@ -871,6 +900,7 @@ mod tests {
         check_tema_accuracy,
         check_tema_default_candles,
         check_tema_zero_period,
+        check_tema_empty_input,
         check_tema_period_exceeds_length,
         check_tema_very_small_dataset,
         check_tema_reinput,
@@ -926,4 +956,398 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// ========== Helper Functions for Bindings ==========
+
+/// Centralized validation and preparation for TEMA calculation
+#[inline]
+fn tema_prepare<'a>(
+    input: &'a TemaInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, usize, Kernel), TemaError> {
+    let data: &[f64] = match &input.data {
+        TemaData::Candles { candles, source } => source_type(candles, source),
+        TemaData::Slice(sl) => sl,
+    };
+
+    if data.is_empty() {
+        return Err(TemaError::EmptyInputData);
+    }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(TemaError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(TemaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    Ok((data, period, first, len, chosen))
+}
+
+/// Compute TEMA directly into pre-allocated output buffer
+#[inline]
+fn tema_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    chosen: Kernel,
+    out: &mut [f64],
+) {
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                tema_scalar(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                tema_avx2(data, period, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                tema_avx512(data, period, first, out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                tema_scalar(data, period, first, out)
+            }
+            Kernel::Auto => unreachable!(),
+        }
+    }
+}
+
+/// Optimized batch calculation that writes directly to pre-allocated buffer
+#[inline(always)]
+fn tema_batch_inner_into(
+    data: &[f64],
+    sweep: &TemaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<TemaParams>, TemaError> {
+    // ---------- 0. parameter checks ----------
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(TemaError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+
+    if data.is_empty() {
+        return Err(TemaError::EmptyInputData);
+    }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(TemaError::NotEnoughValidData {
+            needed: max_p,
+            valid: data.len() - first,
+        });
+    }
+
+    // ---------- 1. matrix dimensions ----------
+    let rows = combos.len();
+    let cols = data.len();
+
+    // ---------- 2. build per-row warm-up lengths ----------
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| (first + (c.period.unwrap() - 1) * 3).min(cols))   // (period-1)*3 matches tema_scalar, clamped to cols
+        .collect();
+
+    // ---------- 3. reinterpret output slice as MaybeUninit for efficient initialization ----------
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+
+    // ---------- 4. closure that fills ONE row ----------
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let period  = combos[row].period.unwrap();
+
+        // cast this row to &mut [f64] so the row-kernel can write normally
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
+        match kern {
+            Kernel::Scalar =>  tema_row_scalar(data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   =>  tema_row_avx2  (data, first, period, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 =>  tema_row_avx512(data, first, period, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => tema_row_scalar(data, first, period, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ---------- 5. run all rows (optionally in parallel) ----------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+        out_uninit.par_chunks_mut(cols)
+                   .enumerate()
+                   .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")] {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                    do_row(row, slice);
+        }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+// ========== Python Bindings ==========
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tema")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Triple Exponential Moving Average (TEMA) of the input data.
+///
+/// TEMA applies three exponential moving averages in succession to reduce lag and noise.
+/// It is calculated as: TEMA = 3*EMA1 - 3*EMA2 + EMA3.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window (must be >= 1).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of TEMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period is zero, exceeds data length, etc).
+pub fn tema_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // ---------- build input struct -------------------------------------------------
+    let params = TemaParams { period: Some(period) };
+    let tema_in = TemaInput::from_slice(slice_in, params);
+
+    // ---------- allocate NumPy output buffer ---------------------------------------
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), TemaError> {
+        let (data, period, first, _len, chosen) = tema_prepare(&tema_in, kern)?;
+        // Initialize NaN prefix
+        let lookback = (period - 1) * 3;
+        let warm = (first + lookback).min(slice_out.len());
+        slice_out[..warm].fill(f64::NAN);
+        // Compute TEMA
+        tema_compute_into(data, period, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TemaStream")]
+pub struct TemaStreamPy {
+    stream: TemaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TemaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = TemaParams { period: Some(period) };
+        let stream =
+            TemaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TemaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated TEMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tema_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute TEMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn tema_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = TemaBatchRange {
+        period: period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        tema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+// ========== WASM Bindings ==========
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = TemaParams { period: Some(period) };
+    let input = TemaInput::from_slice(data, params);
+
+    tema_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    tema_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|c| c.period.unwrap() as f64)
+        .collect();
+
+    Ok(metadata)
 }

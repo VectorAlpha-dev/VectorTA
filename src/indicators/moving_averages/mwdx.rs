@@ -15,13 +15,23 @@
 //! - **Ok(MwdxOutput)**: Contains Vec<f64> with result, matching input length.
 //! - **Err(MwdxError)**: On error.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -161,16 +171,25 @@ pub fn mwdx(input: &MwdxInput) -> Result<MwdxOutput, MwdxError> {
     mwdx_with_kernel(input, Kernel::Auto)
 }
 
-pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput, MwdxError> {
-    let data: &[f64] = match &input.data {
-        MwdxData::Candles { candles, source } => source_type(candles, source),
-        MwdxData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn mwdx_prepare<'a>(
+    input: &'a MwdxInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*fac*/ f64,
+        /*warm*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    MwdxError,
+> {
+    let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
         return Err(MwdxError::EmptyData);
     }
+    
     let factor = input.get_factor();
     if factor <= 0.0 || factor.is_nan() || factor.is_infinite() {
         return Err(MwdxError::InvalidFactor { factor });
@@ -182,35 +201,48 @@ pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput,
     }
     let fac = 2.0 / (val2 + 1.0);
 
+    let warm = data.iter()
+                .position(|x| !x.is_nan())
+                .map(|i| i + 1)
+                .unwrap_or(len);
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
-    let warm = data.iter()
-                .position(|x| !x.is_nan())
-                .map(|i| i + 1)           // prefix length
-                .unwrap_or(len);          // all NaNs → whole vec is prefix
+    Ok((data, fac, warm, chosen))
+}
 
-    let mut out = alloc_with_nan_prefix(len, warm);
-
+#[inline(always)]
+fn mwdx_compute_into(
+    data: &[f64],
+    fac: f64,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                mwdx_scalar(data, fac, &mut out)
+                mwdx_scalar(data, fac, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                mwdx_avx2(data, fac, &mut out)
+                mwdx_avx2(data, fac, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                mwdx_avx512(data, fac, &mut out)
+                mwdx_avx512(data, fac, out)
             }
             _ => unreachable!(),
         }
     }
+}
 
+pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput, MwdxError> {
+    let (data, fac, warm, chosen) = mwdx_prepare(input, kernel)?;
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    mwdx_compute_into(data, fac, chosen, &mut out);
     Ok(MwdxOutput { values: out })
 }
 
@@ -230,43 +262,27 @@ pub fn mwdx_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn mwdx_avx2(
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn mwdx_avx2(
     data: &[f64],
     fac: f64,
     out: &mut [f64],
 ) {
-    // API parity: always call scalar for now
+    // MWDX has sequential dependencies, so no SIMD benefit
+    // Fall back to scalar implementation
     mwdx_scalar(data, fac, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn mwdx_avx512(
+#[target_feature(enable = "avx512f")]
+pub unsafe fn mwdx_avx512(
     data: &[f64],
     fac: f64,
     out: &mut [f64],
 ) {
-    // API parity: always call scalar for now
-    mwdx_scalar(data, fac, out);
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn mwdx_avx512_short(
-    data: &[f64],
-    fac: f64,
-    out: &mut [f64],
-) {
-    mwdx_scalar(data, fac, out);
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn mwdx_avx512_long(
-    data: &[f64],
-    fac: f64,
-    out: &mut [f64],
-) {
+    // MWDX has sequential dependencies, so no SIMD benefit
+    // Fall back to scalar implementation
     mwdx_scalar(data, fac, out);
 }
 
@@ -461,6 +477,18 @@ fn mwdx_batch_inner(
     if data.is_empty() {
         return Err(MwdxError::EmptyData);
     }
+    
+    // Validate all parameter combinations upfront
+    for combo in &combos {
+        let factor = combo.factor.unwrap();
+        if factor <= 0.0 || factor.is_nan() || factor.is_infinite() {
+            return Err(MwdxError::InvalidFactor { factor });
+        }
+        let val2 = (2.0 / factor) - 1.0;
+        if val2 + 1.0 <= 0.0 {
+            return Err(MwdxError::InvalidDenominator { factor });
+        }
+    }
 
     let rows = combos.len();
     let cols = data.len();
@@ -544,6 +572,99 @@ fn mwdx_batch_inner(
 }
 
 #[inline(always)]
+fn mwdx_batch_inner_into(
+    data: &[f64],
+    sweep: &MwdxBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<MwdxParams>, MwdxError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(MwdxError::EmptyData);
+    }
+    if data.is_empty() {
+        return Err(MwdxError::EmptyData);
+    }
+    
+    // Validate all parameter combinations upfront
+    for combo in &combos {
+        let factor = combo.factor.unwrap();
+        if factor <= 0.0 || factor.is_nan() || factor.is_infinite() {
+            return Err(MwdxError::InvalidFactor { factor });
+        }
+        let val2 = (2.0 / factor) - 1.0;
+        if val2 + 1.0 <= 0.0 {
+            return Err(MwdxError::InvalidDenominator { factor });
+        }
+    }
+
+    let rows = combos.len();
+    let cols = data.len();
+    let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
+    let warm_prefixes = vec![first_valid + 1; rows];
+
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm_prefixes) };
+
+    // Closure that writes ONE row
+    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        let prm = &combos[row];
+        let factor = prm.factor.unwrap();
+
+        // Validate factor
+        if factor <= 0.0 || factor.is_nan() || factor.is_infinite() { return; }
+        let val2 = (2.0 / factor) - 1.0;
+        if val2 + 1.0 <= 0.0 { return; }
+        let fac = 2.0 / (val2 + 1.0);
+
+        // Cast this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
+        match kern {
+            Kernel::Scalar => mwdx_row_scalar(data, fac, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 => mwdx_row_avx2(data, fac, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => mwdx_row_avx512(data, fac, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // Drive the whole matrix
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out_uninit.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    Ok(combos)
+}
+
+#[inline(always)]
 unsafe fn mwdx_row_scalar(
     data: &[f64],
     fac: f64,
@@ -558,47 +679,28 @@ unsafe fn mwdx_row_scalar(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn mwdx_row_avx2(
     data: &[f64],
     fac: f64,
     out: &mut [f64],
 ) {
+    // For batch row processing, the dependency chain still exists
+    // so we fall back to scalar for now
     mwdx_row_scalar(data, fac, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn mwdx_row_avx512(
     data: &[f64],
     fac: f64,
     out: &mut [f64],
 ) {
-    if data.len() <= 32 {
-        mwdx_row_avx512_short(data, fac, out);
-    
-        } else {
-        mwdx_row_avx512_long(data, fac, out);
-    }
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn mwdx_row_avx512_short(
-    data: &[f64],
-    fac: f64,
-    out: &mut [f64],
-) {
-    mwdx_row_scalar(data, fac, out);
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn mwdx_row_avx512_long(
-    data: &[f64],
-    fac: f64,
-    out: &mut [f64],
-) {
+    // MWDX has sequential dependencies, so no SIMD benefit
+    // Fall back to scalar implementation
     mwdx_row_scalar(data, fac, out);
 }
 
@@ -836,4 +938,181 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "mwdx")]
+pub fn mwdx_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    factor: f64,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let slice_in = data.as_slice()?;
+    let params = MwdxParams {
+        factor: Some(factor),
+    };
+    let mwdx_in = MwdxInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), MwdxError> {
+        let (data, fac, warm, chosen) = mwdx_prepare(&mwdx_in, Kernel::Auto)?;
+        // Initialize prefix with NaN
+        slice_out[..warm].fill(f64::NAN);
+        mwdx_compute_into(data, fac, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MwdxStream")]
+pub struct MwdxStreamPy {
+    stream: MwdxStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MwdxStreamPy {
+    #[new]
+    fn new(factor: f64) -> PyResult<Self> {
+        let params = MwdxParams {
+            factor: Some(factor),
+        };
+        let stream =
+            MwdxStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(MwdxStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated MWDX value.
+    fn update(&mut self, value: f64) -> f64 {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mwdx_batch")]
+pub fn mwdx_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    factor_range: (f64, f64, f64),
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    
+    let slice_in = data.as_slice()?;
+    let sweep = MwdxBatchRange {
+        factor: factor_range,
+    };
+
+    // Expand grid to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        let kernel = match Kernel::Auto {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant
+        mwdx_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "factors",
+        combos
+            .iter()
+            .map(|p| p.factor.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_js(data: &[f64], factor: f64) -> Result<Vec<f64>, JsValue> {
+    let params = MwdxParams {
+        factor: Some(factor),
+    };
+    let input = MwdxInput::from_slice(data, params);
+
+    mwdx_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_batch_js(
+    data: &[f64],
+    factor_start: f64,
+    factor_end: f64,
+    factor_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = MwdxBatchRange {
+        factor: (factor_start, factor_end, factor_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    mwdx_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_batch_metadata_js(
+    factor_start: f64,
+    factor_end: f64,
+    factor_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = MwdxBatchRange {
+        factor: (factor_start, factor_end, factor_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.factor.unwrap())
+        .collect();
+
+    Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_batch_rows_cols_js(
+    factor_start: f64,
+    factor_end: f64,
+    factor_step: f64,
+    data_len: usize,
+) -> Vec<usize> {
+    let sweep = MwdxBatchRange {
+        factor: (factor_start, factor_end, factor_step),
+    };
+    let combos = expand_grid(&sweep);
+    vec![combos.len(), data_len]
 }

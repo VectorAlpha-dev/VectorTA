@@ -995,3 +995,285 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "srwma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Square Root Weighted Moving Average (SRWMA) of the input data.
+///
+/// SRWMA assigns weights proportional to the square root of the distance from
+/// the current bar, providing moderate emphasis on recent data while reducing noise.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     The look-back window size for weighting (must be >= 2).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of SRWMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period < 2, data too short, etc).
+pub fn srwma_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = SrwmaParams { period: Some(period) };
+    let srwma_in = SrwmaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy computation without the GIL
+    py.allow_threads(|| -> Result<(), SrwmaError> {
+        let first = slice_in.iter().position(|x| !x.is_nan()).ok_or(SrwmaError::AllValuesNaN)?;
+        let len = slice_in.len();
+        
+        if period == 0 || period > len {
+            return Err(SrwmaError::InvalidPeriod { period, data_len: len });
+        }
+        if (len - first) < period + 1 {
+            return Err(SrwmaError::NotEnoughValidData {
+                needed: period + 1,
+                valid: len - first,
+            });
+        }
+
+        // Prepare weights
+        let weight_len = period - 1;
+        let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, weight_len);
+        weights.resize(weight_len, 0.0);
+        let mut norm = 0.0;
+        for i in 0..weight_len {
+            let w = ((period - i) as f64).sqrt();
+            weights[i] = w;
+            norm += w;
+        }
+        let inv_norm = 1.0 / norm;
+
+        // Fill NaN prefix
+        let warm = first + period + 1;
+        slice_out[..warm].fill(f64::NAN);
+
+        // Select kernel
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        // Compute
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    srwma_scalar(slice_in, &weights, period, first, inv_norm, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    srwma_avx2(slice_in, &weights, period, first, inv_norm, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    srwma_avx512(slice_in, &weights, period, first, inv_norm, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SrwmaStream")]
+pub struct SrwmaStreamPy {
+    stream: SrwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SrwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = SrwmaParams { period: Some(period) };
+        let stream = SrwmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(SrwmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated SRWMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "srwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute SRWMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn srwma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = SrwmaBatchRange { period: period_range };
+
+    // Expand grid to know dimensions
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy computation without GIL
+    py.allow_threads(|| -> Result<(), SrwmaError> {
+        // Resolve kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Process batch directly into pre-allocated buffer
+        let result = srwma_batch_inner(slice_in, &sweep, simd, true)?;
+        
+        // Copy result values into our pre-allocated buffer
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build return dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = SrwmaParams { period: Some(period) };
+    let input = SrwmaInput::from_slice(data, params);
+
+    srwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srwma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = SrwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use batch function with parallel=false for WASM
+    srwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<u32>, JsValue> {
+    let sweep = SrwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    Ok(combos.iter().map(|p| p.period.unwrap() as u32).collect())
+}
