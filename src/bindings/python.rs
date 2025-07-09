@@ -71,6 +71,10 @@ use crate::indicators::moving_averages::swma::{swma_py, swma_batch_py, SwmaStrea
 use crate::indicators::moving_averages::tema::{tema_py, tema_batch_py, TemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::tilson::{tilson_py, tilson_batch_py, TilsonStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::trima::{trima_py, trima_batch_py, TrimaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::trendflex::{trendflex_py, trendflex_batch_py, TrendFlexStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -237,12 +241,22 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register TEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(tema_py, m)?)?;
     m.add_function(wrap_pyfunction!(tema_batch_py, m)?)?;
+    
+    // Register TRIMA functions
+    m.add_function(wrap_pyfunction!(trima_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trima_batch_py, m)?)?;
+    m.add_class::<TrimaStreamPy>()?;
     m.add_class::<TemaStreamPy>()?;
     
     // Register Tilson functions with their user-facing names
     m.add_function(wrap_pyfunction!(tilson_py, m)?)?;
     m.add_function(wrap_pyfunction!(tilson_batch_py, m)?)?;
     m.add_class::<TilsonStreamPy>()?;
+    
+    // Register TrendFlex functions with their user-facing names
+    m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
+    m.add_class::<TrendFlexStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     

@@ -105,7 +105,14 @@
       "Bash(timeout:*)",
       "Bash(./test_error_taxonomy:*)",
       "Bash(cat:*)",
-      "Bash(./bench_alma_simple)"
+      "Bash(./bench_alma_simple)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(mv:*)",
+      "Bash(npx jest:*)",
+      "Bash(wasm-pack:*)",
+      "WebFetch(domain:bheisler.github.io)"
     ],
     "deny": []
   }

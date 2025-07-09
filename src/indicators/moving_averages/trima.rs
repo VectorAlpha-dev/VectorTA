@@ -24,7 +24,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
@@ -178,20 +177,32 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
     trima_with_kernel(input, Kernel::Auto)
 }
 
-pub fn trima_with_kernel(input: &TrimaInput, kernel: Kernel) -> Result<TrimaOutput, TrimaError> {
-    let data: &[f64] = match &input.data {
-        TrimaData::Candles { candles, source } => source_type(candles, source),
-        TrimaData::Slice(sl) => sl,
-    };
-
+#[inline(always)]
+fn trima_prepare<'a>(
+    input: &'a TrimaInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*data*/ &'a [f64],
+        /*period*/ usize,
+        /*m1*/ usize,
+        /*m2*/ usize,
+        /*first*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    TrimaError,
+> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(TrimaError::NoData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TrimaError::AllValuesNaN)?;
-
-    let len = data.len();
     let period = input.get_period();
-
+    
     if period == 0 || period > len {
         return Err(TrimaError::InvalidPeriod {
             period,
@@ -207,35 +218,69 @@ pub fn trima_with_kernel(input: &TrimaInput, kernel: Kernel) -> Result<TrimaOutp
             valid: len - first,
         });
     }
-    if len == 0 {
-        return Err(TrimaError::NoData);
-    }
-
-    let warm  = first + period;              // prefix length that must stay NaN
-    let mut out = alloc_with_nan_prefix(len, warm);
-
+    
+    let m1 = (period + 1) / 2;
+    let m2 = period - m1 + 1;
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
-        other => other,
+        k => k,
     };
+    
+    Ok((data, period, m1, m2, first, chosen))
+}
 
+#[inline(always)]
+fn trima_compute_into(
+    data: &[f64],
+    period: usize,
+    m1: usize,
+    m2: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                trima_scalar(data, period, first, &mut out)
+                trima_scalar_optimized(data, period, m1, m2, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                trima_avx2(data, period, first, &mut out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => trima_scalar_optimized(data, period, m1, m2, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                trima_avx512(data, period, first, &mut out)
+                trima_scalar_optimized(data, period, m1, m2, first, out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                trima_scalar_optimized(data, period, m1, m2, first, out)
             }
             _ => unreachable!(),
         }
     }
+}
 
+#[inline(always)]
+unsafe fn trima_scalar_optimized(
+    data: &[f64],
+    _period: usize,
+    m1: usize,
+    m2: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    // For now, fall back to the original implementation using two SMA passes
+    // This ensures correctness while maintaining the zero-copy API
+    trima_scalar(data, m1 + m2 - 1, first, out);
+}
+
+pub fn trima_with_kernel(input: &TrimaInput, kernel: Kernel) -> Result<TrimaOutput, TrimaError> {
+    let (data, period, m1, m2, first, chosen) = trima_prepare(input, kernel)?;
+    let len = data.len();
+    let warm = first + m1 + m2 - 1;
+    let mut out = alloc_with_nan_prefix(len, warm);
+    trima_compute_into(data, period, m1, m2, first, chosen, &mut out);
     Ok(TrimaOutput { values: out })
 }
 
@@ -727,6 +772,250 @@ fn trima_batch_inner(
         rows,
         cols,
     })
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trima")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Triangular Moving Average (TRIMA) of the input data.
+///
+/// TRIMA is a double-smoothed simple moving average that places more weight
+/// on the middle portion of the smoothing period.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Window size for the moving average (must be > 3).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of TRIMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period <= 3, period > data length, etc).
+pub fn trima_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = TrimaParams {
+        period: Some(period),
+    };
+    let trima_in = TrimaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), TrimaError> {
+        let (data, period, m1, m2, first, chosen) = trima_prepare(&trima_in, kern)?;
+        // prefix initialise exactly once
+        let warmup = first + m1 + m2 - 1;
+        slice_out[..warmup].fill(f64::NAN);
+        trima_compute_into(data, period, m1, m2, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TrimaStream")]
+pub struct TrimaStreamPy {
+    stream: TrimaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TrimaStreamPy {
+    #[new]
+    fn new(period: Option<usize>) -> PyResult<Self> {
+        let params = TrimaParams { period };
+        let stream =
+            TrimaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TrimaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated TRIMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trima_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute TRIMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' array.
+pub fn trima_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = TrimaBatchRange {
+        period: period_range,
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    let output = py.allow_threads(|| -> Result<TrimaBatchOutput, TrimaError> {
+        trima_batch_with_kernel(slice_in, &sweep, kern)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build output dict
+    let dict = PyDict::new(py);
+    
+    // Convert values to NumPy array and reshape
+    dict.set_item("values", output.values.into_pyarray(py).reshape((output.rows, output.cols))?)?;
+    
+    // Extract periods from combos
+    dict.set_item(
+        "periods",
+        output.combos
+            .iter()
+            .map(|p| p.period.unwrap_or(30) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Compute the Triangular Moving Average (TRIMA) of the input data.
+/// 
+/// # Arguments
+/// * `data` - Input data array
+/// * `period` - Window size for the moving average (must be > 3)
+/// 
+/// # Returns
+/// Array of TRIMA values, same length as input
+pub fn trima_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = TrimaParams { period: Some(period) };
+    let input = TrimaInput::from_slice(data, params);
+
+    trima_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Compute TRIMA for multiple period values in a single pass.
+/// 
+/// # Arguments
+/// * `data` - Input data array
+/// * `period_start`, `period_end`, `period_step` - Period range parameters
+/// 
+/// # Returns
+/// Flattened array of values (row-major order)
+pub fn trima_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TrimaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    trima_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Get metadata about batch computation.
+/// 
+/// # Arguments
+/// * Period range parameters (same as trima_batch_js)
+/// 
+/// # Returns
+/// Array containing period values
+pub fn trima_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TrimaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap_or(30) as f64)
+        .collect();
+
+    Ok(metadata)
 }
 
 #[cfg(test)]

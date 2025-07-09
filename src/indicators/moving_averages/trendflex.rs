@@ -192,6 +192,11 @@ pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<T
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch   =>
                 trendflex_avx512(data, period, first, &mut out)?,
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                trendflex_scalar(data, period, first, &mut out)?
+            }
             _ => unreachable!(),
         };
         // preserve the NaN prefix we just allocated
@@ -606,6 +611,8 @@ fn trendflex_batch_inner(
             Kernel::Avx2   => trendflex_row_avx2  (data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => trendflex_row_avx512(data, first, period, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => trendflex_row_scalar(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
@@ -997,4 +1004,244 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trendflex")]
+#[pyo3(signature = (data, period=None, kernel=None))]
+/// Compute the Trend Flex Filter (TrendFlex) of the input data.
+///
+/// Highlights momentum shifts using a super smoother and volatility measurement.
+/// Adapts to market volatility, amplifying or dampening its reaction accordingly.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int, optional
+///     Primary lookback period (default: 20).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of TrendFlex values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period = 0, period > data length, etc).
+pub fn trendflex_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: Option<usize>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = TrendFlexParams { period };
+    let trendflex_in = TrendFlexInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), TrendFlexError> {
+        // Get the TrendFlex output
+        let result = trendflex_with_kernel(&trendflex_in, kern)?;
+        // Copy results to the pre-allocated buffer
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TrendFlexStream")]
+pub struct TrendFlexStreamPy {
+    stream: TrendFlexStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TrendFlexStreamPy {
+    #[new]
+    fn new(period: Option<usize>) -> PyResult<Self> {
+        let params = TrendFlexParams { period };
+        let stream =
+            TrendFlexStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TrendFlexStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated TrendFlex value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trendflex_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute TrendFlex for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' array.
+pub fn trendflex_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = TrendFlexBatchRange {
+        period: period_range,
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    let output = py.allow_threads(|| -> Result<TrendFlexBatchOutput, TrendFlexError> {
+        trendflex_batch_with_kernel(slice_in, &sweep, kern)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build output dict
+    let dict = PyDict::new(py);
+    
+    // Convert values to NumPy array and reshape
+    let values_arr = output.values.into_pyarray(py);
+    dict.set_item("values", values_arr.reshape((output.rows, output.cols))?)?;
+    
+    // Extract periods from combos
+    dict.set_item(
+        "periods",
+        output.combos
+            .iter()
+            .map(|p| p.period.unwrap_or(20) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Compute the Trend Flex Filter (TrendFlex) of the input data.
+/// 
+/// # Arguments
+/// * `data` - Input data array
+/// * `period` - Primary lookback period
+/// 
+/// # Returns
+/// Array of TrendFlex values, same length as input
+pub fn trendflex_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = TrendFlexParams { period: Some(period) };
+    let input = TrendFlexInput::from_slice(data, params);
+
+    trendflex_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Compute TrendFlex for multiple period values in a single pass.
+/// 
+/// # Arguments
+/// * `data` - Input data array
+/// * `period_start`, `period_end`, `period_step` - Period range parameters
+/// 
+/// # Returns
+/// Flattened array of values (row-major order)
+pub fn trendflex_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TrendFlexBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    trendflex_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Get metadata about batch computation.
+/// 
+/// # Arguments
+/// * Period range parameters (same as trendflex_batch_js)
+/// 
+/// # Returns
+/// Array containing period values
+pub fn trendflex_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = TrendFlexBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap_or(20) as f64)
+        .collect();
+
+    Ok(metadata)
 }

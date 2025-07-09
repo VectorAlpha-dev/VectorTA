@@ -19,6 +19,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
+use crate::utilities::math_functions::atan_fast;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -339,12 +340,172 @@ pub unsafe fn mama_avx2(data: &[f64], fast_limit: f64, slow_limit: f64, out_mama
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
 #[inline]
-pub unsafe fn mama_avx512(data: &[f64], fast_limit: f64, slow_limit: f64, out_mama: &mut [f64], out_fama: &mut [f64]) -> Result<(), MamaError> {
-    mama_avx2_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
-    Ok(())
+unsafe fn hilbert4_avx512(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
+    // X = [x6, x4, x2, x0, 0,0,0,0]  (upper 4 lanes zeroed so they don't
+    // influence the horizontal reduction)
+    let v_x = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, x6, x4, x2, x0);
+
+    // H = [-0.0962, -0.5769, 0.5769, 0.0962, 0,0,0,0]
+    const H3: f64 = -0.096_2;
+    const H2: f64 = -0.576_9;
+    const H1: f64 =  0.576_9;
+    const H0: f64 =  0.096_2;
+    let v_h = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, H3, H2, H1, H0);
+
+    // 1) component‑wise multiply, 2) horizontal add of all 8 lanes
+    let v_mul = _mm512_mul_pd(v_x, v_h);           // 1 µ‑op
+    _mm512_reduce_add_pd(v_mul)                    // 1 µ‑op (ICE: latency → 4 cy)
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+#[inline]
+pub unsafe fn mama_avx512_inplace(
+    data:       &[f64],
+    fast_limit: f64,
+    slow_limit: f64,
+    out_mama:   &mut [f64],
+    out_fama:   &mut [f64],
+) {
+    debug_assert_eq!(data.len(), out_mama.len());
+    debug_assert_eq!(data.len(), out_fama.len());
+
+    /* ---- identical constants & ring‑buffer setup to your AVX2 version ---- */
+    const LEN: usize = 8;          // power of two
+    const MASK: usize = LEN - 1;
+
+    // align on 64 B so every load hits one line
+    #[repr(align(64))] struct A([f64; LEN]);
+    let first = data[0];
+    let mut smooth    = A([first; LEN]).0;
+    let mut detrender = A([first; LEN]).0;
+    let mut i1_buf    = A([first; LEN]).0;
+    let mut q1_buf    = A([first; LEN]).0;
+
+    const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
+
+    /* ---- state ---- */
+    let (mut idx, mut prev_mesa, mut prev_phase) = (0usize, 0.0, 0.0);
+    let (mut prev_mama, mut prev_fama) = (first, first);
+    let (mut prev_i2,  mut prev_q2)    = (0.0, 0.0);
+    let (mut prev_re,  mut prev_im)    = (0.0, 0.0);
+
+    #[inline(always)]
+    fn lag(buf: &[f64; LEN], p: usize, k: usize) -> f64 {
+        unsafe { *buf.get_unchecked((p.wrapping_sub(k)) & MASK) }
+    }
+
+    /* ---- main loop ---- */
+    for (i, &price) in data.iter().enumerate() {
+        /* 1. 4‑3‑2‑1 smoother (scalar FMA) */
+        let s1 = if i >= 1 { data[i - 1] } else { price };
+        let s2 = if i >= 2 { data[i - 2] } else { price };
+        let s3 = if i >= 3 { data[i - 3] } else { price };
+        let smooth_val = 0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
+        smooth[idx] = smooth_val;
+
+        /* 2. Hilbert detrender (AVX‑512) */
+        let dt_val = hilbert4_avx512(
+            smooth[idx],
+            lag(&smooth, idx, 2),
+            lag(&smooth, idx, 4),
+            lag(&smooth, idx, 6),
+        );
+        detrender[idx] = dt_val;
+
+        /* 3. In‑phase / quadrature */
+        let i1 = lag(&detrender, idx, 3);
+        i1_buf[idx] = i1;
+
+        let q1 = hilbert4_avx512(
+            detrender[idx],
+            lag(&detrender, idx, 2),
+            lag(&detrender, idx, 4),
+            lag(&detrender, idx, 6),
+        );
+        q1_buf[idx] = q1;
+
+        /* 4. 90° leads */
+        let j_i = hilbert4_avx512(
+            i1_buf[idx],
+            lag(&i1_buf, idx, 2),
+            lag(&i1_buf, idx, 4),
+            lag(&i1_buf, idx, 6),
+        );
+        let j_q = hilbert4_avx512(
+            q1_buf[idx],
+            lag(&q1_buf, idx, 2),
+            lag(&q1_buf, idx, 4),
+            lag(&q1_buf, idx, 6),
+        );
+
+        /* 5. Homodyne discriminator (unchanged) */
+        let i2  = i1 - j_q;
+        let q2  = q1 + j_i;
+        let i2s = 0.2_f64.mul_add(i2, 0.8 * prev_i2);
+        let q2s = 0.2_f64.mul_add(q2, 0.8 * prev_q2);
+        prev_i2 = i2s;
+        prev_q2 = q2s;
+
+        let re  = 0.2_f64.mul_add(i2s * prev_i2 + q2s * prev_q2, 0.8 * prev_re);
+        let im  = 0.2_f64.mul_add(i2s * prev_q2 - q2s * prev_i2, 0.8 * prev_im);
+        prev_re = re;
+        prev_im = im;
+
+        /* 6. Dominant cycle period */
+        let mut mesa = if re != 0.0 && im != 0.0 {
+            2.0 * std::f64::consts::PI / atan_fast(im / re)
+        } else { prev_mesa };
+        mesa = mesa.min(1.5 * prev_mesa).max(0.67 * prev_mesa).max(6.0).min(50.0);
+        mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
+        prev_mesa = mesa;
+
+        /* 7. Adaptive alpha */
+        let phase = if i1 != 0.0 { atan_fast(q1 / i1) * DEG_PER_RAD } else { prev_phase };
+        let mut dp = prev_phase - phase;
+        if dp < 1.0 { dp = 1.0; }
+        prev_phase = phase;
+
+        let mut alpha = fast_limit / dp;
+        alpha = alpha.clamp(slow_limit, fast_limit);
+
+        /* 8. MAMA / FAMA */
+        let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
+        let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
+        prev_mama = cur_mama;
+        prev_fama = cur_fama;
+
+        out_mama[i] = cur_mama;
+        out_fama[i] = cur_fama;
+
+        idx = (idx + 1) & MASK;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn hilbert4_avx2(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
+    // X = [x6,x4,x2,x0]  – order chosen so that vhadd folds without shuffle
+    let v_x = _mm256_set_pd(x6, x4, x2, x0);
+    // H = [‑.0962,‑.5769,.5769,.0962]
+    const H3: f64 = -0.096_2; const H2: f64 = -0.576_9;
+    const H1: f64 =  0.576_9; const H0: f64 =  0.096_2;
+    let v_h = _mm256_set_pd(H3, H2, H1, H0);
+
+    // multiply & first stage add
+    let v_mul = _mm256_mul_pd(v_x, v_h);          // 1 µ‑op
+    let v_sum = _mm256_hadd_pd(v_mul, v_mul);     // horizontal add
+    // fold lanes 0‑1 with 2‑3
+    let v_fold = _mm256_permute2f128_pd(v_sum, v_sum, 0x1);
+    let v_res  = _mm256_add_pd(v_sum, v_fold);    // 1 µ‑op
+    _mm256_cvtsd_f64(v_res)                       // lane 0 → scalar
+}
+
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn mama_avx2_inplace(
     data:       &[f64],
@@ -356,139 +517,155 @@ pub unsafe fn mama_avx2_inplace(
     debug_assert_eq!(data.len(), out_mama.len());
     debug_assert_eq!(data.len(), out_fama.len());
 
-    /* ---------- constants (all f64-suffixed) ---------- */
-    const W0: f64 = 4.0_f64;
-    const W1: f64 = 3.0_f64;
-    const W2: f64 = 2.0_f64;
-    const W3: f64 = 1.0_f64;
+    /* ----------------------------------------------------------
+     * 1. Constants – weights & helpers
+     * -------------------------------------------------------- */
+    const RING_LEN : usize = 8;               // power‑of‑two → & (LEN‑1) instead of %
+    const MASK     : usize = RING_LEN - 1;
 
-    const H0: f64 = 0.096_2_f64;
-    const H1: f64 = 0.576_9_f64;
-    const H2: f64 = -0.576_9_f64;
-    const H3: f64 = -0.096_2_f64;
+    // 4‑3‑2‑1 smoother coefficients (sum = 10).
+    const W0: f64 = 4.0;
+    const W1: f64 = 3.0;
+    const W2: f64 = 2.0;
+    const W3: f64 = 1.0;
 
-    const DEG_PER_RAD: f64 = 180.0_f64 / std::f64::consts::PI;
-    const WARM: usize  = 10;
+    // Hilbert transform taps (John Ehlers)
+    const H0: f64 =  0.096_2;
+    const H1: f64 =  0.576_9;
+    const H2: f64 = -0.576_9;
+    const H3: f64 = -0.096_2;
 
-    /* ---------- 7-slot circular buffers --------------- */
-    let mut smooth    = [data[0]; 7];
-    let mut detrender = [data[0]; 7];
-    let mut i1_buf    = [data[0]; 7];
-    let mut q1_buf    = [data[0]; 7];
+    const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-    /* ---------- rolling state ------------------------- */
-    let mut idx        = 0_usize;
-    let mut prev_mesa  = 0.0_f64;
-    let mut prev_phase = 0.0_f64;
-    let mut prev_mama  = data[0];
-    let mut prev_fama  = data[0];
-    let mut prev_i2    = 0.0_f64;
-    let mut prev_q2    = 0.0_f64;
-    let mut prev_re    = 0.0_f64;
-    let mut prev_im    = 0.0_f64;
+    /* ----------------------------------------------------------
+     * 3. Local ring buffers (filled with first sample)
+     * -------------------------------------------------------- */
+    let first = data[0];
+    let mut smooth    = [first; RING_LEN];
+    let mut detrender = [first; RING_LEN];
+    let mut i1_buf    = [first; RING_LEN];
+    let mut q1_buf    = [first; RING_LEN];
 
-    /* helper: lagged read from ring */
+    /* ----------------------------------------------------------
+     * 4. Rolling state variables
+     * -------------------------------------------------------- */
+    let mut idx         = 0usize;
+    let mut prev_mesa   = 0.0;
+    let mut prev_phase  = 0.0;
+    let mut prev_mama   = first;
+    let mut prev_fama   = first;
+    let mut prev_i2     = 0.0;
+    let mut prev_q2     = 0.0;
+    let mut prev_re     = 0.0;
+    let mut prev_im     = 0.0;
+
+    // lag helper – branch‑free via masking
     #[inline(always)]
-    fn lag(buf: &[f64; 7], p: usize, k: usize) -> f64 {
-        buf[if p >= k { p - k } else { p + 7 - k }]
+    fn lag(buf: &[f64; RING_LEN], p: usize, k: usize) -> f64 {
+        buf[(p.wrapping_sub(k)) & MASK]
     }
 
-    /* ---------------- main loop ----------------------- */
+    /* ----------------------------------------------------------
+     * 5. Main processing loop
+     * -------------------------------------------------------- */
     for (i, &price) in data.iter().enumerate() {
-        /* 4-3-2-1 weighted smoother */
-        let s1 = if i >= 1 { data[i - 1] } else { price };
-        let s2 = if i >= 2 { data[i - 2] } else { price };
-        let s3 = if i >= 3 { data[i - 3] } else { price };
+        /* ---------- 5.1 4‑3‑2‑1 smoother ------------------- */
+        let s1  = if i >= 1 { data[i - 1] } else { price };
+        let s2  = if i >= 2 { data[i - 2] } else { price };
+        let s3  = if i >= 3 { data[i - 3] } else { price };
 
-        let smooth_val = W0.mul_add(
-            price,
-            W1.mul_add(s1, W2.mul_add(s2, s3)),
-        ) / 10.0_f64;
+        // fused  (4p + 3s1 + 2s2 + s3) / 10
+        let smooth_val =
+            W0.mul_add(price,
+            W1.mul_add(s1,
+            W2.mul_add(s2, s3))) * 0.1;
         smooth[idx] = smooth_val;
 
-        /* Hilbert detrender */
-        let dt_val = H0.mul_add(
-            smooth[idx],
-            H1.mul_add(lag(&smooth, idx, 2),
-            H2.mul_add(lag(&smooth, idx, 4),
-            H3 * lag(&smooth, idx, 6)) ),
+        /* ---------- 5.2 Hilbert detrender ------------------ */
+        let dt_val = hilbert4_avx2(
+            smooth[idx], lag(&smooth, idx, 2),
+            lag(&smooth, idx, 4), lag(&smooth, idx, 6)
         );
-        detrender[idx] = dt_val;
 
-        /* in-phase & quadrature */
-        let i1 = if i >= 3 { lag(&detrender, idx, 3) } else { dt_val };
+        /* ---------- 5.3 In‑phase & quadrature -------------- */
+        let i1 = lag(&detrender, idx, 3);        // 3‑bar lag
         i1_buf[idx] = i1;
 
-        let q1 = H0.mul_add(
-            detrender[idx],
+        let q1 =
+            H0.mul_add(detrender[idx],
             H1.mul_add(lag(&detrender, idx, 2),
             H2.mul_add(lag(&detrender, idx, 4),
-            H3 * lag(&detrender, idx, 6)) ),
-        );
+                       H3 * lag(&detrender, idx, 6))));
         q1_buf[idx] = q1;
 
-        /* 90° leads */
-        let j_i = H0.mul_add(
-            i1_buf[idx],
+        /* ---------- 5.4 90° leads -------------------------- */
+        let j_i =
+            H0.mul_add(i1_buf[idx],
             H1.mul_add(lag(&i1_buf, idx, 2),
             H2.mul_add(lag(&i1_buf, idx, 4),
-            H3 * lag(&i1_buf, idx, 6)) ),
-        );
-        let j_q = H0.mul_add(
-            q1_buf[idx],
+                       H3 * lag(&i1_buf, idx, 6))));
+        let j_q =
+            H0.mul_add(q1_buf[idx],
             H1.mul_add(lag(&q1_buf, idx, 2),
             H2.mul_add(lag(&q1_buf, idx, 4),
-            H3 * lag(&q1_buf, idx, 6)) ),
-        );
+                       H3 * lag(&q1_buf, idx, 6))));
 
-        /* homodyne discriminator */
-        let i2   = i1 - j_q;
-        let q2   = q1 + j_i;
-        let i2s  = 0.2_f64.mul_add(i2, 0.8_f64 * prev_i2);
-        let q2s  = 0.2_f64.mul_add(q2, 0.8_f64 * prev_q2);
-        prev_i2  = i2s;
-        prev_q2  = q2s;
+        /* ---------- 5.5 Homodyne discriminator ------------- */
+        let i2  = i1 - j_q;
+        let q2  = q1 + j_i;
+        let i2s = 0.2_f64.mul_add(i2, 0.8 * prev_i2);
+        let q2s = 0.2_f64.mul_add(q2, 0.8 * prev_q2);
+        prev_i2 = i2s;
+        prev_q2 = q2s;
 
-        let re = 0.2_f64.mul_add(i2s * prev_i2 + q2s * prev_q2, 0.8_f64 * prev_re);
-        let im = 0.2_f64.mul_add(i2s * prev_q2 - q2s * prev_i2, 0.8_f64 * prev_im);
+        let re  = 0.2_f64.mul_add(i2s * prev_i2 + q2s * prev_q2, 0.8 * prev_re);
+        let im  = 0.2_f64.mul_add(i2s * prev_q2 - q2s * prev_i2, 0.8 * prev_im);
         prev_re = re;
         prev_im = im;
 
-        /* dominant cycle period */
+        /* ---------- 5.6 Dominant cycle period -------------- */
         let mut mesa = if re != 0.0 && im != 0.0 {
-            2.0_f64 * std::f64::consts::PI / (im / re).atan()
-        
-            } else { prev_mesa };
-        let prior = if i == 0 { mesa } else { prev_mesa };
-        mesa = mesa.min(1.5_f64 * prior).max(0.67_f64 * prior);
-        mesa = mesa.max(6.0_f64).min(50.0_f64);
-        mesa = 0.2_f64.mul_add(mesa, 0.8_f64 * prior);
+            2.0 * std::f64::consts::PI
+                / atan_fast(im / re)
+        } else {
+            prev_mesa
+        };
+
+        mesa = mesa
+            .min(1.5 * prev_mesa)
+            .max(0.67 * prev_mesa)
+            .max(6.0)
+            .min(50.0);
+        mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        /* adaptive alpha */
-        let phase = if i1 != 0.0_f64 { (q1 / i1).atan() * DEG_PER_RAD } else { prev_phase };
+        /* ---------- 5.7 Adaptive alpha --------------------- */
+        let phase = if i1 != 0.0 {
+            atan_fast(q1 / i1)
+                * DEG_PER_RAD
+        } else {
+            prev_phase
+        };
         let mut dp = prev_phase - phase;
-        if dp < 1.0_f64 { dp = 1.0_f64; }
+        if dp < 1.0 { dp = 1.0; }
         prev_phase = phase;
 
         let mut alpha = fast_limit / dp;
-        if alpha < slow_limit { alpha = slow_limit; }
-        if alpha > fast_limit { alpha = fast_limit; }
+        alpha = alpha.clamp(slow_limit, fast_limit);
 
-        /* MAMA & FAMA */
-        let cur_mama = alpha.mul_add(price, (1.0_f64 - alpha) * prev_mama);
-        let cur_fama = (0.5_f64 * alpha).mul_add(cur_mama, (1.0_f64 - 0.5_f64 * alpha) * prev_fama);
+        /* ---------- 5.8 MAMA & FAMA ------------------------ */
+        let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
+        let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = cur_mama;
         prev_fama = cur_fama;
 
         out_mama[i] = cur_mama;
         out_fama[i] = cur_fama;
 
-        /* next slot */
-        idx = if idx == 6 { 0 } else { idx + 1 };
+        /* ---------- 5.9 Advance ring index ----------------- */
+        idx = (idx + 1) & MASK;     // branch‑free, cheaper than %
     }
 }
-
 #[inline(always)]
 fn hilbert(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
     0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6

@@ -62,7 +62,7 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-lto             = "fat"
+lto             = "thin"
 codegen-units   = 255
 incremental = false
 panic           = "abort"
