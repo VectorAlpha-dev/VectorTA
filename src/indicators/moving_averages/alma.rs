@@ -1,28 +1,3 @@
-//! # Arnaud Legoux Moving Average (ALMA)
-//!
-//! A smooth yet responsive moving average that uses Gaussian weighting. Its parameters
-//! (`period`, `offset`, `sigma`) control the window size, the weighting center, and
-//! the Gaussian smoothness. ALMA can also be re-applied to its own output, allowing
-//! iterative smoothing on previously computed results.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points).
-//! - **offset**: Shift in [0.0, 1.0] for the Gaussian center (defaults to 0.85).
-//! - **sigma**: Controls the Gaussian curve’s width (defaults to 6.0).
-//!
-//! ## Errors
-//! - **EmptyInputData**: alma: Input data slice is empty.
-//! - **AllValuesNaN**: alma: All input data values are `NaN`.
-//! - **InvalidPeriod**: alma: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: alma: Not enough valid data points for the requested `period`.
-//! - **InvalidSigma**: alma: `sigma` ≤ 0.0.
-//! - **InvalidOffset**: alma: `offset` is `NaN` or infinite.
-//!
-//! ## Returns
-//! - **`Ok(AlmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(AlmaError)`** otherwise.
-//!
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

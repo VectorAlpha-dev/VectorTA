@@ -9,6 +9,7 @@ def load_test_data():
     data_path = Path(__file__).parent.parent.parent / 'src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv'
     
     candles = {
+        'timestamp': [],
         'open': [],
         'high': [],
         'low': [],
@@ -27,6 +28,7 @@ def load_test_data():
             if len(row) < 6:
                 continue
             # CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+            candles['timestamp'].append(int(row[0]))
             candles['open'].append(float(row[1]))
             candles['close'].append(float(row[2]))
             candles['high'].append(float(row[3]))
@@ -142,6 +144,33 @@ EXPECTED_OUTPUTS = {
             59179.40342783722,
             59171.22758152845,
             59127.859841077094
+        ]
+    },
+    'vwap': {
+        'default_params': {'anchor': '1d'},
+        'last_5_values': [
+            59353.05963230107,
+            59330.15815713043,
+            59289.94649532547,
+            59274.6155462414,
+            58730.0
+        ],
+        'anchor_1D': [
+            59353.05963230107,
+            59330.15815713043,
+            59289.94649532547,
+            59274.6155462414,
+            58730.0
+        ]
+    },
+    'zlema': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            59015.1,
+            59165.2,
+            59168.1,
+            59147.0,
+            58978.9
         ]
     }
 }

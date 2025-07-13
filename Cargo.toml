@@ -39,6 +39,7 @@ ctor = "0.4.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 chrono = { version = "0.4.39", features = ["wasmbind"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 
 [build-dependencies]
@@ -84,6 +85,3 @@ python = ["pyo3", "numpy"]
 
 [package.metadata.wasm-pack]
 "wasm-opt" = false
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }

@@ -20,6 +20,17 @@
 //! - **`Ok(VwapOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(VwapError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
@@ -682,18 +693,16 @@ fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::error::Error>>
 
 #[inline]
 fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
-    let naive = NaiveDateTime::from_timestamp(ts_ms / 1000, ((ts_ms % 1000) * 1_000_000) as u32);
-    let dt_utc = chrono::DateTime::<Utc>::from_utc(naive, Utc);
-    let year = dt_utc.year();
-    let month = dt_utc.month();
-    if count == 1 {
-        let group_id = (year as i64) * 12 + (month as i64 - 1);
-        Ok(group_id)
+    // Fast approximation: average days per month = 30.436875
+    let days = ts_ms / 86_400_000;  // floor days since epoch
+    let months = (days as f64 / 30.436875).floor() as i64;  // approximate months since epoch
     
-        } else {
-        let quarter_group = (month as i64 - 1) / (count as i64);
-        let group_id = (year as i64) * 100 + quarter_group;
-        Ok(group_id)
+    if count == 1 {
+        // For 1M anchor, just return the month count
+        Ok(months)
+    } else {
+        // For multi-month anchors (e.g., 3M for quarters), group by count
+        Ok(months / (count as i64))
     }
 }
 
@@ -1015,4 +1024,268 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_anchor_grid);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwap")]
+#[pyo3(signature = (timestamps, volumes, prices, anchor=None, kernel=None))]
+/// Compute the Volume Weighted Average Price (VWAP) of the input data.
+///
+/// VWAP calculates the average price of a security weighted by traded volume,
+/// grouped by the specified time anchor (e.g., "1d", "4h", "1M").
+///
+/// Parameters:
+/// -----------
+/// timestamps : np.ndarray
+///     Array of Unix timestamps in milliseconds (int64).
+/// volumes : np.ndarray
+///     Array of trading volumes (float64).
+/// prices : np.ndarray
+///     Array of prices (float64).
+/// anchor : str, optional
+///     Time period for grouping (e.g., "1d", "4h", "1M"). Default is "1d".
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of VWAP values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If array lengths don't match, anchor is invalid, or data is empty.
+pub fn vwap_py<'py>(
+    py: Python<'py>,
+    timestamps: numpy::PyReadonlyArray1<'py, i64>,
+    volumes: numpy::PyReadonlyArray1<'py, f64>,
+    prices: numpy::PyReadonlyArray1<'py, f64>,
+    anchor: Option<&str>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let ts_slice = timestamps.as_slice()?; // zero-copy, read-only view
+    let vol_slice = volumes.as_slice()?;
+    let price_slice = prices.as_slice()?;
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = VwapParams {
+        anchor: anchor.map(|s| s.to_string()),
+    };
+    let vwap_in = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [price_slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), VwapError> {
+        let anchor_str = vwap_in.get_anchor();
+        let (count, unit_char) = parse_anchor(anchor_str)
+            .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
+        
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        // Initialize output array (no warmup for VWAP)
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch =>
+                    vwap_scalar(ts_slice, vol_slice, price_slice, count, unit_char, slice_out)?,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch =>
+                    vwap_avx2(ts_slice, vol_slice, price_slice, count, unit_char, slice_out)?,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch =>
+                    vwap_avx512(ts_slice, vol_slice, price_slice, count, unit_char, slice_out)?,
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VwapStream")]
+pub struct VwapStreamPy {
+    stream: VwapStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VwapStreamPy {
+    #[new]
+    fn new(anchor: Option<&str>) -> PyResult<Self> {
+        let params = VwapParams {
+            anchor: anchor.map(|s| s.to_string()),
+        };
+        let stream =
+            VwapStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(VwapStreamPy { stream })
+    }
+
+    /// Updates the stream with new values and returns the calculated VWAP value.
+    /// Returns `None` if volume sum is zero.
+    fn update(&mut self, timestamp: i64, price: f64, volume: f64) -> Option<f64> {
+        self.stream.update(timestamp, price, volume)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwap_batch")]
+#[pyo3(signature = (timestamps, volumes, prices, anchor_range, kernel=None))]
+/// Compute VWAP for multiple anchor parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// timestamps : np.ndarray
+///     Array of Unix timestamps in milliseconds (int64).
+/// volumes : np.ndarray
+///     Array of trading volumes (float64).
+/// prices : np.ndarray
+///     Array of prices (float64).
+/// anchor_range : tuple
+///     (start, end, step) for anchor values to compute (e.g., ("1d", "3d", 1)).
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'anchors' array.
+pub fn vwap_batch_py<'py>(
+    py: Python<'py>,
+    timestamps: numpy::PyReadonlyArray1<'py, i64>,
+    volumes: numpy::PyReadonlyArray1<'py, f64>,
+    prices: numpy::PyReadonlyArray1<'py, f64>,
+    anchor_range: (&str, &str, u32),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let ts_slice = timestamps.as_slice()?;
+    let vol_slice = volumes.as_slice()?;
+    let price_slice = prices.as_slice()?;
+
+    let sweep = VwapBatchRange {
+        anchor: (anchor_range.0.to_string(), anchor_range.1.to_string(), anchor_range.2),
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    let output = py.allow_threads(|| {
+        vwap_batch_with_kernel(ts_slice, vol_slice, price_slice, &sweep, kern)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", output.values.into_pyarray(py).reshape((output.rows, output.cols))?)?;
+    dict.set_item(
+        "anchors",
+        output.combos
+            .iter()
+            .map(|p| p.anchor.clone().unwrap_or_else(|| "1d".to_string()))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwap_js(
+    timestamps: &[f64], // Note: JS numbers are f64, we'll convert internally
+    volumes: &[f64],
+    prices: &[f64],
+    anchor: Option<String>,
+    kernel: Option<String>,
+) -> Result<Vec<f64>, JsValue> {
+    // Convert timestamps from f64 to i64
+    let ts_i64: Vec<i64> = timestamps.iter().map(|&t| t as i64).collect();
+    
+    // Parse kernel string to enum
+    let kern = match kernel.as_deref() {
+        None | Some("auto") => Kernel::Scalar,  // Default to scalar for WASM
+        Some("scalar") => Kernel::Scalar,
+        Some("scalar_batch") => Kernel::ScalarBatch,
+        Some(k) => return Err(JsValue::from_str(&format!("Unknown kernel: {}", k))),
+    };
+    
+    let params = VwapParams { anchor };
+    let input = VwapInput::from_slice(&ts_i64, volumes, prices, params);
+
+    vwap_with_kernel(&input, kern)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwap_batch_js(
+    timestamps: &[f64],
+    volumes: &[f64],
+    prices: &[f64],
+    anchor_start: String,
+    anchor_end: String,
+    anchor_step: u32,
+) -> Result<Vec<f64>, JsValue> {
+    // Convert timestamps from f64 to i64
+    let ts_i64: Vec<i64> = timestamps.iter().map(|&t| t as i64).collect();
+    
+    let sweep = VwapBatchRange {
+        anchor: (anchor_start, anchor_end, anchor_step),
+    };
+
+    vwap_batch_with_kernel(&ts_i64, volumes, prices, &sweep, Kernel::ScalarBatch)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwap_batch_metadata_js(
+    anchor_start: String,
+    anchor_end: String,
+    anchor_step: u32,
+) -> Result<Vec<String>, JsValue> {
+    let sweep = VwapBatchRange {
+        anchor: (anchor_start, anchor_end, anchor_step),
+    };
+
+    let combos = expand_grid_vwap(&sweep);
+    let metadata: Vec<String> = combos
+        .iter()
+        .map(|c| c.anchor.clone().unwrap_or_else(|| "1d".to_string()))
+        .collect();
+
+    Ok(metadata)
 }

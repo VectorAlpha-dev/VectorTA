@@ -75,6 +75,10 @@ use crate::indicators::moving_averages::tilson::{tilson_py, tilson_batch_py, Til
 use crate::indicators::moving_averages::trima::{trima_py, trima_batch_py, TrimaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::trendflex::{trendflex_py, trendflex_batch_py, TrendFlexStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::vwap::{vwap_py, vwap_batch_py, VwapStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::zlema::{zlema_py, zlema_batch_py, ZlemaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -257,6 +261,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
     m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
     m.add_class::<TrendFlexStreamPy>()?;
+    
+    // Register VWAP functions with their user-facing names
+    m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vwap_batch_py, m)?)?;
+    m.add_class::<VwapStreamPy>()?;
+    
+    // Register ZLEMA functions with their user-facing names
+    m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
+    m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
+    m.add_class::<ZlemaStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     
