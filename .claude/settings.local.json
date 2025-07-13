@@ -95,7 +95,9 @@
       "Bash(npx jest:*)",
       "Bash(wasm-pack:*)",
       "WebFetch(domain:bheisler.github.io)",
-      "Bash(del test_zero_copy.py)"
+      "Bash(del test_zero_copy.py)",
+      "Bash(.venvScriptsactivate)",
+      "Bash(.venvScriptsactivate.bat)"
     ],
     "deny": []
   }

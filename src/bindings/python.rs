@@ -87,6 +87,10 @@ use crate::indicators::moving_averages::vwma::{vwma_py, vwma_batch_py, VwmaStrea
 use crate::indicators::moving_averages::vwap::{vwap_py, vwap_batch_py, VwapStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_py, zlema_batch_py, ZlemaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::vpwma::{vpwma_py, vpwma_batch_py, VpwmaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::wma::{wma_py, wma_batch_py, WmaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -299,6 +303,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
     m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
     m.add_class::<ZlemaStreamPy>()?;
+    
+    // Register VPWMA functions with their user-facing names
+    m.add_function(wrap_pyfunction!(vpwma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vpwma_batch_py, m)?)?;
+    m.add_class::<VpwmaStreamPy>()?;
+    
+    // Register WMA functions with their user-facing names
+    m.add_function(wrap_pyfunction!(wma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
+    m.add_class::<WmaStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     
