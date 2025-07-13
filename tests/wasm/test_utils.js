@@ -20,6 +20,7 @@ function loadTestData() {
     });
     
     const candles = {
+        timestamp: [],
         open: [],
         high: [],
         low: [],
@@ -30,6 +31,7 @@ function loadTestData() {
     for (const row of records) {
         if (row.length < 6) continue;
         // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+        candles.timestamp.push(parseFloat(row[0]));  // JS numbers are f64
         candles.open.push(parseFloat(row[1]));
         candles.close.push(parseFloat(row[2]));
         candles.high.push(parseFloat(row[3]));
@@ -226,6 +228,33 @@ const EXPECTED_OUTPUTS = {
             -26.0,
             -66.5,
             -114.4
+        ]
+    },
+    vwap: {
+        defaultParams: { anchor: '1d' },
+        last5Values: [
+            59353.05963230107,
+            59330.15815713043,
+            59289.94649532547,
+            59274.6155462414,
+            58730.0
+        ],
+        anchor1D: [
+            59353.05963230107,
+            59330.15815713043,
+            59289.94649532547,
+            59274.6155462414,
+            58730.0
+        ]
+    },
+    zlema: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59015.1,
+            59165.2,
+            59168.1,
+            59147.0,
+            58978.9
         ]
     }
 };

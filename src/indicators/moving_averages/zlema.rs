@@ -780,3 +780,275 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+/// Zero-copy version that writes directly into a provided buffer
+#[inline]
+pub fn zlema_compute_into(
+    input: &ZlemaInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), ZlemaError> {
+    let data: &[f64] = match &input.data {
+        ZlemaData::Candles { candles, source } => source_type(candles, source),
+        ZlemaData::Slice(sl) => sl,
+    };
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(ZlemaError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(ZlemaError::InvalidPeriod { period, data_len: len - first });
+    }
+
+    let warm = first + period;
+    
+    // Initialize the warmup period with NaN
+    out[..warm].fill(f64::NAN);
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // Write directly into the provided buffer
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                zlema_scalar(data, period, first, out);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                zlema_avx2(data, period, first, out);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                zlema_avx512(data, period, first, out);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "zlema")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Zero Lag Exponential Moving Average (ZLEMA) of the input data.
+///
+/// ZLEMA reduces lag by de-lagging the input before EMA calculation.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of ZLEMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period is 0 or exceeds data length).
+pub fn zlema_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = ZlemaParams {
+        period: Some(period),
+    };
+    let zlema_in = ZlemaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL - TRUE ZERO-COPY
+    py.allow_threads(|| -> Result<(), ZlemaError> {
+        zlema_compute_into(&zlema_in, kern, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ZlemaStream")]
+pub struct ZlemaStreamPy {
+    stream: ZlemaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ZlemaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = ZlemaParams {
+            period: Some(period),
+        };
+        let stream =
+            ZlemaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(ZlemaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated ZLEMA value.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "zlema_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute ZLEMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn zlema_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = ZlemaBatchRange {
+        period: period_range,
+    };
+
+    // Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    py.allow_threads(|| -> Result<(), ZlemaError> {
+        let result = zlema_batch_with_kernel(slice_in, &sweep, kern)?;
+        // Copy result directly into pre-allocated buffer
+        slice_out.copy_from_slice(&result.values);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = ZlemaParams {
+        period: Some(period),
+    };
+    let input = ZlemaInput::from_slice(data, params);
+
+    zlema_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = ZlemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    zlema_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = ZlemaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}

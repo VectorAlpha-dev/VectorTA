@@ -83,6 +83,10 @@ use crate::indicators::moving_averages::wilders::{wilders_py, wilders_batch_py, 
 use crate::indicators::ad::{ad_py, ad_batch_py, AdStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwma::{vwma_py, vwma_batch_py, VwmaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::vwap::{vwap_py, vwap_batch_py, VwapStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::zlema::{zlema_py, zlema_batch_py, ZlemaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -285,6 +289,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
     m.add_class::<VwmaStreamPy>()?;
+    
+    // Register VWAP functions with their user-facing names
+    m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vwap_batch_py, m)?)?;
+    m.add_class::<VwapStreamPy>()?;
+    
+    // Register ZLEMA functions with their user-facing names
+    m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
+    m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
+    m.add_class::<ZlemaStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     
