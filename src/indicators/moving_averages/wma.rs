@@ -14,6 +14,17 @@
 //! - **`Ok(WmaOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(WmaError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
@@ -172,6 +183,25 @@ pub fn wma(input: &WmaInput) -> Result<WmaOutput, WmaError> {
 }
 
 pub fn wma_with_kernel(input: &WmaInput, kernel: Kernel) -> Result<WmaOutput, WmaError> {
+    let (data, period, first, chosen) = wma_prepare(input, kernel)?;
+    let len = data.len();
+    let warm = first + period;
+    let mut out = alloc_with_nan_prefix(len, warm);
+    
+    wma_compute_into(data, period, first, chosen, &mut out);
+    
+    Ok(WmaOutput { values: out })
+}
+
+fn wma_prepare<'a>(
+    input: &'a WmaInput,
+    kernel: Kernel,
+) -> Result<(
+    /*data*/ &'a [f64],
+    /*period*/ usize,
+    /*first*/ usize,
+    /*chosen*/ Kernel,
+), WmaError> {
     let data: &[f64] = match &input.data {
         WmaData::Candles { candles, source } => source_type(candles, source),
         WmaData::Slice(sl) => sl,
@@ -203,27 +233,33 @@ pub fn wma_with_kernel(input: &WmaInput, kernel: Kernel) -> Result<WmaOutput, Wm
         other => other,
     };
 
-    let warm = first + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
+    Ok((data, period, first, chosen))
+}
 
+#[inline(always)]
+fn wma_compute_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
     unsafe {
-        match chosen {
+        match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                wma_scalar(data, period, first, &mut out)
+                wma_scalar(data, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                wma_avx2(data, period, first, &mut out)
+                wma_avx2(data, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                wma_avx512(data, period, first, &mut out)
+                wma_avx512(data, period, first, out)
             }
             _ => unreachable!(),
         }
     }
-
-    Ok(WmaOutput { values: out })
 }
 
 #[inline]
@@ -518,6 +554,27 @@ fn wma_batch_inner(
     parallel: bool,
 ) -> Result<WmaBatchOutput, WmaError> {
     let combos = expand_grid(sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Allocate output buffer
+    let mut values = vec![0.0; rows * cols];
+    
+    // Use the _into variant for zero-copy
+    wma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(WmaBatchOutput { values, combos, rows, cols })
+}
+
+#[inline(always)]
+fn wma_batch_inner_into(
+    data: &[f64],
+    sweep: &WmaBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<WmaParams>, WmaError> {
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(WmaError::InvalidPeriod {
             period: 0,
@@ -546,9 +603,19 @@ fn wma_batch_inner(
         .map(|c| first + c.period.unwrap())
         .collect();
 
-    // ---------- 2.  Allocate as MaybeUninit and fill NaN prefixes ----------
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    // ---------- 2.  Reinterpret output slice as MaybeUninit for efficient initialization ----------
+    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
+    // init_matrix_prefixes function. This is safe because:
+    // 1. MaybeUninit<T> has the same layout as T
+    // 2. We ensure all values are written before the slice is used again
+    let out_uninit = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        )
+    };
+    
+    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     // ---------- 3.  Closure that fills one row ----------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -572,35 +639,24 @@ fn wma_batch_inner(
 
     // ---------- 4.  Run every row ----------
     if parallel {
-
         #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
+            out_uninit.par_chunks_mut(cols)
                 .enumerate()
-
                 .for_each(|(row, slice)| do_row(row, slice));
-
         }
 
         #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    // ---------- 5.  All rows initialised → transmute to Vec<f64> ----------
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
-
-    Ok(WmaBatchOutput { values, combos, rows, cols })
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -951,4 +1007,238 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wma")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute the Weighted Moving Average (WMA) of the input data.
+///
+/// WMA assigns linearly increasing weights to each data point in the window,
+/// with the most recent values carrying the highest weights.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Window size (must be >= 2).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of WMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period < 2, exceeds data length, etc).
+pub fn wma_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = WmaParams {
+        period: Some(period),
+    };
+    let wma_in = WmaInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), WmaError> {
+        let (data, period, first, chosen) = wma_prepare(&wma_in, kern)?;
+        // Fill NaN prefix directly in output buffer (same as alloc_with_nan_prefix)
+        let warm = first + period;
+        slice_out[..warm].fill(f64::NAN);
+        // Compute directly into output buffer
+        wma_compute_into(data, period, first, chosen, slice_out);
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "WmaStream")]
+pub struct WmaStreamPy {
+    stream: WmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl WmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = WmaParams {
+            period: Some(period),
+        };
+        let stream =
+            WmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(WmaStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated WMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute WMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn wma_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = WmaBatchRange {
+        period: period_range,
+    };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffer
+        wma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = WmaParams {
+        period: Some(period),
+    };
+    let input = WmaInput::from_slice(data, params);
+
+    wma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = WmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    wma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = WmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
 }
