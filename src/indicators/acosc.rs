@@ -21,7 +21,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
@@ -434,6 +433,251 @@ impl AcoscBuilder {
         let input = AcoscInput::from_slices(high, low, AcoscParams::default());
         acosc_with_kernel(&input, self.kernel)
     }
+}
+
+#[cfg(feature = "python")]
+use numpy;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "acosc")]
+#[pyo3(signature = (high, low, kernel=None))]
+/// Compute the Accelerator Oscillator (ACOSC) of the input data.
+///
+/// Bill Williams' AC Oscillator measures median price acceleration via SMA5, SMA34,
+/// and further SMA5 smoothing.
+///
+/// Parameters:
+/// -----------
+/// high : np.ndarray
+///     Array of high prices (float64).
+/// low : np.ndarray
+///     Array of low prices (float64).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// tuple[np.ndarray, np.ndarray]
+///     Tuple of (osc, change) arrays, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If high/low lengths mismatch or insufficient data.
+pub fn acosc_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?; // zero-copy, read-only view
+    let low_slice = low.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = AcoscParams::default();
+    let acosc_in = AcoscInput::from_slices(high_slice, low_slice, params);
+
+    // Allocate NumPy output buffers
+    let out_osc = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
+    let out_change = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
+    let slice_osc = unsafe { out_osc.as_slice_mut()? };
+    let slice_change = unsafe { out_change.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), AcoscError> {
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+        
+        // Initialize NaN values
+        slice_osc.fill(f64::NAN);
+        slice_change.fill(f64::NAN);
+        
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    acosc_scalar(high_slice, low_slice, slice_osc, slice_change)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    acosc_avx2(high_slice, low_slice, slice_osc, slice_change)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    acosc_avx512(high_slice, low_slice, slice_osc, slice_change)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok((out_osc.into(), out_change.into()))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AcoscStream")]
+pub struct AcoscStreamPy {
+    stream: AcoscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AcoscStreamPy {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let params = AcoscParams::default();
+        let stream = AcoscStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AcoscStreamPy { stream })
+    }
+
+    /// Updates the stream with new high/low values and returns the calculated (osc, change) tuple.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
+        self.stream.update(high, low)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "acosc_batch")]
+#[pyo3(signature = (high, low, kernel=None))]
+/// Compute ACOSC in batch mode (since ACOSC has no parameters, this is equivalent to single mode).
+///
+/// Parameters:
+/// -----------
+/// high : np.ndarray
+///     Array of high prices (float64).
+/// low : np.ndarray
+///     Array of low prices (float64).
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'osc' and 'change' arrays (2D with 1 row).
+pub fn acosc_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Since ACOSC has no parameters, we always have 1 row
+    let rows = 1;
+    let cols = high_slice.len();
+
+    // Pre-allocate NumPy arrays
+    let out_osc = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_change = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_osc = unsafe { out_osc.as_slice_mut()? };
+    let slice_change = unsafe { out_change.as_slice_mut()? };
+
+    // Heavy work without the GIL
+    py.allow_threads(|| -> Result<(), AcoscError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Initialize NaN values
+        slice_osc.fill(f64::NAN);
+        slice_change.fill(f64::NAN);
+
+        unsafe {
+            match simd {
+                Kernel::Scalar => acosc_scalar(high_slice, low_slice, slice_osc, slice_change),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => acosc_avx2(high_slice, low_slice, slice_osc, slice_change),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => acosc_avx512(high_slice, low_slice, slice_osc, slice_change),
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("osc", out_osc.reshape((rows, cols))?)?;
+    dict.set_item("change", out_change.reshape((rows, cols))?)?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
+    let params = AcoscParams::default();
+    let input = AcoscInput::from_slices(high, low, params);
+
+    acosc_with_kernel(&input, Kernel::Scalar)
+        .map(|o| {
+            // Flatten osc and change into a single vector
+            let mut result = Vec::with_capacity(o.osc.len() * 2);
+            result.extend_from_slice(&o.osc);
+            result.extend_from_slice(&o.change);
+            result
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_batch_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
+    // Since ACOSC has no parameters, batch is the same as single
+    acosc_js(high, low)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
+    // Since ACOSC has no parameters, return empty metadata
+    Ok(vec![])
 }
 
 #[cfg(test)]

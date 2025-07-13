@@ -15,6 +15,17 @@
 //! - **Ok(VwmaOutput)** on success, containing the VWMA as a Vec<f64>.
 //! - **Err(VwmaError)** on error.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
@@ -837,4 +848,337 @@ mod batch_tests {
     gen_batch_tests!(check_batch_default_row);
 }
 
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwma")]
+#[pyo3(signature = (prices, volumes, period, kernel=None))]
+/// Compute the Volume Weighted Moving Average (VWMA) of the input data.
+///
+/// VWMA weights each price by its volume over a moving window to capture
+/// price action with regard to trading activity.
+///
+/// Parameters:
+/// -----------
+/// prices : np.ndarray
+///     Price data array (float64).
+/// volumes : np.ndarray
+///     Volume data array (float64), must be same length as prices.
+/// period : int
+///     Number of bars in the moving average window.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of VWMA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (mismatched lengths, invalid period, etc).
+pub fn vwma_py<'py>(
+    py: Python<'py>,
+    prices: numpy::PyReadonlyArray1<'py, f64>,
+    volumes: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let prices_slice = prices.as_slice()?;
+    let volumes_slice = volumes.as_slice()?;
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = VwmaParams { period: Some(period) };
+    let vwma_in = VwmaInput::from_slice(prices_slice, volumes_slice, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [prices_slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), VwmaError> {
+        let (price, volume): (&[f64], &[f64]) = match &vwma_in.data {
+            VwmaData::Slice { prices, volumes } => (prices, volumes),
+            _ => unreachable!(),
+        };
+        
+        let len = price.len();
+        let period = vwma_in.get_period();
+
+        if period == 0 || period > len {
+            return Err(VwmaError::InvalidPeriod { period, data_len: len });
+        }
+        if volume.len() != len {
+            return Err(VwmaError::PriceVolumeMismatch {
+                price_len: len,
+                volume_len: volume.len(),
+            });
+        }
+
+        let first = price
+            .iter()
+            .zip(volume.iter())
+            .position(|(&p, &v)| !p.is_nan() && !v.is_nan())
+            .ok_or(VwmaError::AllValuesNaN)?;
+
+        if (len - first) < period {
+            return Err(VwmaError::NotEnoughValidData {
+                needed: period,
+                valid: len - first,
+            });
+        }
+
+        let warm = first + period;
+        
+        // Initialize prefix with NaN
+        slice_out[..warm - 1].fill(f64::NAN);
+
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    vwma_scalar(price, volume, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    vwma_avx2(price, volume, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    vwma_avx512(price, volume, period, first, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VwmaStream")]
+pub struct VwmaStreamPy {
+    stream: VwmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VwmaStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = VwmaParams { period: Some(period) };
+        let stream = VwmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(VwmaStreamPy { stream })
+    }
+
+    /// Updates the stream with new price and volume values and returns the calculated VWMA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
+        self.stream.update(price, volume)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwma_batch")]
+#[pyo3(signature = (prices, volumes, period_range, kernel=None))]
+/// Compute VWMA for multiple period values in a single pass.
+///
+/// Parameters:
+/// -----------
+/// prices : np.ndarray
+///     Price data array (float64).
+/// volumes : np.ndarray
+///     Volume data array (float64), must be same length as prices.
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' array.
+pub fn vwma_batch_py<'py>(
+    py: Python<'py>,
+    prices: numpy::PyReadonlyArray1<'py, f64>,
+    volumes: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let prices_slice = prices.as_slice()?;
+    let volumes_slice = volumes.as_slice()?;
+
+    let sweep = VwmaBatchRange { period: period_range };
+
+    // Expand grid to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = prices_slice.len();
+
+    // Pre-allocate NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    py.allow_threads(|| {
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        
+        // Initialize output with NaN and compute
+        let len = prices_slice.len();
+        let first = prices_slice
+            .iter()
+            .zip(volumes_slice.iter())
+            .position(|(&p, &v)| !p.is_nan() && !v.is_nan())
+            .ok_or(VwmaError::AllValuesNaN)?;
+
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if len - first < max_p {
+            return Err(VwmaError::NotEnoughValidData {
+                needed: max_p,
+                valid: len - first,
+            });
+        }
+
+        // Initialize matrix prefixes with NaN
+        let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+        
+        // Convert slice_out to MaybeUninit for init_matrix_prefixes
+        let out_uninit = unsafe {
+            std::slice::from_raw_parts_mut(
+                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                slice_out.len()
+            )
+        };
+        
+        unsafe { init_matrix_prefixes(out_uninit, cols, &warm_prefixes) };
+
+        // Process each row
+        for (row, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap();
+            let row_start = row * cols;
+            let row_slice = &mut slice_out[row_start..row_start + cols];
+            
+            unsafe {
+                match simd {
+                    Kernel::Scalar => vwma_row_scalar(prices_slice, volumes_slice, first, period, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => vwma_row_avx2(prices_slice, volumes_slice, first, period, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => vwma_row_avx512(prices_slice, volumes_slice, first, period, row_slice),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        
+        Ok::<_, VwmaError>(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_js(prices: &[f64], volumes: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = VwmaParams { period: Some(period) };
+    let input = VwmaInput::from_slice(prices, volumes, params);
+
+    vwma_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_batch_js(
+    prices: &[f64],
+    volumes: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = VwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    vwma_batch_inner(prices, volumes, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = VwmaBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
 }
