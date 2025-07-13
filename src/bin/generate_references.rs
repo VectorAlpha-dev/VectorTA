@@ -35,6 +35,7 @@ use my_project::indicators::moving_averages::swma::{swma, SwmaInput, SwmaParams}
 use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams};
 use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
 use my_project::indicators::moving_averages::trendflex::{trendflex, TrendFlexInput, TrendFlexParams};
+use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -43,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex");
+        eprintln!("Available indicators: alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -605,6 +606,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = trendflex(&input)?;
             json!({
                 "indicator": "trendflex",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "trima" => {
+            let params = TrimaParams::default();
+            let period = params.period.unwrap_or(30);
+            let input = TrimaInput::from_candles(&candles, source, params);
+            let result = trima(&input)?;
+            json!({
+                "indicator": "trima",
                 "source": source,
                 "params": {
                     "period": period
