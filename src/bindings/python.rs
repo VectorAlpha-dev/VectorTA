@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 // Add module initialization here
 
 #[cfg(feature = "python")]
+use crate::indicators::acosc::{acosc_py, acosc_batch_py, AcoscStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_py, alma_batch_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_py, cwma_batch_py, CwmaStreamPy};
@@ -75,9 +77,16 @@ use crate::indicators::moving_averages::tilson::{tilson_py, tilson_batch_py, Til
 use crate::indicators::moving_averages::trima::{trima_py, trima_batch_py, TrimaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::trendflex::{trendflex_py, trendflex_batch_py, TrendFlexStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::vwma::{vwma_py, vwma_batch_py, VwmaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Register ACOSC functions with their user-facing names
+    m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
+    m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
+    m.add_class::<AcoscStreamPy>()?;
+    
     // Register ALMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(alma_py, m)?)?;
     m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
@@ -257,6 +266,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
     m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
     m.add_class::<TrendFlexStreamPy>()?;
+    
+    // Register VWMA functions with their user-facing names
+    m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
+    m.add_class::<VwmaStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     
