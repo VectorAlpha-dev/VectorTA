@@ -28,18 +28,18 @@ itertools = "0.14.0"
 wasm-bindgen = { version = "0.2.95", optional = true }
 pyo3 = { version = "0.25.0", optional = true, features = ["extension-module"] }
 numpy = { version = "0.25.0", optional = true }
-proptest = { version = "1.7.0", optional = true }
 smallvec = "1.15.1"
 float-cmp = "0.10.0"
-imp = "0.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+proptest = { version = "1.7.0", optional = true }
 rayon = "1.10.0"
 ctor = "0.4.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 chrono = { version = "0.4.39", features = ["wasmbind"] }
 getrandom = { version = "0.2", features = ["js"] }
+
 
 [build-dependencies]
 cmake = "0.1.54"
@@ -84,4 +84,3 @@ python = ["pyo3", "numpy"]
 
 [package.metadata.wasm-pack]
 "wasm-opt" = false
-
