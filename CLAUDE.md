@@ -81,6 +81,31 @@ A separate Astro-based website exists in `website/` for showcasing indicators wi
 
 ## Testing Individual Indicators
 
+### Quick Testing Commands
+For any indicator, use these two commands:
+```bash
+# Test Rust implementation (replace 'indicator_name' with actual indicator)
+cargo test --features nightly-avx --lib indicators::moving_averages::indicator_name -- --nocapture
+
+# Test Python and WASM bindings (Linux/Mac/WSL)
+./test_bindings.sh indicator_name
+
+# Test Python and WASM bindings (Windows native - run separately):
+# For Python (first time setup):
+# If you get virtualenv errors, delete and recreate it:
+rmdir /s /q .venv
+python -m venv .venv
+.venv\Scripts\activate
+pip install maturin pytest pytest-xdist numpy
+maturin develop --features python --release
+python tests/python/run_all_tests.py indicator_name
+
+# For WASM (first time setup):
+cargo install wasm-pack
+wasm-pack build --target nodejs --features wasm
+cd tests/wasm && npm test -- indicator_name
+```
+
 ### Rust Tests
 To test a specific indicator with nightly-avx features:
 ```bash
@@ -93,6 +118,8 @@ cargo test --features nightly-avx --lib indicators::rsi -- --nocapture
 cargo test --features nightly-avx --lib indicators::moving_averages::ema -- --nocapture
 cargo test --features nightly-avx --lib indicators::bollinger_bands -- --nocapture
 ```
+
+Note: For moving averages, use the full path: `indicators::moving_averages::indicator_name`
 
 ### Python and WASM Binding Tests
 Test bindings for all indicators:
