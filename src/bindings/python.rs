@@ -75,9 +75,18 @@ use crate::indicators::moving_averages::tilson::{tilson_py, tilson_batch_py, Til
 use crate::indicators::moving_averages::trima::{trima_py, trima_batch_py, TrimaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::trendflex::{trendflex_py, trendflex_batch_py, TrendFlexStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::wilders::{wilders_py, wilders_batch_py, WildersStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ad::{ad_py, ad_batch_py, AdStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Register AD functions with their user-facing names
+    m.add_function(wrap_pyfunction!(ad_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ad_batch_py, m)?)?;
+    m.add_class::<AdStreamPy>()?;
+    
     // Register ALMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(alma_py, m)?)?;
     m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
@@ -257,6 +266,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
     m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
     m.add_class::<TrendFlexStreamPy>()?;
+    
+    // Register Wilders functions with their user-facing names
+    m.add_function(wrap_pyfunction!(wilders_py, m)?)?;
+    m.add_function(wrap_pyfunction!(wilders_batch_py, m)?)?;
+    m.add_class::<WildersStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     

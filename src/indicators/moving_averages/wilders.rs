@@ -1,4 +1,4 @@
-//! # Wilder’s Moving Average (Wilders)
+//! # Wilder's Moving Average (Wilders)
 //!
 //! A moving average introduced by J. Welles Wilder, commonly used in indicators such as
 //! the Average Directional Index (ADX). Places a heavier emphasis on new data than an SMA,
@@ -215,6 +215,7 @@ pub fn wilders_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2")]
 pub unsafe fn wilders_avx2(
     data: &[f64],
     period: usize,
@@ -226,6 +227,7 @@ pub unsafe fn wilders_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_avx512(
     data: &[f64],
     period: usize,
@@ -242,6 +244,7 @@ pub unsafe fn wilders_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_avx512_short(
     data: &[f64],
     period: usize,
@@ -253,6 +256,7 @@ pub unsafe fn wilders_avx512_short(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_avx512_long(
     data: &[f64],
     period: usize,
@@ -267,6 +271,7 @@ pub unsafe fn wilders_avx512_long(
 #[derive(Debug, Clone)]
 pub struct WildersStream {
     period: usize,
+    alpha: f64,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
@@ -280,8 +285,10 @@ impl WildersStream {
         if period == 0 {
             return Err(WildersError::InvalidPeriod { period, data_len: 0 });
         }
+        let alpha = 1.0 / (period as f64);
         Ok(Self {
             period,
+            alpha,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
@@ -302,7 +309,7 @@ impl WildersStream {
             Some(self.last)
         
             } else {
-            self.last = (value - self.last) / (self.period as f64) + self.last;
+            self.last += (value - self.last) * self.alpha;
             Some(self.last)
         }
     }
@@ -528,6 +535,7 @@ pub unsafe fn wilders_row_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+#[target_feature(enable = "avx2")]
 pub unsafe fn wilders_row_avx2(
     data: &[f64],
     first: usize,
@@ -539,6 +547,7 @@ pub unsafe fn wilders_row_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512(
     data: &[f64],
     first: usize,
@@ -555,6 +564,7 @@ pub unsafe fn wilders_row_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512_short(
     data: &[f64],
     first: usize,
@@ -566,6 +576,7 @@ pub unsafe fn wilders_row_avx512_short(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512_long(
     data: &[f64],
     first: usize,
@@ -817,4 +828,326 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wilders")]
+#[pyo3(signature = (data, period, kernel=None))]
+/// Compute Wilder's Moving Average of the input data.
+///
+/// Wilder's Moving Average is a smoothing technique that places less emphasis on old data
+/// than an EMA but more than an SMA. It's commonly used in technical indicators like RSI and ADX.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period : int
+///     Number of data points in the moving average window.
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of Wilder's MA values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (period = 0, period > data length, etc).
+pub fn wilders_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Build input struct
+    let params = WildersParams {
+        period: Some(period),
+    };
+    let wilders_in = WildersInput::from_slice(slice_in, params);
+
+    // Allocate NumPy output buffer
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), WildersError> {
+        let data = wilders_in.as_ref();
+        let len = data.len();
+        let period = wilders_in.get_period();
+
+        let first = data.iter().position(|x| !x.is_nan()).ok_or(WildersError::AllValuesNaN)?;
+        if period == 0 || period > len {
+            return Err(WildersError::InvalidPeriod { period, data_len: len });
+        }
+        if (len - first) < period {
+            return Err(WildersError::NotEnoughValidData { needed: period, valid: len - first });
+        }
+
+        let warm = first + period - 1;
+        // Initialize NaN prefix
+        slice_out[..warm].fill(f64::NAN);
+
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    wilders_scalar(data, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    wilders_avx2(data, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    wilders_avx512(data, period, first, slice_out)
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    wilders_scalar(data, period, first, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "WildersStream")]
+pub struct WildersStreamPy {
+    stream: WildersStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl WildersStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = WildersParams {
+            period: Some(period),
+        };
+        let stream =
+            WildersStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(WildersStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated Wilder's MA value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wilders_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+/// Compute Wilder's MA for multiple parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// data : np.ndarray
+///     Input data array (float64).
+/// period_range : tuple
+///     (start, end, step) for period values to compute.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array) and 'periods' arrays.
+pub fn wilders_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = WildersBatchRange {
+        period: period_range,
+    };
+
+    // Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // Pre-allocate NumPy array (1-D, will reshape later)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Direct implementation to write into pre-allocated buffer
+        let combos = expand_grid(&sweep);
+        if combos.is_empty() {
+            return Err(WildersError::InvalidPeriod { period: 0, data_len: 0 });
+        }
+        let first = slice_in.iter().position(|x| !x.is_nan()).ok_or(WildersError::AllValuesNaN)?;
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if slice_in.len() - first < max_p {
+            return Err(WildersError::NotEnoughValidData { needed: max_p, valid: slice_in.len() - first });
+        }
+        
+        let warm: Vec<usize> = combos
+            .iter()
+            .map(|c| first + c.period.unwrap() - 1)
+            .collect();
+
+        // Initialize NaN prefixes
+        for (row, &warm_idx) in warm.iter().enumerate() {
+            let row_start = row * cols;
+            slice_out[row_start..row_start + warm_idx].fill(f64::NAN);
+        }
+
+        // Compute each row
+        for (row, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap();
+            let row_start = row * cols;
+            let out_row = &mut slice_out[row_start..row_start + cols];
+
+            unsafe {
+                match simd {
+                    Kernel::Scalar => wilders_row_scalar(slice_in, first, period, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => wilders_row_avx2(slice_in, first, period, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => wilders_row_avx512(slice_in, first, period, out_row),
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    Kernel::Avx2 | Kernel::Avx512 => wilders_row_scalar(slice_in, first, period, out_row),
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wilders_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = WildersParams {
+        period: Some(period),
+    };
+    let input = WildersInput::from_slice(data, params);
+
+    wilders_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wilders_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = WildersBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    wilders_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wilders_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = WildersBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
 }

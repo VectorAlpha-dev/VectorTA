@@ -289,6 +289,29 @@ fn ad_batch_inner(
     let rows = data.highs.len();
     let cols = if rows > 0 { data.highs[0].len() } else { 0 };
     let mut values = vec![0.0; rows * cols];
+    
+    ad_batch_inner_into(data, kern, parallel, &mut values)?;
+    
+    Ok(AdBatchOutput { values, rows, cols })
+}
+
+fn ad_batch_inner_into(
+    data: &AdBatchInput,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<(), AdError> {
+    let rows = data.highs.len();
+    let cols = if rows > 0 { data.highs[0].len() } else { 0 };
+    
+    if out.len() != rows * cols {
+        return Err(AdError::DataLengthMismatch {
+            high_len: rows,
+            low_len: rows,
+            close_len: rows,
+            volume_len: out.len(),
+        });
+    }
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         ad_row_scalar(
@@ -303,7 +326,7 @@ fn ad_batch_inner(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            values
+            out
                 .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
@@ -311,17 +334,17 @@ fn ad_batch_inner(
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    Ok(AdBatchOutput { values, rows, cols })
+    Ok(())
 }
 
 #[inline(always)]
@@ -452,6 +475,330 @@ fn expand_grid_ad<'a>(
         out.push((highs[i], lows[i], closes[i], volumes[i]));
     }
     out
+}
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ad")]
+#[pyo3(signature = (high, low, close, volume, kernel=None))]
+/// Compute the Chaikin Accumulation/Distribution (AD) indicator.
+///
+/// AD is a volume-based cumulative money flow indicator that uses the relationship
+/// between close, high, and low prices to determine the Money Flow Multiplier,
+/// which is then multiplied by volume to create Money Flow Volume.
+///
+/// Parameters:
+/// -----------
+/// high : np.ndarray
+///     High prices array (float64).
+/// low : np.ndarray
+///     Low prices array (float64).
+/// close : np.ndarray
+///     Close prices array (float64).
+/// volume : np.ndarray
+///     Volume array (float64).
+/// kernel : str, optional
+///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// np.ndarray
+///     Array of AD values, same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If input arrays have different lengths or are empty.
+pub fn ad_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    volume: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    // Zero-copy views of input arrays
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Create input struct
+    let input = AdInput::from_slices(
+        high_slice,
+        low_slice,
+        close_slice,
+        volume_slice,
+        AdParams::default(),
+    );
+
+    // Allocate output array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
+    let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+    // Compute without GIL
+    py.allow_threads(|| -> Result<(), AdError> {
+        // Validate input lengths
+        if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() || high_slice.len() != volume_slice.len() {
+            return Err(AdError::DataLengthMismatch {
+                high_len: high_slice.len(),
+                low_len: low_slice.len(),
+                close_len: close_slice.len(),
+                volume_len: volume_slice.len(),
+            });
+        }
+        
+        let size = high_slice.len();
+        if size < 1 {
+            return Err(AdError::NotEnoughData { len: size });
+        }
+        
+        // Direct computation into output slice - true zero-copy
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        };
+        
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => ad_scalar(high_slice, low_slice, close_slice, volume_slice, out_slice),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => ad_avx2(high_slice, low_slice, close_slice, volume_slice, out_slice),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => ad_avx512(high_slice, low_slice, close_slice, volume_slice, out_slice),
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AdStream")]
+pub struct AdStreamPy {
+    stream: AdStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AdStreamPy {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let stream = AdStream::try_new().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AdStreamPy { stream })
+    }
+
+    /// Updates the stream with new OHLCV data and returns the calculated AD value.
+    fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
+        self.stream.update(high, low, close, volume)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ad_batch")]
+#[pyo3(signature = (highs, lows, closes, volumes, kernel=None))]
+/// Compute AD for multiple securities in a single pass.
+///
+/// This function processes multiple securities (rows) efficiently in parallel.
+/// Each row represents a different security's time series data.
+///
+/// Parameters:
+/// -----------
+/// highs : List[np.ndarray]
+///     List of high price arrays, one per security.
+/// lows : List[np.ndarray]
+///     List of low price arrays, one per security.
+/// closes : List[np.ndarray]
+///     List of close price arrays, one per security.
+/// volumes : List[np.ndarray]
+///     List of volume arrays, one per security.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///     Default is 'auto' which auto-detects the best available.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D array where each row is a security).
+pub fn ad_batch_py<'py>(
+    py: Python<'py>,
+    highs: &Bound<'py, PyList>,
+    lows: &Bound<'py, PyList>,
+    closes: &Bound<'py, PyList>,
+    volumes: &Bound<'py, PyList>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+    use pyo3::types::PyDict;
+
+    // Parse kernel
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::ScalarBatch,
+        Some("avx2") => Kernel::Avx2Batch,
+        Some("avx512") => Kernel::Avx512Batch,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
+
+    // Convert Python lists to Rust vectors of slices
+    let rows = highs.len();
+    if lows.len() != rows || closes.len() != rows || volumes.len() != rows {
+        return Err(PyValueError::new_err(
+            "All input lists must have the same length",
+        ));
+    }
+
+    let mut high_vecs: Vec<Vec<f64>> = Vec::with_capacity(rows);
+    let mut low_vecs: Vec<Vec<f64>> = Vec::with_capacity(rows);
+    let mut close_vecs: Vec<Vec<f64>> = Vec::with_capacity(rows);
+    let mut volume_vecs: Vec<Vec<f64>> = Vec::with_capacity(rows);
+
+    for i in 0..rows {
+        let high_arr: PyReadonlyArray1<f64> = highs.get_item(i)?.extract()?;
+        let low_arr: PyReadonlyArray1<f64> = lows.get_item(i)?.extract()?;
+        let close_arr: PyReadonlyArray1<f64> = closes.get_item(i)?.extract()?;
+        let volume_arr: PyReadonlyArray1<f64> = volumes.get_item(i)?.extract()?;
+
+        high_vecs.push(high_arr.to_vec()?);
+        low_vecs.push(low_arr.to_vec()?);
+        close_vecs.push(close_arr.to_vec()?);
+        volume_vecs.push(volume_arr.to_vec()?);
+    }
+
+    // Convert to slices
+    let high_slices: Vec<&[f64]> = high_vecs.iter().map(|v| v.as_slice()).collect();
+    let low_slices: Vec<&[f64]> = low_vecs.iter().map(|v| v.as_slice()).collect();
+    let close_slices: Vec<&[f64]> = close_vecs.iter().map(|v| v.as_slice()).collect();
+    let volume_slices: Vec<&[f64]> = volume_vecs.iter().map(|v| v.as_slice()).collect();
+
+    let cols = if rows > 0 { high_vecs[0].len() } else { 0 };
+
+    // Pre-allocate output
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_slice = unsafe { out_arr.as_slice_mut()? };
+
+    // Compute without GIL
+    py.allow_threads(|| -> Result<(), AdError> {
+        let batch_input = AdBatchInput {
+            highs: &high_slices,
+            lows: &low_slices,
+            closes: &close_slices,
+            volumes: &volume_slices,
+        };
+        
+        // Direct computation into output slice - true zero-copy
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            other if other.is_batch() => other,
+            _ => Kernel::ScalarBatch,
+        };
+        
+        ad_batch_inner_into(&batch_input, kernel, true, out_slice)?;
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build result dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> Result<Vec<f64>, JsValue> {
+    let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
+
+    ad_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_batch_js(
+    highs_flat: &[f64],
+    lows_flat: &[f64],
+    closes_flat: &[f64],
+    volumes_flat: &[f64],
+    rows: usize,
+) -> Result<Vec<f64>, JsValue> {
+    if highs_flat.is_empty() || rows == 0 {
+        return Err(JsValue::from_str("Empty input data"));
+    }
+
+    let cols = highs_flat.len() / rows;
+    if highs_flat.len() != rows * cols
+        || lows_flat.len() != rows * cols
+        || closes_flat.len() != rows * cols
+        || volumes_flat.len() != rows * cols
+    {
+        return Err(JsValue::from_str("Input arrays must have rows*cols elements"));
+    }
+
+    // Convert flattened arrays to slices
+    let mut high_slices = Vec::with_capacity(rows);
+    let mut low_slices = Vec::with_capacity(rows);
+    let mut close_slices = Vec::with_capacity(rows);
+    let mut volume_slices = Vec::with_capacity(rows);
+
+    for i in 0..rows {
+        let start = i * cols;
+        let end = start + cols;
+        high_slices.push(&highs_flat[start..end]);
+        low_slices.push(&lows_flat[start..end]);
+        close_slices.push(&closes_flat[start..end]);
+        volume_slices.push(&volumes_flat[start..end]);
+    }
+
+    let batch_input = AdBatchInput {
+        highs: &high_slices,
+        lows: &low_slices,
+        closes: &close_slices,
+        volumes: &volume_slices,
+    };
+
+    ad_batch_with_kernel(&batch_input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_batch_metadata_js(rows: usize, cols: usize) -> Vec<f64> {
+    // For AD, we just return the dimensions since there are no parameters
+    vec![rows as f64, cols as f64]
 }
 
 #[cfg(test)]
