@@ -101,8 +101,8 @@ class CriterionComparableBenchmark:
         
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
-            'alma', 'alligator', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc',
-            'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
+            'alma', 'alligator', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
+            'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
@@ -116,7 +116,7 @@ class CriterionComparableBenchmark:
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
-                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch']
+                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'apo_batch', 'bandpass_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -230,6 +230,8 @@ class CriterionComparableBenchmark:
             ('adx', lambda: my_project.adx(data['high'], data['low'], data['close'], 14)),
             ('acosc', lambda: my_project.acosc(data['high'], data['low'])),
             ('adosc', lambda: my_project.adosc(data['high'], data['low'], data['close'], data['volume'], 3, 10)),
+            ('apo', lambda: my_project.apo(data['close'], 10, 20)),
+            ('bandpass', lambda: my_project.bandpass(data['close'], 20, 0.3)),
             ('vwap', lambda: my_project.vwap(data['timestamps'], data['volume'], data['close'], '1d')),
             ('cwma', lambda: my_project.cwma(data['close'], 14)),
             ('dema', lambda: my_project.dema(data['close'], 14)),
@@ -300,6 +302,8 @@ class CriterionComparableBenchmark:
             ('adxr_batch', lambda: my_project.adxr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adx_batch', lambda: my_project.adx_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adosc_batch', lambda: my_project.adosc_batch(data['high'], data['low'], data['close'], data['volume'], (3, 3, 1), (10, 10, 1))),
+            ('apo_batch', lambda: my_project.apo_batch(data['close'], (10, 10, 1), (20, 20, 1))),
+            ('bandpass_batch', lambda: my_project.bandpass_batch(data['close'], (20, 20, 1), (0.3, 0.3, 0.0))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -372,7 +376,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc']:
+        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'apo', 'bandpass']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

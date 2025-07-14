@@ -18,13 +18,28 @@
 //! - **`Ok(ApoOutput)`** on success, containing a `Vec<f64>` matching input length.
 //! - **`Err(ApoError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -59,6 +74,7 @@ pub struct ApoOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct ApoParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -895,4 +911,268 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// ================================================================================================
+// Python Bindings
+// ================================================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "apo")]
+#[pyo3(signature = (data, short_period=10, long_period=20, kernel=None))]
+pub fn apo_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    short_period: usize,
+    long_period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // ---------- build input struct -------------------------------------------------
+    let params = ApoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let apo_in = ApoInput::from_slice(slice_in, params);
+
+    // ---------- allocate uninitialized NumPy output buffer -------------------------
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), ApoError> {
+        let result = apo_with_kernel(&apo_in, kern)?;
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // The APO algorithm guarantees that result.values has exactly the same length as input
+        slice_out.copy_from_slice(&result.values);
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ApoStream")]
+pub struct ApoStreamPy {
+    stream: ApoStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ApoStreamPy {
+    #[new]
+    fn new(short_period: usize, long_period: usize) -> PyResult<Self> {
+        let params = ApoParams {
+            short_period: Some(short_period),
+            long_period: Some(long_period),
+        };
+        let stream =
+            ApoStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(ApoStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated APO value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "apo_batch")]
+#[pyo3(signature = (data, short_period_range, long_period_range, kernel=None))]
+pub fn apo_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = ApoBatchRange {
+        short: short_period_range,
+        long: long_period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("No valid parameter combinations"));
+    }
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<ApoParams>, ApoError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        
+        let result = apo_batch_with_kernel(slice_in, &sweep, kernel)?;
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // The batch algorithm guarantees that result.values has exactly rows * cols elements
+        slice_out.copy_from_slice(&result.values);
+        
+        Ok(result.combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "short_periods",
+        combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "long_periods",
+        combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+// ================================================================================================
+// WASM Bindings
+// ================================================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn apo_js(data: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = ApoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let input = ApoInput::from_slice(data, params);
+
+    apo_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn apo_batch_js(
+    data: &[f64],
+    short_period_start: usize,
+    short_period_end: usize,
+    short_period_step: usize,
+    long_period_start: usize,
+    long_period_end: usize,
+    long_period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = ApoBatchRange {
+        short: (short_period_start, short_period_end, short_period_step),
+        long: (long_period_start, long_period_end, long_period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    apo_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn apo_batch_metadata_js(
+    short_period_start: usize,
+    short_period_end: usize,
+    short_period_step: usize,
+    long_period_start: usize,
+    long_period_end: usize,
+    long_period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = ApoBatchRange {
+        short: (short_period_start, short_period_end, short_period_step),
+        long: (long_period_start, long_period_end, long_period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 2);
+
+    for combo in combos {
+        metadata.push(combo.short_period.unwrap() as f64);
+        metadata.push(combo.long_period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ApoBatchConfig {
+    pub short_period_range: (usize, usize, usize),
+    pub long_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ApoBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<ApoParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = apo_batch)]
+pub fn apo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: ApoBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = ApoBatchRange {
+        short: config.short_period_range,
+        long: config.long_period_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = apo_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = ApoBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
