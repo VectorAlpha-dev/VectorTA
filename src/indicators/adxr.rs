@@ -16,9 +16,28 @@
 //! ## Returns
 //! - **`Ok(AdxrOutput)`** on success, else **`Err(AdxrError)`**.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+// Note: AVec<f64> already implements Send since f64 is Send
+// No wrapper types needed
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -57,6 +76,7 @@ pub struct AdxrOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AdxrParams {
     pub period: Option<usize>,
 }
@@ -603,12 +623,20 @@ fn adxr_batch_inner(
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
+        
+        // Note: out_row is already initialized to NaN, but ADXR only writes from 2*period
+        // Since we pre-initialized with NaN, the prefix is already correct
+        
         match kern {
             Kernel::Scalar => adxr_row_scalar(high, low, close, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => adxr_row_avx2(high, low, close, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => adxr_row_avx512(high, low, close, first, period, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => {
+                adxr_row_scalar(high, low, close, first, period, out_row)
+            }
             _ => unreachable!(),
         }
     };
@@ -935,4 +963,374 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adxr")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+
+pub fn adxr_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?; // zero-copy, read-only view
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate input lengths
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "HLC data length mismatch: high={}, low={}, close={}",
+            high_slice.len(),
+            low_slice.len(),
+            close_slice.len()
+        )));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // ---------- build input struct -------------------------------------------------
+    let params = AdxrParams {
+        period: Some(period),
+    };
+    let adxr_in = AdxrInput::from_slices(high_slice, low_slice, close_slice, params);
+
+    // ---------- allocate uninitialized NumPy output buffer -------------------------
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), AdxrError> {
+        // Get the appropriate kernel
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        };
+
+        // Find first non-NaN value
+        let first = close_slice
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(AdxrError::AllValuesNaN)?;
+
+        // Validate parameters
+        if period == 0 || period > close_slice.len() {
+            return Err(AdxrError::InvalidPeriod {
+                period,
+                data_len: close_slice.len(),
+            });
+        }
+        if close_slice.len() - first < period + 1 {
+            return Err(AdxrError::NotEnoughData {
+                needed: period + 1,
+                valid: close_slice.len() - first,
+            });
+        }
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // ADXR only writes starting at index 2*period, so we must fill the prefix with NaN
+        let fill_len = (first + 2 * period).min(slice_out.len());
+        if fill_len > 0 {
+            slice_out[..fill_len].fill(f64::NAN);
+        }
+        
+        // Now compute ADXR values for the remaining indices
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    adxr_scalar(high_slice, low_slice, close_slice, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    adxr_avx2(high_slice, low_slice, close_slice, period, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    adxr_avx512(high_slice, low_slice, close_slice, period, first, slice_out)
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    // Fallback to scalar when AVX is not available
+                    adxr_scalar(high_slice, low_slice, close_slice, period, first, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AdxrStream")]
+pub struct AdxrStreamPy {
+    stream: AdxrStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AdxrStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = AdxrParams {
+            period: Some(period),
+        };
+        let stream =
+            AdxrStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AdxrStreamPy { stream })
+    }
+
+    /// Updates the stream with new high, low, close values and returns the calculated ADXR value.
+    /// Returns `None` if the buffer is not yet full.
+    /// 
+    /// Note: ADXR streaming requires maintaining full ADX history,
+    /// so this implementation is simplified and may not produce exact values.
+    fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        self.stream.update(high, low, close)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adxr_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+/// Batch ADXR calculation across multiple periods.
+/// 
+/// Note: Unlike ALMA which has 3 parameters (period, offset, sigma),
+/// ADXR only has period as a parameter, so batch processing is simpler.
+pub fn adxr_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate input lengths
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "HLC data length mismatch: high={}, low={}, close={}",
+            high_slice.len(),
+            low_slice.len(),
+            close_slice.len()
+        )));
+    }
+
+    let sweep = AdxrBatchRange {
+        period: period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = close_slice.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    // SAFETY: We must write to ALL elements before returning to Python
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<AdxrParams>, AdxrError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Validate data
+        let first = close_slice
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(AdxrError::AllValuesNaN)?;
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if close_slice.len() - first < max_p + 1 {
+            return Err(AdxrError::NotEnoughData {
+                needed: max_p + 1,
+                valid: close_slice.len() - first,
+            });
+        }
+
+        // Process each row
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            
+            // SAFETY: Fill prefix with NaN since ADXR only writes from index 2*period onwards
+            let fill_len = (first + 2 * period).min(out_row.len());
+            if fill_len > 0 {
+                out_row[..fill_len].fill(f64::NAN);
+            }
+            
+            match simd {
+                Kernel::Scalar => adxr_row_scalar(high_slice, low_slice, close_slice, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => adxr_row_avx2(high_slice, low_slice, close_slice, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => adxr_row_avx512(high_slice, low_slice, close_slice, first, period, out_row),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    adxr_row_scalar(high_slice, low_slice, close_slice, first, period, out_row)
+                }
+                _ => unreachable!(),
+            }
+        };
+
+        // Process all rows in parallel
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice_out
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, row_slice)| do_row(row, row_slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, row_slice) in slice_out.chunks_mut(cols).enumerate() {
+                do_row(row, row_slice);
+            }
+        }
+
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adxr_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = AdxrParams {
+        period: Some(period),
+    };
+    let input = AdxrInput::from_slices(high, low, close, params);
+
+    adxr_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adxr_batch_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AdxrBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    adxr_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adxr_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AdxrBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdxrBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdxrBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AdxrParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = adxr_batch)]
+pub fn adxr_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AdxrBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = AdxrBatchRange {
+        period: config.period_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = adxr_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = AdxrBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

@@ -107,7 +107,7 @@ class CriterionComparableBenchmark:
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
-            'trendflex', 'trima', 'vqwma'
+            'trendflex', 'trima', 'vqwma', 'adxr'
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -116,7 +116,7 @@ class CriterionComparableBenchmark:
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
-                           'hma_batch', 'cwma_batch', 'adx_batch', 'adosc_batch']
+                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -266,6 +266,7 @@ class CriterionComparableBenchmark:
             ('trendflex', lambda: my_project.trendflex(data['close'], 20)),
             ('trima', lambda: my_project.trima(data['close'], 14)),
             ('vqwma', lambda: my_project.vqwma(data['close'], 0.5, 0.2, 0.2)),
+            ('adxr', lambda: my_project.adxr(data['high'], data['low'], data['close'], 14)),
         ]
         
         # Filter if requested
@@ -295,6 +296,7 @@ class CriterionComparableBenchmark:
             ('tema_batch', lambda: my_project.tema_batch(data['close'], (14, 14, 1))),
             ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
+            ('adxr_batch', lambda: my_project.adxr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adx_batch', lambda: my_project.adx_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adosc_batch', lambda: my_project.adosc_batch(data['high'], data['low'], data['close'], data['volume'], (3, 3, 1), (10, 10, 1))),
         ]
@@ -369,7 +371,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adx', 'adosc']:
+        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]
