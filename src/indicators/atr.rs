@@ -16,9 +16,25 @@
 //! - **`Err(AtrError)`** otherwise.
 //!
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -45,6 +61,7 @@ pub struct AtrOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AtrParams {
     pub length: Option<usize>,
 }
@@ -825,4 +842,371 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+// ============= Python and WASM Bindings =============
+
+#[cfg(feature = "python")]
+use pyo3::create_exception;
+
+// Custom Python exceptions for each AtrError variant
+#[cfg(feature = "python")]
+create_exception!(atr, InvalidLengthError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, InconsistentSliceLengthsError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, NoCandlesAvailableError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, NotEnoughDataError, PyValueError);
+
+#[cfg(feature = "python")]
+impl From<AtrError> for PyErr {
+    fn from(err: AtrError) -> PyErr {
+        match err {
+            AtrError::InvalidLength { length } => {
+                InvalidLengthError::new_err(format!("Invalid length for ATR calculation (length={}).", length))
+            }
+            AtrError::InconsistentSliceLengths { high_len, low_len, close_len } => {
+                InconsistentSliceLengthsError::new_err(format!(
+                    "Inconsistent slice lengths for ATR calculation: high={}, low={}, close={}",
+                    high_len, low_len, close_len
+                ))
+            }
+            AtrError::NoCandlesAvailable => {
+                NoCandlesAvailableError::new_err("No candles available for ATR calculation.")
+            }
+            AtrError::NotEnoughData { length, data_len } => {
+                NotEnoughDataError::new_err(format!(
+                    "Not enough data to calculate ATR: length={}, data length={}",
+                    length, data_len
+                ))
+            }
+        }
+    }
+}
+
+/// Helper function to prepare ATR calculation parameters
+#[inline(always)]
+fn atr_prepare<'a>(
+    high: &'a [f64],
+    low: &'a [f64],
+    close: &'a [f64],
+    length: usize,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize), AtrError> {
+    // Check for mismatched lengths
+    if high.len() != low.len() || low.len() != close.len() {
+        return Err(AtrError::InconsistentSliceLengths {
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: close.len(),
+        });
+    }
+
+    // Check for empty data
+    if close.is_empty() {
+        return Err(AtrError::NoCandlesAvailable);
+    }
+
+    // Check for zero length
+    if length == 0 {
+        return Err(AtrError::InvalidLength { length });
+    }
+
+    // Check if we have enough data
+    if length > close.len() {
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: close.len(),
+        });
+    }
+
+    Ok((high, low, close, length))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "atr")]
+#[pyo3(signature = (high, low, close, length=14, kernel=None))]
+pub fn atr_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    length: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    let kernel_enum = match kernel {
+        Some(k) => validate_kernel(k)?,
+        None => Kernel::Auto,
+    };
+
+    // Get slices from numpy arrays - zero copy
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate inputs using prepare function
+    let (high_valid, low_valid, close_valid, length_valid) = 
+        atr_prepare(high_slice, low_slice, close_slice, length)?;
+
+    let len = close_valid.len();
+
+    // Pre-allocate output array
+    let output = unsafe { PyArray1::new(py, [len], false) };
+
+    // Get mutable slice for writing
+    let out_slice = unsafe { output.as_slice_mut()? };
+
+    // Choose kernel
+    let chosen = match kernel_enum {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // SAFETY: We have validated that inputs are the same length
+    // and output buffer is allocated with correct size
+    py.allow_threads(|| unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                atr_scalar(high_valid, low_valid, close_valid, length_valid, out_slice)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                atr_avx2(high_valid, low_valid, close_valid, length_valid, out_slice)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                atr_avx512(high_valid, low_valid, close_valid, length_valid, out_slice)
+            }
+            _ => unreachable!(),
+        }
+    });
+
+    Ok(output.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AtrStream")]
+pub struct AtrStreamPy {
+    stream: AtrStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AtrStreamPy {
+    #[new]
+    pub fn new(length: Option<usize>) -> PyResult<Self> {
+        let params = AtrParams { length };
+        let stream = AtrStream::try_new(params)?;
+        Ok(Self { stream })
+    }
+
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        self.stream.update(high, low, close)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "atr_batch")]
+#[pyo3(signature = (high, low, close, length_range, kernel=None))]
+pub fn atr_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    length_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<&'py PyDict> {
+    let kernel_enum = match kernel {
+        Some(k) => validate_kernel(k, true)?,  // true for batch operation
+        None => Kernel::Auto,
+    };
+
+    let batch_kernel = match kernel_enum {
+        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Scalar => Kernel::ScalarBatch,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 => Kernel::Avx2Batch,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 => Kernel::Avx512Batch,
+        k if k.is_batch() => k,
+        _ => return Err(PyValueError::new_err("Invalid kernel for batch operation")),
+    };
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    let range = AtrBatchRange {
+        length: length_range,
+    };
+
+    // First expand grid to know dimensions
+    let combos = expand_grid(&range);
+    let rows = combos.len();
+    let cols = close_slice.len();
+
+    // Pre-allocate 2D NumPy array
+    let values_2d = unsafe { numpy::PyArray2::new(py, [rows, cols], false) };
+    
+    // Ensure the array is contiguous (should always be true for new arrays)
+    debug_assert!(values_2d.is_contiguous());
+    
+    // Get a pointer to the raw data - need to cast from *mut c_void to *mut f64
+    let raw_ptr = values_2d.data() as *mut f64;
+
+    // Clone combos to avoid recomputing expand_grid
+    let combos_cloned = combos.clone();
+
+    // Compute directly into the pre-allocated array
+    py.allow_threads(|| {
+        // Create a mutable slice view of the entire 2D array as flat
+        let output_slice = unsafe {
+            std::slice::from_raw_parts_mut(raw_ptr, rows * cols)
+        };
+        
+        // Call the inner batch function that works with a flat output slice
+        let simd = match batch_kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        
+        // Process each row
+        for (row_idx, combo) in combos_cloned.iter().enumerate() {
+            let length = combo.length.unwrap_or(14);
+            let row_start = row_idx * cols;
+            let row_slice = &mut output_slice[row_start..row_start + cols];
+            
+            // SAFETY: We have validated inputs and allocated correct output size
+            unsafe {
+                match simd {
+                    Kernel::Scalar => atr_scalar(high_slice, low_slice, close_slice, length, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => atr_avx2(high_slice, low_slice, close_slice, length, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => atr_avx512(high_slice, low_slice, close_slice, length, row_slice),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    });
+
+    let dict = PyDict::new(py);
+    dict.set_item("values", values_2d)?;
+
+    // Extract lengths from combos
+    let lengths: Vec<usize> = combos.iter()
+        .map(|p| p.length.unwrap_or(14))
+        .collect();
+    dict.set_item("lengths", PyList::new(py, &lengths)?)?;
+
+    Ok(dict)
+}
+
+// ============= WASM Bindings =============
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "atr")]
+pub fn atr_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+) -> Result<Vec<f64>, JsError> {
+    let params = AtrParams {
+        length: Some(length),
+    };
+    let input = AtrInput::from_slices(high, low, close, params);
+    let output = atr(&input).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(output.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "atrBatch")]
+pub fn atr_batch_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+) -> Result<Vec<f64>, JsError> {
+    let range = AtrBatchRange {
+        length: (length_start, length_end, length_step),
+    };
+    let output = atr_batch_with_kernel(high, low, close, &range, Kernel::Auto)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(output.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "atrBatchMetadata")]
+pub fn atr_batch_metadata_js(
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+) -> Vec<f64> {
+    let range = AtrBatchRange {
+        length: (length_start, length_end, length_step),
+    };
+    let combos = expand_grid(&range);
+    
+    // Return flat array of lengths
+    combos.iter()
+        .map(|p| p.length.unwrap_or(14) as f64)
+        .collect()
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "atrBatch", skip_jsdoc)]
+pub fn atr_batch_unified_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+) -> Result<JsValue, JsError> {
+    #[derive(Deserialize)]
+    struct BatchConfig {
+        length_range: [usize; 3],
+    }
+
+    let config: BatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    let range = AtrBatchRange {
+        length: (config.length_range[0], config.length_range[1], config.length_range[2]),
+    };
+
+    let output = atr_batch_with_kernel(high, low, close, &range, Kernel::Auto)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    #[derive(Serialize)]
+    struct BatchResult {
+        values: Vec<f64>,
+        combos: Vec<AtrParams>,
+        rows: usize,
+        cols: usize,
+    }
+
+    let result = BatchResult {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+// Python module registration for custom exceptions
+// This should be called from the main module initialization
+#[cfg(feature = "python")]
+pub fn register_atr_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("InvalidLengthError", m.py().get_type::<InvalidLengthError>())?;
+    m.add("InconsistentSliceLengthsError", m.py().get_type::<InconsistentSliceLengthsError>())?;
+    m.add("NoCandlesAvailableError", m.py().get_type::<NoCandlesAvailableError>())?;
+    m.add("NotEnoughDataError", m.py().get_type::<NotEnoughDataError>())?;
+    Ok(())
 }

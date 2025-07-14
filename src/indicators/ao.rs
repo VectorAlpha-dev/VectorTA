@@ -17,9 +17,25 @@
 //! - **`Ok(AoOutput)`** with Vec<f64> of same length as input, leading values are NaN
 //! - **`Err(AoError)`** otherwise
 //!
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -55,6 +71,7 @@ pub struct AoOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AoParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -192,11 +209,25 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
     ao_with_kernel(input, Kernel::Auto)
 }
 
-pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoError> {
+#[inline(always)]
+fn ao_prepare<'a>(
+    input: &'a AoInput,
+) -> Result<(
+    /*data*/ &'a [f64],
+    /*short*/ usize,
+    /*long*/ usize,
+    /*first*/ usize,
+    /*len*/ usize,
+), AoError> {
     let data: &[f64] = match &input.data {
         AoData::Candles { candles, source } => source_type(candles, source),
         AoData::Slice(sl) => sl,
     };
+
+    // Early empty slice detection
+    if data.is_empty() {
+        return Err(AoError::NoData);
+    }
 
     let first = data
         .iter()
@@ -223,6 +254,12 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
         });
     }
 
+    Ok((data, short, long, first, len))
+}
+
+pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoError> {
+    let (data, short, long, first, len) = ao_prepare(input)?;
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -243,7 +280,7 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
     Ok(AoOutput { values: out })
 }
 
-// Scalar implementation (no logic changes)
+// Scalar implementation - ensures all elements are written
 #[inline]
 pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
@@ -261,7 +298,10 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
         if i >= long {
             long_sum -= data[i - long];
         }
-        if i >= (long - 1).max(first + long - 1) {
+        
+        if i < first + long - 1 {
+            out[i] = f64::NAN;  // Explicit write for warmup period
+        } else {
             let short_sma = short_sum / (short as f64);
             let long_sma = long_sum / (long as f64);
             out[i] = short_sma - long_sma;
@@ -523,12 +563,13 @@ pub fn ao_batch_par_slice(
     ao_batch_inner(data, sweep, kern, true)
 }
 #[inline(always)]
-fn ao_batch_inner(
+fn ao_batch_inner_into(
     data: &[f64],
     sweep: &AoBatchRange,
     kern: Kernel,
     parallel: bool,
-) -> Result<AoBatchOutput, AoError> {
+    out: &mut [f64],
+) -> Result<Vec<AoParams>, AoError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(AoError::InvalidPeriods { short: 0, long: 0 });
@@ -546,7 +587,6 @@ fn ao_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let short = combos[row].short_period.unwrap();
         let long = combos[row].long_period.unwrap();
@@ -562,7 +602,7 @@ fn ao_batch_inner(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            values
+            out
                 .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
@@ -570,15 +610,33 @@ fn ao_batch_inner(
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+    Ok(combos)
+}
+
+// Original batch function that allocates its own storage
+#[inline(always)]
+fn ao_batch_inner(
+    data: &[f64],
+    sweep: &AoBatchRange,
+    kern: Kernel,
+    parallel: bool,
+) -> Result<AoBatchOutput, AoError> {
+    let combos = expand_grid(sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    
+    let combos = ao_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
     Ok(AoBatchOutput {
         values,
         combos,
@@ -858,4 +916,340 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ao")]
+#[pyo3(signature = (high, low, short_period, long_period, kernel=None))]
+pub fn ao_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    short_period: usize,
+    long_period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?; // zero-copy, read-only view
+    let low_slice = low.as_slice()?;   // zero-copy, read-only view
+
+    // Verify slices have same length
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err("High and low arrays must have same length"));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Compute hl2 (median price)
+    let hl2: Vec<f64> = high_slice.iter()
+        .zip(low_slice.iter())
+        .map(|(&h, &l)| (h + l) / 2.0)
+        .collect();
+
+    // Build input struct
+    let params = AoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let ao_in = AoInput::from_slice(&hl2, params);
+
+    // Pre-allocate uninitialized NumPy output buffer
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [hl2.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Pre-fill with NaN to ensure all elements are initialized
+    slice_out.fill(f64::NAN);
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), AoError> {
+        let (data, short, long, first, _len) = ao_prepare(&ao_in)?;
+        
+        // Resolve Kernel::Auto to a specific kernel
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // ao_scalar writes NaN values for warmup period and valid values after
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, slice_out),
+                _ => unreachable!(),
+            }
+        }
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AoStream")]
+pub struct AoStreamPy {
+    stream: AoStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AoStreamPy {
+    #[new]
+    fn new(short_period: usize, long_period: usize) -> PyResult<Self> {
+        let params = AoParams {
+            short_period: Some(short_period),
+            long_period: Some(long_period),
+        };
+        let stream =
+            AoStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AoStreamPy { stream })
+    }
+
+    /// Updates the stream with a new high and low value and returns the calculated AO value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+        let hl2 = (high + low) / 2.0;
+        self.stream.update(hl2)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ao_batch")]
+#[pyo3(signature = (high, low, short_period_range, long_period_range, kernel=None))]
+pub fn ao_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+
+    // Verify slices have same length
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err("High and low arrays must have same length"));
+    }
+
+    // Compute hl2 (median price)
+    let hl2: Vec<f64> = high_slice.iter()
+        .zip(low_slice.iter())
+        .map(|(&h, &l)| (h + l) / 2.0)
+        .collect();
+
+    let sweep = AoBatchRange {
+        short_period: short_period_range,
+        long_period: long_period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = hl2.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Pre-fill with NaN to ensure all elements are initialized
+    slice_out.fill(f64::NAN);
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<AoParams>, AoError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Compute batch directly into pre-allocated buffer - no copy needed!
+        ao_batch_inner_into(&hl2, &sweep, simd, true, slice_out)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "short_periods",
+        combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "long_periods",
+        combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_js(high: &[f64], low: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
+    // Verify arrays have same length
+    if high.len() != low.len() {
+        return Err(JsValue::from_str("High and low arrays must have same length"));
+    }
+
+    // Compute hl2
+    let hl2: Vec<f64> = high.iter()
+        .zip(low.iter())
+        .map(|(&h, &l)| (h + l) / 2.0)
+        .collect();
+
+    let params = AoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let input = AoInput::from_slice(&hl2, params);
+
+    ao_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_batch_js(
+    high: &[f64],
+    low: &[f64],
+    short_start: usize,
+    short_end: usize,
+    short_step: usize,
+    long_start: usize,
+    long_end: usize,
+    long_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    // Verify arrays have same length
+    if high.len() != low.len() {
+        return Err(JsValue::from_str("High and low arrays must have same length"));
+    }
+
+    // Compute hl2
+    let hl2: Vec<f64> = high.iter()
+        .zip(low.iter())
+        .map(|(&h, &l)| (h + l) / 2.0)
+        .collect();
+
+    let sweep = AoBatchRange {
+        short_period: (short_start, short_end, short_step),
+        long_period: (long_start, long_end, long_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    ao_batch_inner(&hl2, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_batch_metadata_js(
+    short_start: usize,
+    short_end: usize,
+    short_step: usize,
+    long_start: usize,
+    long_end: usize,
+    long_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AoBatchRange {
+        short_period: (short_start, short_end, short_step),
+        long_period: (long_start, long_end, long_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 2);
+
+    for combo in combos {
+        metadata.push(combo.short_period.unwrap() as f64);
+        metadata.push(combo.long_period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AoBatchConfig {
+    pub short_period_range: (usize, usize, usize),
+    pub long_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AoBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AoParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ao_batch)]
+pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AoBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    // Verify arrays have same length
+    if high.len() != low.len() {
+        return Err(JsValue::from_str("High and low arrays must have same length"));
+    }
+
+    // Compute hl2
+    let hl2: Vec<f64> = high.iter()
+        .zip(low.iter())
+        .map(|(&h, &l)| (h + l) / 2.0)
+        .collect();
+
+    let sweep = AoBatchRange {
+        short_period: config.short_period_range,
+        long_period: config.long_period_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = ao_batch_inner(&hl2, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = AoBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

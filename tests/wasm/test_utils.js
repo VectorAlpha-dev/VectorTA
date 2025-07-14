@@ -300,6 +300,14 @@ const EXPECTED_OUTPUTS = {
     adosc: {
         defaultParams: { short_period: 3, long_period: 10 },
         last5Values: [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
+    },
+    ao: {
+        defaultParams: { short_period: 5, long_period: 34 },
+        last5Values: [-1671.3, -1401.6706, -1262.3559, -1178.4941, -1157.4118]
+    },
+    atr: {
+        defaultParams: { length: 14 },
+        last5Values: [916.89, 874.33, 838.45, 801.92, 811.57]
     }
 };
 
