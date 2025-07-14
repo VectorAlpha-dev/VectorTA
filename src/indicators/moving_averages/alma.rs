@@ -21,6 +21,8 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -994,10 +996,6 @@ fn alma_batch_inner_into(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-    // init_matrix_prefixes function. This is safe because:
-    // 1. MaybeUninit<T> has the same layout as T
-    // 2. We ensure all values are written before the slice is used again
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1007,10 +1005,6 @@ fn alma_batch_inner_into(
 
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // ---------------------------------------------------------------------------
-    // 2. closure that writes one row; it receives &mut [MaybeUninit<f64>]
-    //    and casts *only* that slice to &mut [f64] for the kernel call
-    // ---------------------------------------------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -1176,9 +1170,6 @@ unsafe fn alma_row_avx512_short(
     let tail_len = period % STEP; // 0‑7 remaining samples
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    // ───────────────────────────────────────────────────────────────────────────
-    // Fast path: period ≤ 8  (no full 8‑wide block, only a masked tail)
-    // ───────────────────────────────────────────────────────────────────────────
     if chunks == 0 {
         let w_tail = _mm512_maskz_loadu_pd(tail_mask, w_ptr);
         for i in (first + period - 1)..data.len() {
@@ -1190,21 +1181,16 @@ unsafe fn alma_row_avx512_short(
         return;
     }
 
-    // ───────────────────────────────────────────────────────────────────────────
-    // General short kernel (1 ≤ chunks ≤ 4; tail_len may be 0)
-    // ───────────────────────────────────────────────────────────────────────────
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
         let mut acc = _mm512_setzero_pd();
 
-        // accumulate every full 8‑wide block
         for blk in 0..chunks {
             let w = _mm512_loadu_pd(w_ptr.add(blk * STEP));
             let d = _mm512_loadu_pd(data.as_ptr().add(start + blk * STEP));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // optional tail
         if tail_len != 0 {
             let w_tail = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(chunks * STEP));
             let d_tail = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + chunks * STEP));
@@ -1758,8 +1744,6 @@ mod tests {
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
-                    // Skip special cases: if either value is NaN or ±Inf, we only check that the
-                    // other is equal (covers constant-series invariance and keeps shrinking sane).
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -1909,35 +1893,7 @@ mod tests {
 #[cfg(feature = "python")]
 #[pyfunction(name = "alma")]
 #[pyo3(signature = (data, period, offset, sigma, kernel=None))]
-/// Compute the Arnaud Legoux Moving Average (ALMA) of the input data.
-///
-/// ALMA uses a Gaussian distribution as weights for the moving average calculation,
-/// with adjustable offset and sigma parameters to control the curve's responsiveness
-/// and smoothness.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Number of data points in the moving average window.
-/// offset : float
-///     Controls the Gaussian center (0.0 to 1.0, typically 0.85).
-/// sigma : float
-///     Controls the Gaussian width (typically 6.0).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of ALMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (sigma <= 0, offset out of range, etc).
+
 pub fn alma_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1950,14 +1906,8 @@ pub fn alma_py<'py>(
 
     let slice_in = data.as_slice()?; // zero-copy, read-only view
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
 
     // ---------- build input struct -------------------------------------------------
     let params = AlmaParams {
@@ -1967,21 +1917,30 @@ pub fn alma_py<'py>(
     };
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
-    // ---------- allocate NumPy output buffer ---------------------------------------
+    // ---------- allocate uninitialized NumPy output buffer -------------------------
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AlmaError> {
         let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, kern)?;
-        // prefix initialise exactly once
-        slice_out[..first + per - 1].fill(f64::NAN);
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix only to the first (first + per - 1) elements
+        if first + per - 1 > 0 {
+            slice_out[..first + per - 1].fill(f64::NAN);
+        }
+        
+        // 2. alma_compute_into MUST write to all elements from (first + per - 1) onwards
+        // This is guaranteed by the ALMA algorithm implementation
         alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
+        
         Ok(())
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr.into())
+    Ok(out_arr)
 }
 
 #[cfg(feature = "python")]
@@ -2015,26 +1974,7 @@ impl AlmaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "alma_batch")]
 #[pyo3(signature = (data, period_range, offset_range, sigma_range, kernel=None))]
-/// Compute ALMA for multiple parameter combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// offset_range : tuple
-///     (start, end, step) for offset values to compute.
-/// sigma_range : tuple
-///     (start, end, step) for sigma values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array), 'periods', 'offsets', and 'sigmas' arrays.
+
 pub fn alma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2059,18 +1999,13 @@ pub fn alma_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
 
     // 3. Heavy work without the GIL
     let combos = py.allow_threads(|| {

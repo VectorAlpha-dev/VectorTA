@@ -281,9 +281,9 @@ class CriterionComparableBenchmark:
                 print(f"  {name}: FAILED - {str(e)[:50]}...")
         
         # Also run batch operations
-        print("\n  Batch operations (1 combo):")
+        print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
-            ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 9, 1), (0.85, 0.85, 0.1), (6.0, 6.0, 1.0))),
+            ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 9, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
             ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
@@ -359,7 +359,7 @@ class CriterionComparableBenchmark:
         
         # Batch vs Single analysis
         print("\n\n" + "=" * 80)
-        print("BATCH vs SINGLE ANALYSIS (1 combo)")
+        print("BATCH vs SINGLE ANALYSIS")
         print("=" * 80)
         print(f"{'Indicator':20} {'Single (ms)':>12} {'Batch (ms)':>12} {'Overhead':>12} {'Status':>10}")
         print("-" * 80)

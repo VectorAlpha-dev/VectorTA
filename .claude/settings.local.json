@@ -146,7 +146,11 @@
       "Bash(del debug_epma.py test_epma_values.py)",
       "Bash(test_bindings.bat epma --python)",
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_epma.py::TestEpma::test_epma_batch_multiple_params -xvs)",
-      "Bash(call test_bindings.bat:*)"
+      "Bash(call test_bindings.bat:*)",
+      "Bash(run_benchmark.bat alma)",
+      "Bash(del test_kernel_detection.py)",
+      "Bash(del srcbintest_kernel_detection.rs)",
+      "Bash(run_benchmark.bat cwma)"
     ],
     "deny": []
   }

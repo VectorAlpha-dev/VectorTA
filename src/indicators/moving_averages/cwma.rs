@@ -263,6 +263,11 @@ fn cwma_compute_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 cwma_avx512(data, weights, period, first, inv_norm, out)
             }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                cwma_scalar(data, weights, period, first, inv_norm, out)
+            }
             _ => unreachable!(),
         }
     }
@@ -680,6 +685,8 @@ pub fn cwma_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::Scalar,
         _ => unreachable!(),
     };
     cwma_batch_par_slice(data, sweep, simd)
@@ -857,6 +864,8 @@ fn cwma_batch_inner_into(
             Kernel::Avx512 => cwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => cwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
             _ => cwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
         }
     };
@@ -1139,15 +1148,26 @@ unsafe fn cwma_row_avx2(
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "cwma")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn cwma_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{PyArray1, PyArrayMethods};
     use pyo3::exceptions::PyValueError;
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    
+    // Parse kernel string to enum
+    let kern = match kernel {
+        None | Some("auto") => Kernel::Auto,
+        Some("scalar") => Kernel::Scalar,
+        Some("avx2") => Kernel::Avx2,
+        Some("avx512") => Kernel::Avx512,
+        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
+    };
     
     let params = CwmaParams {
         period: Some(period),
@@ -1158,7 +1178,7 @@ pub fn cwma_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     py.allow_threads(|| -> Result<(), CwmaError> {
-        let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(&cwma_in, Kernel::Auto)?;
+        let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(&cwma_in, kern)?;
         slice_out[..warm].fill(f64::NAN);
         cwma_compute_into(data, &weights, period, first, inv_norm, chosen, slice_out);
         Ok(())
@@ -1226,6 +1246,8 @@ pub fn cwma_batch_py<'py>(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2Batch => Kernel::Avx2,
             Kernel::ScalarBatch => Kernel::Scalar,
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::Scalar,
             _ => unreachable!(),
         };
         // Use the _into variant that writes directly to our pre-allocated buffer
