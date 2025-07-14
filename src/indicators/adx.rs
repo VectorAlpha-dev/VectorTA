@@ -17,9 +17,25 @@
 //! - **`Ok(AdxOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(AdxError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -47,6 +63,7 @@ pub struct AdxOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AdxParams {
     pub period: Option<usize>,
 }
@@ -464,6 +481,21 @@ pub struct AdxBatchOutput {
     pub cols: usize,
 }
 
+impl AdxBatchOutput {
+    pub fn row_for_params(&self, p: &AdxParams) -> Option<usize> {
+        self.combos.iter().position(|c| {
+            c.period.unwrap_or(14) == p.period.unwrap_or(14)
+        })
+    }
+
+    pub fn values_for(&self, p: &AdxParams) -> Option<&[f64]> {
+        self.row_for_params(p).map(|row| {
+            let start = row * self.cols;
+            &self.values[start..start + self.cols]
+        })
+    }
+}
+
 #[inline(always)]
 fn expand_grid(r: &AdxBatchRange) -> Vec<AdxParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -743,19 +775,6 @@ impl AdxStream {
     }
 }
 
-#[inline(always)]
-pub fn expand_grid_adx(r: &AdxBatchRange) -> Vec<AdxParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    axis_usize(r.period)
-        .into_iter()
-        .map(|p| AdxParams { period: Some(p) })
-        .collect()
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,4 +1056,352 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adx")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+pub fn adx_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate input lengths match
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err(
+            "Input arrays must have the same length"
+        ));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Build input struct
+    let params = AdxParams {
+        period: Some(period),
+    };
+    let adx_in = AdxInput::from_slices(high_slice, low_slice, close_slice, params);
+
+    // Allocate uninitialized NumPy output buffer
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), AdxError> {
+        // Initial fill with NaN for entire output
+        slice_out.fill(f64::NAN);
+        
+        // Prepare data
+        let period = adx_in.get_period();
+        let len = close_slice.len();
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(AdxError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
+        }
+        if len < period + 1 {
+            return Err(AdxError::NotEnoughValidData {
+                needed: period + 1,
+                valid: len,
+            });
+        }
+        if high_slice.iter().all(|x| x.is_nan())
+            || low_slice.iter().all(|x| x.is_nan())
+            || close_slice.iter().all(|x| x.is_nan())
+        {
+            return Err(AdxError::AllValuesNaN);
+        }
+
+        // Kernel selection
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        };
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // adx_scalar (and its AVX stubs) will write to appropriate indices
+        // The rest remain NaN as initialized above
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    adx_scalar(high_slice, low_slice, close_slice, period, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    adx_avx2(high_slice, low_slice, close_slice, period, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    adx_avx512(high_slice, low_slice, close_slice, period, slice_out)
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    // Fallback to scalar when AVX is not available
+                    adx_scalar(high_slice, low_slice, close_slice, period, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AdxStream")]
+pub struct AdxStreamPy {
+    stream: AdxStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AdxStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = AdxParams {
+            period: Some(period),
+        };
+        let stream =
+            AdxStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AdxStreamPy { stream })
+    }
+
+    /// Updates the stream with new high, low, close values and returns the calculated ADX value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        self.stream.update(high, low, close)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adx_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn adx_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate input lengths match
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err(
+            "Input arrays must have the same length"
+        ));
+    }
+
+    let sweep = AdxBatchRange {
+        period: period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = close_slice.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Initialize all values to NaN first
+        slice_out.fill(f64::NAN);
+        
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => return Err(AdxError::InvalidPeriod { period: 0, data_len: 0 }),
+        };
+        
+        // Process each row
+        for (row, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap();
+            let row_start = row * cols;
+            let row_slice = &mut slice_out[row_start..row_start + cols];
+            
+            unsafe {
+                match simd {
+                    Kernel::Scalar => adx_row_scalar(high_slice, low_slice, close_slice, period, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => adx_row_avx2(high_slice, low_slice, close_slice, period, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => adx_row_avx512(high_slice, low_slice, close_slice, period, row_slice),
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    Kernel::Avx2 | Kernel::Avx512 => {
+                        adx_row_scalar(high_slice, low_slice, close_slice, period, row_slice)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        
+        Ok(combos)
+    })
+    .map_err(|e: AdxError| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    // Validate input lengths match
+    if high.len() != low.len() || high.len() != close.len() {
+        return Err(JsValue::from_str("Input arrays must have the same length"));
+    }
+    
+    let params = AdxParams {
+        period: Some(period),
+    };
+    let input = AdxInput::from_slices(high, low, close, params);
+    
+    adx_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_batch_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    // Validate input lengths match
+    if high.len() != low.len() || high.len() != close.len() {
+        return Err(JsValue::from_str("Input arrays must have the same length"));
+    }
+    
+    let sweep = AdxBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    // Use the existing batch function with parallel=false for WASM
+    adx_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AdxBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let metadata: Vec<f64> = combos
+        .into_iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
+    
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdxBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdxBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AdxParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = adx_batch)]
+pub fn adx_batch_unified_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue
+) -> Result<JsValue, JsValue> {
+    // Validate input lengths match
+    if high.len() != low.len() || high.len() != close.len() {
+        return Err(JsValue::from_str("Input arrays must have the same length"));
+    }
+    
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AdxBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+    
+    let sweep = AdxBatchRange {
+        period: config.period_range,
+    };
+    
+    // 2. Run the existing core logic
+    let output = adx_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // 3. Create the structured output
+    let js_output = AdxBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+    
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

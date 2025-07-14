@@ -203,6 +203,16 @@ const EXPECTED_OUTPUTS = {
             1645728.78
         ]
     },
+    adx: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            36.14,
+            36.52,
+            37.01,
+            37.46,
+            38.47
+        ]
+    },
     vwma: {
         defaultParams: { period: 20 },
         last5Values: [
