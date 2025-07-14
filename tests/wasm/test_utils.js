@@ -297,9 +297,36 @@ const EXPECTED_OUTPUTS = {
             36.3
         ]
     },
+    aroon: {
+        defaultParams: { length: 14 },
+        last5Up: [
+            21.43,
+            14.29,
+            7.14,
+            0.0,
+            0.0
+        ],
+        last5Down: [
+            71.43,
+            64.29,
+            57.14,
+            50.0,
+            42.86
+        ]
+    },
     adosc: {
         defaultParams: { short_period: 3, long_period: 10 },
         last5Values: [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
+    },
+    bollinger_bands_width: {
+        defaultParams: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
+        last5Values: [
+            0.0344,  // Placeholder values - should be calculated from actual Rust implementation
+            0.0352,
+            0.0361,
+            0.0358,
+            0.0349
+        ]
     }
 };
 

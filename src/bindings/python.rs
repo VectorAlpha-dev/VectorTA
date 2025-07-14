@@ -99,6 +99,10 @@ use crate::indicators::moving_averages::zlema::{zlema_py, zlema_batch_py, ZlemaS
 use crate::indicators::moving_averages::vpwma::{vpwma_py, vpwma_batch_py, VpwmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::wma::{wma_py, wma_batch_py, WmaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::aroon::{aroon_py, aroon_batch_py, AroonStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::bollinger_bands_width::{bollinger_bands_width_py, bollinger_bands_width_batch_py, BollingerBandsWidthStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -341,6 +345,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wma_py, m)?)?;
     m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
     m.add_class::<WmaStreamPy>()?;
+    
+    // Register Aroon functions with their user-facing names
+    m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
+    m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
+    m.add_class::<AroonStreamPy>()?;
+    
+    // Register Bollinger Bands Width functions with their user-facing names
+    m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
+    m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
+    m.add_class::<BollingerBandsWidthStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     
