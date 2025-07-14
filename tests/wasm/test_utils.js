@@ -276,6 +276,16 @@ const EXPECTED_OUTPUTS = {
             59432.02580645162,
             59350.58279569892
         ]
+    },
+    adxr: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            37.10,
+            37.3,
+            37.0,
+            36.2,
+            36.3
+        ]
     }
 };
 
