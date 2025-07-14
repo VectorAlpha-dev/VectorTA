@@ -21,9 +21,25 @@
 //! ## Returns
 //! - **Ok(AlligatorOutput)** on success, with jaw/teeth/lips vectors (shifted)
 //! - **Err(AlligatorError)** otherwise
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -61,6 +77,7 @@ pub struct AlligatorOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AlligatorParams {
     pub jaw_period: Option<usize>,
     pub jaw_offset: Option<usize>,
@@ -1461,4 +1478,420 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "alligator")]
+#[pyo3(signature = (data, jaw_period=13, jaw_offset=8, teeth_period=8, teeth_offset=5, lips_period=5, lips_offset=3, kernel=None))]
+pub fn alligator_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // ---------- build input struct -------------------------------------------------
+    let params = AlligatorParams {
+        jaw_period: Some(jaw_period),
+        jaw_offset: Some(jaw_offset),
+        teeth_period: Some(teeth_period),
+        teeth_offset: Some(teeth_offset),
+        lips_period: Some(lips_period),
+        lips_offset: Some(lips_offset),
+    };
+    let alligator_in = AlligatorInput::from_slice(slice_in, params);
+
+    // ---------- allocate uninitialized NumPy output buffers ------------------------
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let jaw_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let teeth_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let lips_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    
+    let jaw_slice = unsafe { jaw_arr.as_slice_mut()? };
+    let teeth_slice = unsafe { teeth_arr.as_slice_mut()? };
+    let lips_slice = unsafe { lips_arr.as_slice_mut()? };
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), AlligatorError> {
+        let AlligatorOutput { jaw, teeth, lips } = alligator_with_kernel(&alligator_in, kern)?;
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // The alligator algorithm guarantees all elements are written
+        jaw_slice.copy_from_slice(&jaw);
+        teeth_slice.copy_from_slice(&teeth);
+        lips_slice.copy_from_slice(&lips);
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build result dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("jaw", jaw_arr)?;
+    dict.set_item("teeth", teeth_arr)?;
+    dict.set_item("lips", lips_arr)?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AlligatorStream")]
+pub struct AlligatorStreamPy {
+    stream: AlligatorStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AlligatorStreamPy {
+    #[new]
+    #[pyo3(signature = (jaw_period=13, jaw_offset=8, teeth_period=8, teeth_offset=5, lips_period=5, lips_offset=3))]
+    fn new(
+        jaw_period: usize,
+        jaw_offset: usize,
+        teeth_period: usize,
+        teeth_offset: usize,
+        lips_period: usize,
+        lips_offset: usize,
+    ) -> PyResult<Self> {
+        let params = AlligatorParams {
+            jaw_period: Some(jaw_period),
+            jaw_offset: Some(jaw_offset),
+            teeth_period: Some(teeth_period),
+            teeth_offset: Some(teeth_offset),
+            lips_period: Some(lips_period),
+            lips_offset: Some(lips_offset),
+        };
+        let stream =
+            AlligatorStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AlligatorStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated Alligator values.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "alligator_batch")]
+#[pyo3(signature = (data, jaw_period_range, jaw_offset_range, teeth_period_range, teeth_offset_range, lips_period_range, lips_offset_range, kernel=None))]
+pub fn alligator_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    jaw_period_range: (usize, usize, usize),
+    jaw_offset_range: (usize, usize, usize),
+    teeth_period_range: (usize, usize, usize),
+    teeth_offset_range: (usize, usize, usize),
+    lips_period_range: (usize, usize, usize),
+    lips_offset_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = AlligatorBatchRange {
+        jaw_period: jaw_period_range,
+        jaw_offset: jaw_offset_range,
+        teeth_period: teeth_period_range,
+        teeth_offset: teeth_offset_range,
+        lips_period: lips_period_range,
+        lips_offset: lips_offset_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let jaw_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let teeth_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let lips_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    
+    let jaw_slice = unsafe { jaw_arr.as_slice_mut()? };
+    let teeth_slice = unsafe { teeth_arr.as_slice_mut()? };
+    let lips_slice = unsafe { lips_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        
+        // Use the batch function that writes directly to our pre-allocated buffers
+        let AlligatorBatchOutput { jaw, teeth, lips, combos, .. } = 
+            alligator_batch_inner(slice_in, &sweep, simd, true)?;
+        
+        // Copy data to output slices
+        jaw_slice.copy_from_slice(&jaw);
+        teeth_slice.copy_from_slice(&teeth);
+        lips_slice.copy_from_slice(&lips);
+        
+        Ok::<Vec<AlligatorParams>, AlligatorError>(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("jaw", jaw_arr.reshape((rows, cols))?)?;
+    dict.set_item("teeth", teeth_arr.reshape((rows, cols))?)?;
+    dict.set_item("lips", lips_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "jaw_periods",
+        combos
+            .iter()
+            .map(|p| p.jaw_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "jaw_offsets",
+        combos
+            .iter()
+            .map(|p| p.jaw_offset.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "teeth_periods",
+        combos
+            .iter()
+            .map(|p| p.teeth_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "teeth_offsets",
+        combos
+            .iter()
+            .map(|p| p.teeth_offset.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "lips_periods",
+        combos
+            .iter()
+            .map(|p| p.lips_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "lips_offsets",
+        combos
+            .iter()
+            .map(|p| p.lips_offset.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_js(
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let params = AlligatorParams {
+        jaw_period: Some(jaw_period),
+        jaw_offset: Some(jaw_offset),
+        teeth_period: Some(teeth_period),
+        teeth_offset: Some(teeth_offset),
+        lips_period: Some(lips_period),
+        lips_offset: Some(lips_offset),
+    };
+    let input = AlligatorInput::from_slice(data, params);
+
+    alligator_with_kernel(&input, Kernel::Scalar)
+        .map(|o| {
+            // Flatten the three arrays into one for JS compatibility
+            let mut result = Vec::with_capacity(data.len() * 3);
+            result.extend_from_slice(&o.jaw);
+            result.extend_from_slice(&o.teeth);
+            result.extend_from_slice(&o.lips);
+            result
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_batch_js(
+    data: &[f64],
+    jaw_period_start: usize,
+    jaw_period_end: usize,
+    jaw_period_step: usize,
+    jaw_offset_start: usize,
+    jaw_offset_end: usize,
+    jaw_offset_step: usize,
+    teeth_period_start: usize,
+    teeth_period_end: usize,
+    teeth_period_step: usize,
+    teeth_offset_start: usize,
+    teeth_offset_end: usize,
+    teeth_offset_step: usize,
+    lips_period_start: usize,
+    lips_period_end: usize,
+    lips_period_step: usize,
+    lips_offset_start: usize,
+    lips_offset_end: usize,
+    lips_offset_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AlligatorBatchRange {
+        jaw_period: (jaw_period_start, jaw_period_end, jaw_period_step),
+        jaw_offset: (jaw_offset_start, jaw_offset_end, jaw_offset_step),
+        teeth_period: (teeth_period_start, teeth_period_end, teeth_period_step),
+        teeth_offset: (teeth_offset_start, teeth_offset_end, teeth_offset_step),
+        lips_period: (lips_period_start, lips_period_end, lips_period_step),
+        lips_offset: (lips_offset_start, lips_offset_end, lips_offset_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    alligator_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| {
+            // Flatten all three arrays into one for JS compatibility
+            let mut result = Vec::with_capacity((output.jaw.len() + output.teeth.len() + output.lips.len()));
+            result.extend_from_slice(&output.jaw);
+            result.extend_from_slice(&output.teeth);
+            result.extend_from_slice(&output.lips);
+            result
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_batch_metadata_js(
+    jaw_period_start: usize,
+    jaw_period_end: usize,
+    jaw_period_step: usize,
+    jaw_offset_start: usize,
+    jaw_offset_end: usize,
+    jaw_offset_step: usize,
+    teeth_period_start: usize,
+    teeth_period_end: usize,
+    teeth_period_step: usize,
+    teeth_offset_start: usize,
+    teeth_offset_end: usize,
+    teeth_offset_step: usize,
+    lips_period_start: usize,
+    lips_period_end: usize,
+    lips_period_step: usize,
+    lips_offset_start: usize,
+    lips_offset_end: usize,
+    lips_offset_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AlligatorBatchRange {
+        jaw_period: (jaw_period_start, jaw_period_end, jaw_period_step),
+        jaw_offset: (jaw_offset_start, jaw_offset_end, jaw_offset_step),
+        teeth_period: (teeth_period_start, teeth_period_end, teeth_period_step),
+        teeth_offset: (teeth_offset_start, teeth_offset_end, teeth_offset_step),
+        lips_period: (lips_period_start, lips_period_end, lips_period_step),
+        lips_offset: (lips_offset_start, lips_offset_end, lips_offset_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 6);
+
+    for combo in combos {
+        metadata.push(combo.jaw_period.unwrap() as f64);
+        metadata.push(combo.jaw_offset.unwrap() as f64);
+        metadata.push(combo.teeth_period.unwrap() as f64);
+        metadata.push(combo.teeth_offset.unwrap() as f64);
+        metadata.push(combo.lips_period.unwrap() as f64);
+        metadata.push(combo.lips_offset.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AlligatorBatchConfig {
+    pub jaw_period_range: (usize, usize, usize),
+    pub jaw_offset_range: (usize, usize, usize),
+    pub teeth_period_range: (usize, usize, usize),
+    pub teeth_offset_range: (usize, usize, usize),
+    pub lips_period_range: (usize, usize, usize),
+    pub lips_offset_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AlligatorBatchJsOutput {
+    pub jaw: Vec<f64>,
+    pub teeth: Vec<f64>,
+    pub lips: Vec<f64>,
+    pub combos: Vec<AlligatorParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = alligator_batch)]
+pub fn alligator_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AlligatorBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = AlligatorBatchRange {
+        jaw_period: config.jaw_period_range,
+        jaw_offset: config.jaw_offset_range,
+        teeth_period: config.teeth_period_range,
+        teeth_offset: config.teeth_offset_range,
+        lips_period: config.lips_period_range,
+        lips_offset: config.lips_offset_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = alligator_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = AlligatorBatchJsOutput {
+        jaw: output.jaw,
+        teeth: output.teeth,
+        lips: output.lips,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
