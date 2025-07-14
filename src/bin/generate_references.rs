@@ -44,6 +44,9 @@ use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
 use my_project::indicators::ad::{ad, AdInput, AdParams, AdData};
 use my_project::indicators::acosc::{acosc, AcoscInput, AcoscParams, AcoscData};
+use my_project::indicators::adx::{adx, AdxInput, AdxParams, AdxData};
+use my_project::indicators::adosc::{adosc, AdoscInput, AdoscParams, AdoscData};
+use my_project::indicators::adxr::{adxr, AdxrInput, AdxrParams, AdxrData};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -762,6 +765,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "osc": result.osc,
                 "change": result.change,
                 "length": result.osc.len()
+            })
+        },
+        "adx" => {
+            if source != "ohlc" {
+                eprintln!("ADX indicator requires 'ohlc' source");
+                std::process::exit(1);
+            }
+            let params = AdxParams::default();
+            let input = AdxInput {
+                data: AdxData::Candles { candles: &candles },
+                params,
+            };
+            let result = adx(&input)?;
+            json!({
+                "indicator": "adx",
+                "source": source,
+                "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "adosc" => {
+            if source != "hlcv" {
+                eprintln!("ADOSC indicator requires 'hlcv' source");
+                std::process::exit(1);
+            }
+            let params = AdoscParams::default();
+            let input = AdoscInput {
+                data: AdoscData::Candles { candles: &candles },
+                params,
+            };
+            let result = adosc(&input)?;
+            json!({
+                "indicator": "adosc",
+                "source": source,
+                "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "adxr" => {
+            if source != "hlc" {
+                eprintln!("ADXR indicator requires 'hlc' source");
+                std::process::exit(1);
+            }
+            let params = AdxrParams::default();
+            let input = AdxrInput {
+                data: AdxrData::Candles { candles: &candles },
+                params,
+            };
+            let result = adxr(&input)?;
+            json!({
+                "indicator": "adxr",
+                "source": source,
+                "params": {},
+                "values": result.values,
+                "length": result.values.len()
             })
         },
         _ => {

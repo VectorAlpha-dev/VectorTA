@@ -136,8 +136,8 @@ impl AdBuilder {
 
 #[derive(Debug, Error)]
 pub enum AdError {
-    #[error(transparent)]
-    CandleFieldError(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error("ad: Candle field error: {0}")]
+    CandleFieldError(String),
     #[error("ad: Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
     DataLengthMismatch {
         high_len: usize,
@@ -157,14 +157,10 @@ pub fn ad(input: &AdInput) -> Result<AdOutput, AdError> {
 pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdError> {
     let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         AdData::Candles { candles } => {
-            let high = candles.select_candle_field("high")
-                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
-            let low = candles.select_candle_field("low")
-                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
-            let close = candles.select_candle_field("close")
-                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
-            let volume = candles.select_candle_field("volume")
-                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
+            let high = candles.select_candle_field("high").map_err(|e| AdError::CandleFieldError(e.to_string()))?;
+            let low = candles.select_candle_field("low").map_err(|e| AdError::CandleFieldError(e.to_string()))?;
+            let close = candles.select_candle_field("close").map_err(|e| AdError::CandleFieldError(e.to_string()))?;
+            let volume = candles.select_candle_field("volume").map_err(|e| AdError::CandleFieldError(e.to_string()))?;
             (high, low, close, volume)
         }
         AdData::Slices {

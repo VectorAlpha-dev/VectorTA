@@ -179,8 +179,8 @@ impl AdxrBuilder {
 
 #[derive(Debug, Error)]
 pub enum AdxrError {
-    #[error("adxr: Candle field error")]
-    CandleFieldError(#[from] Box<dyn std::error::Error>),
+    #[error("adxr: Candle field error: {0}")]
+    CandleFieldError(String),
     #[error("adxr: HLC data length mismatch: high={high_len}, low={low_len}, close={close_len}")]
     HlcLengthMismatch {
         high_len: usize,
@@ -203,9 +203,9 @@ pub fn adxr(input: &AdxrInput) -> Result<AdxrOutput, AdxrError> {
 pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput, AdxrError> {
     let (high, low, close) = match &input.data {
         AdxrData::Candles { candles } => (
-            candles.select_candle_field("high")?,
-            candles.select_candle_field("low")?,
-            candles.select_candle_field("close")?,
+            candles.select_candle_field("high").map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
+            candles.select_candle_field("low").map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
+            candles.select_candle_field("close").map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
         ),
         AdxrData::Slices { high, low, close } => (*high, *low, *close),
     };

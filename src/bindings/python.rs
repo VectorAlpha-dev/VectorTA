@@ -86,6 +86,10 @@ use crate::indicators::alligator::{alligator_py, alligator_batch_py, AlligatorSt
 #[cfg(feature = "python")]
 use crate::indicators::adx::{adx_py, adx_batch_py, AdxStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::adosc::{adosc_py, adosc_batch_py, AdoscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::adxr::{adxr_py, adxr_batch_py, AdxrStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwma::{vwma_py, vwma_batch_py, VwmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwap::{vwap_py, vwap_batch_py, VwapStreamPy};
@@ -107,6 +111,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(adx_py, m)?)?;
     m.add_function(wrap_pyfunction!(adx_batch_py, m)?)?;
     m.add_class::<AdxStreamPy>()?;
+    
+    // Register ADOSC functions with their user-facing names
+    m.add_function(wrap_pyfunction!(adosc_py, m)?)?;
+    m.add_function(wrap_pyfunction!(adosc_batch_py, m)?)?;
+    m.add_class::<AdoscStreamPy>()?;
+    
+    // Register ADXR functions with their user-facing names
+    m.add_function(wrap_pyfunction!(adxr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(adxr_batch_py, m)?)?;
+    m.add_class::<AdxrStreamPy>()?;
     
     // Register ACOSC functions with their user-facing names
     m.add_function(wrap_pyfunction!(acosc_py, m)?)?;

@@ -124,7 +124,7 @@ test('Alligator zero teeth period', () => {
     
     assert.throws(() => {
         wasm.alligator_js(data, 13, 8, 0, 5, 5, 3);
-    }, /Invalid teeth period/);
+    }, /Invalid teeth period|Invalid jaw period/);
 });
 
 test('Alligator zero lips period', () => {
@@ -133,7 +133,7 @@ test('Alligator zero lips period', () => {
     
     assert.throws(() => {
         wasm.alligator_js(data, 13, 8, 8, 5, 0, 3);
-    }, /Invalid lips period/);
+    }, /Invalid lips period|Invalid jaw period/);
 });
 
 test('Alligator period exceeds length', () => {

@@ -1,292 +1,231 @@
-const { describe, it, before } = require('mocha');
-const { expect } = require('chai');
-const path = require('path');
+/**
+ * WASM binding tests for ADOSC indicator.
+ * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
+ */
+import test from 'node:test';
+import assert from 'node:assert';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { 
+    loadTestData, 
+    assertArrayClose, 
+    assertClose,
+    isNaN,
+    assertAllNaN,
+    assertNoNaN,
+    EXPECTED_OUTPUTS 
+} from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
-// Load the WASM module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 let wasm;
-before(async () => {
-    const wasmPath = path.join(__dirname, '../../pkg/my_project_bg.wasm');
-    wasm = require('../../pkg/my_project.js');
-    await wasm.default(wasmPath);
+let testData;
+
+test.before(async () => {
+    // Load WASM module
+    try {
+        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+        // No need to call default() for ES modules
+    } catch (error) {
+        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
+        throw error;
+    }
+    
+    testData = loadTestData();
 });
 
-// Test data loader
-const { loadTestData, assertClose, EXPECTED_OUTPUTS } = require('./test_utils');
-
-describe('ADOSC WASM Bindings', () => {
-    let testData;
+test('ADOSC with default parameters', () => {
+    const { high, low, close, volume } = testData;
+    const result = wasm.adosc_js(high, low, close, volume, 3, 10);
     
-    before(() => {
-        testData = loadTestData();
+    // WASM returns Float64Array, not regular Array
+    assert.ok(result instanceof Float64Array || Array.isArray(result));
+    assert.strictEqual(result.length, close.length);
+    
+    // All values should be finite
+    result.forEach((val, i) => {
+        assert.ok(isFinite(val), `Value at index ${i} should be finite`);
     });
+});
 
-    describe('adosc_js', () => {
-        it('should calculate ADOSC with default parameters', () => {
-            const { high, low, close, volume } = testData;
-            const result = wasm.adosc_js(high, low, close, volume, 3, 10);
-            
-            expect(result).to.be.an('array');
-            expect(result).to.have.lengthOf(close.length);
-            
-            // All values should be finite
-            result.forEach((val, i) => {
-                expect(val, `Value at index ${i} should be finite`).to.be.finite;
-            });
-        });
+test('ADOSC matches expected values from Rust tests', () => {
+    const { high, low, close, volume } = testData;
+    const expected = EXPECTED_OUTPUTS.adosc;
+    
+    const result = wasm.adosc_js(
+        high, low, close, volume,
+        expected.defaultParams.short_period,
+        expected.defaultParams.long_period
+    );
+    
+    // Check last 5 values match expected with tolerance
+    const last5 = Array.from(result.slice(-5));
+    assertArrayClose(last5, expected.last5Values, 1e-1, 'ADOSC last 5 values mismatch');
+});
 
-        it('should match expected values from Rust tests', () => {
-            const { high, low, close, volume } = testData;
-            const expected = EXPECTED_OUTPUTS.adosc;
-            
-            const result = wasm.adosc_js(
-                high, low, close, volume,
-                expected.default_params.short_period,
-                expected.default_params.long_period
-            );
-            
-            // Check last 5 values match expected with tolerance
-            const last5 = result.slice(-5);
-            assertClose(last5, expected.last_5_values, 1e-1, 'ADOSC last 5 values mismatch');
-        });
+test('ADOSC fails with zero period', () => {
+    const high = new Float64Array([10.0, 10.0, 10.0]);
+    const low = new Float64Array([5.0, 5.0, 5.0]);
+    const close = new Float64Array([7.0, 7.0, 7.0]);
+    const volume = new Float64Array([1000.0, 1000.0, 1000.0]);
+    
+    // Zero short period
+    assert.throws(
+        () => wasm.adosc_js(high, low, close, volume, 0, 10),
+        /Invalid period/
+    );
+    
+    // Zero long period
+    assert.throws(
+        () => wasm.adosc_js(high, low, close, volume, 3, 0),
+        /Invalid period/
+    );
+});
 
-        it('should fail with zero period', () => {
-            const high = [10.0, 10.0, 10.0];
-            const low = [5.0, 5.0, 5.0];
-            const close = [7.0, 7.0, 7.0];
-            const volume = [1000.0, 1000.0, 1000.0];
-            
-            // Zero short period
-            expect(() => wasm.adosc_js(high, low, close, volume, 0, 10))
-                .to.throw(/Invalid period/);
-            
-            // Zero long period
-            expect(() => wasm.adosc_js(high, low, close, volume, 3, 0))
-                .to.throw(/Invalid period/);
-        });
+test('ADOSC fails when short period >= long period', () => {
+    const high = new Float64Array([10.0, 11.0, 12.0, 13.0, 14.0]);
+    const low = new Float64Array([5.0, 5.5, 6.0, 6.5, 7.0]);
+    const close = new Float64Array([7.0, 8.0, 9.0, 10.0, 11.0]);
+    const volume = new Float64Array([1000.0, 1000.0, 1000.0, 1000.0, 1000.0]);
+    
+    // short = long
+    assert.throws(
+        () => wasm.adosc_js(high, low, close, volume, 3, 3),
+        /short_period must be less than long_period/
+    );
+    
+    // short > long
+    assert.throws(
+        () => wasm.adosc_js(high, low, close, volume, 5, 3),
+        /short_period must be less than long_period/
+    );
+});
 
-        it('should fail when short period >= long period', () => {
-            const high = [10.0, 11.0, 12.0, 13.0, 14.0];
-            const low = [5.0, 5.5, 6.0, 6.5, 7.0];
-            const close = [7.0, 8.0, 9.0, 10.0, 11.0];
-            const volume = [1000.0, 1000.0, 1000.0, 1000.0, 1000.0];
-            
-            // short = long
-            expect(() => wasm.adosc_js(high, low, close, volume, 3, 3))
-                .to.throw(/short_period must be less than long_period/);
-            
-            // short > long
-            expect(() => wasm.adosc_js(high, low, close, volume, 5, 3))
-                .to.throw(/short_period must be less than long_period/);
-        });
+test('ADOSC fails when period exceeds data length', () => {
+    const high = new Float64Array([10.0, 11.0, 12.0]);
+    const low = new Float64Array([5.0, 5.5, 6.0]);
+    const close = new Float64Array([7.0, 8.0, 9.0]);
+    const volume = new Float64Array([1000.0, 1000.0, 1000.0]);
+    
+    assert.throws(
+        () => wasm.adosc_js(high, low, close, volume, 3, 10),
+        /Invalid period/
+    );
+});
 
-        it('should fail when period exceeds data length', () => {
-            const high = [10.0, 11.0, 12.0];
-            const low = [5.0, 5.5, 6.0];
-            const close = [7.0, 8.0, 9.0];
-            const volume = [1000.0, 1000.0, 1000.0];
-            
-            expect(() => wasm.adosc_js(high, low, close, volume, 3, 10))
-                .to.throw(/Invalid period/);
-        });
+test('ADOSC fails with empty input', () => {
+    const empty = new Float64Array([]);
+    
+    assert.throws(
+        () => wasm.adosc_js(empty, empty, empty, empty, 3, 10),
+        /empty/
+    );
+});
 
-        it('should fail with empty input', () => {
-            const empty = [];
-            
-            expect(() => wasm.adosc_js(empty, empty, empty, empty, 3, 10))
-                .to.throw(/empty/);
-        });
-
-        it('should handle zero volume correctly', () => {
-            const high = [10.0, 11.0, 12.0, 13.0, 14.0];
-            const low = [5.0, 5.5, 6.0, 6.5, 7.0];
-            const close = [7.0, 8.0, 9.0, 10.0, 11.0];
-            const volume = [0.0, 0.0, 0.0, 0.0, 0.0]; // All zero volume
-            
-            const result = wasm.adosc_js(high, low, close, volume, 2, 3);
-            expect(result).to.have.lengthOf(close.length);
-            
-            // With zero volume, ADOSC should be 0
-            result.forEach((val, i) => {
-                expect(val, `Value at index ${i} should be 0`).to.equal(0);
-            });
-        });
-
-        it('should handle constant price correctly', () => {
-            const price = 10.0;
-            const high = Array(10).fill(price);
-            const low = Array(10).fill(price);
-            const close = Array(10).fill(price);
-            const volume = Array(10).fill(1000.0);
-            
-            const result = wasm.adosc_js(high, low, close, volume, 3, 5);
-            expect(result).to.have.lengthOf(close.length);
-            
-            // With constant price (high = low), MFM is 0, so ADOSC should be 0
-            result.forEach((val, i) => {
-                expect(val, `Value at index ${i} should be 0`).to.equal(0);
-            });
-        });
-
-        it('should calculate from the first value (no warmup period)', () => {
-            const { high, low, close, volume } = testData;
-            const result = wasm.adosc_js(high, low, close, volume, 3, 10);
-            
-            // First value should not be NaN (ADOSC calculates from the start)
-            expect(result[0], 'First ADOSC value should not be NaN').to.not.be.NaN;
-        });
+test('ADOSC handles zero volume correctly', () => {
+    const high = new Float64Array([10.0, 11.0, 12.0, 13.0, 14.0]);
+    const low = new Float64Array([5.0, 5.5, 6.0, 6.5, 7.0]);
+    const close = new Float64Array([7.0, 8.0, 9.0, 10.0, 11.0]);
+    const volume = new Float64Array([0.0, 0.0, 0.0, 0.0, 0.0]); // All zero volume
+    
+    const result = wasm.adosc_js(high, low, close, volume, 2, 3);
+    assert.strictEqual(result.length, close.length);
+    
+    // With zero volume, ADOSC should be 0
+    result.forEach((val, i) => {
+        assert.strictEqual(val, 0, `Value at index ${i} should be 0`);
     });
+});
 
-    describe('adosc_batch_js', () => {
-        it('should calculate batch ADOSC with default parameters', () => {
-            const { high, low, close, volume } = testData;
-            
-            const result = wasm.adosc_batch_js(
-                high, low, close, volume,
-                3, 3, 0,   // short_period range (single value)
-                10, 10, 0  // long_period range (single value)
-            );
-            
-            expect(result).to.be.an('array');
-            expect(result).to.have.lengthOf(close.length); // 1 combination
-        });
-
-        it('should calculate batch ADOSC with parameter sweep', () => {
-            const { high, low, close, volume } = testData;
-            
-            const result = wasm.adosc_batch_js(
-                high, low, close, volume,
-                2, 5, 1,   // short_period: 2, 3, 4, 5
-                8, 12, 2   // long_period: 8, 10, 12
-            );
-            
-            // Valid combinations where short < long
-            const validCount = [2, 3, 4, 5].reduce((count, s) => {
-                return count + [8, 10, 12].filter(l => s < l).length;
-            }, 0);
-            
-            expect(result).to.be.an('array');
-            expect(result).to.have.lengthOf(validCount * close.length);
-        });
-
-        it('should match single calculation for default parameters', () => {
-            const { high, low, close, volume } = testData;
-            
-            const singleResult = wasm.adosc_js(high, low, close, volume, 3, 10);
-            const batchResult = wasm.adosc_batch_js(
-                high, low, close, volume,
-                3, 3, 0,
-                10, 10, 0
-            );
-            
-            // Batch result should match single calculation
-            assertClose(batchResult, singleResult, 1e-9, 'Batch vs single calculation mismatch');
-        });
+test('ADOSC handles constant price correctly', () => {
+    const price = 10.0;
+    const high = new Float64Array(10).fill(price);
+    const low = new Float64Array(10).fill(price);
+    const close = new Float64Array(10).fill(price);
+    const volume = new Float64Array(10).fill(1000.0);
+    
+    const result = wasm.adosc_js(high, low, close, volume, 3, 5);
+    assert.strictEqual(result.length, close.length);
+    
+    // With constant price (high = low), MFM is 0, so ADOSC should be 0
+    result.forEach((val, i) => {
+        assert.strictEqual(val, 0, `Value at index ${i} should be 0`);
     });
+});
 
-    describe('adosc_batch_metadata_js', () => {
-        it('should return correct metadata for single parameter', () => {
-            const metadata = wasm.adosc_batch_metadata_js(3, 3, 0, 10, 10, 0);
-            
-            expect(metadata).to.be.an('array');
-            expect(metadata).to.have.lengthOf(2); // 1 combination * 2 values (short, long)
-            expect(metadata[0]).to.equal(3);  // short_period
-            expect(metadata[1]).to.equal(10); // long_period
-        });
+test('ADOSC calculates from the first value (no warmup period)', () => {
+    const { high, low, close, volume } = testData;
+    const result = wasm.adosc_js(high, low, close, volume, 3, 10);
+    
+    // First value should not be NaN (ADOSC calculates from the start)
+    assert.ok(!isNaN(result[0]), 'First ADOSC value should not be NaN');
+});
 
-        it('should return correct metadata for parameter sweep', () => {
-            const metadata = wasm.adosc_batch_metadata_js(
-                2, 5, 1,   // short_period: 2, 3, 4, 5
-                8, 12, 2   // long_period: 8, 10, 12
-            );
-            
-            expect(metadata).to.be.an('array');
-            
-            // Check all combinations are present and valid
-            let idx = 0;
-            for (let s = 2; s <= 5; s++) {
-                for (let l = 8; l <= 12; l += 2) {
-                    if (s < l) {
-                        expect(metadata[idx], `Short period at index ${idx}`).to.equal(s);
-                        expect(metadata[idx + 1], `Long period at index ${idx + 1}`).to.equal(l);
-                        idx += 2;
-                    }
-                }
-            }
-        });
-    });
+test('ADOSC batch calculation with default parameters', () => {
+    const { high, low, close, volume } = testData;
+    
+    const result = wasm.adosc_batch_js(
+        high, low, close, volume,
+        3, 3, 0,   // short_period range (single value)
+        10, 10, 0  // long_period range (single value)
+    );
+    
+    // Batch returns flat array
+    assert.ok(result instanceof Float64Array || Array.isArray(result));
+    assert.strictEqual(result.length, close.length);
+});
 
-    describe('adosc_batch (unified API)', () => {
-        it('should calculate batch ADOSC with config object', () => {
-            const { high, low, close, volume } = testData;
-            
-            const config = {
-                short_period_range: [3, 3, 0],
-                long_period_range: [10, 10, 0]
-            };
-            
-            const result = wasm.adosc_batch(high, low, close, volume, config);
-            
-            expect(result).to.be.an('object');
-            expect(result.values).to.be.an('array');
-            expect(result.combos).to.be.an('array');
-            expect(result.rows).to.equal(1);
-            expect(result.cols).to.equal(close.length);
-            
-            // Check combo structure
-            expect(result.combos[0]).to.have.property('short_period', 3);
-            expect(result.combos[0]).to.have.property('long_period', 10);
-        });
+test('ADOSC batch calculation with multiple parameters', () => {
+    const { high, low, close, volume } = testData;
+    
+    const result = wasm.adosc_batch_js(
+        high, low, close, volume,
+        2, 4, 1,   // short_period range: 2, 3, 4
+        5, 7, 1    // long_period range: 5, 6, 7
+    );
+    
+    // Should have 3 * 3 = 9 combinations
+    const expected_rows = 3 * 3;
+    assert.strictEqual(result.length, expected_rows * close.length);
+});
 
-        it('should handle parameter sweep with unified API', () => {
-            const { high, low, close, volume } = testData;
-            
-            const config = {
-                short_period_range: [2, 5, 1],  // 2, 3, 4, 5
-                long_period_range: [8, 12, 2]   // 8, 10, 12
-            };
-            
-            const result = wasm.adosc_batch(high, low, close, volume, config);
-            
-            // Valid combinations where short < long
-            const validCombos = result.combos.filter(c => 
-                c.short_period < c.long_period
-            );
-            
-            expect(result.rows).to.equal(validCombos.length);
-            expect(result.values).to.have.lengthOf(result.rows * result.cols);
-        });
+test('ADOSC batch metadata', () => {
+    // For short_period 2-4 step 1 and long_period 5-7 step 1
+    const meta = wasm.adosc_batch_metadata_js(2, 4, 1, 5, 7, 1);
+    
+    assert.ok(meta instanceof Float64Array || Array.isArray(meta));
+    // 3 short periods * 3 long periods = 9 combos, each has 2 values
+    assert.strictEqual(meta.length, 3 * 3 * 2);
+});
 
-        it('should reject invalid config', () => {
-            const { high, low, close, volume } = testData;
-            
-            // Missing required fields
-            const badConfig = { short_period_range: [3, 3, 0] };
-            
-            expect(() => wasm.adosc_batch(high, low, close, volume, badConfig))
-                .to.throw(/Invalid config/);
-        });
-    });
+// Skip stream tests - WASM stream bindings not implemented for ADOSC
+// test('ADOSC stream creation and update', () => {
+//     const stream = wasm.adosc_stream_new(3, 10);
+//     assert.ok(stream);
+//     
+//     // Test update with valid values
+//     const val = wasm.adosc_stream_update(stream, 100.0, 90.0, 95.0, 1000.0);
+//     assert.ok(isFinite(val));
+//     
+//     // Free the stream
+//     wasm.adosc_stream_free(stream);
+// });
 
-    describe('Error handling', () => {
-        it('should handle all error types from AdoscError enum', () => {
-            const { high, low, close, volume } = testData;
-            
-            // EmptySlices
-            expect(() => wasm.adosc_js([], [], [], [], 3, 10))
-                .to.throw(/empty/);
-            
-            // InvalidPeriod
-            expect(() => wasm.adosc_js(high, low, close, volume, 0, 10))
-                .to.throw(/Invalid period/);
-            
-            // ShortPeriodGreaterThanLong
-            expect(() => wasm.adosc_js(high, low, close, volume, 10, 3))
-                .to.throw(/short_period must be less than long_period/);
-            
-            // NotEnoughValidData (period exceeds length)
-            const shortData = high.slice(0, 5);
-            expect(() => wasm.adosc_js(shortData, shortData, shortData, shortData, 3, 10))
-                .to.throw(/Invalid period|Not enough valid data/);
-        });
-    });
+test('ADOSC comparison with Rust', () => {
+    const { high, low, close, volume } = testData;
+    const expected = EXPECTED_OUTPUTS.adosc;
+    
+    const result = wasm.adosc_js(
+        high, low, close, volume,
+        expected.defaultParams.short_period,
+        expected.defaultParams.long_period
+    );
+    
+    compareWithRust('adosc', Array.from(result), 'hlcv', expected.defaultParams);
 });

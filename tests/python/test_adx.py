@@ -96,7 +96,7 @@ class TestAdx:
         low = np.array([41.0])
         close = np.array([40.5])
         
-        with pytest.raises(ValueError, match="Not enough valid data"):
+        with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.adx(high, low, close, period=14)
     
     def test_adx_input_length_mismatch(self):

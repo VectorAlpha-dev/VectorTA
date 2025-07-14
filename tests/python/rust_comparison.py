@@ -85,7 +85,7 @@ def compare_with_rust(indicator_name, python_output, source='close', params=None
     
     # Compare values
     try:
-        np.testing.assert_allclose(python_output, rust_output, rtol=rtol, atol=atol)
+        np.testing.assert_allclose(python_output, rust_output, rtol=rtol, atol=atol, equal_nan=True)
         return True
     except AssertionError as e:
         # Find first mismatch for better error reporting

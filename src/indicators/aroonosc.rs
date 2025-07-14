@@ -145,8 +145,8 @@ impl AroonOscBuilder {
 
 #[derive(Debug, Error)]
 pub enum AroonOscError {
-    #[error(transparent)]
-    CandleFieldError(#[from] Box<dyn std::error::Error>),
+    #[error("aroonosc: Candle field error: {0}")]
+    CandleFieldError(String),
 
     #[error("aroonosc: Invalid length specified for Aroon Osc calculation. length={length}")]
     InvalidLength { length: usize },
@@ -182,8 +182,8 @@ pub fn aroon_osc_with_kernel(
             if candles.close.is_empty() {
                 return Err(AroonOscError::NoCandles);
             }
-            let high = candles.select_candle_field("high")?;
-            let low = candles.select_candle_field("low")?;
+            let high = candles.select_candle_field("high").map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
+            let low = candles.select_candle_field("low").map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
             (high, low)
         }
         AroonOscData::SlicesHL { high, low } => {
@@ -375,8 +375,8 @@ impl AroonOscBatchBuilder {
             .apply_slices(high, low)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {
-        let high = c.select_candle_field("high")?;
-        let low = c.select_candle_field("low")?;
+        let high = c.select_candle_field("high").map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
+        let low = c.select_candle_field("low").map_err(|e| AroonOscError::CandleFieldError(e.to_string()))?;
         self.apply_slices(high, low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {

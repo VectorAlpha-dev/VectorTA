@@ -93,8 +93,8 @@ pub enum AvgPriceError {
         close_len: usize,
     },
 
-    #[error(transparent)]
-    CandleFieldError(#[from] Box<dyn std::error::Error>),
+    #[error("avgprice: Candle field error: {0}")]
+    CandleFieldError(String),
 }
 
 #[inline]
@@ -104,10 +104,10 @@ pub fn avgprice(input: &AvgPriceInput) -> Result<AvgPriceOutput, AvgPriceError> 
             if candles.close.is_empty() {
                 return Err(AvgPriceError::NoCandles);
             }
-            let open = candles.select_candle_field("open")?;
-            let high = candles.select_candle_field("high")?;
-            let low = candles.select_candle_field("low")?;
-            let close = candles.select_candle_field("close")?;
+            let open = candles.select_candle_field("open").map_err(|e| AvgPriceError::CandleFieldError(e.to_string()))?;
+            let high = candles.select_candle_field("high").map_err(|e| AvgPriceError::CandleFieldError(e.to_string()))?;
+            let low = candles.select_candle_field("low").map_err(|e| AvgPriceError::CandleFieldError(e.to_string()))?;
+            let close = candles.select_candle_field("close").map_err(|e| AvgPriceError::CandleFieldError(e.to_string()))?;
             (open, high, low, close)
         }
         AvgPriceData::Slices {

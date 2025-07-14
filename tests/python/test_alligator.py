@@ -100,15 +100,17 @@ class TestAlligator:
         """Test Alligator fails with zero teeth period"""
         data = np.array([10.0, 20.0, 30.0])
         
+        # Provide valid jaw period and offset for small dataset
         with pytest.raises(ValueError, match="Invalid teeth period"):
-            ta_indicators.alligator(data, teeth_period=0)
+            ta_indicators.alligator(data, jaw_period=2, jaw_offset=1, teeth_period=0)
     
     def test_alligator_zero_lips_period(self):
         """Test Alligator fails with zero lips period"""
         data = np.array([10.0, 20.0, 30.0])
         
+        # Provide valid jaw and teeth periods and offsets for small dataset
         with pytest.raises(ValueError, match="Invalid lips period"):
-            ta_indicators.alligator(data, lips_period=0)
+            ta_indicators.alligator(data, jaw_period=2, jaw_offset=1, teeth_period=2, teeth_offset=1, lips_period=0)
     
     def test_alligator_period_exceeds_length(self):
         """Test Alligator fails when period exceeds data length"""
@@ -121,14 +123,15 @@ class TestAlligator:
         """Test Alligator fails when offset exceeds data length"""
         data = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
         
+        # Provide valid periods and offsets for small dataset
         with pytest.raises(ValueError, match="Invalid jaw offset"):
-            ta_indicators.alligator(data, jaw_offset=10)
+            ta_indicators.alligator(data, jaw_period=3, jaw_offset=10)
         
         with pytest.raises(ValueError, match="Invalid teeth offset"):
-            ta_indicators.alligator(data, teeth_offset=10)
+            ta_indicators.alligator(data, jaw_period=3, jaw_offset=2, teeth_period=3, teeth_offset=10)
         
         with pytest.raises(ValueError, match="Invalid lips offset"):
-            ta_indicators.alligator(data, lips_offset=10)
+            ta_indicators.alligator(data, jaw_period=3, jaw_offset=2, teeth_period=3, teeth_offset=2, lips_period=3, lips_offset=10)
     
     def test_alligator_all_nan_input(self):
         """Test Alligator with all NaN values"""
@@ -270,7 +273,7 @@ class TestAlligator:
     
     def test_alligator_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        hl2 = (test_data['high'] + test_data['low']) / 2[:100]  # Use smaller dataset for speed
+        hl2 = ((test_data['high'] + test_data['low']) / 2)[:100]  # Use smaller dataset for speed
         
         # Multiple jaw periods: 13, 15, 17
         result = ta_indicators.alligator_batch(
@@ -294,7 +297,7 @@ class TestAlligator:
     
     def test_alligator_full_parameter_sweep(self, test_data):
         """Test full parameter sweep"""
-        hl2 = (test_data['high'] + test_data['low']) / 2[:50]  # Small dataset
+        hl2 = ((test_data['high'] + test_data['low']) / 2)[:50]  # Small dataset
         
         result = ta_indicators.alligator_batch(
             hl2,
