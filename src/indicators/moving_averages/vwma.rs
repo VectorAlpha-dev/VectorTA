@@ -891,14 +891,8 @@ pub fn vwma_py<'py>(
     let prices_slice = prices.as_slice()?;
     let volumes_slice = volumes.as_slice()?;
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
     // Build input struct
     let params = VwmaParams { period: Some(period) };
@@ -1044,14 +1038,8 @@ pub fn vwma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
     // Heavy work without the GIL
     py.allow_threads(|| {

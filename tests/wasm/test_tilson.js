@@ -1,6 +1,5 @@
 import assert from 'assert';
 import { describe, it, test } from 'node:test';
-import * as wasm from '../../pkg/my_project.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -9,6 +8,13 @@ import { compareWithRust } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Load WASM module
+const wasmPath = join(__dirname, '../../pkg/my_project.js');
+const importPath = process.platform === 'win32' 
+    ? 'file:///' + wasmPath.replace(/\\/g, '/')
+    : wasmPath;
+const wasm = await import(importPath);
 
 // Load test data
 const testData = loadTestData();

@@ -534,7 +534,7 @@ pub unsafe fn wilders_row_scalar(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx2")]
 pub unsafe fn wilders_row_avx2(
     data: &[f64],
@@ -546,7 +546,7 @@ pub unsafe fn wilders_row_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512(
     data: &[f64],
@@ -563,7 +563,7 @@ pub unsafe fn wilders_row_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512_short(
     data: &[f64],
@@ -575,7 +575,7 @@ pub unsafe fn wilders_row_avx512_short(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn wilders_row_avx512_long(
     data: &[f64],
@@ -835,6 +835,8 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
@@ -878,14 +880,8 @@ pub fn wilders_py<'py>(
 
     let slice_in = data.as_slice()?; // zero-copy, read-only view
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse kernel string to enum with CPU feature validation
+    let kern = validate_kernel(kernel, false)?;
 
     // Build input struct
     let params = WildersParams {
@@ -1016,14 +1012,8 @@ pub fn wilders_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse kernel string to enum with CPU feature validation
+    let kern = validate_kernel(kernel, true)?;
 
     // Heavy work without the GIL
     let combos = py.allow_threads(|| {

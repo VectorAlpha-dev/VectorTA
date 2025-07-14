@@ -358,6 +358,156 @@ test('ALMA batch edge cases', () => {
     }, /All values are NaN/);
 });
 
+// New API tests
+test('ALMA batch - new ergonomic API with single parameter', () => {
+    // Test the new API with a single parameter combination
+    const close = new Float64Array(testData.close);
+    
+    const result = wasm.alma_batch(close, {
+        period_range: [9, 9, 0],
+        offset_range: [0.85, 0.85, 0],
+        sigma_range: [6.0, 6.0, 0]
+    });
+    
+    // Verify structure
+    assert(result.values, 'Should have values array');
+    assert(result.combos, 'Should have combos array');
+    assert(typeof result.rows === 'number', 'Should have rows count');
+    assert(typeof result.cols === 'number', 'Should have cols count');
+    
+    // Verify dimensions
+    assert.strictEqual(result.rows, 1);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.combos.length, 1);
+    assert.strictEqual(result.values.length, close.length);
+    
+    // Verify parameters
+    const combo = result.combos[0];
+    assert.strictEqual(combo.period, 9);
+    assert.strictEqual(combo.offset, 0.85);
+    assert.strictEqual(combo.sigma, 6.0);
+    
+    // Compare with old API
+    const oldResult = wasm.alma_js(close, 9, 0.85, 6.0);
+    for (let i = 0; i < oldResult.length; i++) {
+        if (isNaN(oldResult[i]) && isNaN(result.values[i])) {
+            continue; // Both NaN is OK
+        }
+        assert(Math.abs(oldResult[i] - result.values[i]) < 1e-10,
+               `Value mismatch at index ${i}`);
+    }
+});
+
+test('ALMA batch - new API with multiple parameters', () => {
+    // Test with multiple parameter combinations
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const result = wasm.alma_batch(close, {
+        period_range: [9, 11, 2],      // 9, 11
+        offset_range: [0.85, 0.90, 0.05], // 0.85, 0.90
+        sigma_range: [6.0, 6.0, 0]     // 6.0
+    });
+    
+    // Should have 2 * 2 * 1 = 4 combinations
+    assert.strictEqual(result.rows, 4);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.combos.length, 4);
+    assert.strictEqual(result.values.length, 200);
+    
+    // Verify each combo
+    const expectedCombos = [
+        { period: 9, offset: 0.85, sigma: 6.0 },
+        { period: 9, offset: 0.90, sigma: 6.0 },
+        { period: 11, offset: 0.85, sigma: 6.0 },
+        { period: 11, offset: 0.90, sigma: 6.0 }
+    ];
+    
+    for (let i = 0; i < expectedCombos.length; i++) {
+        assert.strictEqual(result.combos[i].period, expectedCombos[i].period);
+        assert.strictEqual(result.combos[i].offset, expectedCombos[i].offset);
+        assert.strictEqual(result.combos[i].sigma, expectedCombos[i].sigma);
+    }
+    
+    // Extract and verify a specific row
+    const secondRow = result.values.slice(result.cols, 2 * result.cols);
+    assert.strictEqual(secondRow.length, 50);
+    
+    // Compare with old API for first combination
+    const oldResult = wasm.alma_js(close, 9, 0.85, 6.0);
+    const firstRow = result.values.slice(0, result.cols);
+    for (let i = 0; i < oldResult.length; i++) {
+        if (isNaN(oldResult[i]) && isNaN(firstRow[i])) {
+            continue; // Both NaN is OK
+        }
+        assert(Math.abs(oldResult[i] - firstRow[i]) < 1e-10,
+               `Value mismatch at index ${i}`);
+    }
+});
+
+test('ALMA batch - new API matches old API results', () => {
+    // Comprehensive comparison test
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    const params = {
+        period_range: [10, 15, 5],
+        offset_range: [0.8, 0.9, 0.1],
+        sigma_range: [5.0, 7.0, 2.0]
+    };
+    
+    // Old API
+    const oldValues = wasm.alma_batch_js(
+        close,
+        params.period_range[0], params.period_range[1], params.period_range[2],
+        params.offset_range[0], params.offset_range[1], params.offset_range[2],
+        params.sigma_range[0], params.sigma_range[1], params.sigma_range[2]
+    );
+    
+    // New API
+    const newResult = wasm.alma_batch(close, params);
+    
+    // Should produce identical values
+    assert.strictEqual(oldValues.length, newResult.values.length);
+    
+    for (let i = 0; i < oldValues.length; i++) {
+        if (isNaN(oldValues[i]) && isNaN(newResult.values[i])) {
+            continue; // Both NaN is OK
+        }
+        assert(Math.abs(oldValues[i] - newResult.values[i]) < 1e-10,
+               `Value mismatch at index ${i}: old=${oldValues[i]}, new=${newResult.values[i]}`);
+    }
+});
+
+test('ALMA batch - new API error handling', () => {
+    const close = new Float64Array(testData.close.slice(0, 10));
+    
+    // Invalid config structure
+    assert.throws(() => {
+        wasm.alma_batch(close, {
+            period_range: [9, 9], // Missing step
+            offset_range: [0.85, 0.85, 0],
+            sigma_range: [6.0, 6.0, 0]
+        });
+    }, /Invalid config/);
+    
+    // Missing required field
+    assert.throws(() => {
+        wasm.alma_batch(close, {
+            period_range: [9, 9, 0],
+            offset_range: [0.85, 0.85, 0]
+            // Missing sigma_range
+        });
+    }, /Invalid config/);
+    
+    // Invalid data type
+    assert.throws(() => {
+        wasm.alma_batch(close, {
+            period_range: "invalid",
+            offset_range: [0.85, 0.85, 0],
+            sigma_range: [6.0, 6.0, 0]
+        });
+    }, /Invalid config/);
+});
+
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
 test.after(() => {

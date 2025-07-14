@@ -1,0 +1,40 @@
+{
+  "methodology": "criterion-comparable",
+  "warmup_ms": 150.0,
+  "samples": 10,
+  "gc_disabled": true,
+  "omp_threads": 1,
+  "data_size": "1M",
+  "python_results": {
+    "cwma": 1.730835,
+    "cwma_batch": 1.64283
+  },
+  "rust_results": {
+    "cwma": 2.13105,
+    "cwma_batch": 155.69835
+  },
+  "comparisons": [
+    {
+      "indicator": "cwma",
+      "python_ms": 1.730835,
+      "rust_ms": 2.13105,
+      "overhead_ms": -0.4002150000000002,
+      "overhead_pct": -18.78017878510594
+    },
+    {
+      "indicator": "cwma_batch",
+      "python_ms": 1.64283,
+      "rust_ms": 155.69835,
+      "overhead_ms": -154.05552,
+      "overhead_pct": -98.94486357755237
+    }
+  ],
+  "batch_comparisons": [
+    {
+      "indicator": "cwma",
+      "single_ms": 1.730835,
+      "batch_ms": 1.64283,
+      "overhead_pct": -5.084540120808734
+    }
+  ]
+}

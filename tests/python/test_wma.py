@@ -100,8 +100,11 @@ class TestWma:
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
         
-        # First period values should be NaN (warmup is period for WMA)
-        assert np.all(np.isnan(result[:14])), "Expected NaN in warmup period"
+        # First period-1 values should be NaN (warmup is period-1 for WMA)
+        # For period=14, indices 0-12 should be NaN
+        assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
+        # First valid value should be at index period-1 = 13
+        assert not np.isnan(result[13]), "Expected valid value at index 13"
     
     def test_wma_streaming(self, test_data):
         """Test WMA streaming matches batch calculation - mirrors check_wma_streaming"""
@@ -183,7 +186,7 @@ class TestWma:
                 )
             except ValueError as e:
                 # Some kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
         
         # All available kernels should produce similar results

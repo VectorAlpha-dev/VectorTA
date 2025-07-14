@@ -82,7 +82,7 @@ class TestVwap:
         empty_vol = np.array([])
         empty_price = np.array([])
         
-        with pytest.raises(ValueError, match="No data"):
+        with pytest.raises(ValueError, match="No data for VWAP calculation"):
             ta_indicators.vwap(empty_ts, empty_vol, empty_price)
     
     def test_vwap_streaming(self, test_data):

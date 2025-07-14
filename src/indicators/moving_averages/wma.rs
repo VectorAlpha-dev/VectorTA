@@ -1046,14 +1046,8 @@ pub fn wma_py<'py>(
 
     let slice_in = data.as_slice()?; // zero-copy, read-only view
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
     // Build input struct
     let params = WmaParams {
@@ -1140,14 +1134,8 @@ pub fn wma_batch_py<'py>(
         period: period_range,
     };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
     // 1. Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);

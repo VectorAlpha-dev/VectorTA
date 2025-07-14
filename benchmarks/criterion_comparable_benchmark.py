@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""
+Criterion-comparable benchmark for Python bindings.
+Implements best practices for accurate performance measurement.
+"""
+
+import argparse
+import json
+import time
+import gc
+import os
+import sys
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Tuple, Callable, Any
+import subprocess
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import my_project
+
+# Disable multi-threading for consistent results
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+
+class CriterionComparableBenchmark:
+    """Benchmark harness that matches Criterion's methodology."""
+    
+    def __init__(self, data_size: str = '1M', filter_indicator: str = None):
+        self.data_size = data_size
+        self.filter_indicator = filter_indicator
+        self.rust_results = {}
+        self.python_results = {}
+        
+        # Benchmark parameters matching Criterion
+        self.warmup_target_ns = 150_000_000  # 150ms in nanoseconds
+        self.sample_count = 10  # Number of samples to take
+        self.min_iterations = 10  # Minimum iterations per sample
+        
+    def load_csv_data(self) -> Dict[str, np.ndarray]:
+        """Load CSV data once, outside of timing loops."""
+        csv_path = Path(__file__).parent.parent / 'src/data/1MillionCandles.csv'
+        
+        # Pre-allocate arrays for better performance
+        with open(csv_path, 'r') as f:
+            f.readline()  # Skip header
+            # Count lines first
+            line_count = sum(1 for _ in f)
+        
+        # Allocate arrays
+        timestamps = np.empty(line_count, dtype=np.int64)
+        opens = np.empty(line_count, dtype=np.float64)
+        highs = np.empty(line_count, dtype=np.float64)
+        lows = np.empty(line_count, dtype=np.float64)
+        closes = np.empty(line_count, dtype=np.float64)
+        volumes = np.empty(line_count, dtype=np.float64)
+        
+        # Load data
+        with open(csv_path, 'r') as f:
+            f.readline()  # Skip header
+            import csv
+            reader = csv.reader(f)
+            valid_count = 0
+            for row in reader:
+                if len(row) >= 7:
+                    try:
+                        timestamps[valid_count] = int(row[0])
+                        opens[valid_count] = float(row[1])
+                        highs[valid_count] = float(row[2])
+                        lows[valid_count] = float(row[3])
+                        closes[valid_count] = float(row[4])
+                        volumes[valid_count] = float(row[6])
+                        valid_count += 1
+                    except ValueError:
+                        continue
+        
+        # Trim to actual size and ensure C-contiguous
+        data = {
+            'timestamps': np.ascontiguousarray(timestamps[:valid_count]),
+            'open': np.ascontiguousarray(opens[:valid_count]),
+            'high': np.ascontiguousarray(highs[:valid_count]),
+            'low': np.ascontiguousarray(lows[:valid_count]),
+            'close': np.ascontiguousarray(closes[:valid_count]),
+            'volume': np.ascontiguousarray(volumes[:valid_count])
+        }
+        
+        print(f"Loaded {valid_count} candles")
+        return data
+    
+    def parse_criterion_json(self):
+        """Parse Criterion's JSON output files for accurate medians."""
+        criterion_dir = Path(__file__).parent.parent / 'target/criterion'
+        if not criterion_dir.exists():
+            print("Warning: No Criterion results found. Run Rust benchmarks first.")
+            return
+        
+        print("\nParsing Criterion JSON results...")
+        print("-" * 80)
+        
+        # Map of indicator names to their benchmark paths
+        indicators_to_find = [
+            'alma', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'acosc',
+            'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
+            'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
+            'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
+            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
+            'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
+            'trendflex', 'trima', 'vqwma'
+        ]
+        
+        size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
+        target_size = size_map.get(self.data_size, '1m')
+        
+        # Also add batch indicators to find
+        batch_indicators = ['alma_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
+                           'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
+                           'hma_batch', 'cwma_batch']
+        all_indicators = indicators_to_find + batch_indicators
+        
+        for indicator in all_indicators:
+            if self.filter_indicator and not indicator.startswith(self.filter_indicator):
+                continue
+                
+            # Try to find the best kernel result
+            best_time = float('inf')
+            best_kernel = None
+            
+            # Check each kernel variant (for batch operations, check batch kernels)
+            if indicator.endswith('_batch'):
+                kernels_to_check = ['avx512batch', 'avx2batch', 'scalarbatch', '']
+            else:
+                kernels_to_check = ['avx512', 'avx2', 'scalar', '']
+                
+            for kernel in kernels_to_check:
+                if kernel:
+                    bench_name = f"{indicator}_{kernel}"
+                else:
+                    bench_name = indicator
+                
+                json_path = criterion_dir / indicator / bench_name / target_size / 'new' / 'estimates.json'
+                
+                if json_path.exists():
+                    try:
+                        with open(json_path, 'r') as f:
+                            data = json.load(f)
+                            median_ns = data['median']['point_estimate']
+                            median_ms = median_ns / 1_000_000
+                            
+                            if median_ms < best_time:
+                                best_time = median_ms
+                                best_kernel = kernel or 'auto'
+                    except Exception as e:
+                        print(f"  Error reading {json_path}: {e}")
+            
+            if best_time < float('inf'):
+                self.rust_results[indicator] = best_time
+                print(f"  {indicator}: {best_time:.3f} ms (kernel: {best_kernel})")
+    
+    def benchmark_function(self, func: Callable, name: str) -> float:
+        """
+        Benchmark a function using Criterion-like methodology.
+        Returns median time in milliseconds.
+        """
+        # Disable garbage collection during measurement
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        
+        try:
+            # Warmup phase - run until we've accumulated at least 150ms
+            warmup_elapsed = 0
+            warmup_iterations = 0
+            
+            while warmup_elapsed < self.warmup_target_ns:
+                start = time.perf_counter_ns()
+                func()
+                end = time.perf_counter_ns()
+                warmup_elapsed += (end - start)
+                warmup_iterations += 1
+            
+            # Sampling phase - take multiple samples
+            samples = []
+            
+            for _ in range(self.sample_count):
+                # Each sample measures multiple iterations
+                iterations = max(self.min_iterations, warmup_iterations // 10)
+                
+                start = time.perf_counter_ns()
+                for _ in range(iterations):
+                    func()
+                end = time.perf_counter_ns()
+                
+                # Calculate time per iteration
+                time_per_iter = (end - start) / iterations
+                samples.append(time_per_iter)
+            
+            # Return median (like Criterion does)
+            median_ns = np.median(samples)
+            return median_ns / 1_000_000  # Convert to ms
+            
+        finally:
+            # Re-enable GC if it was enabled
+            if gc_was_enabled:
+                gc.enable()
+    
+    def run_python_benchmarks(self):
+        """Run Python benchmarks with pre-allocated buffers."""
+        print("\n\nRunning Python benchmarks (Criterion-comparable)...")
+        print("-" * 80)
+        
+        data = self.load_csv_data()
+        
+        # Pre-allocate output buffers for each indicator
+        output_buffers = {
+            'single': np.empty_like(data['close']),
+            'multi': np.empty((4, len(data['close'])), dtype=np.float64),  # For indicators with multiple outputs
+        }
+        
+        # Define indicators with their functions
+        indicators = [
+            ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
+            ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
+            ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
+            ('wilders', lambda: my_project.wilders(data['close'], 14)),
+            ('wma', lambda: my_project.wma(data['close'], 14)),
+            ('zlema', lambda: my_project.zlema(data['close'], 14)),
+            ('ad', lambda: my_project.ad(data['high'], data['low'], data['close'], data['volume'])),
+            ('acosc', lambda: my_project.acosc(data['high'], data['low'])),
+            ('vwap', lambda: my_project.vwap(data['timestamps'], data['volume'], data['close'], '1d')),
+            ('cwma', lambda: my_project.cwma(data['close'], 14)),
+            ('dema', lambda: my_project.dema(data['close'], 14)),
+            ('edcf', lambda: my_project.edcf(data['close'], 14)),
+            ('ehlers_itrend', lambda: my_project.ehlers_itrend(data['close'], 20, 48)),
+            ('ema', lambda: my_project.ema(data['close'], 14)),
+            ('epma', lambda: my_project.epma(data['close'], 14, 0)),
+            ('frama', lambda: my_project.frama(data['high'], data['low'], 14, 1, 198)),
+            ('fwma', lambda: my_project.fwma(data['close'], 14)),
+            ('gaussian', lambda: my_project.gaussian(data['close'], 14, 4)),
+            ('highpass_2_pole', lambda: my_project.highpass_2_pole(data['close'], 48, 0.707)),
+            ('highpass', lambda: my_project.highpass(data['close'], 48)),
+            ('hma', lambda: my_project.hma(data['close'], 14)),
+            ('hwma', lambda: my_project.hwma(data['close'], 0.2, 0.1, 0.1)),
+            ('jma', lambda: my_project.jma(data['close'], 14, 0.0, 2)),
+            ('jsa', lambda: my_project.jsa(data['close'], 14)),
+            ('kama', lambda: my_project.kama(data['close'], 14)),
+            ('linreg', lambda: my_project.linreg(data['close'], 14)),
+            ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
+            ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
+            ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
+            ('nma', lambda: my_project.nma(data['close'], data['volume'])),
+            ('pwma', lambda: my_project.pwma(data['close'], 14)),
+            ('reflex', lambda: my_project.reflex(data['close'], 20)),
+            ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
+            ('sma', lambda: my_project.sma(data['close'], 14)),
+            ('smma', lambda: my_project.smma(data['close'], 14)),
+            ('sqwma', lambda: my_project.sqwma(data['close'], 14)),
+            ('srwma', lambda: my_project.srwma(data['close'], 14)),
+            ('supersmoother_3_pole', lambda: my_project.supersmoother_3_pole(data['close'], 14)),
+            ('supersmoother', lambda: my_project.supersmoother(data['close'], 14)),
+            ('swma', lambda: my_project.swma(data['close'], 14)),
+            ('tema', lambda: my_project.tema(data['close'], 14)),
+            ('tilson', lambda: my_project.tilson(data['close'], 14, 0.7)),
+            ('trendflex', lambda: my_project.trendflex(data['close'], 20)),
+            ('trima', lambda: my_project.trima(data['close'], 14)),
+            ('vqwma', lambda: my_project.vqwma(data['close'], 0.5, 0.2, 0.2)),
+        ]
+        
+        # Filter if requested
+        if self.filter_indicator:
+            indicators = [(name, func) for name, func in indicators 
+                         if name.startswith(self.filter_indicator)]
+        
+        # Run benchmarks
+        for name, func in indicators:
+            try:
+                median_time = self.benchmark_function(func, name)
+                self.python_results[name] = median_time
+                print(f"  {name}: {median_time:.3f} ms")
+            except Exception as e:
+                print(f"  {name}: FAILED - {str(e)[:50]}...")
+        
+        # Also run batch operations
+        print("\n  Batch operations (1 combo):")
+        batch_indicators = [
+            ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 9, 1), (0.85, 0.85, 0.1), (6.0, 6.0, 1.0))),
+            ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
+            ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
+            ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
+            ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
+            ('ema_batch', lambda: my_project.ema_batch(data['close'], (14, 14, 1))),
+            ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
+            ('tema_batch', lambda: my_project.tema_batch(data['close'], (14, 14, 1))),
+            ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
+            ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
+        ]
+        
+        # Filter batch tests if indicator filter is active
+        if self.filter_indicator:
+            batch_indicators = [(name, func) for name, func in batch_indicators 
+                               if name.startswith(self.filter_indicator)]
+        
+        for name, func in batch_indicators:
+            try:
+                median_time = self.benchmark_function(func, name)
+                self.python_results[name] = median_time
+                print(f"  {name}: {median_time:.3f} ms")
+            except Exception as e:
+                print(f"  {name}: FAILED - {str(e)[:50]}...")
+    
+    def compare_results(self):
+        """Compare Python and Rust results."""
+        print("\n\n" + "=" * 80)
+        print("PERFORMANCE COMPARISON (Criterion-comparable)")
+        print("=" * 80)
+        print(f"{'Indicator':25} {'Python (ms)':>12} {'Rust (ms)':>12} {'Overhead':>12} {'Status':>10}")
+        print("-" * 80)
+        
+        comparisons = []
+        
+        for indicator in sorted(self.python_results.keys()):
+            python_time = self.python_results[indicator]
+            
+            if indicator in self.rust_results:
+                rust_time = self.rust_results[indicator]
+                overhead_ms = python_time - rust_time
+                overhead_pct = (python_time / rust_time - 1) * 100
+                
+                # Status based on overhead percentage
+                if overhead_pct <= 15:
+                    status = "✅ EXCELLENT"
+                elif overhead_pct <= 30:
+                    status = "👍 GOOD"
+                elif overhead_pct <= 50:
+                    status = "⚠️  OK"
+                else:
+                    status = "❌ HIGH"
+                
+                print(f"{indicator:25} {python_time:12.2f} {rust_time:12.2f} "
+                      f"{overhead_pct:11.1f}% {status}")
+                
+                comparisons.append({
+                    'indicator': indicator,
+                    'python_ms': python_time,
+                    'rust_ms': rust_time,
+                    'overhead_ms': overhead_ms,
+                    'overhead_pct': overhead_pct
+                })
+            else:
+                print(f"{indicator:25} {python_time:12.2f} {'N/A':>12} {'N/A':>12}")
+        
+        # Summary statistics
+        if comparisons:
+            avg_overhead = np.mean([c['overhead_pct'] for c in comparisons])
+            median_overhead = np.median([c['overhead_pct'] for c in comparisons])
+            print("\n" + "-" * 80)
+            print(f"Average overhead: {avg_overhead:.1f}%")
+            print(f"Median overhead: {median_overhead:.1f}%")
+        
+        # Batch vs Single analysis
+        print("\n\n" + "=" * 80)
+        print("BATCH vs SINGLE ANALYSIS (1 combo)")
+        print("=" * 80)
+        print(f"{'Indicator':20} {'Single (ms)':>12} {'Batch (ms)':>12} {'Overhead':>12} {'Status':>10}")
+        print("-" * 80)
+        
+        batch_comparisons = []
+        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma']:
+            if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
+                single_time = self.python_results[base_name]
+                batch_time = self.python_results[f"{base_name}_batch"]
+                overhead_ms = batch_time - single_time
+                overhead_pct = (batch_time / single_time - 1) * 100
+                
+                if overhead_pct <= 10:
+                    status = "✅ OK"
+                elif overhead_pct <= 20:
+                    status = "⚠️  MODERATE"
+                else:
+                    status = "❌ HIGH"
+                
+                print(f"{base_name:20} {single_time:12.2f} {batch_time:12.2f} "
+                      f"{overhead_pct:11.1f}% {status}")
+                
+                batch_comparisons.append({
+                    'indicator': base_name,
+                    'single_ms': single_time,
+                    'batch_ms': batch_time,
+                    'overhead_pct': overhead_pct
+                })
+        
+        # Save results
+        results = {
+            'methodology': 'criterion-comparable',
+            'warmup_ms': self.warmup_target_ns / 1_000_000,
+            'samples': self.sample_count,
+            'gc_disabled': True,
+            'omp_threads': 1,
+            'data_size': self.data_size,
+            'python_results': self.python_results,
+            'rust_results': self.rust_results,
+            'comparisons': comparisons,
+            'batch_comparisons': batch_comparisons
+        }
+        
+        output_path = Path(__file__).parent / 'criterion_comparable_results.json'
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"\nResults saved to benchmarks/criterion_comparable_results.json")
+
+
+def main():
+    """Run the Criterion-comparable benchmark."""
+    parser = argparse.ArgumentParser(description='Criterion-comparable Python benchmark')
+    parser.add_argument('filter', nargs='?', help='Filter to specific indicator')
+    parser.add_argument('--size', default='1M', choices=['10k', '100k', '1M'],
+                       help='Data size to use (default: 1M)')
+    args = parser.parse_args()
+    
+    print("Criterion-Comparable Python Benchmark")
+    print("=" * 80)
+    print("Features:")
+    print("  - Parses Criterion JSON for accurate Rust medians")
+    print("  - Disables GC during measurement")
+    print("  - Uses 150ms warmup period")
+    print("  - Takes median of 10 samples")
+    print("  - Single-threaded NumPy (OMP_NUM_THREADS=1)")
+    print(f"\nData size: {args.size}")
+    if args.filter:
+        print(f"Filtering for: {args.filter}")
+    
+    benchmark = CriterionComparableBenchmark(
+        data_size=args.size,
+        filter_indicator=args.filter
+    )
+    
+    # Parse Criterion results
+    benchmark.parse_criterion_json()
+    
+    # Run Python benchmarks
+    benchmark.run_python_benchmarks()
+    
+    # Compare results
+    benchmark.compare_results()
+
+
+if __name__ == '__main__':
+    main()

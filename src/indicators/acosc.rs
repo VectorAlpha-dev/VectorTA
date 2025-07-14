@@ -482,14 +482,8 @@ pub fn acosc_py<'py>(
     let high_slice = high.as_slice()?; // zero-copy, read-only view
     let low_slice = low.as_slice()?; // zero-copy, read-only view
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
     // Build input struct
     let params = AcoscParams::default();
@@ -503,31 +497,13 @@ pub fn acosc_py<'py>(
 
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), AcoscError> {
-        let chosen = match kern {
-            Kernel::Auto => detect_best_kernel(),
-            other => other,
-        };
+        // Use the main acosc function which has proper validation
+        let result = acosc_with_kernel(&acosc_in, kern)?;
         
-        // Initialize NaN values
-        slice_osc.fill(f64::NAN);
-        slice_change.fill(f64::NAN);
+        // Copy results to pre-allocated arrays
+        slice_osc.copy_from_slice(&result.osc);
+        slice_change.copy_from_slice(&result.change);
         
-        unsafe {
-            match chosen {
-                Kernel::Scalar | Kernel::ScalarBatch => {
-                    acosc_scalar(high_slice, low_slice, slice_osc, slice_change)
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 | Kernel::Avx2Batch => {
-                    acosc_avx2(high_slice, low_slice, slice_osc, slice_change)
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => {
-                    acosc_avx512(high_slice, low_slice, slice_osc, slice_change)
-                }
-                _ => unreachable!(),
-            }
-        }
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -590,14 +566,8 @@ pub fn acosc_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
     // Since ACOSC has no parameters, we always have 1 row
     let rows = 1;

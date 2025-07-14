@@ -128,11 +128,28 @@ Test bindings for all indicators:
 ./test_bindings.sh alma         # Test only ALMA indicator
 ./test_bindings.sh --python     # Run only Python tests
 ./test_bindings.sh --wasm       # Run only WASM tests
+
+# Windows Native:
+test_bindings.bat indicator_name  # Test both Python and WASM bindings for specific indicator
 ```
 
 Generate test files for new indicators:
 ```bash
 python scripts/generate_binding_tests.py <indicator_name>
+```
+
+### Testing Commands Reference
+```bash
+# Test Rust unit tests for specific indicator
+cargo test --features nightly-avx --lib indicators::indicator_name -- --nocapture
+# For moving averages:
+cargo test --features nightly-avx --lib indicators::moving_averages::indicator_name -- --nocapture
+
+# Run benchmarks for specific indicator  
+cargo bench --features nightly-avx --bench indicator_benchmark -- indicator_name
+
+# Test Python and WASM bindings (Windows)
+test_bindings.bat indicator_name
 ```
 
 ## Adding New Indicators

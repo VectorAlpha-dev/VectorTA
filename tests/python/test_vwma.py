@@ -226,7 +226,7 @@ class TestVwma:
                 assert len(result) == len(close)
             except ValueError as e:
                 # AVX kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
 
 

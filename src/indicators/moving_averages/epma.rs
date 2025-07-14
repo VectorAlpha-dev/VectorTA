@@ -295,24 +295,28 @@ pub fn epma_scalar(
 ) {
     let n = data.len();
     let p1 = period - 1;
+    // Build weights for oldest-to-newest order
     let mut weights = Vec::with_capacity(p1);
+    let mut weight_sum = 0.0;
     for i in 0..p1 {
-        weights.push((period as i32 - i as i32 - offset as i32) as f64);
+        let w = (period as i32 - i as i32 - offset as i32) as f64;
+        weights.push(w);
+        weight_sum += w;
     }
-    let weight_sum: f64 = weights.iter().sum();
 
     for j in (first_valid + period + offset + 1)..n {
+        let start = j + 1 - p1;
         let mut my_sum = 0.0;
         let mut i = 0_usize;
         while i + 3 < p1 {
-            my_sum += data[j - i] * weights[i];
-            my_sum += data[j - (i + 1)] * weights[i + 1];
-            my_sum += data[j - (i + 2)] * weights[i + 2];
-            my_sum += data[j - (i + 3)] * weights[i + 3];
+            my_sum += data[start + i] * weights[p1 - 1 - i];
+            my_sum += data[start + i + 1] * weights[p1 - 2 - i];
+            my_sum += data[start + i + 2] * weights[p1 - 3 - i];
+            my_sum += data[start + i + 3] * weights[p1 - 4 - i];
             i += 4;
         }
         while i < p1 {
-            my_sum += data[j - i] * weights[i];
+            my_sum += data[start + i] * weights[p1 - 1 - i];
             i += 1;
         }
         out[j] = my_sum / weight_sum;

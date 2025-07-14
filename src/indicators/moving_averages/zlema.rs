@@ -21,12 +21,23 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 use std::mem::MaybeUninit;
+#[cfg(feature = "python")]
+use pyo3::{pyclass, pyfunction, pymethods, Bound, Python, PyResult};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
+use pyo3::types::PyDictMethods;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::JsValue;
 
 impl<'a> AsRef<[f64]> for ZlemaInput<'a> {
     #[inline(always)]
@@ -162,13 +173,14 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
         ZlemaData::Slice(sl) => sl,
     };
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
     let len = data.len();
     let period = input.get_period();
-
-    if period == 0 || period > len {
+    
+    if period == 0 || len == 0 || period > len {
         return Err(ZlemaError::InvalidPeriod { period, data_len: len });
     }
+
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
     if (len - first) < period {
         return Err(ZlemaError::InvalidPeriod { period, data_len: len - first });
     }
@@ -375,19 +387,41 @@ impl ZlemaStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        if value.is_nan() {
+            return None;
+        }
+        
+        // Store value in circular buffer
         self.buffer[self.head] = value;
-        let lag_idx = (self.head + self.period - self.lag) % self.period;
+        let samples_seen = if !self.filled { 
+            self.head + 1 
+        } else { 
+            self.period + self.head + 1
+        };
+        
         self.head = (self.head + 1) % self.period;
-
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
-        let val = if !self.filled { value } else { 2.0 * value - self.buffer[lag_idx] };
+        
+        // ZLEMA calculation
+        let val = if samples_seen <= self.lag + 1 {
+            // Not enough data to de-lag, use raw value (like scalar implementation)
+            value
+        } else {
+            // De-lag the value
+            let lag_idx = (self.head + self.period - self.lag - 1) % self.period;
+            2.0 * value - self.buffer[lag_idx]
+        };
+        
         if self.last_ema.is_nan() {
+            // First value initialization
             self.last_ema = val;
         } else {
+            // EMA calculation
             self.last_ema = self.alpha * val + (1.0 - self.alpha) * self.last_ema;
         }
+        
         Some(self.last_ema)
     }
 }
@@ -531,6 +565,13 @@ fn zlema_batch_inner(
     if combos.is_empty() {
         return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
     }
+    
+    // Check for empty data first
+    if data.is_empty() {
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(0);
+        return Err(ZlemaError::InvalidPeriod { period: max_p, data_len: 0 });
+    }
+    
     let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
@@ -871,14 +912,8 @@ pub fn zlema_py<'py>(
 
     let slice_in = data.as_slice()?; // zero-copy, read-only view
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse kernel string to enum with CPU feature validation
+    let kern = validate_kernel(kernel, false)?;
 
     // Build input struct
     let params = ZlemaParams {
@@ -967,14 +1002,8 @@ pub fn zlema_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse kernel string to enum with CPU feature validation
+    let kern = validate_kernel(kernel, true)?;
 
     // Heavy work without the GIL
     py.allow_threads(|| -> Result<(), ZlemaError> {

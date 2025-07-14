@@ -60,7 +60,7 @@ class TestHighPass2Pole:
         )
         
         # Compare full output with Rust
-        compare_with_rust('highpass_2_pole', result, 'close', {'period': 48, 'k': 0.707})
+        compare_with_rust('highpass_2_pole', result, 'close', {'period': 48, 'k': 0.707}, atol=1e-10)
     
     def test_highpass2_default_candles(self, test_data):
         """Test HighPass2 with default parameters - mirrors check_highpass2_default_candles"""
@@ -71,7 +71,7 @@ class TestHighPass2Pole:
         assert len(result) == len(close)
         
         # Compare with Rust
-        compare_with_rust('highpass_2_pole', result, 'close', {'period': 48, 'k': 0.707})
+        compare_with_rust('highpass_2_pole', result, 'close', {'period': 48, 'k': 0.707}, atol=1e-10)
     
     def test_highpass2_zero_period(self):
         """Test HighPass2 fails with zero period - mirrors check_highpass2_zero_period"""

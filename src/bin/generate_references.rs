@@ -36,6 +36,14 @@ use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams}
 use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
 use my_project::indicators::moving_averages::trendflex::{trendflex, TrendFlexInput, TrendFlexParams};
 use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
+use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
+use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
+use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
+use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
+use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
+use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
+use my_project::indicators::ad::{ad, AdInput, AdParams, AdData};
+use my_project::indicators::acosc::{acosc, AcoscInput, AcoscParams, AcoscData};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -44,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima");
+        eprintln!("Available indicators: ad, acosc, alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -627,6 +635,133 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 "values": result.values,
                 "length": result.values.len()
+            })
+        },
+        "vwap" => {
+            let params = VwapParams::default();
+            let anchor = params.anchor.clone().unwrap_or_else(|| "1d".to_string());
+            let input = VwapInput::from_candles(&candles, "hlcv", params);
+            let result = vwap(&input)?;
+            json!({
+                "indicator": "vwap",
+                "source": "hlcv",
+                "params": {
+                    "anchor": anchor
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "vwma" => {
+            let params = VwmaParams::default();
+            let period = params.period.unwrap_or(20);
+            let input = VwmaInput::from_candles(&candles, source, params);
+            let result = vwma(&input)?;
+            json!({
+                "indicator": "vwma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "vpwma" => {
+            let params = VpwmaParams::default();
+            let period = params.period.unwrap_or(20);
+            let power = params.power.unwrap_or(1.0);
+            let input = VpwmaInput::from_candles(&candles, source, params);
+            let result = vpwma(&input)?;
+            json!({
+                "indicator": "vpwma",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "power": power
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "wilders" => {
+            let params = WildersParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = WildersInput::from_candles(&candles, source, params);
+            let result = wilders(&input)?;
+            json!({
+                "indicator": "wilders",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "wma" => {
+            let params = WmaParams::default();
+            let period = params.period.unwrap_or(9);
+            let input = WmaInput::from_candles(&candles, source, params);
+            let result = wma(&input)?;
+            json!({
+                "indicator": "wma",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "zlema" => {
+            let params = ZlemaParams::default();
+            let period = params.period.unwrap_or(14);
+            let input = ZlemaInput::from_candles(&candles, source, params);
+            let result = zlema(&input)?;
+            json!({
+                "indicator": "zlema",
+                "source": source,
+                "params": {
+                    "period": period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "ad" => {
+            if source != "ohlcv" {
+                eprintln!("AD indicator requires 'ohlcv' source");
+                std::process::exit(1);
+            }
+            let params = AdParams::default();
+            let data = AdData::Candles { candles: &candles };
+            let input = AdInput { data, params };
+            let result = ad(&input)?;
+            json!({
+                "indicator": "ad",
+                "source": source,
+                "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "acosc" => {
+            if source != "high_low" {
+                eprintln!("ACOSC indicator requires 'high_low' source");
+                std::process::exit(1);
+            }
+            let params = AcoscParams::default();
+            let data = AcoscData::Candles { candles: &candles };
+            let input = AcoscInput { data, params };
+            let result = acosc(&input)?;
+            json!({
+                "indicator": "acosc",
+                "source": source,
+                "params": {},
+                "osc": result.osc,
+                "change": result.change,
+                "length": result.osc.len()
             })
         },
         _ => {

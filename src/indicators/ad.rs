@@ -21,9 +21,14 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+#[cfg(feature = "python")]
+use pyo3::{pyfunction, Python, PyResult, Bound};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList, PyListMethods};
 
 #[derive(Debug, Clone)]
 pub enum AdData<'a> {
@@ -132,7 +137,7 @@ impl AdBuilder {
 #[derive(Debug, Error)]
 pub enum AdError {
     #[error(transparent)]
-    CandleFieldError(#[from] Box<dyn std::error::Error>),
+    CandleFieldError(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("ad: Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
     DataLengthMismatch {
         high_len: usize,
@@ -152,10 +157,14 @@ pub fn ad(input: &AdInput) -> Result<AdOutput, AdError> {
 pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdError> {
     let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         AdData::Candles { candles } => {
-            let high = candles.select_candle_field("high")?;
-            let low = candles.select_candle_field("low")?;
-            let close = candles.select_candle_field("close")?;
-            let volume = candles.select_candle_field("volume")?;
+            let high = candles.select_candle_field("high")
+                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
+            let low = candles.select_candle_field("low")
+                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
+            let close = candles.select_candle_field("close")
+                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
+            let volume = candles.select_candle_field("volume")
+                .map_err(|e| AdError::CandleFieldError(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())) as Box<dyn std::error::Error + Send + Sync>))?;
             (high, low, close, volume)
         }
         AdData::Slices {
@@ -480,11 +489,7 @@ fn expand_grid_ad<'a>(
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
 use pyo3::prelude::*;
-#[cfg(feature = "python")]
-use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -536,14 +541,8 @@ pub fn ad_py<'py>(
     let close_slice = close.as_slice()?;
     let volume_slice = volume.as_slice()?;
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
     // Create input struct
     let input = AdInput::from_slices(
@@ -656,14 +655,8 @@ pub fn ad_batch_py<'py>(
     use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
     use pyo3::types::PyDict;
 
-    // Parse kernel
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
     // Convert Python lists to Rust vectors of slices
     let rows = highs.len();
@@ -679,15 +672,21 @@ pub fn ad_batch_py<'py>(
     let mut volume_vecs: Vec<Vec<f64>> = Vec::with_capacity(rows);
 
     for i in 0..rows {
-        let high_arr: PyReadonlyArray1<f64> = highs.get_item(i)?.extract()?;
-        let low_arr: PyReadonlyArray1<f64> = lows.get_item(i)?.extract()?;
-        let close_arr: PyReadonlyArray1<f64> = closes.get_item(i)?.extract()?;
-        let volume_arr: PyReadonlyArray1<f64> = volumes.get_item(i)?.extract()?;
+        let high_item = highs.get_item(i)?;
+        let low_item = lows.get_item(i)?;
+        let close_item = closes.get_item(i)?;
+        let volume_item = volumes.get_item(i)?;
+        
+        // Extract numpy arrays
+        let high_readonly = high_item.extract::<PyReadonlyArray1<f64>>()?;
+        let low_readonly = low_item.extract::<PyReadonlyArray1<f64>>()?;
+        let close_readonly = close_item.extract::<PyReadonlyArray1<f64>>()?;
+        let volume_readonly = volume_item.extract::<PyReadonlyArray1<f64>>()?;
 
-        high_vecs.push(high_arr.to_vec()?);
-        low_vecs.push(low_arr.to_vec()?);
-        close_vecs.push(close_arr.to_vec()?);
-        volume_vecs.push(volume_arr.to_vec()?);
+        high_vecs.push(high_readonly.to_vec()?);
+        low_vecs.push(low_readonly.to_vec()?);
+        close_vecs.push(close_readonly.to_vec()?);
+        volume_vecs.push(volume_readonly.to_vec()?);
     }
 
     // Convert to slices

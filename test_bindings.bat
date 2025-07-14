@@ -70,7 +70,7 @@ if "%RUN_PYTHON%"=="true" (
     
     echo.
     echo Building Python bindings...
-    maturin develop --features python --release
+    maturin develop --features python,nightly-avx --release
     if !errorlevel! equ 0 (
         echo Python build successful
         

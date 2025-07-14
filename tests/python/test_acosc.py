@@ -78,7 +78,7 @@ class TestAcosc:
         high = np.array([100.0, 101.0, 102.0])
         low = np.array([99.0, 98.0])  # Shorter array
         
-        with pytest.raises(ValueError, match="mismatch"):
+        with pytest.raises(ValueError, match="Mismatch"):
             ta_indicators.acosc(high, low)
     
     def test_acosc_nan_handling(self, test_data):
@@ -190,7 +190,7 @@ class TestAcosc:
                 assert len(change) == len(high)
             except ValueError as e:
                 # AVX kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
 
 

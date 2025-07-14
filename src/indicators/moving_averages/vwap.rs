@@ -39,7 +39,6 @@ use std::error::Error;
 use thiserror::Error;
 use chrono::{Datelike, NaiveDateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -1071,14 +1070,18 @@ pub fn vwap_py<'py>(
     let vol_slice = volumes.as_slice()?;
     let price_slice = prices.as_slice()?;
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Parse and validate kernel
+    let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
+
+    // Check for empty data
+    if ts_slice.is_empty() || vol_slice.is_empty() || price_slice.is_empty() {
+        return Err(PyValueError::new_err("vwap: No data for VWAP calculation."));
+    }
+    
+    // Check for mismatched lengths
+    if ts_slice.len() != vol_slice.len() || ts_slice.len() != price_slice.len() {
+        return Err(PyValueError::new_err("vwap: Mismatch in length of timestamps, prices, or volumes."));
+    }
 
     // Build input struct
     let params = VwapParams {
@@ -1176,7 +1179,7 @@ pub fn vwap_batch_py<'py>(
     timestamps: numpy::PyReadonlyArray1<'py, i64>,
     volumes: numpy::PyReadonlyArray1<'py, f64>,
     prices: numpy::PyReadonlyArray1<'py, f64>,
-    anchor_range: (&str, &str, u32),
+    anchor_range: (String, String, u32),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
@@ -1187,7 +1190,7 @@ pub fn vwap_batch_py<'py>(
     let price_slice = prices.as_slice()?;
 
     let sweep = VwapBatchRange {
-        anchor: (anchor_range.0.to_string(), anchor_range.1.to_string(), anchor_range.2),
+        anchor: (anchor_range.0, anchor_range.1, anchor_range.2),
     };
 
     // Parse kernel string to enum
@@ -1208,14 +1211,15 @@ pub fn vwap_batch_py<'py>(
     // Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", output.values.into_pyarray(py).reshape((output.rows, output.cols))?)?;
-    dict.set_item(
-        "anchors",
+    
+    // Create Python list of anchor strings
+    let anchors_list = PyList::new(
+        py,
         output.combos
             .iter()
             .map(|p| p.anchor.clone().unwrap_or_else(|| "1d".to_string()))
-            .collect::<Vec<_>>()
-            .into_pyarray(py),
     )?;
+    dict.set_item("anchors", anchors_list)?;
 
     Ok(dict)
 }

@@ -27,7 +27,10 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        wasm = await import(wasmPath);
+        const importPath = process.platform === 'win32' 
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
         // No need to call default() for ES modules
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
@@ -131,8 +134,8 @@ test('WMA NaN handling', () => {
         }
     }
     
-    // First period values should be NaN
-    assertAllNaN(result.slice(0, 14), "Expected NaN in warmup period");
+    // First period-1 values should be NaN (for period=14, indices 0-12 should be NaN)
+    assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period");
 });
 
 test('WMA all NaN input', () => {
@@ -232,13 +235,13 @@ test('WMA batch full parameter sweep', () => {
         const rowStart = combo * 50;
         const rowData = batchResult.slice(rowStart, rowStart + 50);
         
-        // First period values should be NaN
-        for (let i = 0; i < period; i++) {
+        // First period-1 values should be NaN
+        for (let i = 0; i < period - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
         }
         
-        // After warmup should have values
-        for (let i = period; i < 50; i++) {
+        // After warmup should have values (starting at period-1)
+        for (let i = period - 1; i < 50; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
         }
     }

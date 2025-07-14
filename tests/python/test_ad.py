@@ -148,7 +148,7 @@ class TestAd:
                 assert len(result) == len(close)
             except ValueError as e:
                 # AVX kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
     
     def test_ad_batch(self, test_data):
@@ -182,10 +182,10 @@ class TestAd:
     
     def test_ad_batch_different_lengths(self):
         """Test AD batch fails with different length inputs"""
-        highs = [np.array([1, 2, 3]), np.array([1, 2])]  # Different lengths
-        lows = [np.array([1, 2, 3]), np.array([1, 2])]
-        closes = [np.array([1, 2, 3]), np.array([1, 2])]
-        volumes = [np.array([1, 2, 3]), np.array([1, 2])]
+        highs = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]  # Different lengths
+        lows = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]
+        closes = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]
+        volumes = [np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0])]
         
         # Should still work as each security is processed independently
         result = ta_indicators.ad_batch(highs, lows, closes, volumes)
