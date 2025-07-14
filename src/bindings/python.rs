@@ -84,6 +84,10 @@ use crate::indicators::ad::{ad_py, ad_batch_py, AdStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::alligator::{alligator_py, alligator_batch_py, AlligatorStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::aroonosc::{aroon_osc_py, aroon_osc_batch_py, AroonOscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::bollinger_bands::{bollinger_bands_py, bollinger_bands_batch_py, BollingerBandsStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::adx::{adx_py, adx_batch_py, AdxStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::adosc::{adosc_py, adosc_batch_py, AdoscStreamPy};
@@ -136,6 +140,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(alma_py, m)?)?;
     m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
     m.add_class::<AlmaStreamPy>()?;
+    
+    // Register AroonOsc functions with their user-facing names
+    m.add_function(wrap_pyfunction!(aroon_osc_py, m)?)?;
+    m.add_function(wrap_pyfunction!(aroon_osc_batch_py, m)?)?;
+    m.add_class::<AroonOscStreamPy>()?;
+    
+    // Register Bollinger Bands functions with their user-facing names
+    m.add_function(wrap_pyfunction!(bollinger_bands_py, m)?)?;
+    m.add_function(wrap_pyfunction!(bollinger_bands_batch_py, m)?)?;
+    m.add_class::<BollingerBandsStreamPy>()?;
     
     // Register CWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(cwma_py, m)?)?;

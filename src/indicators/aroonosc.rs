@@ -759,3 +759,364 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 }
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "aroonosc")]
+#[pyo3(signature = (high, low, length=14, kernel=None))]
+pub fn aroon_osc_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    length: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?; // zero-copy, read-only view
+    let low_slice = low.as_slice()?;   // zero-copy, read-only view
+
+    // Validate inputs have same length
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "High and low arrays must have same length. Got high: {}, low: {}",
+            high_slice.len(),
+            low_slice.len()
+        )));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Build input struct
+    let params = AroonOscParams {
+        length: Some(length),
+    };
+    let aroon_in = AroonOscInput::from_slices_hl(high_slice, low_slice, params);
+
+    // Allocate uninitialized NumPy output buffer
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), AroonOscError> {
+        let length = aroon_in.get_length();
+        if length == 0 {
+            return Err(AroonOscError::InvalidLength { length });
+        }
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix to the first (length) elements
+        let window = length + 1;
+        if window > 1 {
+            slice_out[..window - 1].fill(f64::NAN);
+        }
+        
+        // 2. Compute Aroon Oscillator values for remaining elements
+        // This is guaranteed by the aroon_osc_scalar implementation
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+        
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => aroon_osc_scalar(high_slice, low_slice, length, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => aroon_osc_avx2(high_slice, low_slice, length, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => aroon_osc_avx512(high_slice, low_slice, length, slice_out),
+                _ => unreachable!(),
+            }
+        }
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AroonOscStream")]
+pub struct AroonOscStreamPy {
+    stream: AroonOscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AroonOscStreamPy {
+    #[new]
+    fn new(length: usize) -> PyResult<Self> {
+        let params = AroonOscParams {
+            length: Some(length),
+        };
+        let stream = AroonOscStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AroonOscStreamPy { stream })
+    }
+
+    /// Updates the stream with new high/low values and returns the calculated Aroon Oscillator value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+        self.stream.update(high, low)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "aroonosc_batch")]
+#[pyo3(signature = (high, low, length_range, kernel=None))]
+pub fn aroon_osc_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    length_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+
+    // Validate inputs have same length
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "High and low arrays must have same length. Got high: {}, low: {}",
+            high_slice.len(),
+            low_slice.len()
+        )));
+    }
+
+    let sweep = AroonOscBatchRange {
+        length: length_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = high_slice.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        
+        // Fill slice_out with NaN initially
+        slice_out.fill(f64::NAN);
+        
+        // Compute batch results directly into pre-allocated buffer
+        let combos = expand_grid(&sweep);
+        let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+        if high_slice.len() < max_l {
+            return Err(AroonOscError::NotEnoughData {
+                required: max_l,
+                found: high_slice.len(),
+            });
+        }
+        
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let length = combos[row].length.unwrap();
+            match simd {
+                Kernel::Scalar => aroon_osc_row_scalar(high_slice, low_slice, length, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => aroon_osc_row_avx2(high_slice, low_slice, length, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => aroon_osc_row_avx512(high_slice, low_slice, length, out_row),
+                _ => unreachable!(),
+            }
+        };
+        
+        // Parallel processing for non-WASM
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice_out
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in slice_out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+        
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "lengths",
+        combos
+            .iter()
+            .map(|p| p.length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_js(high: &[f64], low: &[f64], length: usize) -> Result<Vec<f64>, JsValue> {
+    if high.len() != low.len() {
+        return Err(JsValue::from_str(&format!(
+            "High and low arrays must have same length. Got high: {}, low: {}",
+            high.len(),
+            low.len()
+        )));
+    }
+
+    let params = AroonOscParams {
+        length: Some(length),
+    };
+    let input = AroonOscInput::from_slices_hl(high, low, params);
+
+    aroon_osc_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_batch_js(
+    high: &[f64],
+    low: &[f64],
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    if high.len() != low.len() {
+        return Err(JsValue::from_str(&format!(
+            "High and low arrays must have same length. Got high: {}, low: {}",
+            high.len(),
+            low.len()
+        )));
+    }
+
+    let sweep = AroonOscBatchRange {
+        length: (length_start, length_end, length_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    aroon_osc_batch_slice(high, low, &sweep, Kernel::Scalar)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_batch_metadata_js(
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AroonOscBatchRange {
+        length: (length_start, length_end, length_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.length.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AroonOscBatchConfig {
+    pub length_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AroonOscBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AroonOscParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = aroonosc_batch)]
+pub fn aroon_osc_batch_unified_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+) -> Result<JsValue, JsValue> {
+    if high.len() != low.len() {
+        return Err(JsValue::from_str(&format!(
+            "High and low arrays must have same length. Got high: {}, low: {}",
+            high.len(),
+            low.len()
+        )));
+    }
+
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AroonOscBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = AroonOscBatchRange {
+        length: config.length_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = aroon_osc_batch_slice(high, low, &sweep, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = AroonOscBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}

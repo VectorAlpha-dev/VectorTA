@@ -101,7 +101,7 @@ class CriterionComparableBenchmark:
         
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
-            'alma', 'alligator', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc',
+            'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc',
             'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
@@ -114,7 +114,7 @@ class CriterionComparableBenchmark:
         target_size = size_map.get(self.data_size, '1m')
         
         # Also add batch indicators to find
-        batch_indicators = ['alma_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
+        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch']
         all_indicators = indicators_to_find + batch_indicators
@@ -221,6 +221,8 @@ class CriterionComparableBenchmark:
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
             ('alligator', lambda: my_project.alligator((data['high'] + data['low']) / 2)),
+            ('bollinger_bands', lambda: my_project.bollinger_bands(data['close'], 20, 2.0, 2.0, "sma", 0)),
+            ('aroonosc', lambda: my_project.aroonosc(data['high'], data['low'], 14)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
@@ -288,6 +290,8 @@ class CriterionComparableBenchmark:
         print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
             ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 9, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
+            ('aroonosc_batch', lambda: my_project.aroonosc_batch(data['high'], data['low'], (14, 14, 1))),
+            ('bollinger_bands_batch', lambda: my_project.bollinger_bands_batch(data['close'], (20, 20, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0), "sma", 0)),
             ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
@@ -372,7 +376,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc']:
+        for base_name in ['alma', 'aroonosc', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]
