@@ -6,6 +6,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_py, acosc_batch_py, AcoscStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::apo::{apo_py, apo_batch_py, ApoStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::bandpass::{bandpass_py, bandpass_batch_py, BandPassStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_py, alma_batch_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_py, cwma_batch_py, CwmaStreamPy};
@@ -126,6 +130,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
     m.add_class::<AcoscStreamPy>()?;
+    
+    // Register APO functions with their user-facing names
+    m.add_function(wrap_pyfunction!(apo_py, m)?)?;
+    m.add_function(wrap_pyfunction!(apo_batch_py, m)?)?;
+    m.add_class::<ApoStreamPy>()?;
+    
+    // Register Band-Pass functions with their user-facing names
+    m.add_function(wrap_pyfunction!(bandpass_py, m)?)?;
+    m.add_function(wrap_pyfunction!(bandpass_batch_py, m)?)?;
+    m.add_class::<BandPassStreamPy>()?;
     
     // Register Alligator functions with their user-facing names
     m.add_function(wrap_pyfunction!(alligator_py, m)?)?;

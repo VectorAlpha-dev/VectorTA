@@ -17,10 +17,27 @@
 //! - **`Ok(BandPassOutput)`** on success.  
 //! - **`Err(BandPassError)`** otherwise.
 //!
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -51,6 +68,7 @@ pub enum BandPassData<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct BandPassParams {
     pub period: Option<usize>,
     pub bandwidth: Option<f64>,
@@ -649,6 +667,123 @@ fn bandpass_batch_inner(
     })
 }
 
+/// Batch processing that writes directly into caller-supplied buffers to avoid allocations.
+/// Each output buffer must have size rows * cols.
+/// SAFETY: When parallel=true, this function uses unsafe pointer arithmetic to allow
+/// parallel writes to non-overlapping regions of the output buffers.
+#[inline(always)]
+fn bandpass_batch_inner_into(
+    data: &[f64],
+    sweep: &BandPassBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    bp_out: &mut [f64],
+    bp_normalized_out: &mut [f64],
+    signal_out: &mut [f64],
+    trigger_out: &mut [f64],
+) -> Result<Vec<BandPassParams>, BandPassError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(BandPassError::InvalidPeriod { period: 0 });
+    }
+    
+    let cols = data.len();
+    let rows = combos.len();
+    
+    // Verify buffer sizes
+    if bp_out.len() != rows * cols || bp_normalized_out.len() != rows * cols ||
+       signal_out.len() != rows * cols || trigger_out.len() != rows * cols {
+        return Err(BandPassError::InvalidPeriod { period: 0 }); // Could add a new error variant
+    }
+    
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicPtr, Ordering};
+            
+            // Wrap raw pointers in AtomicPtr for thread safety
+            let bp_ptr = AtomicPtr::new(bp_out.as_mut_ptr());
+            let bp_normalized_ptr = AtomicPtr::new(bp_normalized_out.as_mut_ptr());
+            let signal_ptr = AtomicPtr::new(signal_out.as_mut_ptr());
+            let trigger_ptr = AtomicPtr::new(trigger_out.as_mut_ptr());
+            
+            (0..rows).into_par_iter().try_for_each(|row| -> Result<(), BandPassError> {
+                let p = combos[row].clone();
+                let input = BandPassInput::from_slice(data, p);
+                let output = bandpass_with_kernel(&input, kern)?;
+                
+                // Write directly to the pre-allocated slices
+                let start_idx = row * cols;
+                
+                // SAFETY: We know these indices are valid and non-overlapping between threads
+                // Each thread writes to a distinct row (start_idx..start_idx+cols)
+                unsafe {
+                    let bp_base = bp_ptr.load(Ordering::Relaxed);
+                    let bp_normalized_base = bp_normalized_ptr.load(Ordering::Relaxed);
+                    let signal_base = signal_ptr.load(Ordering::Relaxed);
+                    let trigger_base = trigger_ptr.load(Ordering::Relaxed);
+                    
+                    std::ptr::copy_nonoverlapping(
+                        output.bp.as_ptr(),
+                        bp_base.add(start_idx),
+                        cols
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        output.bp_normalized.as_ptr(),
+                        bp_normalized_base.add(start_idx),
+                        cols
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        output.signal.as_ptr(),
+                        signal_base.add(start_idx),
+                        cols
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        output.trigger.as_ptr(),
+                        trigger_base.add(start_idx),
+                        cols
+                    );
+                }
+                
+                Ok(())
+            })?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for row in 0..rows {
+                let p = combos[row].clone();
+                let input = BandPassInput::from_slice(data, p);
+                let output = bandpass_with_kernel(&input, kern)?;
+                
+                let start_idx = row * cols;
+                let end_idx = start_idx + cols;
+                
+                bp_out[start_idx..end_idx].copy_from_slice(&output.bp);
+                bp_normalized_out[start_idx..end_idx].copy_from_slice(&output.bp_normalized);
+                signal_out[start_idx..end_idx].copy_from_slice(&output.signal);
+                trigger_out[start_idx..end_idx].copy_from_slice(&output.trigger);
+            }
+        }
+    } else {
+        for row in 0..rows {
+            let p = combos[row].clone();
+            let input = BandPassInput::from_slice(data, p);
+            let output = bandpass_with_kernel(&input, kern)?;
+            
+            let start_idx = row * cols;
+            let end_idx = start_idx + cols;
+            
+            bp_out[start_idx..end_idx].copy_from_slice(&output.bp);
+            bp_normalized_out[start_idx..end_idx].copy_from_slice(&output.bp_normalized);
+            signal_out[start_idx..end_idx].copy_from_slice(&output.signal);
+            trigger_out[start_idx..end_idx].copy_from_slice(&output.trigger);
+        }
+    }
+    
+    Ok(combos)
+}
+
 #[inline(always)]
 pub fn bandpass_row_scalar(
     hp: &[f64],
@@ -985,4 +1120,381 @@ macro_rules! gen_batch_tests {
     };
 }
 gen_batch_tests!(check_batch_default_row);
+}
+
+// ========================= Python Bindings =========================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bandpass")]
+#[pyo3(signature = (data, period=20, bandwidth=0.3, kernel=None))]
+pub fn bandpass_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    bandwidth: f64,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Build input struct
+    let params = BandPassParams {
+        period: Some(period),
+        bandwidth: Some(bandwidth),
+    };
+    let bandpass_in = BandPassInput::from_slice(slice_in, params);
+
+    // Pre-allocate uninitialized NumPy output buffers for all 4 outputs
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let bp_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let bp_normalized_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let signal_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let trigger_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+
+    let bp_slice = unsafe { bp_arr.as_slice_mut()? };
+    let bp_normalized_slice = unsafe { bp_normalized_arr.as_slice_mut()? };
+    let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+    let trigger_slice = unsafe { trigger_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), BandPassError> {
+        let output = bandpass_with_kernel(&bandpass_in, kern)?;
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // The bandpass algorithm fills all elements of the output arrays
+        bp_slice.copy_from_slice(&output.bp);
+        bp_normalized_slice.copy_from_slice(&output.bp_normalized);
+        signal_slice.copy_from_slice(&output.signal);
+        trigger_slice.copy_from_slice(&output.trigger);
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Create output dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("bp", bp_arr)?;
+    dict.set_item("bp_normalized", bp_normalized_arr)?;
+    dict.set_item("signal", signal_arr)?;
+    dict.set_item("trigger", trigger_arr)?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "BandPassStream")]
+pub struct BandPassStreamPy {
+    stream: BandPassStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl BandPassStreamPy {
+    #[new]
+    fn new(period: usize, bandwidth: f64) -> PyResult<Self> {
+        let params = BandPassParams {
+            period: Some(period),
+            bandwidth: Some(bandwidth),
+        };
+        let stream =
+            BandPassStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(BandPassStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated band-pass value.
+    /// Note: This returns only the bp value, not all 4 outputs for streaming simplicity.
+    /// Unlike some indicators (e.g., ALMA), BandPassStream always returns a value from the
+    /// first call - there is no warm-up period where None is returned.
+    fn update(&mut self, value: f64) -> f64 {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bandpass_batch")]
+#[pyo3(signature = (data, period_range, bandwidth_range, kernel=None))]
+pub fn bandpass_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    bandwidth_range: (f64, f64, f64),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = BandPassBatchRange {
+        period: period_range,
+        bandwidth: bandwidth_range,
+    };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let bp_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let bp_normalized_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let trigger_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    
+    let bp_slice = unsafe { bp_arr.as_slice_mut()? };
+    let bp_normalized_slice = unsafe { bp_normalized_arr.as_slice_mut()? };
+    let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+    let trigger_slice = unsafe { trigger_arr.as_slice_mut()? };
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<BandPassParams>, BandPassError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        // Use the _into variant that writes directly to our pre-allocated buffers
+        bandpass_batch_inner_into(
+            slice_in, 
+            &sweep, 
+            simd, 
+            true, 
+            bp_slice,
+            bp_normalized_slice,
+            signal_slice,
+            trigger_slice
+        )
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Reshape arrays
+    let bp_arr = bp_arr.reshape((rows, cols))?;
+    let bp_normalized_arr = bp_normalized_arr.reshape((rows, cols))?;
+    let signal_arr = signal_arr.reshape((rows, cols))?;
+    let trigger_arr = trigger_arr.reshape((rows, cols))?;
+    
+    // Build output dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("bp", bp_arr)?;
+    dict.set_item("bp_normalized", bp_normalized_arr)?;
+    dict.set_item("signal", signal_arr)?;
+    dict.set_item("trigger", trigger_arr)?;
+    
+    // Add parameter arrays
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "bandwidths",
+        combos
+            .iter()
+            .map(|p| p.bandwidth.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+// ========================= WASM Bindings =========================
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BandPassJsOutput {
+    pub bp: Vec<f64>,
+    pub bp_normalized: Vec<f64>,
+    pub signal: Vec<f64>,
+    pub trigger: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_js(data: &[f64], period: usize, bandwidth: f64) -> Result<JsValue, JsValue> {
+    let params = BandPassParams {
+        period: Some(period),
+        bandwidth: Some(bandwidth),
+    };
+    let input = BandPassInput::from_slice(data, params);
+
+    bandpass_with_kernel(&input, Kernel::Scalar)
+        .map(|output| {
+            let js_output = BandPassJsOutput {
+                bp: output.bp,
+                bp_normalized: output.bp_normalized,
+                signal: output.signal,
+                trigger: output.trigger,
+            };
+            serde_wasm_bindgen::to_value(&js_output)
+                .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    bandwidth_start: f64,
+    bandwidth_end: f64,
+    bandwidth_step: f64,
+) -> Result<JsValue, JsValue> {
+    let sweep = BandPassBatchRange {
+        period: (period_start, period_end, period_step),
+        bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
+    };
+
+    // Expand grid to get dimensions
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Pre-allocate output vectors
+    let mut bp_values = vec![0.0; rows * cols];
+    let mut bp_normalized_values = vec![0.0; rows * cols];
+    let mut signal_values = vec![0.0; rows * cols];
+    let mut trigger_values = vec![0.0; rows * cols];
+    
+    // Use the _into variant with parallel=false for WASM
+    bandpass_batch_inner_into(
+        data, 
+        &sweep, 
+        Kernel::Scalar, 
+        false,
+        &mut bp_values,
+        &mut bp_normalized_values,
+        &mut signal_values,
+        &mut trigger_values
+    )
+    .map(|_combos| {
+        // Create structured output
+        let js_output = BandPassJsOutput {
+            bp: bp_values,
+            bp_normalized: bp_normalized_values,
+            signal: signal_values,
+            trigger: trigger_values,
+        };
+        
+        serde_wasm_bindgen::to_value(&js_output)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    })
+    .map_err(|e| JsValue::from_str(&e.to_string()))?
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    bandwidth_start: f64,
+    bandwidth_end: f64,
+    bandwidth_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = BandPassBatchRange {
+        period: (period_start, period_end, period_step),
+        bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 2);
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+        metadata.push(combo.bandwidth.unwrap());
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BandPassBatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub bandwidth_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BandPassBatchJsOutput {
+    pub bp: Vec<f64>,
+    pub bp_normalized: Vec<f64>,
+    pub signal: Vec<f64>,
+    pub trigger: Vec<f64>,
+    pub combos: Vec<BandPassParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = bandpass_batch)]
+pub fn bandpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: BandPassBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = BandPassBatchRange {
+        period: config.period_range,
+        bandwidth: config.bandwidth_range,
+    };
+
+    // 2. Get dimensions and pre-allocate
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    
+    let mut bp_values = vec![0.0; rows * cols];
+    let mut bp_normalized_values = vec![0.0; rows * cols];
+    let mut signal_values = vec![0.0; rows * cols];
+    let mut trigger_values = vec![0.0; rows * cols];
+    
+    // 3. Run the _into variant with parallel=false for WASM
+    bandpass_batch_inner_into(
+        data,
+        &sweep,
+        Kernel::Scalar,
+        false,
+        &mut bp_values,
+        &mut bp_normalized_values,
+        &mut signal_values,
+        &mut trigger_values
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 4. Create the structured output
+    let js_output = BandPassBatchJsOutput {
+        bp: bp_values,
+        bp_normalized: bp_normalized_values,
+        signal: signal_values,
+        trigger: trigger_values,
+        combos,
+        rows,
+        cols,
+    };
+
+    // 5. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
