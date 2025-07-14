@@ -166,6 +166,16 @@ EXPECTED_OUTPUTS = {
             1645728.78
         ]
     },
+    'adx': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            36.14,
+            36.52,
+            37.01,
+            37.46,
+            38.47
+        ]
+    },
     'vwma': {
         'default_params': {'period': 20},
         'last_5_values': [

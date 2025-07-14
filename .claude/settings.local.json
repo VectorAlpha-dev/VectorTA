@@ -150,7 +150,8 @@
       "Bash(run_benchmark.bat alma)",
       "Bash(del test_kernel_detection.py)",
       "Bash(del srcbintest_kernel_detection.rs)",
-      "Bash(run_benchmark.bat cwma)"
+      "Bash(run_benchmark.bat cwma)",
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py adx --size 10k)"
     ],
     "deny": []
   }
