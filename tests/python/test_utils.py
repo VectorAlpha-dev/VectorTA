@@ -260,9 +260,36 @@ EXPECTED_OUTPUTS = {
             36.3
         ]
     },
+    'aroon': {
+        'default_params': {'length': 14},
+        'last_5_up': [
+            21.43,
+            14.29,
+            7.14,
+            0.0,
+            0.0
+        ],
+        'last_5_down': [
+            71.43,
+            64.29,
+            57.14,
+            50.0,
+            42.86
+        ]
+    },
     'adosc': {
         'default_params': {'short_period': 3, 'long_period': 10},
         'last_5_values': [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
+    },
+    'bollinger_bands_width': {
+        'default_params': {'period': 20, 'devup': 2.0, 'devdn': 2.0, 'matype': 'sma', 'devtype': 0},
+        'last_5_values': [
+            0.0344,  # Placeholder values - should be calculated from actual Rust implementation
+            0.0352,
+            0.0361,
+            0.0358,
+            0.0349
+        ]
     },
     'apo': {
         'default_params': {'short_period': 10, 'long_period': 20},

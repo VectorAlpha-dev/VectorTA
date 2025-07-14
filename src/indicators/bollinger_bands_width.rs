@@ -15,9 +15,25 @@
 //! - **`Ok(BollingerBandsWidthOutput)`**: Vec<f64> of same length as input
 //! - **`Err(BollingerBandsWidthError)`** otherwise
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +66,7 @@ pub struct BollingerBandsWidthOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct BollingerBandsWidthParams {
     pub period: Option<usize>,
     pub devup: Option<f64>,
@@ -236,8 +253,27 @@ pub fn bollinger_bands_width_with_kernel(
     kernel: Kernel,
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     let data: &[f64] = input.as_ref();
+    let mut out = vec![f64::NAN; data.len()];
+    bollinger_bands_width_into(data, input, &mut out, kernel)?;
+    Ok(BollingerBandsWidthOutput { values: out })
+}
+
+/// Compute Bollinger Bands Width directly into a pre-allocated buffer.
+/// This is the zero-copy variant used by Python/WASM bindings.
+pub fn bollinger_bands_width_into(
+    data: &[f64],
+    input: &BollingerBandsWidthInput,
+    out: &mut [f64],
+    kernel: Kernel,
+) -> Result<(), BollingerBandsWidthError> {
     if data.is_empty() {
         return Err(BollingerBandsWidthError::EmptyData);
+    }
+    if data.len() != out.len() {
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period: 0,
+            data_len: data.len(),
+        });
     }
     let period = input.get_period();
     if period == 0 || period > data.len() {
@@ -256,22 +292,27 @@ pub fn bollinger_bands_width_with_kernel(
             valid: data.len() - first_valid_idx,
         });
     }
+    
+    // Fill with NaN up to the warmup period
+    out[..first_valid_idx + period - 1].fill(f64::NAN);
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                bollinger_bands_width_scalar(data, input, first_valid_idx)
+                bollinger_bands_width_scalar_into(data, input, first_valid_idx, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                bollinger_bands_width_avx2(data, input, first_valid_idx)
+                bollinger_bands_width_avx2_into(data, input, first_valid_idx, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                bollinger_bands_width_avx512(data, input, first_valid_idx)
+                bollinger_bands_width_avx512_into(data, input, first_valid_idx, out)
             }
             _ => unreachable!(),
         }
@@ -284,6 +325,18 @@ pub unsafe fn bollinger_bands_width_scalar(
     input: &BollingerBandsWidthInput,
     first_valid_idx: usize,
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
+    let mut out = vec![f64::NAN; data.len()];
+    bollinger_bands_width_scalar_into(data, input, first_valid_idx, &mut out)?;
+    Ok(BollingerBandsWidthOutput { values: out })
+}
+
+#[inline]
+pub unsafe fn bollinger_bands_width_scalar_into(
+    data: &[f64],
+    input: &BollingerBandsWidthInput,
+    first_valid_idx: usize,
+    out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
     let period = input.get_period();
     let devup = input.get_devup();
     let devdn = input.get_devdn();
@@ -308,14 +361,14 @@ pub unsafe fn bollinger_bands_width_scalar(
     );
     let dev_values = crate::indicators::deviation::deviation(&dev_input)
         .map_err(|e| BollingerBandsWidthError::UnderlyingFunctionFailed(e.to_string()))?;
-    let mut out = vec![f64::NAN; data.len()];
+    
     for i in (first_valid_idx + period - 1)..data.len() {
         let middle_band = middle[i];
         let upper_band = middle[i] + devup * dev_values[i];
         let lower_band = middle[i] - devdn * dev_values[i];
         out[i] = (upper_band - lower_band) / middle_band;
     }
-    Ok(BollingerBandsWidthOutput { values: out })
+    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -327,6 +380,18 @@ pub unsafe fn bollinger_bands_width_avx512(
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     bollinger_bands_width_scalar(data, input, first_valid_idx)
 }
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn bollinger_bands_width_avx512_into(
+    data: &[f64],
+    input: &BollingerBandsWidthInput,
+    first_valid_idx: usize,
+    out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
+    bollinger_bands_width_scalar_into(data, input, first_valid_idx, out)
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn bollinger_bands_width_avx2(
@@ -335,6 +400,17 @@ pub unsafe fn bollinger_bands_width_avx2(
     first_valid_idx: usize,
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     bollinger_bands_width_scalar(data, input, first_valid_idx)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn bollinger_bands_width_avx2_into(
+    data: &[f64],
+    input: &BollingerBandsWidthInput,
+    first_valid_idx: usize,
+    out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
+    bollinger_bands_width_scalar_into(data, input, first_valid_idx, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -618,6 +694,31 @@ fn bollinger_bands_width_batch_inner(
     parallel: bool,
 ) -> Result<BollingerBandsWidthBatchOutput, BollingerBandsWidthError> {
     let combos = expand_grid(sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    let mut values = vec![f64::NAN; rows * cols];
+    
+    bollinger_bands_width_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    
+    Ok(BollingerBandsWidthBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+/// Compute batch Bollinger Bands Width directly into a pre-allocated buffer.
+/// This is the zero-copy variant used by Python bindings for batch operations.
+#[inline(always)]
+pub fn bollinger_bands_width_batch_inner_into(
+    data: &[f64],
+    sweep: &BollingerBandsWidthBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<BollingerBandsWidthParams>, BollingerBandsWidthError> {
+    let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(BollingerBandsWidthError::InvalidPeriod {
             period: 0,
@@ -635,40 +736,96 @@ fn bollinger_bands_width_batch_inner(
             valid: data.len() - first,
         });
     }
-    let rows = combos.len();
+    
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
-    let do_row = |row: usize, out_row: &mut [f64]| {
-        let prm = &combos[row];
-        let inp = BollingerBandsWidthInput::from_slice(data, prm.clone());
-        bollinger_bands_width_row_scalar(data, &inp, first, out_row)
-    };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            values
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
+    
+    // Group combinations by (period, matype, devtype) to avoid redundant calculations
+    use std::collections::HashMap;
+    let mut groups: HashMap<(usize, String, usize), Vec<(usize, f64, f64)>> = HashMap::new();
+    
+    for (idx, combo) in combos.iter().enumerate() {
+        let key = (
+            combo.period.unwrap(),
+            combo.matype.as_ref().unwrap_or(&"sma".to_string()).clone(),
+            combo.devtype.unwrap_or(0),
+        );
+        groups.entry(key).or_insert_with(Vec::new).push((
+            idx,
+            combo.devup.unwrap(),
+            combo.devdn.unwrap(),
+        ));
+    }
+    
+    // Process each unique (period, matype, devtype) group
+    for ((period, matype, devtype), indices) in groups {
+        // Compute MA and deviation once for this group
+        let ma_data = crate::indicators::moving_averages::ma::MaData::Slice(data);
+        let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period)?;
+        
+        let dev_input = crate::indicators::deviation::DevInput::from_slice(
+            data,
+            crate::indicators::deviation::DevParams {
+                period: Some(period),
+                devtype: Some(devtype),
+            },
+        );
+        let dev_values = crate::indicators::deviation::deviation(&dev_input)?;
+        
+        // Now compute BBW for each (devup, devdn) combination in this group
+        if parallel {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                // Create a list of (start_idx, end_idx) for parallel processing
+                let ranges: Vec<_> = indices.iter()
+                    .map(|&(idx, devup, devdn)| (idx * cols, (idx + 1) * cols, devup, devdn))
+                    .collect();
+                
+                // Use split_at_mut to safely partition the output slice
+                ranges.into_par_iter().for_each(|(start, end, devup, devdn)| {
+                    let out_row = unsafe {
+                        // SAFETY: Each thread writes to a non-overlapping slice
+                        std::slice::from_raw_parts_mut(out.as_mut_ptr().add(start), end - start)
+                    };
+                    for i in (first + period - 1)..cols {
+                        let middle_band = middle.values[i];
+                        let upper_band = middle_band + devup * dev_values.values[i];
+                        let lower_band = middle_band - devdn * dev_values.values[i];
+                        out_row[i] = (upper_band - lower_band) / middle_band;
+                    }
+                });
+            }
+            
+            #[cfg(target_arch = "wasm32")]
+            {
+                for &(idx, devup, devdn) in &indices {
+                    let start = idx * cols;
+                    let end = start + cols;
+                    let out_row = &mut out[start..end];
+                    for i in (first + period - 1)..cols {
+                        let middle_band = middle.values[i];
+                        let upper_band = middle_band + devup * dev_values.values[i];
+                        let lower_band = middle_band - devdn * dev_values.values[i];
+                        out_row[i] = (upper_band - lower_band) / middle_band;
+                    }
+                }
+            }
+        } else {
+            for &(idx, devup, devdn) in &indices {
+                let start = idx * cols;
+                let end = start + cols;
+                let out_row = &mut out[start..end];
+                for i in (first + period - 1)..cols {
+                    let middle_band = middle.values[i];
+                    let upper_band = middle_band + devup * dev_values.values[i];
+                    let lower_band = middle_band - devdn * dev_values.values[i];
+                    out_row[i] = (upper_band - lower_band) / middle_band;
+                }
             }
         }
-    } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
-        }
     }
-    Ok(BollingerBandsWidthBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
+    
+    Ok(combos)
 }
 
 #[cfg(test)]
@@ -865,4 +1022,353 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bollinger_bands_width")]
+#[pyo3(signature = (data, period, devup, devdn, matype=None, devtype=None, kernel=None))]
+pub fn bollinger_bands_width_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    devup: f64,
+    devdn: f64,
+    matype: Option<&str>,
+    devtype: Option<usize>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    use pyo3::exceptions::PyValueError;
+    use crate::utilities::kernel_validation::validate_kernel;
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+    
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+    
+    // Build input struct
+    let params = BollingerBandsWidthParams {
+        period: Some(period),
+        devup: Some(devup),
+        devdn: Some(devdn),
+        matype: matype.map(|s| s.to_string()),
+        devtype: devtype,
+    };
+    let bbw_in = BollingerBandsWidthInput::from_slice(slice_in, params);
+    
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized.
+    // We MUST write to ALL elements before returning these arrays to Python.
+    // Python/NumPy's memory model requires that all array elements are initialized.
+    // Returning uninitialized memory to Python is undefined behavior and can cause
+    // crashes or expose sensitive data from previous memory contents.
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), BollingerBandsWidthError> {
+        // SAFETY: Compute directly into the pre-allocated NumPy buffer.
+        // This avoids an extra allocation and copy.
+        bollinger_bands_width_into(slice_in, &bbw_in, slice_out, kern)?;
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "BollingerBandsWidthStream")]
+pub struct BollingerBandsWidthStreamPy {
+    period: usize,
+    devup: f64,
+    devdn: f64,
+    matype: String,
+    devtype: usize,
+    buffer: Vec<f64>,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl BollingerBandsWidthStreamPy {
+    #[new]
+    fn new(period: usize, devup: f64, devdn: f64, matype: Option<&str>, devtype: Option<usize>) -> PyResult<Self> {
+        use pyo3::exceptions::PyValueError;
+        
+        if period == 0 {
+            return Err(PyValueError::new_err("Period must be greater than 0"));
+        }
+        
+        Ok(BollingerBandsWidthStreamPy {
+            period,
+            devup,
+            devdn,
+            matype: matype.unwrap_or("sma").to_string(),
+            devtype: devtype.unwrap_or(0),
+            buffer: Vec::with_capacity(period),
+        })
+    }
+    
+    /// Updates the stream with a new value and returns the calculated BBW value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        use pyo3::exceptions::PyValueError;
+        
+        self.buffer.push(value);
+        
+        if self.buffer.len() > self.period {
+            self.buffer.remove(0);
+        }
+        
+        if self.buffer.len() < self.period {
+            return None;
+        }
+        
+        // Calculate BBW using the current buffer
+        let params = BollingerBandsWidthParams {
+            period: Some(self.period),
+            devup: Some(self.devup),
+            devdn: Some(self.devdn),
+            matype: Some(self.matype.clone()),
+            devtype: Some(self.devtype),
+        };
+        let input = BollingerBandsWidthInput::from_slice(&self.buffer, params);
+        
+        match bollinger_bands_width(&input) {
+            Ok(result) => result.values.last().copied(),
+            Err(_) => None,
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bollinger_bands_width_batch")]
+#[pyo3(signature = (data, period_range, devup_range, devdn_range, matype=None, devtype=None, kernel=None))]
+pub fn bollinger_bands_width_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    devup_range: (f64, f64, f64),
+    devdn_range: (f64, f64, f64),
+    matype: Option<&str>,
+    devtype: Option<usize>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    use pyo3::exceptions::PyValueError;
+    use crate::utilities::kernel_validation::validate_kernel;
+    
+    let slice_in = data.as_slice()?;
+    
+    let sweep = BollingerBandsWidthBatchRange {
+        period: period_range,
+        devup: devup_range,
+        devdn: devdn_range,
+    };
+    
+    // Use kernel validation for safety  
+    let kern = validate_kernel(kernel, true)?;
+    
+    // Expand grid to know dimensions
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // SAFETY: Pre-allocate uninitialized NumPy array for performance.
+    // We MUST write to ALL elements before returning to Python.
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Heavy work without the GIL
+    let (combos, matype_used, devtype_used) = py.allow_threads(|| -> Result<(Vec<BollingerBandsWidthParams>, String, usize), BollingerBandsWidthError> {
+        let matype_str = matype.unwrap_or("sma").to_string();
+        let devtype_val = devtype.unwrap_or(0);
+        
+        // Resolve kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        
+        // SAFETY: Compute directly into the pre-allocated NumPy buffer.
+        // This avoids an extra allocation and copy.
+        let mut combos = bollinger_bands_width_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)?;
+        
+        // Update combos with matype and devtype
+        for combo in &mut combos {
+            combo.matype = Some(matype_str.clone());
+            combo.devtype = Some(devtype_val);
+        }
+        
+        Ok((combos, matype_str, devtype_val))
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Build result dict
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "devups",
+        combos
+            .iter()
+            .map(|p| p.devup.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "devdns",
+        combos
+            .iter()
+            .map(|p| p.devdn.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item("matype", matype_used)?;
+    dict.set_item("devtype", devtype_used)?;
+    
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_js(
+    data: &[f64],
+    period: usize,
+    devup: f64,
+    devdn: f64,
+    matype: Option<String>,
+    devtype: Option<usize>,
+) -> Result<Vec<f64>, JsValue> {
+    let params = BollingerBandsWidthParams {
+        period: Some(period),
+        devup: Some(devup),
+        devdn: Some(devdn),
+        matype: matype.or_else(|| Some("sma".to_string())),
+        devtype: devtype.or(Some(0)),
+    };
+    let input = BollingerBandsWidthInput::from_slice(data, params);
+    
+    bollinger_bands_width_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    devup_start: f64,
+    devup_end: f64,
+    devup_step: f64,
+    devdn_start: f64,
+    devdn_end: f64,
+    devdn_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = BollingerBandsWidthBatchRange {
+        period: (period_start, period_end, period_step),
+        devup: (devup_start, devup_end, devup_step),
+        devdn: (devdn_start, devdn_end, devdn_step),
+    };
+    
+    bollinger_bands_width_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    devup_start: f64,
+    devup_end: f64,
+    devup_step: f64,
+    devdn_start: f64,
+    devdn_end: f64,
+    devdn_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = BollingerBandsWidthBatchRange {
+        period: (period_start, period_end, period_step),
+        devup: (devup_start, devup_end, devup_step),
+        devdn: (devdn_start, devdn_end, devdn_step),
+    };
+    
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 3);
+    
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+        metadata.push(combo.devup.unwrap());
+        metadata.push(combo.devdn.unwrap());
+    }
+    
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BollingerBandsWidthBatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub devup_range: (f64, f64, f64),
+    pub devdn_range: (f64, f64, f64),
+    pub matype: Option<String>,
+    pub devtype: Option<usize>,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BollingerBandsWidthBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<BollingerBandsWidthParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = bollinger_bands_width_batch)]
+pub fn bollinger_bands_width_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // Deserialize the configuration object from JavaScript
+    let config: BollingerBandsWidthBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+    
+    let sweep = BollingerBandsWidthBatchRange {
+        period: config.period_range,
+        devup: config.devup_range,
+        devdn: config.devdn_range,
+    };
+    
+    // Run the existing core logic
+    let mut output = bollinger_bands_width_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // Update combos with matype and devtype
+    for combo in &mut output.combos {
+        combo.matype = config.matype.clone().or_else(|| Some("sma".to_string()));
+        combo.devtype = config.devtype.or(Some(0));
+    }
+    
+    // Create the structured output
+    let js_output = BollingerBandsWidthBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+    
+    // Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
