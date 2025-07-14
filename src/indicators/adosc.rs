@@ -18,9 +18,25 @@
 //! - `Ok(AdoscOutput)` on success, containing Vec<f64> for each row
 //! - `Err(AdoscError)` otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -48,6 +64,7 @@ pub struct AdoscOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct AdoscParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -210,7 +227,24 @@ pub fn adosc(input: &AdoscInput) -> Result<AdoscOutput, AdoscError> {
     adosc_with_kernel(input, Kernel::Auto)
 }
 
-pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutput, AdoscError> {
+#[inline(always)]
+fn adosc_prepare<'a>(
+    input: &'a AdoscInput,
+    kernel: Kernel,
+) -> Result<
+    (
+        /*high*/ &'a [f64],
+        /*low*/ &'a [f64],
+        /*close*/ &'a [f64],
+        /*volume*/ &'a [f64],
+        /*short*/ usize,
+        /*long*/ usize,
+        /*first*/ usize,
+        /*len*/ usize,
+        /*chosen*/ Kernel,
+    ),
+    AdoscError,
+> {
     let (high, low, close, volume) = match &input.data {
         AdoscData::Candles { candles } => {
             let n = candles.close.len();
@@ -246,9 +280,12 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
             (*high, *low, *close, *volume)
         }
     };
+    
     let len = close.len();
     let short = input.get_short_period();
     let long = input.get_long_period();
+    
+    // Validation checks
     if short == 0 || long == 0 || long > len {
         return Err(AdoscError::InvalidPeriod {
             short,
@@ -259,6 +296,7 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
     if short >= long {
         return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
     }
+    
     let first = 0;
     if len < long {
         return Err(AdoscError::NotEnoughValidData {
@@ -266,10 +304,19 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
             valid: len,
         });
     }
+    
+    // Kernel auto-detection only once
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    
+    Ok((high, low, close, volume, short, long, first, len, chosen))
+}
+
+pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutput, AdoscError> {
+    let (high, low, close, volume, short, long, first, len, chosen) = adosc_prepare(input, kernel)?;
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -282,6 +329,10 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 adosc_avx512(high, low, close, volume, short, long, first, len)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                adosc_scalar(high, low, close, volume, short, long, first, len)
             }
             _ => unreachable!(),
         }
@@ -1102,4 +1153,367 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adosc")]
+#[pyo3(signature = (high, low, close, volume, short_period, long_period, kernel=None))]
+pub fn adosc_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    volume: numpy::PyReadonlyArray1<'py, f64>,
+    short_period: usize,
+    long_period: usize,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+
+    // Validate all slices have the same length
+    let len = close_slice.len();
+    if high_slice.len() != len || low_slice.len() != len || volume_slice.len() != len {
+        return Err(PyValueError::new_err(format!(
+            "All input arrays must have the same length. Got high={}, low={}, close={}, volume={}",
+            high_slice.len(), low_slice.len(), close_slice.len(), volume_slice.len()
+        )));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Build input struct
+    let params = AdoscParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let adosc_in = AdoscInput::from_slices(high_slice, low_slice, close_slice, volume_slice, params);
+
+    // Allocate uninitialized NumPy output buffer
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), AdoscError> {
+        // Use centralized validation from adosc_prepare
+        let (h, l, c, v, short, long, first, _len, chosen) = adosc_prepare(&adosc_in, kern)?;
+        
+        // SAFETY: We must write to ALL elements before returning to Python
+        // ADOSC writes to all elements from index 0 onwards (no warmup period with NaN)
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    adosc_row_scalar(h, l, c, v, short, long, first, slice_out)?;
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    adosc_row_avx2(h, l, c, v, short, long, first, slice_out)?;
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    adosc_row_avx512(h, l, c, v, short, long, first, slice_out)?;
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    adosc_row_scalar(h, l, c, v, short, long, first, slice_out)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "AdoscStream")]
+pub struct AdoscStreamPy {
+    stream: AdoscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl AdoscStreamPy {
+    #[new]
+    fn new(short_period: usize, long_period: usize) -> PyResult<Self> {
+        let params = AdoscParams {
+            short_period: Some(short_period),
+            long_period: Some(long_period),
+        };
+        let stream = AdoscStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(AdoscStreamPy { stream })
+    }
+
+    /// Updates the stream with new values and returns the calculated ADOSC value.
+    fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
+        self.stream.update(high, low, close, volume)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "adosc_batch")]
+#[pyo3(signature = (high, low, close, volume, short_period_range, long_period_range, kernel=None))]
+pub fn adosc_batch_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    volume: numpy::PyReadonlyArray1<'py, f64>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+
+    // Validate all slices have the same length
+    let len = close_slice.len();
+    if high_slice.len() != len || low_slice.len() != len || volume_slice.len() != len {
+        return Err(PyValueError::new_err(format!(
+            "All input arrays must have the same length. Got high={}, low={}, close={}, volume={}",
+            high_slice.len(), low_slice.len(), close_slice.len(), volume_slice.len()
+        )));
+    }
+
+    let sweep = AdoscBatchRange {
+        short_period: short_period_range,
+        long_period: long_period_range,
+    };
+
+    // Expand grid to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = len;
+
+    // Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // Heavy work without the GIL
+    let combos = py.allow_threads(|| -> Result<Vec<AdoscParams>, AdoscError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Process each parameter combination
+        let combos = expand_grid(&sweep);
+        for (row, combo) in combos.iter().enumerate() {
+            let short = combo.short_period.unwrap();
+            let long = combo.long_period.unwrap();
+            let out_row = &mut slice_out[row * cols..(row + 1) * cols];
+            
+            unsafe {
+                match simd {
+                    Kernel::Scalar => {
+                        let res = adosc_row_scalar(high_slice, low_slice, close_slice, volume_slice, 
+                                                  short, long, 0, out_row);
+                        if res.is_err() {
+                            out_row.fill(f64::NAN);
+                        }
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => {
+                        let res = adosc_row_avx2(high_slice, low_slice, close_slice, volume_slice, 
+                                                short, long, 0, out_row);
+                        if res.is_err() {
+                            out_row.fill(f64::NAN);
+                        }
+                    }
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => {
+                        let res = adosc_row_avx512(high_slice, low_slice, close_slice, volume_slice, 
+                                                   short, long, 0, out_row);
+                        if res.is_err() {
+                            out_row.fill(f64::NAN);
+                        }
+                    }
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    Kernel::Avx2 | Kernel::Avx512 => {
+                        let res = adosc_row_scalar(high_slice, low_slice, close_slice, volume_slice, 
+                                                  short, long, 0, out_row);
+                        if res.is_err() {
+                            out_row.fill(f64::NAN);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "short_periods",
+        combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "long_periods",
+        combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adosc_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short_period: usize,
+    long_period: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let params = AdoscParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let input = AdoscInput::from_slices(high, low, close, volume, params);
+
+    adosc_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adosc_batch_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short_period_start: usize,
+    short_period_end: usize,
+    short_period_step: usize,
+    long_period_start: usize,
+    long_period_end: usize,
+    long_period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AdoscBatchRange {
+        short_period: (short_period_start, short_period_end, short_period_step),
+        long_period: (long_period_start, long_period_end, long_period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    adosc_batch_inner(high, low, close, volume, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adosc_batch_metadata_js(
+    short_period_start: usize,
+    short_period_end: usize,
+    short_period_step: usize,
+    long_period_start: usize,
+    long_period_end: usize,
+    long_period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = AdoscBatchRange {
+        short_period: (short_period_start, short_period_end, short_period_step),
+        long_period: (long_period_start, long_period_end, long_period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 2);
+
+    for combo in combos {
+        metadata.push(combo.short_period.unwrap() as f64);
+        metadata.push(combo.long_period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdoscBatchConfig {
+    pub short_period_range: (usize, usize, usize),
+    pub long_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AdoscBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<AdoscParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = adosc_batch)]
+pub fn adosc_batch_unified_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: AdoscBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = AdoscBatchRange {
+        short_period: config.short_period_range,
+        long_period: config.long_period_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = adosc_batch_inner(high, low, close, volume, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = AdoscBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

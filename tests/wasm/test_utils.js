@@ -1,13 +1,9 @@
 /**
  * Common utilities for WASM binding tests
  */
-import fs from 'fs';
-import path from 'path';
-import { parse } from 'csv-parse/sync';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const fs = require('fs');
+const path = require('path');
+const { parse } = require('csv-parse/sync');
 
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
@@ -276,6 +272,10 @@ const EXPECTED_OUTPUTS = {
             59432.02580645162,
             59350.58279569892
         ]
+    },
+    adosc: {
+        defaultParams: { short_period: 3, long_period: 10 },
+        last5Values: [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
     }
 };
 
@@ -283,7 +283,7 @@ const EXPECTED_OUTPUTS = {
 const EXPECTED_SUPERSMOOTHER_3_POLE = EXPECTED_OUTPUTS.supersmoother_3_pole.last5Values;
 const EXPECTED_SUPERSMOOTHER = EXPECTED_OUTPUTS.supersmoother.last5Values;
 
-export { 
+module.exports = { 
     loadTestData, 
     assertClose, 
     assertArrayClose, 

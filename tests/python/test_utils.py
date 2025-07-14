@@ -239,6 +239,10 @@ EXPECTED_OUTPUTS = {
             59432.02580645162,
             59350.58279569892
         ]
+    },
+    'adosc': {
+        'default_params': {'short_period': 3, 'long_period': 10},
+        'last_5_values': [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
     }
 }
 
