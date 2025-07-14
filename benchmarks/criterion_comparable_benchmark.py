@@ -101,7 +101,7 @@ class CriterionComparableBenchmark:
         
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
-            'alma', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'acosc',
+            'alma', 'alligator', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'acosc',
             'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
@@ -220,6 +220,7 @@ class CriterionComparableBenchmark:
         # Define indicators with their functions
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
+            ('alligator', lambda: my_project.alligator((data['high'] + data['low']) / 2)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
