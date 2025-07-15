@@ -187,7 +187,8 @@
       "Bash(.venvScriptspython.exe -m maturin develop --features python --release)",
       "Bash(.venvScriptspython.exe tests/python/test_reflex.py)",
       "Bash(call .venvScriptsactivate)",
-      "Bash(test_bindings.bat supersmoother --python)"
+      "Bash(test_bindings.bat supersmoother --python)",
+      "WebFetch(domain:doc.rust-lang.org)"
     ],
     "deny": []
   }

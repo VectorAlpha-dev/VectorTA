@@ -1,6 +1,10 @@
 [build]
 rustc-wrapper = "sccache"
 
+# Limit test parallelism to prevent crashes from memory exhaustion
+[test]
+threads = 4
+
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
   "-C", "target-cpu=native",

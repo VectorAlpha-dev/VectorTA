@@ -1328,6 +1328,61 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_itrend_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with default parameters
+        let input = EhlersITrendInput::from_candles(&candles, "close", EhlersITrendParams::default());
+        let output = ehlers_itrend_with_kernel(&input, kernel)?;
+
+        // Check every value for poison patterns
+        for (i, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_itrend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
 
     #[allow(clippy::float_cmp)]
     fn check_itrend_property(
@@ -1512,7 +1567,8 @@ mod tests {
         check_itrend_streaming,
         check_itrend_zero_warmup,
         check_itrend_invalid_max_dc,
-        check_itrend_property
+        check_itrend_property,
+        check_itrend_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1556,6 +1612,66 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = EhlersITrendBatchBuilder::new()
+            .kernel(kernel)
+            .warmup_range(10, 20, 10)  // Test with multiple warmup values
+            .max_dc_range(30, 50, 20)  // Test with multiple max_dc values
+            .apply_candles(&c, "close")?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1583,6 +1699,7 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_invalid_kernel);
     gen_batch_tests!(check_batch_invalid_range);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

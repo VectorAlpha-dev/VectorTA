@@ -96,19 +96,34 @@ pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
 
     let warm = warm.min(len);
 
-    // 1. allocate uninitialised
+    // Allocate with capacity
     let mut buf: Vec<MaybeUninit<f64>> = Vec::with_capacity(len);
-    unsafe { buf.set_len(len); }
-
-    // 2. fill the prefix with a canonical quiet NaN
-    for slot in &mut buf[..warm] {
-        slot.write(f64::NAN);
+    
+    // In release mode, just set length after filling warmup
+    #[cfg(not(debug_assertions))]
+    {
+        unsafe { buf.set_len(len); }
+        for i in 0..warm {
+            buf[i].write(f64::from_bits(0x7ff8_0000_0000_0000));
+        }
+    }
+    
+    // In debug mode, initialize all values to avoid any UB window
+    #[cfg(debug_assertions)]
+    {
+        // Extend to full length with poison values
+        for _ in 0..warm {
+            buf.push(MaybeUninit::new(f64::from_bits(0x7ff8_0000_0000_0000)));
+        }
+        for _ in warm..len {
+            buf.push(MaybeUninit::new(f64::from_bits(0x11111111_11111111)));
+        }
     }
 
-    // 3. turn it into Vec<f64>
+    // Convert to Vec<f64>
     let ptr = buf.as_mut_ptr() as *mut f64;
     let cap = buf.capacity();
-    mem::forget(buf);                    // no double-free
+    mem::forget(buf);
     unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
 
@@ -126,6 +141,17 @@ pub fn init_matrix_prefixes(
     assert_eq!(rows, warm_prefixes.len(),
         "`warm_prefixes` length must equal number of rows");
 
+    // DEBUG ONLY: First poison ALL cells to catch uninitialized reads
+    #[cfg(debug_assertions)]
+    {
+        // Use different poison value 0x22222222_22222222
+        // This appears as 3.5873e-221 when interpreted as f64
+        for cell in buf.iter_mut() {
+            cell.write(f64::from_bits(0x22222222_22222222));
+        }
+    }
+
+    // Write NaN values to warm prefixes
     buf.chunks_exact_mut(cols)
         .zip(warm_prefixes)
         .for_each(|(row, &warm)| {
@@ -149,7 +175,19 @@ pub fn make_uninit_matrix(rows: usize, cols: usize)
     v.try_reserve_exact(total)
         .expect("OOM in make_uninit_matrix");
 
-    // SAFETY: length is set to capacity, which is fully allocated.
-    unsafe { v.set_len(total); }
+    // In release mode, just set length - MaybeUninit is safe for uninitialized memory
+    #[cfg(not(debug_assertions))]
+    {
+        unsafe { v.set_len(total); }
+    }
+    
+    // DEBUG ONLY: poison all cells with a third distinct pattern
+    #[cfg(debug_assertions)]
+    {
+        // Push poison values to avoid UB window
+        for _ in 0..total {
+            v.push(MaybeUninit::new(f64::from_bits(0x33333333_33333333)));
+        }
+    }
     v
 }
