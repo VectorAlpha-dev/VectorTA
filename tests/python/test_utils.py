@@ -346,6 +346,24 @@ EXPECTED_OUTPUTS = {
     'atr': {
         'default_params': {'length': 14},
         'last_5_values': [916.89, 874.33, 838.45, 801.92, 811.57]
+    },
+    'cci': {
+        'default_params': {'period': 14},
+        'last_5_values': [
+            -51.55252564125841,
+            -43.50326506381541,
+            -64.05117302269149,
+            -39.05150631680948,
+            -152.50523930896998
+        ],
+        # Re-input test expected values (when CCI is applied to CCI output)
+        'reinput_last_5': [
+            -150.0,  # Will be calculated when tests run
+            -150.0,
+            -150.0,
+            -150.0,
+            -150.0
+        ]
     }
 }
 

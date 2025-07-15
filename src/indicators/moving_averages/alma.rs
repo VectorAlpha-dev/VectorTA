@@ -911,6 +911,12 @@ fn alma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
+    
+    // Check if data is empty to avoid issues with allocation
+    if cols == 0 {
+        // Check if all values are NaN (in this case, empty means all are NaN)
+        return Err(AlmaError::AllValuesNaN);
+    }
 
     // 1. Allocate *uninitialised* matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
