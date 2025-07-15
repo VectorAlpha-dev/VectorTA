@@ -188,7 +188,9 @@
       "Bash(.venvScriptspython.exe tests/python/test_reflex.py)",
       "Bash(call .venvScriptsactivate)",
       "Bash(test_bindings.bat supersmoother --python)",
-      "WebFetch(domain:doc.rust-lang.org)"
+      "WebFetch(domain:doc.rust-lang.org)",
+      "Bash(.venvScriptspython.exe tests/python/test_acosc.py)",
+      "Bash(del test_acosc_quick.py)"
     ],
     "deny": []
   }
