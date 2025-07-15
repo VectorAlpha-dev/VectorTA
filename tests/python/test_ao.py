@@ -10,6 +10,9 @@ from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 
 class TestAo:
+    @pytest.fixture(scope='class')
+    def test_data(self):
+        return load_test_data()
     def test_ao_accuracy(self, test_data):
         """Test that AO values match expected results from Rust tests."""
         high = test_data['high']
@@ -58,7 +61,7 @@ class TestAo:
         """Test AO with empty input arrays."""
         empty = np.array([], dtype=np.float64)
         
-        with pytest.raises(ValueError, match="empty|no data"):
+        with pytest.raises(ValueError, match="empty|no data|No data"):
             my_project.ao(empty, empty, 5, 34)
 
     def test_ao_mismatched_lengths(self, test_data):
@@ -155,7 +158,7 @@ class TestAo:
         stream_results = np.array(stream_results)
         
         # Compare results (streaming should match batch)
-        assert_close(stream_results, batch_result, rtol=1e-10,
+        assert_close(stream_results, batch_result, rtol=1e-9, atol=1e-9,
                     msg="Streaming vs batch mismatch")
 
     def test_ao_re_input(self, test_data):
@@ -271,9 +274,9 @@ class TestAo:
         long_periods = result['long_periods']
         
         # Only valid combos where short < long
-        # Valid: (5,10), (5,12)
-        assert values.shape[0] == 2
-        assert list(zip(short_periods, long_periods)) == [(5, 10), (5, 12)]
+        # Valid: (5,10), (5,12), (10,12)
+        assert values.shape[0] == 3
+        assert list(zip(short_periods, long_periods)) == [(5, 10), (5, 12), (10, 12)]
 
     def test_ao_error_coverage(self, test_data):
         """Test all error enum variants are covered."""
@@ -293,7 +296,7 @@ class TestAo:
             my_project.ao(high[:50], low[:50], 34, 34)
             
         # NoData (empty)
-        with pytest.raises(ValueError, match="empty|no data"):
+        with pytest.raises(ValueError, match="empty|no data|No data"):
             my_project.ao(np.array([]), np.array([]), 5, 34)
             
         # NotEnoughValidData

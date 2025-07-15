@@ -108,9 +108,15 @@ use crate::indicators::moving_averages::vpwma::{vpwma_py, vpwma_batch_py, VpwmaS
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::wma::{wma_py, wma_batch_py, WmaStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::moving_averages::ma::ma_py;
+#[cfg(feature = "python")]
 use crate::indicators::aroon::{aroon_py, aroon_batch_py, AroonStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::bollinger_bands_width::{bollinger_bands_width_py, bollinger_bands_width_batch_py, BollingerBandsWidthStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ao::{ao_py, ao_batch_py, AoStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::atr::{atr_py, atr_batch_py, AtrStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -374,6 +380,9 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
     m.add_class::<WmaStreamPy>()?;
     
+    // Register MA dispatcher function
+    m.add_function(wrap_pyfunction!(ma_py, m)?)?;
+    
     // Register Aroon functions with their user-facing names
     m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
     m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
@@ -383,6 +392,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
     m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
     m.add_class::<BollingerBandsWidthStreamPy>()?;
+    
+    // Register AO functions with their user-facing names
+    m.add_function(wrap_pyfunction!(ao_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
+    m.add_class::<AoStreamPy>()?;
+    
+    // Register ATR functions with their user-facing names
+    m.add_function(wrap_pyfunction!(atr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
+    m.add_class::<AtrStreamPy>()?;
     
     // Add other indicators here as you implement their Python bindings
     

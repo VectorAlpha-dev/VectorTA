@@ -91,7 +91,7 @@ test('ATR with mismatched lengths', () => {
     
     assert.throws(
         () => wasm.atr(high, low, close, 14),
-        /differing lengths|same length/
+        /differing lengths|same length|Inconsistent slice lengths/
     );
 });
 
@@ -221,7 +221,7 @@ test('ATR batch (unified API)', () => {
         length_range: [14, 14, 0]
     };
     
-    const result = wasm.atrBatch(high, low, close, config);
+    const result = wasm.atr_batch(high, low, close, config);
     
     assert.ok(result);
     assert.ok(result.values);
@@ -245,7 +245,7 @@ test('ATR error handling coverage', () => {
     // InconsistentSliceLengths
     assert.throws(
         () => wasm.atr(high.slice(0, 50), low.slice(0, 49), close.slice(0, 50), 14),
-        /differing lengths/
+        /differing lengths|Inconsistent slice lengths/
     );
     
     // NoCandlesAvailable
@@ -318,5 +318,5 @@ test('ATR comparison with Rust', () => {
         expected.defaultParams.length
     );
     
-    compareWithRust('atr', Array.from(result), 'hlc', expected.defaultParams);
+    compareWithRust('atr', Array.from(result), 'ohlc', expected.defaultParams);
 });

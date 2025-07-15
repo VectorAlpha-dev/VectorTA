@@ -53,6 +53,7 @@ pub struct BollingerBandsOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct BollingerBandsParams {
     pub period: Option<usize>,
     pub devup: Option<f64>,

@@ -27,7 +27,6 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::alloc::{alloc, dealloc, Layout};
 use std::convert::AsRef;
@@ -912,9 +911,40 @@ fn alma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    let mut values = vec![0.0; rows * cols];
-    
-    alma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+
+    // 1. Allocate *uninitialised* matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+
+    // 2. Fill the NaN warm-up prefix row-wise  ──────┐
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c|                                 //  first + period - 1
+             data.iter()
+                 .position(|x| !x.is_nan())
+                 .unwrap_or(0) + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(&mut buf_mu, cols, &warm); // ──┘
+
+    // 3. Convert &[MaybeUninit<f64>] → &mut [f64]
+    //    *after* the prefixes are written but *before*
+    //    the compute kernels run – they will write the rest.
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);          // keep capacity
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+
+    // 4. Compute into it in place
+    alma_batch_inner_into(data, sweep, kern, parallel, out)?;
+
+    // 5. Reclaim the buffer as a normal Vec<f64> for the return value
+    let values = unsafe {
+        Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64,
+                            buf_guard.len(),
+                            buf_guard.capacity())
+    };
     
     Ok(AlmaBatchOutput {
         values,
@@ -990,20 +1020,14 @@ fn alma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-    // collect warm-up lengths per row once
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
-
+    // Note: NaN prefix initialization is now handled in alma_batch_inner
+    // We just need to convert the output slice to MaybeUninit for the row processing
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
             out.len()
         )
     };
-
-    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();

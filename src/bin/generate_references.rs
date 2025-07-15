@@ -47,6 +47,15 @@ use my_project::indicators::acosc::{acosc, AcoscInput, AcoscParams, AcoscData};
 use my_project::indicators::adx::{adx, AdxInput, AdxParams, AdxData};
 use my_project::indicators::adosc::{adosc, AdoscInput, AdoscParams, AdoscData};
 use my_project::indicators::adxr::{adxr, AdxrInput, AdxrParams, AdxrData};
+use my_project::indicators::alligator::{alligator, AlligatorInput, AlligatorParams};
+use my_project::indicators::ao::{ao, AoInput, AoParams, AoData};
+use my_project::indicators::apo::{apo, ApoInput, ApoParams};
+use my_project::indicators::aroon::{aroon, AroonInput, AroonParams, AroonData};
+use my_project::indicators::aroonosc::{aroon_osc, AroonOscInput, AroonOscParams, AroonOscData};
+use my_project::indicators::atr::{atr, AtrInput, AtrParams, AtrData};
+use my_project::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
+use my_project::indicators::bollinger_bands::{bollinger_bands, BollingerBandsInput, BollingerBandsParams};
+use my_project::indicators::bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput, BollingerBandsWidthParams};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -55,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: ad, acosc, alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -820,6 +829,204 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "indicator": "adxr",
                 "source": source,
                 "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "alligator" => {
+            let params = AlligatorParams::default();
+            let jaw_period = params.jaw_period.unwrap_or(13);
+            let teeth_period = params.teeth_period.unwrap_or(8);
+            let lips_period = params.lips_period.unwrap_or(5);
+            let jaw_offset = params.jaw_offset.unwrap_or(8);
+            let teeth_offset = params.teeth_offset.unwrap_or(5);
+            let lips_offset = params.lips_offset.unwrap_or(3);
+            let input = AlligatorInput::from_candles(&candles, source, params);
+            let result = alligator(&input)?;
+            json!({
+                "indicator": "alligator",
+                "source": source,
+                "params": {
+                    "jaw_period": jaw_period,
+                    "teeth_period": teeth_period,
+                    "lips_period": lips_period,
+                    "jaw_offset": jaw_offset,
+                    "teeth_offset": teeth_offset,
+                    "lips_offset": lips_offset
+                },
+                "jaw": result.jaw,
+                "teeth": result.teeth,
+                "lips": result.lips,
+                "length": result.jaw.len()
+            })
+        },
+        "ao" => {
+            if source != "high_low" {
+                eprintln!("AO indicator requires 'high_low' source");
+                std::process::exit(1);
+            }
+            let params = AoParams::default();
+            let input = AoInput {
+                data: AoData::Candles { candles: &candles, source: "hl2" },
+                params,
+            };
+            let result = ao(&input)?;
+            json!({
+                "indicator": "ao",
+                "source": source,
+                "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "apo" => {
+            let params = ApoParams::default();
+            let short_period = params.short_period.unwrap_or(10);
+            let long_period = params.long_period.unwrap_or(20);
+            let input = ApoInput::from_candles(&candles, source, params);
+            let result = apo(&input)?;
+            json!({
+                "indicator": "apo",
+                "source": source,
+                "params": {
+                    "short_period": short_period,
+                    "long_period": long_period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "aroon" => {
+            if source != "high_low" {
+                eprintln!("Aroon indicator requires 'high_low' source");
+                std::process::exit(1);
+            }
+            let params = AroonParams::default();
+            let length = params.length.unwrap_or(14);
+            let input = AroonInput {
+                data: AroonData::Candles { candles: &candles },
+                params,
+            };
+            let result = aroon(&input)?;
+            json!({
+                "indicator": "aroon",
+                "source": source,
+                "params": {
+                    "length": length
+                },
+                "aroon_down": result.aroon_down,
+                "aroon_up": result.aroon_up,
+                "length": result.aroon_up.len()
+            })
+        },
+        "aroonosc" => {
+            if source != "high_low" {
+                eprintln!("Aroon Oscillator requires 'high_low' source");
+                std::process::exit(1);
+            }
+            let params = AroonOscParams::default();
+            let length = params.length.unwrap_or(14);
+            let input = AroonOscInput {
+                data: AroonOscData::Candles { candles: &candles },
+                params,
+            };
+            let result = aroon_osc(&input)?;
+            json!({
+                "indicator": "aroonosc",
+                "source": source,
+                "params": {
+                    "length": length
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "atr" => {
+            if source != "ohlc" {
+                eprintln!("ATR indicator requires 'ohlc' source");
+                std::process::exit(1);
+            }
+            let params = AtrParams::default();
+            let length = params.length.unwrap_or(14);
+            let input = AtrInput {
+                data: AtrData::Candles { candles: &candles },
+                params,
+            };
+            let result = atr(&input)?;
+            json!({
+                "indicator": "atr",
+                "source": source,
+                "params": {
+                    "length": length
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "bandpass" => {
+            let params = BandPassParams::default();
+            let period = params.period.unwrap_or(20);
+            let bandwidth = params.bandwidth.unwrap_or(0.3);
+            let input = BandPassInput::from_candles(&candles, source, params);
+            let result = bandpass(&input)?;
+            json!({
+                "indicator": "bandpass",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "bandwidth": bandwidth
+                },
+                "bp": result.bp,
+                "bp_normalized": result.bp_normalized,
+                "signal": result.signal,
+                "trigger": result.trigger,
+                "length": result.bp.len()
+            })
+        },
+        "bollinger_bands" => {
+            let params = BollingerBandsParams::default();
+            let period = params.period.unwrap_or(20);
+            let devup = params.devup.unwrap_or(2.0);
+            let devdn = params.devdn.unwrap_or(2.0);
+            let matype = params.matype.clone().unwrap_or("sma".to_string());
+            let devtype = params.devtype.unwrap_or(0);
+            let input = BollingerBandsInput::from_candles(&candles, source, params);
+            let result = bollinger_bands(&input)?;
+            json!({
+                "indicator": "bollinger_bands",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "devup": devup,
+                    "devdn": devdn,
+                    "matype": matype,
+                    "devtype": devtype
+                },
+                "upper_band": result.upper_band,
+                "middle_band": result.middle_band,
+                "lower_band": result.lower_band,
+                "length": result.upper_band.len()
+            })
+        },
+        "bollinger_bands_width" => {
+            let params = BollingerBandsWidthParams::default();
+            let period = params.period.unwrap_or(20);
+            let devup = params.devup.unwrap_or(2.0);
+            let devdn = params.devdn.unwrap_or(2.0);
+            let matype = params.matype.clone().unwrap_or("sma".to_string());
+            let devtype = params.devtype.unwrap_or(0);
+            let input = BollingerBandsWidthInput::from_candles(&candles, source, params);
+            let result = bollinger_bands_width(&input)?;
+            json!({
+                "indicator": "bollinger_bands_width",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "devup": devup,
+                    "devdn": devdn,
+                    "matype": matype,
+                    "devtype": devtype
+                },
                 "values": result.values,
                 "length": result.values.len()
             })

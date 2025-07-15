@@ -1,5 +1,10 @@
 //! # End Point Moving Average (EPMA)
 //!
+//! ## MEMORY COPY OPERATION NOTE
+//! The Python batch binding (`epma_batch_py`) contains a memory copy operation
+//! where the output array is initialized with NaN values to prevent uninitialized memory issues.
+//! This was added to fix memory safety issues but introduces a performance overhead.
+//!
 //! A polynomial-weighted moving average with adjustable period and offset.
 //! SIMD (AVX2/AVX512) kernels are provided for API parity with alma.rs, but
 //! offer little to no practical performance gain, as this indicator is memory bound.
@@ -747,7 +752,7 @@ fn epma_batch_inner(
 ) -> Result<EpmaBatchOutput, EpmaError> {
     let rows = expand_grid(sweep).len();
     let cols = data.len();
-    let mut out = vec![0.0; rows * cols];
+    let mut out = vec![f64::NAN; rows * cols];
     
     let combos = epma_batch_inner_into(data, sweep, kern, parallel, &mut out)?;
     
@@ -1351,9 +1356,13 @@ pub fn epma_batch_py<'py>(
     let rows = combos.len();
     let cols = data.len();
     
-    // Pre-allocate output array
+    // Pre-allocate output array and initialize with NaN
     let out_arr = unsafe { PyArray2::<f64>::new(py, [rows, cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
+    // Initialize all values to NaN to avoid uninitialized memory issues
+    for v in out_slice.iter_mut() {
+        *v = f64::NAN;
+    }
     
     // Map kernel (ScalarBatch -> Scalar, etc.)
     let kernel = match Kernel::ScalarBatch {

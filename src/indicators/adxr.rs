@@ -1,5 +1,10 @@
 //! # Average Directional Index Rating (ADXR)
 //!
+//! ## MEMORY COPY OPERATION NOTE
+//! The Python bindings (`adxr_py` and `adxr_batch_py`) contain memory copy operations
+//! where output arrays are initialized with NaN values to prevent uninitialized memory issues.
+//! This was added to fix memory safety issues but introduces a performance overhead.
+//!
 //! A smoothed trend indicator: the average of the current ADX value and the ADX from `period` bars ago.
 //! API and features modeled after alma.rs, including batch, AVX, and streaming support.
 //!
@@ -1002,10 +1007,14 @@ pub fn adxr_py<'py>(
     };
     let adxr_in = AdxrInput::from_slices(high_slice, low_slice, close_slice, params);
 
-    // ---------- allocate uninitialized NumPy output buffer -------------------------
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    // ---------- allocate NumPy output buffer and initialize with NaN ---------------
+    // NOTE: PyArray1::new() creates uninitialized memory, so we must initialize it
     let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // Initialize all values to NaN to avoid uninitialized memory issues
+    for v in slice_out.iter_mut() {
+        *v = f64::NAN;
+    }
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AdxrError> {
@@ -1142,11 +1151,15 @@ pub fn adxr_batch_py<'py>(
     let rows = combos.len();
     let cols = close_slice.len();
 
-    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-    // SAFETY: We must write to ALL elements before returning to Python
+    // 2. Pre-allocate NumPy array and initialize with NaN
+    // NOTE: PyArray1::new() creates uninitialized memory, so we must initialize it
+    // SAFETY: We initialize all elements to NaN to ensure valid values
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // Initialize all values to NaN to avoid uninitialized memory issues
+    for v in slice_out.iter_mut() {
+        *v = f64::NAN;
+    }
 
     // Use kernel validation for safety
     let kern = validate_kernel(kernel, true)?;

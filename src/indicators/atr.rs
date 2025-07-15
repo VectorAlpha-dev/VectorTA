@@ -17,7 +17,7 @@
 //!
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -935,7 +935,7 @@ pub fn atr_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     let kernel_enum = match kernel {
-        Some(k) => validate_kernel(k)?,
+        Some(k) => validate_kernel(Some(k), false)?,
         None => Kernel::Auto,
     };
 
@@ -1015,9 +1015,9 @@ pub fn atr_batch_py<'py>(
     close: numpy::PyReadonlyArray1<'py, f64>,
     length_range: (usize, usize, usize),
     kernel: Option<&str>,
-) -> PyResult<&'py PyDict> {
+) -> PyResult<Bound<'py, PyDict>> {
     let kernel_enum = match kernel {
-        Some(k) => validate_kernel(k, true)?,  // true for batch operation
+        Some(k) => validate_kernel(Some(k), true)?,  // true for batch operation
         None => Kernel::Auto,
     };
 
@@ -1049,48 +1049,29 @@ pub fn atr_batch_py<'py>(
     let values_2d = unsafe { numpy::PyArray2::new(py, [rows, cols], false) };
     
     // Ensure the array is contiguous (should always be true for new arrays)
-    debug_assert!(values_2d.is_contiguous());
-    
-    // Get a pointer to the raw data - need to cast from *mut c_void to *mut f64
-    let raw_ptr = values_2d.data() as *mut f64;
+    debug_assert!(values_2d.is_c_contiguous());
 
     // Clone combos to avoid recomputing expand_grid
     let combos_cloned = combos.clone();
 
-    // Compute directly into the pre-allocated array
-    py.allow_threads(|| {
-        // Create a mutable slice view of the entire 2D array as flat
-        let output_slice = unsafe {
-            std::slice::from_raw_parts_mut(raw_ptr, rows * cols)
-        };
-        
-        // Call the inner batch function that works with a flat output slice
-        let simd = match batch_kernel {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => unreachable!(),
-        };
-        
-        // Process each row
-        for (row_idx, combo) in combos_cloned.iter().enumerate() {
-            let length = combo.length.unwrap_or(14);
-            let row_start = row_idx * cols;
-            let row_slice = &mut output_slice[row_start..row_start + cols];
-            
-            // SAFETY: We have validated inputs and allocated correct output size
-            unsafe {
-                match simd {
-                    Kernel::Scalar => atr_scalar(high_slice, low_slice, close_slice, length, row_slice),
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 => atr_avx2(high_slice, low_slice, close_slice, length, row_slice),
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 => atr_avx512(high_slice, low_slice, close_slice, length, row_slice),
-                    _ => unreachable!(),
-                }
-            }
-        }
-    });
+    // Use the existing batch function that returns a result
+    let simd = match batch_kernel {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => unreachable!(),
+    };
+    
+    let batch_result = py.allow_threads(|| {
+        atr_batch_inner(high_slice, low_slice, close_slice, &range, simd, true)
+    })?;
+
+    // Copy the results into the pre-allocated NumPy array
+    let raw_ptr = values_2d.data() as *mut f64;
+    unsafe {
+        let output_slice = std::slice::from_raw_parts_mut(raw_ptr, rows * cols);
+        output_slice.copy_from_slice(&batch_result.values);
+    }
 
     let dict = PyDict::new(py);
     dict.set_item("values", values_2d)?;
@@ -1101,7 +1082,7 @@ pub fn atr_batch_py<'py>(
         .collect();
     dict.set_item("lengths", PyList::new(py, &lengths)?)?;
 
-    Ok(dict)
+    Ok(dict.into())
 }
 
 // ============= WASM Bindings =============
@@ -1159,7 +1140,7 @@ pub fn atr_batch_metadata_js(
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen(js_name = "atrBatch", skip_jsdoc)]
+#[wasm_bindgen(js_name = "atr_batch", skip_jsdoc)]
 pub fn atr_batch_unified_js(
     high: &[f64],
     low: &[f64],

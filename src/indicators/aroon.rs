@@ -31,8 +31,6 @@ use pyo3::types::{PyDict, PyList};
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
-use js_sys;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -1294,8 +1292,15 @@ pub fn aroon_batch_py<'py>(
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AroonJsOutput {
+    pub up: Vec<f64>,
+    pub down: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<js_sys::Object, JsValue> {
+pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsValue> {
     let params = AroonParams {
         length: Some(length),
     };
@@ -1304,20 +1309,15 @@ pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<js_sys::Obje
     let output = aroon_with_kernel(&input, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Create JS object with up and down arrays
-    let result = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &result,
-        &JsValue::from_str("up"),
-        &js_sys::Float64Array::from(&output.aroon_up[..]),
-    )?;
-    js_sys::Reflect::set(
-        &result,
-        &JsValue::from_str("down"),
-        &js_sys::Float64Array::from(&output.aroon_down[..]),
-    )?;
+    // Create the structured output
+    let js_output = AroonJsOutput {
+        up: output.aroon_up,
+        down: output.aroon_down,
+    };
 
-    Ok(result)
+    // Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1328,7 +1328,7 @@ pub fn aroon_batch_js(
     length_start: usize,
     length_end: usize,
     length_step: usize,
-) -> Result<js_sys::Object, JsValue> {
+) -> Result<JsValue, JsValue> {
     let sweep = AroonBatchRange {
         length: (length_start, length_end, length_step),
     };
@@ -1337,20 +1337,18 @@ pub fn aroon_batch_js(
     let output = aroon_batch_inner(high, low, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Create JS object with up and down arrays
-    let result = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &result,
-        &JsValue::from_str("up"),
-        &js_sys::Float64Array::from(&output.up[..]),
-    )?;
-    js_sys::Reflect::set(
-        &result,
-        &JsValue::from_str("down"),
-        &js_sys::Float64Array::from(&output.down[..]),
-    )?;
+    // Create the structured output
+    let js_output = AroonBatchJsOutput {
+        up: output.up,
+        down: output.down,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
 
-    Ok(result)
+    // Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]

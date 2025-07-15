@@ -314,6 +314,10 @@ const EXPECTED_OUTPUTS = {
             42.86
         ]
     },
+    aroonosc: {
+        defaultParams: { length: 14 },
+        last5Values: [-50.0, -50.0, -50.0, -50.0, -42.8571]
+    },
     adosc: {
         defaultParams: { short_period: 3, long_period: 10 },
         last5Values: [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]

@@ -10,6 +10,9 @@ from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 
 class TestAtr:
+    @pytest.fixture(scope='class')
+    def test_data(self):
+        return load_test_data()
     def test_atr_accuracy(self, test_data):
         """Test that ATR values match expected results from Rust tests."""
         high = test_data['high']
@@ -68,7 +71,7 @@ class TestAtr:
         low = np.array([5.0, 15.0])  # Different length
         close = np.array([7.0, 17.0, 27.0])  # Another different length
         
-        with pytest.raises(ValueError, match="differing lengths|same length"):
+        with pytest.raises(ValueError, match="differing lengths|same length|Inconsistent slice lengths"):
             my_project.atr(high, low, close, 14)
 
     def test_atr_invalid_length(self, test_data):
@@ -250,7 +253,7 @@ class TestAtr:
             my_project.atr(high[:50], low[:50], close[:50], 0)
             
         # InconsistentSliceLengths
-        with pytest.raises(ValueError, match="differing lengths|same length"):
+        with pytest.raises(ValueError, match="differing lengths|same length|Inconsistent slice lengths"):
             my_project.atr(high[:50], low[:49], close[:50], 14)
             
         # NoCandlesAvailable (empty)

@@ -46,6 +46,19 @@ def assert_close(actual, expected, rtol=1e-8, atol=1e-10, msg=""):
             raise AssertionError(f"{msg}: {str(e)}")
         raise
 
+# Alias for backward compatibility
+assert_array_close = assert_close
+
+def assert_all_nan(arr, msg=""):
+    """Assert all values are NaN"""
+    if not np.all(np.isnan(arr)):
+        raise AssertionError(f"{msg}: Not all values are NaN")
+
+def assert_no_nan(arr, msg=""):
+    """Assert no NaN values in array"""
+    if np.any(np.isnan(arr)):
+        raise AssertionError(f"{msg}: Found NaN values in array")
+
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
     'alma': {
@@ -277,6 +290,10 @@ EXPECTED_OUTPUTS = {
             42.86
         ]
     },
+    'aroonosc': {
+        'default_params': {'length': 14},
+        'last_5_values': [-50.0, -50.0, -50.0, -50.0, -42.8571]
+    },
     'adosc': {
         'default_params': {'short_period': 3, 'long_period': 10},
         'last_5_values': [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
@@ -284,11 +301,11 @@ EXPECTED_OUTPUTS = {
     'bollinger_bands_width': {
         'default_params': {'period': 20, 'devup': 2.0, 'devdn': 2.0, 'matype': 'sma', 'devtype': 0},
         'last_5_values': [
-            0.0344,  # Placeholder values - should be calculated from actual Rust implementation
-            0.0352,
-            0.0361,
-            0.0358,
-            0.0349
+            0.03715911020016619,
+            0.036072736452195386,
+            0.034961761824566714,
+            0.03493493700573171,
+            0.03624293421802348
         ]
     },
     'apo': {

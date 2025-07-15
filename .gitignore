@@ -42,3 +42,6 @@ __pycache__/
 # WASM/Node
 pkg/
 tests/wasm/node_modules/
+
+# Claude CLI
+.claude/

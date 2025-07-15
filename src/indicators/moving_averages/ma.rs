@@ -75,6 +75,18 @@ use crate::indicators::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
 use crate::utilities::data_loader::Candles;
 use std::error::Error;
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use numpy::{PyReadonlyArray1, PyArray1};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone)]
 pub enum MaData<'a> {
     Candles {
@@ -953,6 +965,47 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             Ok(output.values)
         }
     }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ma")]
+#[pyo3(signature = (data, ma_type, period))]
+pub fn ma_py<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<'py, f64>,
+    ma_type: &str,
+    period: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::PyArrayMethods;
+    
+    let slice_in = data.as_slice()?;
+    
+    // Pre-allocate uninitialized NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Run computation without GIL
+    let result = py.allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
+        // Call the Rust ma function
+        let result = ma(ma_type, MaData::Slice(slice_in), period)
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { 
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            })?;
+        Ok(result)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Copy result to output array
+    slice_out.copy_from_slice(&result);
+    
+    Ok(out_arr)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "ma")]
+pub fn ma_js(data: &[f64], ma_type: &str, period: usize) -> Result<Vec<f64>, JsValue> {
+    ma(ma_type, MaData::Slice(data), period)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

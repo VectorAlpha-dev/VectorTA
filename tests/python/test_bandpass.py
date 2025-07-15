@@ -88,8 +88,8 @@ class TestBandPass:
             msg="Band-Pass trigger last 5 values mismatch"
         )
         
-        # Also run full comparison with Rust for bp values only
-        compare_with_rust('bandpass', result['bp'])
+        # Also run full comparison with Rust
+        compare_with_rust('bandpass', result)
     
     def test_bandpass_default_params(self, test_data):
         """Test Band-Pass with default parameters"""
@@ -221,7 +221,7 @@ class TestBandPass:
     
     def test_bandpass_batch_multiple_parameters(self, test_data):
         """Test batch processing with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:700]  # Need enough data for largest hp_period (600)
         
         # Multiple parameter combinations
         batch_result = ta_indicators.bandpass_batch(
@@ -268,9 +268,10 @@ class TestBandPass:
     
     def test_bandpass_edge_cases(self):
         """Test Band-Pass with edge case inputs"""
-        # Minimum valid period
+        # Minimum valid period - adjust bandwidth to avoid hp_period issues
         data = np.random.rand(50)
-        result = ta_indicators.bandpass(data, period=2, bandwidth=0.3)
+        # With period=2 and bandwidth=0.5, hp_period = round(4*2/0.5) = 16
+        result = ta_indicators.bandpass(data, period=2, bandwidth=0.5)
         assert len(result['bp']) == len(data)
         
         # Verify all outputs have correct length

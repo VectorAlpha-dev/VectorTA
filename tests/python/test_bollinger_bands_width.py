@@ -85,7 +85,7 @@ class TestBollingerBandsWidth:
                 last_5,
                 self.expected['last_5_values'],
                 rtol=1e-8,
-                err_msg="BBW last 5 values mismatch"
+                msg="BBW last 5 values mismatch"
             )
     
     def test_zero_period(self):
@@ -202,7 +202,9 @@ class TestBollingerBandsWidth:
         stream = my_project.BollingerBandsWidthStream(
             period=period,
             devup=2.0,
-            devdn=2.0
+            devdn=2.0,
+            matype="sma",  # Default moving average type
+            devtype=0      # Default deviation type (stddev)
         )
         
         # Feed data one by one
@@ -251,7 +253,7 @@ class TestBollingerBandsWidth:
             result['values'][0],
             single_result,
             rtol=1e-10,
-            err_msg="Batch vs single mismatch"
+            msg="Batch vs single mismatch"
         )
     
     def test_batch_multiple_params(self):

@@ -39,6 +39,7 @@ pub enum AroonOscData<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct AroonOscParams {
     pub length: Option<usize>,
 }
@@ -789,8 +790,9 @@ pub fn aroon_osc_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{PyArray1, PyArrayMethods};
 
-    let high_slice = high.as_slice()?; // zero-copy, read-only view
-    let low_slice = low.as_slice()?;   // zero-copy, read-only view
+    // Get slices - as_slice() will fail if array is not contiguous
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
 
     // Validate inputs have same length
     if high_slice.len() != low_slice.len() {
@@ -798,6 +800,19 @@ pub fn aroon_osc_py<'py>(
             "High and low arrays must have same length. Got high: {}, low: {}",
             high_slice.len(),
             low_slice.len()
+        )));
+    }
+
+    // Check length validity early
+    if length == 0 {
+        return Err(PyValueError::new_err("Invalid length: length must be greater than 0"));
+    }
+    
+    if length + 1 > high_slice.len() {
+        return Err(PyValueError::new_err(format!(
+            "Not enough data: need at least {} data points for length {}",
+            length + 1,
+            length
         )));
     }
 
@@ -818,9 +833,6 @@ pub fn aroon_osc_py<'py>(
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), AroonOscError> {
         let length = aroon_in.get_length();
-        if length == 0 {
-            return Err(AroonOscError::InvalidLength { length });
-        }
         
         // SAFETY: We must write to ALL elements before returning to Python
         // 1. Write NaN prefix to the first (length) elements

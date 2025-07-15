@@ -88,9 +88,9 @@ def run_tests():
     elapsed = time.time() - start_time
     
     if success:
-        print(f"\n✓ All tests passed in {elapsed:.2f}s")
+        print(f"\n[PASS] All tests passed in {elapsed:.2f}s")
     else:
-        print(f"\n✗ Tests failed after {elapsed:.2f}s")
+        print(f"\n[FAIL] Tests failed after {elapsed:.2f}s")
     
     return 0 if success else 1
 

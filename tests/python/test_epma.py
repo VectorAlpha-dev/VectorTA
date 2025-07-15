@@ -227,7 +227,7 @@ class TestEpma:
         # The batch values should match the single calculation
         # Use a more relaxed tolerance due to potential floating point differences
         assert_close(
-            result['values'][0] * 2.0,  # Temporary workaround: batch returns half values
+            result['values'][0],
             single_result,
             rtol=1e-6,
             msg="First batch row mismatch"

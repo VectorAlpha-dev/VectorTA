@@ -1,5 +1,10 @@
 //! # Bollinger Bands Width (BBW)
 //!
+//! ## MEMORY COPY OPERATION NOTE
+//! The Python batch binding (`bollinger_bands_width_batch_py`) contains a memory copy operation
+//! where the output array is initialized with NaN values to prevent uninitialized memory issues.
+//! This was added to fix memory safety issues but introduces a performance overhead.
+//!
 //! Bollinger Bands Width (sometimes called Bandwidth) shows the relative distance between
 //! the upper and lower Bollinger Bands compared to the middle band.
 //! It is typically calculated as: `(upper_band - lower_band) / middle_band`
@@ -150,6 +155,10 @@ pub enum BollingerBandsWidthError {
     AllValuesNaN,
     #[error("bbw: Underlying MA or Deviation function failed: {0}")]
     UnderlyingFunctionFailed(String),
+    #[error("bbw: MA calculation error: {0}")]
+    MaError(String),
+    #[error("bbw: Deviation calculation error: {0}")]
+    DeviationError(String),
     #[error("bbw: Not enough valid data for period: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 }
@@ -760,7 +769,8 @@ pub fn bollinger_bands_width_batch_inner_into(
     for ((period, matype, devtype), indices) in groups {
         // Compute MA and deviation once for this group
         let ma_data = crate::indicators::moving_averages::ma::MaData::Slice(data);
-        let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period)?;
+        let middle = crate::indicators::moving_averages::ma::ma(&matype, ma_data, period)
+            .map_err(|e| BollingerBandsWidthError::MaError(e.to_string()))?;
         
         let dev_input = crate::indicators::deviation::DevInput::from_slice(
             data,
@@ -769,7 +779,8 @@ pub fn bollinger_bands_width_batch_inner_into(
                 devtype: Some(devtype),
             },
         );
-        let dev_values = crate::indicators::deviation::deviation(&dev_input)?;
+        let dev_values = crate::indicators::deviation::deviation(&dev_input)
+            .map_err(|e| BollingerBandsWidthError::DeviationError(e.to_string()))?;
         
         // Now compute BBW for each (devup, devdn) combination in this group
         if parallel {
@@ -781,17 +792,20 @@ pub fn bollinger_bands_width_batch_inner_into(
                     .map(|&(idx, devup, devdn)| (idx * cols, (idx + 1) * cols, devup, devdn))
                     .collect();
                 
-                // Use split_at_mut to safely partition the output slice
-                ranges.into_par_iter().for_each(|(start, end, devup, devdn)| {
-                    let out_row = unsafe {
-                        // SAFETY: Each thread writes to a non-overlapping slice
-                        std::slice::from_raw_parts_mut(out.as_mut_ptr().add(start), end - start)
-                    };
-                    for i in (first + period - 1)..cols {
-                        let middle_band = middle.values[i];
-                        let upper_band = middle_band + devup * dev_values.values[i];
-                        let lower_band = middle_band - devdn * dev_values.values[i];
-                        out_row[i] = (upper_band - lower_band) / middle_band;
+                // Clone necessary data for parallel processing
+                let middle_ref = &middle;
+                let dev_values_ref = &dev_values.values;
+                
+                // Use parallel chunks_mut to safely partition the output slice
+                out.par_chunks_mut(cols).enumerate().for_each(|(row_idx, out_row)| {
+                    // Find the corresponding parameters for this row
+                    if let Some(&(_, devup, devdn)) = indices.iter().find(|&&(idx, _, _)| idx == row_idx) {
+                        for i in (first + period - 1)..cols {
+                            let middle_band = middle_ref[i];
+                            let upper_band = middle_band + devup * dev_values_ref[i];
+                            let lower_band = middle_band - devdn * dev_values_ref[i];
+                            out_row[i] = (upper_band - lower_band) / middle_band;
+                        }
                     }
                 });
             }
@@ -803,7 +817,7 @@ pub fn bollinger_bands_width_batch_inner_into(
                     let end = start + cols;
                     let out_row = &mut out[start..end];
                     for i in (first + period - 1)..cols {
-                        let middle_band = middle.values[i];
+                        let middle_band = middle[i];
                         let upper_band = middle_band + devup * dev_values.values[i];
                         let lower_band = middle_band - devdn * dev_values.values[i];
                         out_row[i] = (upper_band - lower_band) / middle_band;
@@ -816,7 +830,7 @@ pub fn bollinger_bands_width_batch_inner_into(
                 let end = start + cols;
                 let out_row = &mut out[start..end];
                 for i in (first + period - 1)..cols {
-                    let middle_band = middle.values[i];
+                    let middle_band = middle[i];
                     let upper_band = middle_band + devup * dev_values.values[i];
                     let lower_band = middle_band - devdn * dev_values.values[i];
                     out_row[i] = (upper_band - lower_band) / middle_band;
@@ -1174,10 +1188,15 @@ pub fn bollinger_bands_width_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // SAFETY: Pre-allocate uninitialized NumPy array for performance.
-    // We MUST write to ALL elements before returning to Python.
+    // SAFETY: Pre-allocate NumPy array and initialize with NaN.
+    // This ensures that even if some calculations fail, we return valid NaN values
+    // instead of uninitialized memory.
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // Initialize all values to NaN to avoid uninitialized memory issues
+    for v in slice_out.iter_mut() {
+        *v = f64::NAN;
+    }
     
     // Heavy work without the GIL
     let (combos, matype_used, devtype_used) = py.allow_threads(|| -> Result<(Vec<BollingerBandsWidthParams>, String, usize), BollingerBandsWidthError> {
