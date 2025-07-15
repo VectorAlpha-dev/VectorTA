@@ -14,15 +14,40 @@
 //! ## Returns
 //! - **`Ok(BopOutput)`** on success, containing a `Vec<f64>` with the BOP values.
 //! - **`Err(BopError)`** otherwise.
+//!
+//! ## Example
+//! ```
+//! use my_project::indicators::bop::{bop, BopInput, BopParams};
+//! let open = [1.0, 2.0];
+//! let high = [2.0, 3.0]; 
+//! let low = [0.5, 1.0];
+//! let close = [1.5, 2.5];
+//! let input = BopInput::from_slices(&open, &high, &low, &close, BopParams::default());
+//! let out = bop(&input).unwrap();
+//! assert!((out.values[0] - 0.5).abs() < 1e-12);
+//! ```
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{Candles, source_type};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -134,6 +159,9 @@ impl BopBuilder {
         let i = BopInput::from_slices(open, high, low, close, BopParams::default());
         bop_with_kernel(&i, self.kernel)
     }
+    /// Create a streaming BOP calculator.
+    /// 
+    /// Note: BOP stream is kernel-agnostic; always uses scalar implementation.
     #[inline(always)]
     pub fn into_stream(self) -> Result<BopStream, BopError> {
         BopStream::try_new()
@@ -331,14 +359,18 @@ impl BopStream {
 
 // ---- Batch processing API ----
 
+/// Batch parameter range for BOP.
+/// 
+/// Note: BOP has no parameters, so this struct is intentionally empty.
+/// It exists to maintain API consistency with other indicators.
 #[derive(Clone, Debug)]
 pub struct BopBatchRange {
-    pub dummy: (u8, u8, u8),
+    // Intentionally empty - BOP has no parameters to sweep
 }
 
 impl Default for BopBatchRange {
     fn default() -> Self {
-        Self { dummy: (0, 0, 0) }
+        Self {}
     }
 }
 
@@ -678,4 +710,247 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bop")]
+#[pyo3(signature = (open, high, low, close, *, kernel=None))]
+pub fn bop_py<'py>(
+    py: Python<'py>,
+    open: numpy::PyReadonlyArray1<'py, f64>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    // Zero-copy, read-only views
+    let open_slice = open.as_slice()?;
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    // Validate input lengths
+    let len = open_slice.len();
+    if len != high_slice.len() || len != low_slice.len() || len != close_slice.len() {
+        return Err(PyValueError::new_err("bop: Input arrays have different lengths"));
+    }
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // Pre-allocate uninitialized NumPy output buffer
+    // SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Heavy lifting without the GIL
+    py.allow_threads(|| -> Result<(), BopError> {
+        if len == 0 {
+            return Err(BopError::EmptyData);
+        }
+
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        };
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // The BOP algorithm writes to every element of the output array
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    bop_scalar(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    bop_avx2(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    bop_avx512(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "BopStream")]
+pub struct BopStreamPy {
+    stream: BopStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl BopStreamPy {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let stream = BopStream::try_new()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(BopStreamPy { stream })
+    }
+
+    /// Updates the stream with new OHLC values and returns the calculated BOP value.
+    fn update(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
+        self.stream.update(open, high, low, close)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "bop_batch")]
+#[pyo3(signature = (open, high, low, close, *, kernel=None))]
+pub fn bop_batch_py<'py>(
+    py: Python<'py>,
+    open: numpy::PyReadonlyArray1<'py, f64>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    // Zero-copy, read-only views
+    let open_slice = open.as_slice()?;
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    let len = open_slice.len();
+    if len != high_slice.len() || len != low_slice.len() || len != close_slice.len() {
+        return Err(PyValueError::new_err("bop: Input arrays have different lengths"));
+    }
+
+    // Pre-allocate uninitialized NumPy array
+    // SAFETY: PyArray1::new() creates uninitialized memory
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // Heavy work without the GIL
+    py.allow_threads(|| -> Result<(), BopError> {
+        if len == 0 {
+            return Err(BopError::EmptyData);
+        }
+
+        let chosen = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    bop_scalar(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    bop_avx2(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    bop_avx512(open_slice, high_slice, low_slice, close_slice, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((1, len))?)?;
+    dict.set_item("rows", 1)?;
+    dict.set_item("cols", len)?;
+    
+    // Maintain empty lists so downstream code can zip(..) - matching ALMA pattern
+    dict.set_item("params", PyList::empty(py))?;   // keep for legacy
+    dict.set_item("periods", PyList::empty(py))?;
+    dict.set_item("offsets", PyList::empty(py))?;
+    dict.set_item("sigmas", PyList::empty(py))?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
+    let input = BopInput::from_slices(open, high, low, close, BopParams::default());
+    
+    bop_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_batch_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> Result<Vec<f64>, JsValue> {
+    // BOP has no parameters, so batch processing is just the regular calculation
+    bop_batch_with_kernel(open, high, low, close, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
+    // BOP has no parameters, return empty metadata array
+    // This maintains the same structure as ALMA for uniform treatment
+    Ok(vec![])
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BopBatchConfig {
+    // BOP has no parameters, but we keep this for API consistency
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct BopBatchJsOutput {
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = bop_batch)]
+pub fn bop_batch_unified_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    _config: JsValue, // Unused but kept for API consistency
+) -> Result<JsValue, JsValue> {
+    // Run the BOP calculation
+    let output = bop_batch_with_kernel(open, high, low, close, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // Create the structured output
+    let js_output = BopBatchJsOutput {
+        values: output.values,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

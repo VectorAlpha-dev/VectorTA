@@ -107,7 +107,7 @@ class CriterionComparableBenchmark:
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
-            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr'
+            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'bop'
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -117,7 +117,7 @@ class CriterionComparableBenchmark:
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
-                           'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch']
+                           'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'bop_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -277,6 +277,7 @@ class CriterionComparableBenchmark:
             ('aroon', lambda: my_project.aroon(data['high'], data['low'], 14)),
             ('bollinger_bands_width', lambda: my_project.bollinger_bands_width(data['close'], 20, 2.0, 2.0)),
             ('atr', lambda: my_project.atr(data['high'], data['low'], data['close'], 14)),
+            ('bop', lambda: my_project.bop(data['open'], data['high'], data['low'], data['close'])),
         ]
         
         # Filter if requested
@@ -317,6 +318,7 @@ class CriterionComparableBenchmark:
             ('apo_batch', lambda: my_project.apo_batch(data['close'], (10, 10, 1), (20, 20, 1))),
             ('bandpass_batch', lambda: my_project.bandpass_batch(data['close'], (20, 20, 1), (0.3, 0.3, 0.0))),
             ('atr_batch', lambda: my_project.atr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
+            ('bop_batch', lambda: my_project.bop_batch(data['open'], data['high'], data['low'], data['close'])),
         ]
         
         # Filter batch tests if indicator filter is active

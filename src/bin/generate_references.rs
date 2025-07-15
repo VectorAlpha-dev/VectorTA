@@ -56,6 +56,7 @@ use my_project::indicators::atr::{atr, AtrInput, AtrParams, AtrData};
 use my_project::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
 use my_project::indicators::bollinger_bands::{bollinger_bands, BollingerBandsInput, BollingerBandsParams};
 use my_project::indicators::bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput, BollingerBandsWidthParams};
+use my_project::indicators::bop::{bop, BopInput, BopParams, BopData};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -64,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -1027,6 +1028,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "matype": matype,
                     "devtype": devtype
                 },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        },
+        "bop" => {
+            // BOP requires OHLC data
+            let input = BopInput::from_candles(&candles, BopParams::default());
+            let result = bop(&input)?;
+            json!({
+                "indicator": "bop",
+                "source": "ohlc",
+                "params": {},
                 "values": result.values,
                 "length": result.values.len()
             })

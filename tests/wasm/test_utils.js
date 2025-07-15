@@ -370,6 +370,16 @@ const EXPECTED_OUTPUTS = {
     atr: {
         defaultParams: { length: 14 },
         last5Values: [916.89, 874.33, 838.45, 801.92, 811.57]
+    },
+    bop: {
+        defaultParams: {},  // BOP has no parameters
+        last5Values: [
+            0.045454545454545456,
+            -0.32398753894080995,
+            -0.3844086021505376,
+            0.3547400611620795,
+            -0.5336179295624333
+        ]
     }
 };
 
