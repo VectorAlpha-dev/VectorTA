@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Note: All commands in this file are for Windows environments. Use Command Prompt or PowerShell.**
+
 ## Project Overview
 
 Rust-Backtester is a high-performance technical analysis library implementing 178+ indicators (targeting 300 total). The project emphasizes performance optimization with SIMD instructions, batch processing, and WebAssembly support.
@@ -87,10 +89,10 @@ For any indicator, use these two commands:
 # Test Rust implementation (replace 'indicator_name' with actual indicator)
 cargo test --features nightly-avx --lib indicators::moving_averages::indicator_name -- --nocapture
 
-# Test Python and WASM bindings (Linux/Mac/WSL)
-./test_bindings.sh indicator_name
+# Test Python and WASM bindings (Windows):
+test_bindings.bat indicator_name
 
-# Test Python and WASM bindings (Windows native - run separately):
+# Or test Python and WASM bindings separately:
 # For Python (first time setup):
 # If you get virtualenv errors, delete and recreate it:
 rmdir /s /q .venv
@@ -98,12 +100,12 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install maturin pytest pytest-xdist numpy
 maturin develop --features python --release
-python tests/python/run_all_tests.py indicator_name
+python tests\python\run_all_tests.py indicator_name
 
 # For WASM (first time setup):
 cargo install wasm-pack
 wasm-pack build --target nodejs --features wasm
-cd tests/wasm && npm test -- indicator_name
+cd tests\wasm && npm test -- indicator_name
 ```
 
 ### Rust Tests
@@ -124,41 +126,93 @@ Note: For moving averages, use the full path: `indicators::moving_averages::indi
 ### Python and WASM Binding Tests
 Test bindings for all indicators:
 ```bash
-./test_bindings.sh              # Run all Python and WASM tests
-./test_bindings.sh alma         # Test only ALMA indicator
-./test_bindings.sh --python     # Run only Python tests
-./test_bindings.sh --wasm       # Run only WASM tests
-
-# Windows Native:
-test_bindings.bat indicator_name  # Test both Python and WASM bindings for specific indicator
+# Windows:
+test_bindings.bat               # Run all Python and WASM tests
+test_bindings.bat alma          # Test only ALMA indicator
+test_bindings.bat --python      # Run only Python tests
+test_bindings.bat --wasm        # Run only WASM tests
 ```
 
 Generate test files for new indicators:
 ```bash
-python scripts/generate_binding_tests.py <indicator_name>
+python scripts\generate_binding_tests.py <indicator_name>
 ```
 
-### Testing Commands Reference
+### Testing Commands Reference (Windows)
+
+**IMPORTANT**: Use these exact commands on Windows to avoid cross-platform issues.
+
+#### Rust Unit Tests (Always Works)
 ```bash
-# Test Rust unit tests for specific indicator
+# Test specific indicator
 cargo test --features nightly-avx --lib indicators::indicator_name -- --nocapture
+
 # For moving averages:
 cargo test --features nightly-avx --lib indicators::moving_averages::indicator_name -- --nocapture
 
-# Run benchmarks for specific indicator  
-cargo bench --features nightly-avx --bench indicator_benchmark -- indicator_name
-
-# Test Python and WASM bindings (Windows)
-test_bindings.bat indicator_name
+# Examples that work:
+cargo test --features nightly-avx --lib indicators::moving_averages::reflex -- --nocapture
+cargo test --features nightly-avx --lib indicators::rsi -- --nocapture
 ```
+
+#### Python Binding Tests
+```bash
+# First, ensure Python bindings are built:
+python -m pip install maturin pytest numpy --user --quiet
+python -m maturin develop --features python --release
+
+# Then run tests (use forward slashes):
+python tests/python/test_indicator_name.py
+
+# Note: If module not found error occurs, the bindings are likely installed in venv
+# but you're using system Python. Use test_bindings.bat instead.
+```
+
+#### WASM Binding Tests (Recommended Method)
+```bash
+# Navigate to WASM test directory first
+cd tests\wasm
+
+# Run specific indicator test
+npm test -- test_indicator_name.js
+
+# Or run directly with node
+node --test test_indicator_name.js
+
+# Examples that work:
+cd tests\wasm && npm test -- test_reflex.js
+cd tests\wasm && node --test test_alma.js
+```
+
+#### Using test_bindings.bat (Currently Unreliable)
+```bash
+# This should work but has environment issues:
+test_bindings.bat indicator_name
+
+# If it fails, use the individual methods above
+```
+
+### Common Issues and Solutions
+
+1. **Path Issues**: Use forward slashes in paths when possible
+2. **Python Environment**: If `ModuleNotFoundError`, ensure you're using the same Python that maturin used
+3. **Command Not Found**: Don't use Unix commands (like `call`) in Git Bash on Windows
+4. **Backslash Issues**: Avoid `.venv\Scripts\python.exe` - the backslashes cause problems
 
 ## Adding New Indicators
 
 1. Create new file in `src/indicators/` (or `src/indicators/moving_averages/` for MAs)
-2. Follow existing patterns for error types, input handling, and SIMD optimization
-3. Add module export in `src/indicators/mod.rs`
-4. Include comprehensive documentation with parameters and error cases
-5. Implement tests and benchmarks
+2. **MANDATORY**: Follow the "Indicator Development Standards" section below exactly
+3. Add module export in `src/indicators/mod.rs`:
+   ```rust
+   pub mod indicator_name;
+   pub use indicator_name::{indicator_name, IndicatorNameInput, IndicatorNameOutput, IndicatorNameParams};
+   ```
+4. Register bindings:
+   - Python: Add to `src/python.rs`
+   - WASM: Add to `src/wasm.rs`
+   - Benchmarks: Add to `benches/indicator_benchmark.rs` and `benchmarks/criterion_comparable_benchmark.py`
+5. Generate binding tests: `python scripts\generate_binding_tests.py indicator_name`
 6. Update indicator count in README.md
 
 ## SIMD Kernel Selection
@@ -173,17 +227,174 @@ Use `detect_best_kernel()` or `detect_best_batch_kernel()` helpers.
 
 **Note**: AVX2 and AVX512 kernels are only available when building with nightly Rust and the `nightly-avx` feature flag.
 
-## CRITICAL: Mass Editing Rust Files
+## CRITICAL: Debugging and Code Modification Guidelines
+
+### Never Use Mass Editing Scripts
 
 **NEVER use mass editing scripts on Rust files**. Previous attempts to fix compilation errors using automated scripts across 160+ files introduced significant syntax errors, particularly with:
 - Incorrect bracket placement in if-else blocks
 - Malformed `#[cfg()]` conditional compilation blocks
 - Context-unaware pattern matching that broke valid code
 
-**Always make manual, targeted fixes** to Rust files:
-- Fix compilation errors one file at a time
-- Review each change in context before applying
-- Preserve the existing logic of scalar, AVX2, and AVX512 kernels
-- Use the Read tool to understand the full context before making changes
+### Debugging Best Practices
 
-This is especially important when dealing with WASM conditional compilation or any cross-cutting concerns that affect multiple files.
+**"Think harder" during debugging - work step by step:**
+
+1. **Understand Before Fixing**
+   - Read the FULL error message carefully
+   - Use the Read tool to examine the complete context
+   - Trace through the code logic before making changes
+   - Consider why the original code was written that way
+
+2. **Step-by-Step Approach**
+   - Fix ONE issue at a time
+   - Test after EACH change
+   - Don't assume similar-looking code has the same problem
+   - Verify your fix doesn't break other functionality
+
+3. **Common Debugging Patterns**
+   ```bash
+   # Test a specific indicator after changes
+   cargo test --features nightly-avx --lib indicators::indicator_name -- --nocapture
+   
+   # Check if your changes compile
+   cargo check --features nightly-avx
+   
+   # Run clippy to catch potential issues
+   cargo clippy --features nightly-avx
+   ```
+
+4. **When Dealing with SIMD Code**
+   - Test scalar version first
+   - Then test AVX2/AVX512 versions separately
+   - Ensure all kernels produce identical results
+   - Remember: AVX code requires `--features nightly-avx`
+
+5. **Avoid Shortcuts**
+   - Don't copy-paste fixes between files without understanding context
+   - Don't use regex/find-replace across multiple files
+   - Don't assume one fix applies everywhere
+   - Each indicator may have unique requirements
+
+**Remember**: Taking time to understand the problem thoroughly saves time in the long run. A well-thought-out fix is better than a quick fix that introduces new bugs.
+
+This is especially important when dealing with:
+- WASM conditional compilation
+- Cross-cutting concerns affecting multiple files
+- SIMD kernel implementations
+- Platform-specific code
+
+## Indicator Development Quality Standards
+
+**IMPORTANT**: While indicators vary widely in implementation, all must meet these minimum quality standards. ALMA.rs (`src/indicators/moving_averages/alma.rs`) serves as a reference implementation demonstrating best practices.
+
+### MANDATORY Requirements
+
+These are non-negotiable requirements for ALL indicators:
+
+#### 1. Zero Memory Copy Operations
+
+**Always use helper functions for efficient memory allocation:**
+
+```rust
+// ✅ CORRECT - For single output:
+let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+
+// ❌ WRONG - Avoid these patterns:
+let mut out = vec![f64::NAN; data.len()];
+let mut out = Vec::with_capacity(data.len());
+out.resize(data.len(), f64::NAN);
+```
+
+**For batch/matrix operations:**
+```rust
+// Use these three functions together:
+let mut buf_mu = make_uninit_matrix(rows, cols);
+init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+// Then convert to mutable slice for computation
+```
+
+#### 2. Binding Requirements
+
+**Python Bindings:**
+- Add function to `src/python.rs`
+- Add to benchmark file: `benchmarks/criterion_comparable_benchmark.py`
+- Ensure test exists: `tests/python/test_indicator_name.py`
+
+**WASM Bindings:**
+- Add function to `src/wasm.rs` (if applicable)
+- Ensure test exists: `tests/wasm/test_indicator_name.js`
+
+**Benchmark Integration:**
+- Add to `benches/indicator_benchmark.rs`
+- Include both single and batch versions if applicable
+
+#### 3. Error Handling
+
+All indicators must handle these error cases appropriately:
+- Empty input data
+- All NaN values
+- Invalid parameters (e.g., period > data length)
+- Insufficient data for calculation
+
+#### 4. Testing Requirements
+
+Minimum test coverage:
+- Basic functionality test
+- Edge cases (empty data, all NaN)
+- Parameter validation
+- Accuracy verification against known values
+
+### RECOMMENDED Guidelines
+
+These patterns from ALMA.rs are recommended but can be adapted based on indicator requirements:
+
+#### API Design Suggestions
+
+Consider using these patterns where appropriate:
+
+```rust
+// Input structure with flexibility for candles or raw slices
+pub struct IndicatorInput<'a> {
+    pub data: IndicatorData<'a>,
+    pub params: IndicatorParams,
+}
+
+// Builder pattern for ergonomic API
+pub struct IndicatorBuilder {
+    // parameters
+}
+
+// Streaming support for real-time updates
+pub struct IndicatorStream {
+    // state management
+}
+```
+
+#### SIMD Optimization
+
+When implementing SIMD kernels:
+- Use `detect_best_kernel()` for automatic selection
+- Implement scalar version first, then optimize
+- Use feature gates properly: `#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]`
+
+#### Performance Tips
+
+- Use `AVec<f64>` for cache-aligned SIMD operations
+- Calculate warmup period once and reuse
+- Consider batch operations for parameter sweeps
+
+### Quality Checklist
+
+Before completing an indicator:
+- [ ] **MANDATORY**: Uses zero-copy memory operations
+- [ ] **MANDATORY**: Python bindings added and tested
+- [ ] **MANDATORY**: WASM bindings added (if applicable)
+- [ ] **MANDATORY**: Added to benchmark files
+- [ ] **MANDATORY**: Handles all error cases
+- [ ] **MANDATORY**: Has minimum test coverage
+- [ ] Implements SIMD optimizations where beneficial
+- [ ] Documentation explains all parameters
+- [ ] Follows consistent naming conventions
+
+**Note**: While implementation details may vary, maintaining consistent quality standards and optimization practices ensures the library remains performant and user-friendly.

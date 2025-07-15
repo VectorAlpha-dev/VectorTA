@@ -232,30 +232,29 @@ pub unsafe fn supersmoother_scalar(
     first: usize,
 ) -> Result<SuperSmootherOutput, SuperSmootherError> {
     let len = data.len();
-    let mut out = vec![f64::NAN; len];
     if len == 0 { return Err(SuperSmootherError::EmptyData); }
     if period == 0 { return Err(SuperSmootherError::InvalidPeriod { period, data_len: len }); }
+    
+    let warm = first + period - 1;
+    if warm >= len {
+        return Err(SuperSmootherError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    
+    let mut out = alloc_with_nan_prefix(len, warm);
     let a = (-1.414_f64 * PI / (period as f64)).exp();
     let a_sq = a * a;
     let b = 2.0 * a * (1.414_f64 * PI / (period as f64)).cos();
     let c = (1.0 + a_sq - b) * 0.5;
 
-    if first + period - 1 >= len {
-        return Err(SuperSmootherError::NotEnoughValidData { needed: period, valid: len - first });
-    }
-    // Forward fill up to first valid value
-    for i in 0..first + period - 1 {
-        out[i] = f64::NAN;
-    }
     // Initial conditions
-    if len > first + period - 1 {
-        out[first + period - 1] = data[first + period - 1];
+    if len > warm {
+        out[warm] = data[warm];
     }
-    if len > first + period {
-        out[first + period] = data[first + period];
+    if len > warm + 1 {
+        out[warm + 1] = data[warm + 1];
     }
     // Main calculation
-    for i in (first + period + 1)..len {
+    for i in (warm + 2)..len {
         let prev_1 = out[i - 1];
         let prev_2 = out[i - 2];
         let d_i = data[i];

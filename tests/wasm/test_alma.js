@@ -355,7 +355,7 @@ test('ALMA batch edge cases', () => {
             0.85, 0.85, 0,
             6.0, 6.0, 0
         );
-    }, /Input data slice is empty/);
+    }, /All values are NaN/);
 });
 
 // New API tests

@@ -901,7 +901,7 @@ pub fn reflex_py<'py>(
     let warm = first + period;
     
     // Release GIL during computation
-    let mut output = vec![f64::NAN; len];
+    let mut output = alloc_with_nan_prefix(len, warm);
     py.allow_threads(|| {
         reflex_compute_into(data, period, first, chosen, &mut output);
     });
@@ -957,8 +957,12 @@ pub fn reflex_batch_py<'py>(
     let rows = combos.len();
     let cols = data_slice.len();
     
-    // Allocate output buffer
-    let mut output = vec![f64::NAN; rows * cols];
+    // Allocate output array directly in numpy
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Initialize with NaN (will be overwritten with zeros in warmup)
+    slice_out.fill(f64::NAN);
     
     // Release GIL during computation
     let metadata = py.allow_threads(|| {
@@ -974,15 +978,14 @@ pub fn reflex_batch_py<'py>(
             _ => Kernel::Scalar,
         };
         
-        reflex_batch_inner_into(data_slice, &range, simd, true, &mut output)
+        reflex_batch_inner_into(data_slice, &range, simd, true, slice_out)
     }).map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
     
     // Create output dictionary
     let dict = PyDict::new(py);
     
-    // Convert to numpy array and reshape
-    let np_array = output.into_pyarray(py);
-    let reshaped = np_array.reshape([rows, cols])?;
+    // Reshape the array
+    let reshaped = out_arr.reshape([rows, cols])?;
     dict.set_item("values", reshaped)?;
     
     // Add periods array

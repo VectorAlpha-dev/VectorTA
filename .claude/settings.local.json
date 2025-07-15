@@ -182,7 +182,12 @@
       "Bash(.venvScriptspython.exe tests/python/test_ma.py -v)",
       "Bash(del test_ma_integration.py test_bbw_ma_integration.py)",
       "Bash(test_bindings.bat cfo)",
-      "Bash(.venvScriptspython.exe -m pytest tests/python/test_cfo.py -v)"
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_cfo.py -v)",
+      "Bash(test_bindings.bat reflex)",
+      "Bash(.venvScriptspython.exe -m maturin develop --features python --release)",
+      "Bash(.venvScriptspython.exe tests/python/test_reflex.py)",
+      "Bash(call .venvScriptsactivate)",
+      "Bash(test_bindings.bat supersmoother --python)"
     ],
     "deny": []
   }

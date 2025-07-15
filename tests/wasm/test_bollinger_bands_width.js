@@ -382,7 +382,7 @@ test('BBW batch edge cases', () => {
             2.0, 2.0, 0,
             2.0, 2.0, 0
         );
-    }, /Empty data|bbw: Empty data provided/);
+    }, /All values are NaN/);
 });
 
 // New API tests

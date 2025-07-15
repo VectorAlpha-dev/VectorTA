@@ -218,7 +218,8 @@ pub unsafe fn trendflex_scalar(
 
     let len = data.len();
     let ss_period = ((period as f64) / 2.0).round() as usize;
-    let mut tf = vec![f64::NAN; len];
+    let warm = first_valid + period;
+    let mut tf = alloc_with_nan_prefix(len, warm);
 
     if first_valid == 0 {
         let mut ssf: AVec<f64, ConstAlign<CACHELINE_ALIGN>> = AVec::with_capacity(CACHELINE_ALIGN, len);
@@ -251,7 +252,7 @@ pub unsafe fn trendflex_scalar(
     } else {
         let m = len - first_valid;
         if m < period {
-            return Ok(TrendFlexOutput { values: vec![f64::NAN; len] });
+            return Ok(TrendFlexOutput { values: alloc_with_nan_prefix(len, len) });
         }
         if m < ss_period {
             return Err(TrendFlexError::SmootherPeriodExceedsData { ss_period, data_len: m });
