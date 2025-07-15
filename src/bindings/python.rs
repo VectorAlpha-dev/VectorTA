@@ -117,6 +117,8 @@ use crate::indicators::bollinger_bands_width::{bollinger_bands_width_py, bolling
 use crate::indicators::ao::{ao_py, ao_batch_py, AoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::atr::{atr_py, atr_batch_py, AtrStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::cfo::{cfo_py, cfo_batch_py, CfoStreamPy, CfoBatchResult};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -402,6 +404,12 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(atr_py, m)?)?;
     m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
     m.add_class::<AtrStreamPy>()?;
+    
+    // Register CFO functions with their user-facing names
+    m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cfo_batch_py, m)?)?;
+    m.add_class::<CfoStreamPy>()?;
+    m.add_class::<CfoBatchResult>()?;
     
     // Add other indicators here as you implement their Python bindings
     

@@ -180,7 +180,9 @@
       "Bash(del test_bollinger_bands_new.js)",
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_alma.py -xvs)",
       "Bash(.venvScriptspython.exe tests/python/test_ma.py -v)",
-      "Bash(del test_ma_integration.py test_bbw_ma_integration.py)"
+      "Bash(del test_ma_integration.py test_bbw_ma_integration.py)",
+      "Bash(test_bindings.bat cfo)",
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_cfo.py -v)"
     ],
     "deny": []
   }

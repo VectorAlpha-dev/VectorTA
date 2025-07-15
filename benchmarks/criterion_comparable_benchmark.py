@@ -277,6 +277,7 @@ class CriterionComparableBenchmark:
             ('aroon', lambda: my_project.aroon(data['high'], data['low'], 14)),
             ('bollinger_bands_width', lambda: my_project.bollinger_bands_width(data['close'], 20, 2.0, 2.0)),
             ('atr', lambda: my_project.atr(data['high'], data['low'], data['close'], 14)),
+            ('cfo', lambda: my_project.cfo(data['close'], 14, 100.0)),
         ]
         
         # Filter if requested
@@ -317,6 +318,7 @@ class CriterionComparableBenchmark:
             ('apo_batch', lambda: my_project.apo_batch(data['close'], (10, 10, 1), (20, 20, 1))),
             ('bandpass_batch', lambda: my_project.bandpass_batch(data['close'], (20, 20, 1), (0.3, 0.3, 0.0))),
             ('atr_batch', lambda: my_project.atr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
+            ('cfo_batch', lambda: my_project.cfo_batch(data['close'], (14, 14, 1), (100.0, 100.0, 0.0))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -389,7 +391,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cfo']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]
