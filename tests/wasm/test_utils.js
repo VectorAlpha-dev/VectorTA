@@ -381,6 +381,16 @@ const EXPECTED_OUTPUTS = {
         defaultParams: { length: 14 },
         last5Values: [916.89, 874.33, 838.45, 801.92, 811.57]
     },
+    cci: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            -51.55252564125841,
+            -43.50326506381541,
+            -64.05117302269149,
+            -39.05150631680948,
+            -152.50523930896998
+        ]
+    },
     bop: {
         defaultParams: {},  // BOP has no parameters
         last5Values: [

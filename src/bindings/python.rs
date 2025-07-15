@@ -38,6 +38,8 @@ use crate::indicators::bollinger_bands_width::{
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
@@ -424,6 +426,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(atr_py, m)?)?;
     m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
     m.add_class::<AtrStreamPy>()?;
+
+    // Register CCI functions with their user-facing names
+    m.add_function(wrap_pyfunction!(cci_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cci_batch_py, m)?)?;
+    m.add_class::<CciStreamPy>()?;
 
     // Register CFO functions with their user-facing names
     m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
