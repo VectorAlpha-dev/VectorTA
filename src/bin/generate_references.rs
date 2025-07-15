@@ -1,17 +1,41 @@
+use my_project::indicators::acosc::{acosc, AcoscData, AcoscInput, AcoscParams};
+use my_project::indicators::ad::{ad, AdData, AdInput, AdParams};
+use my_project::indicators::adosc::{adosc, AdoscData, AdoscInput, AdoscParams};
+use my_project::indicators::adx::{adx, AdxData, AdxInput, AdxParams};
+use my_project::indicators::adxr::{adxr, AdxrData, AdxrInput, AdxrParams};
+use my_project::indicators::alligator::{alligator, AlligatorInput, AlligatorParams};
+use my_project::indicators::ao::{ao, AoData, AoInput, AoParams};
+use my_project::indicators::apo::{apo, ApoInput, ApoParams};
+use my_project::indicators::aroon::{aroon, AroonData, AroonInput, AroonParams};
+use my_project::indicators::aroonosc::{aroon_osc, AroonOscData, AroonOscInput, AroonOscParams};
+use my_project::indicators::atr::{atr, AtrData, AtrInput, AtrParams};
+use my_project::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
+use my_project::indicators::bollinger_bands::{
+    bollinger_bands, BollingerBandsInput, BollingerBandsParams,
+};
+use my_project::indicators::bollinger_bands_width::{
+    bollinger_bands_width, BollingerBandsWidthInput, BollingerBandsWidthParams,
+};
+use my_project::indicators::bop::{bop, BopData, BopInput, BopParams};
+use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
 use my_project::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
 use my_project::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
 use my_project::indicators::moving_averages::edcf::{edcf, EdcfInput, EdcfParams};
-use my_project::indicators::moving_averages::ehlers_itrend::{ehlers_itrend, EhlersITrendInput, EhlersITrendParams};
+use my_project::indicators::moving_averages::ehlers_itrend::{
+    ehlers_itrend, EhlersITrendInput, EhlersITrendParams,
+};
 use my_project::indicators::moving_averages::ema::{ema, EmaInput, EmaParams};
 use my_project::indicators::moving_averages::epma::{epma, EpmaInput, EpmaParams};
 use my_project::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use my_project::indicators::moving_averages::fwma::{fwma, FwmaInput, FwmaParams};
 use my_project::indicators::moving_averages::gaussian::{gaussian, GaussianInput, GaussianParams};
-use my_project::indicators::moving_averages::highpass_2_pole::{highpass_2_pole, HighPass2Input, HighPass2Params};
 use my_project::indicators::moving_averages::highpass::{highpass, HighPassInput, HighPassParams};
+use my_project::indicators::moving_averages::highpass_2_pole::{
+    highpass_2_pole, HighPass2Input, HighPass2Params,
+};
 use my_project::indicators::moving_averages::hma::{hma, HmaInput, HmaParams};
 use my_project::indicators::moving_averages::hwma::{hwma, HwmaInput, HwmaParams};
 use my_project::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
@@ -29,34 +53,25 @@ use my_project::indicators::moving_averages::sma::{sma, SmaInput, SmaParams};
 use my_project::indicators::moving_averages::smma::{smma, SmmaInput, SmmaParams};
 use my_project::indicators::moving_averages::sqwma::{sqwma, SqwmaInput, SqwmaParams};
 use my_project::indicators::moving_averages::srwma::{srwma, SrwmaInput, SrwmaParams};
-use my_project::indicators::moving_averages::supersmoother_3_pole::{supersmoother_3_pole, SuperSmoother3PoleInput, SuperSmoother3PoleParams};
-use my_project::indicators::moving_averages::supersmoother::{supersmoother, SuperSmootherInput, SuperSmootherParams};
+use my_project::indicators::moving_averages::supersmoother::{
+    supersmoother, SuperSmootherInput, SuperSmootherParams,
+};
+use my_project::indicators::moving_averages::supersmoother_3_pole::{
+    supersmoother_3_pole, SuperSmoother3PoleInput, SuperSmoother3PoleParams,
+};
 use my_project::indicators::moving_averages::swma::{swma, SwmaInput, SwmaParams};
 use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams};
 use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
-use my_project::indicators::moving_averages::trendflex::{trendflex, TrendFlexInput, TrendFlexParams};
+use my_project::indicators::moving_averages::trendflex::{
+    trendflex, TrendFlexInput, TrendFlexParams,
+};
 use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
+use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
 use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
 use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
-use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
 use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
 use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
-use my_project::indicators::ad::{ad, AdInput, AdParams, AdData};
-use my_project::indicators::acosc::{acosc, AcoscInput, AcoscParams, AcoscData};
-use my_project::indicators::adx::{adx, AdxInput, AdxParams, AdxData};
-use my_project::indicators::adosc::{adosc, AdoscInput, AdoscParams, AdoscData};
-use my_project::indicators::adxr::{adxr, AdxrInput, AdxrParams, AdxrData};
-use my_project::indicators::alligator::{alligator, AlligatorInput, AlligatorParams};
-use my_project::indicators::ao::{ao, AoInput, AoParams, AoData};
-use my_project::indicators::apo::{apo, ApoInput, ApoParams};
-use my_project::indicators::aroon::{aroon, AroonInput, AroonParams, AroonData};
-use my_project::indicators::aroonosc::{aroon_osc, AroonOscInput, AroonOscParams, AroonOscData};
-use my_project::indicators::atr::{atr, AtrInput, AtrParams, AtrData};
-use my_project::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
-use my_project::indicators::bollinger_bands::{bollinger_bands, BollingerBandsInput, BollingerBandsParams};
-use my_project::indicators::bollinger_bands_width::{bollinger_bands_width, BollingerBandsWidthInput, BollingerBandsWidthParams};
-use my_project::indicators::bop::{bop, BopInput, BopParams, BopData};
 use my_project::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
@@ -65,17 +80,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, cfo, bop, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
-    
+
     let indicator = &args[1];
     let source = args.get(2).map(|s| s.as_str()).unwrap_or("close");
-    
+
     // Load test data
     let candles = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
-    
+
     let output = match indicator.as_str() {
         "alma" => {
             let params = AlmaParams::default();
@@ -95,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "cwma" => {
             let params = CwmaParams::default();
             let period = params.period.unwrap_or(14);
@@ -110,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "dema" => {
             let params = DemaParams::default();
             let period = params.period.unwrap_or(21);
@@ -125,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "edcf" => {
             let params = EdcfParams::default();
             let period = params.period.unwrap_or(15);
@@ -140,7 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "ehlers_itrend" => {
             let params = EhlersITrendParams::default();
             let warmup_bars = params.warmup_bars.unwrap_or(12);
@@ -157,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "ema" => {
             let params = EmaParams::default();
             let period = params.period.unwrap_or(9);
@@ -172,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "epma" => {
             let params = EpmaParams::default();
             let period = params.period.unwrap_or(11);
@@ -189,7 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "frama" => {
             let params = FramaParams::default();
             let window = params.window.unwrap_or(10);
@@ -208,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "fwma" => {
             let params = FwmaParams::default();
             let period = params.period.unwrap_or(5);
@@ -223,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "gaussian" => {
             let params = GaussianParams::default();
             let period = params.period.unwrap_or(14);
@@ -240,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "highpass_2_pole" => {
             let params = HighPass2Params::default();
             let period = params.period.unwrap_or(48);
@@ -257,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "highpass" => {
             let params = HighPassParams::default();
             let period = params.period.unwrap_or(48);
@@ -272,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "hma" => {
             let params = HmaParams::default();
             let period = params.period.unwrap_or(5);
@@ -287,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "hwma" => {
             let params = HwmaParams::default();
             let na = params.na.unwrap_or(0.2);
@@ -306,7 +321,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "jma" => {
             let params = JmaParams::default();
             let period = params.period.unwrap_or(7);
@@ -325,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "jsa" => {
             let params = JsaParams::default();
             let period = params.period.unwrap_or(30);
@@ -340,7 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "kama" => {
             let params = KamaParams::default();
             let period = params.period.unwrap_or(30);
@@ -355,7 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "linreg" => {
             let params = LinRegParams::default();
             let period = params.period.unwrap_or(14);
@@ -370,7 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "maaq" => {
             let params = MaaqParams::default();
             let period = params.period.unwrap_or(11);
@@ -389,7 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "mama" => {
             let params = MamaParams::default();
             let fast_limit = params.fast_limit.unwrap_or(0.5);
@@ -407,7 +422,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "fama_values": result.fama_values,
                 "length": result.mama_values.len()
             })
-        },
+        }
         "mwdx" => {
             let params = MwdxParams::default();
             let factor = params.factor.unwrap_or(0.2);
@@ -422,7 +437,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "nma" => {
             let params = NmaParams::default();
             let period = params.period.unwrap_or(40);
@@ -437,7 +452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "pwma" => {
             let params = PwmaParams::default();
             let period = params.period.unwrap_or(5);
@@ -452,7 +467,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "reflex" => {
             let params = ReflexParams::default();
             let period = params.period.unwrap_or(20);
@@ -467,7 +482,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "sinwma" => {
             let params = SinWmaParams::default();
             let period = params.period.unwrap_or(14);
@@ -482,7 +497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "sma" => {
             let params = SmaParams::default();
             let period = params.period.unwrap_or(9);
@@ -497,7 +512,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "smma" => {
             let params = SmmaParams::default();
             let period = params.period.unwrap_or(7);
@@ -512,7 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "sqwma" => {
             let params = SqwmaParams::default();
             let period = params.period.unwrap_or(14);
@@ -527,7 +542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "srwma" => {
             let params = SrwmaParams::default();
             let period = params.period.unwrap_or(14);
@@ -542,7 +557,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "supersmoother_3_pole" => {
             let params = SuperSmoother3PoleParams::default();
             let period = params.period.unwrap_or(14);
@@ -557,7 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "supersmoother" => {
             let params = SuperSmootherParams::default();
             let period = params.period.unwrap_or(14);
@@ -572,7 +587,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "swma" => {
             let params = SwmaParams::default();
             let period = params.period.unwrap_or(5);
@@ -587,7 +602,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "tema" => {
             let params = TemaParams::default();
             let period = params.period.unwrap_or(9);
@@ -602,7 +617,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "tilson" => {
             let params = TilsonParams::default();
             let period = params.period.unwrap_or(5);
@@ -619,7 +634,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "trendflex" => {
             let params = TrendFlexParams::default();
             let period = params.period.unwrap_or(20);
@@ -634,7 +649,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "trima" => {
             let params = TrimaParams::default();
             let period = params.period.unwrap_or(30);
@@ -649,7 +664,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "vwap" => {
             let params = VwapParams::default();
             let anchor = params.anchor.clone().unwrap_or_else(|| "1d".to_string());
@@ -664,7 +679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "vwma" => {
             let params = VwmaParams::default();
             let period = params.period.unwrap_or(20);
@@ -679,7 +694,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "vpwma" => {
             let params = VpwmaParams::default();
             let period = params.period.unwrap_or(20);
@@ -696,7 +711,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "wilders" => {
             let params = WildersParams::default();
             let period = params.period.unwrap_or(14);
@@ -711,7 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "wma" => {
             let params = WmaParams::default();
             let period = params.period.unwrap_or(9);
@@ -726,7 +741,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "zlema" => {
             let params = ZlemaParams::default();
             let period = params.period.unwrap_or(14);
@@ -741,7 +756,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "ad" => {
             if source != "ohlcv" {
                 eprintln!("AD indicator requires 'ohlcv' source");
@@ -758,7 +773,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "acosc" => {
             if source != "high_low" {
                 eprintln!("ACOSC indicator requires 'high_low' source");
@@ -776,7 +791,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "change": result.change,
                 "length": result.osc.len()
             })
-        },
+        }
         "adx" => {
             if source != "ohlc" {
                 eprintln!("ADX indicator requires 'ohlc' source");
@@ -795,7 +810,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "adosc" => {
             if source != "hlcv" {
                 eprintln!("ADOSC indicator requires 'hlcv' source");
@@ -814,7 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "adxr" => {
             if source != "hlc" {
                 eprintln!("ADXR indicator requires 'hlc' source");
@@ -833,7 +848,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "alligator" => {
             let params = AlligatorParams::default();
             let jaw_period = params.jaw_period.unwrap_or(13);
@@ -860,7 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "lips": result.lips,
                 "length": result.jaw.len()
             })
-        },
+        }
         "ao" => {
             if source != "high_low" {
                 eprintln!("AO indicator requires 'high_low' source");
@@ -868,7 +883,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let params = AoParams::default();
             let input = AoInput {
-                data: AoData::Candles { candles: &candles, source: "hl2" },
+                data: AoData::Candles {
+                    candles: &candles,
+                    source: "hl2",
+                },
                 params,
             };
             let result = ao(&input)?;
@@ -879,7 +897,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "apo" => {
             let params = ApoParams::default();
             let short_period = params.short_period.unwrap_or(10);
@@ -896,7 +914,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "aroon" => {
             if source != "high_low" {
                 eprintln!("Aroon indicator requires 'high_low' source");
@@ -919,7 +937,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "aroon_up": result.aroon_up,
                 "length": result.aroon_up.len()
             })
-        },
+        }
         "aroonosc" => {
             if source != "high_low" {
                 eprintln!("Aroon Oscillator requires 'high_low' source");
@@ -941,7 +959,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "atr" => {
             if source != "ohlc" {
                 eprintln!("ATR indicator requires 'ohlc' source");
@@ -963,7 +981,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         "bandpass" => {
             let params = BandPassParams::default();
             let period = params.period.unwrap_or(20);
@@ -983,7 +1001,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "trigger": result.trigger,
                 "length": result.bp.len()
             })
-        },
+        }
         "bollinger_bands" => {
             let params = BollingerBandsParams::default();
             let period = params.period.unwrap_or(20);
@@ -1008,7 +1026,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "lower_band": result.lower_band,
                 "length": result.upper_band.len()
             })
-        },
+        }
         "bollinger_bands_width" => {
             let params = BollingerBandsWidthParams::default();
             let period = params.period.unwrap_or(20);
@@ -1031,7 +1049,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
+        "cfo" => {
+            let params = CfoParams::default();
+            let period = params.period.unwrap_or(14);
+            let scalar = params.scalar.unwrap_or(100.0);
+            let input = CfoInput::from_candles(&candles, source, params);
+            let result = cfo(&input)?;
+            json!({
+                "indicator": "cfo",
+                "source": source,
+                "params": {
+                    "period": period,
+                    "scalar": scalar
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        }
         "bop" => {
             // BOP requires OHLC data
             let input = BopInput::from_candles(&candles, BopParams::default());
@@ -1043,15 +1078,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "values": result.values,
                 "length": result.values.len()
             })
-        },
+        }
         _ => {
             eprintln!("Unknown indicator: {}", indicator);
             std::process::exit(1);
         }
     };
-    
+
     // Output as JSON
     println!("{}", serde_json::to_string_pretty(&output)?);
-    
+
     Ok(())
 }

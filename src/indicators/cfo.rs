@@ -15,16 +15,45 @@
 //! - `Ok(CfoOutput)` on success (with output vector)
 //! - `Err(CfoError)` on failure
 //!
+//! ## Example
+//! ```
+//! use ta_indicators::{cfo, CfoInput, CfoParams};
+//! let prices = vec![1.0; 20];
+//! let params = CfoParams { period: Some(14), scalar: Some(100.0) };
+//! let input = CfoInput::from_slice(&prices, params);
+//! let output = cfo(&input).expect("Failed to calculate CFO");
+//! assert_eq!(output.values.len(), prices.len());
+//! ```
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+// AVec import removed - using standard Vec and helpers instead
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // --- Input, Params, Output, Builder, Stream, Batch Structs ---
@@ -54,6 +83,7 @@ pub struct CfoOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct CfoParams {
     pub period: Option<usize>,
     pub scalar: Option<f64>,
@@ -224,7 +254,8 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    // Use the same helper as ALMA for NaN prefix allocation
+    let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     unsafe {
         match chosen {
@@ -236,6 +267,11 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 cfo_avx512(data, period, scalar, first, &mut out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                cfo_scalar(data, period, scalar, first, &mut out)
             }
             _ => unreachable!(),
         }
@@ -338,7 +374,7 @@ pub fn cfo_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize, // unused, kept for API compatibility
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -351,7 +387,7 @@ pub unsafe fn cfo_row_avx2(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize, // unused, kept for API compatibility
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -381,7 +417,7 @@ pub unsafe fn cfo_row_avx512_short(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize, // unused, kept for API compatibility
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -394,7 +430,7 @@ pub unsafe fn cfo_row_avx512_long(
     data: &[f64],
     first: usize,
     period: usize,
-    stride: usize,
+    _stride: usize, // unused, kept for API compatibility
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -481,7 +517,7 @@ impl Default for CfoBatchRange {
     fn default() -> Self {
         Self {
             period: (14, 60, 1),
-            scalar: (100.0, 100.0, 0.0),
+            scalar: (100.0, 100.0, 0.0), // Keep default at 100.0 for static sweeps
         }
     }
 }
@@ -663,7 +699,26 @@ fn cfo_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // 1. Allocate *uninitialized* matrix using ALMA helper
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // 2. Fill the NaN warm-up prefix row-wise using ALMA helper
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // 3. Convert &[MaybeUninit<f64>] → &mut [f64]
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let scalar = combos[row].scalar.unwrap();
@@ -673,6 +728,10 @@ fn cfo_batch_inner(
             Kernel::Avx2 => cfo_row_avx2(data, first, period, max_p, scalar, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => cfo_row_avx512(data, first, period, max_p, scalar, out_row),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => {
+                cfo_row_scalar(data, first, period, max_p, scalar, out_row)
+            }
             _ => unreachable!(),
         }
     };
@@ -696,6 +755,13 @@ fn cfo_batch_inner(
             do_row(row, slice);
         }
     }
+    // 4. Reclaim the buffer as a normal Vec<f64> for the return value
+    let values = unsafe {
+        Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64,
+                            buf_guard.len(),
+                            buf_guard.capacity())
+    };
+    
     Ok(CfoBatchOutput {
         values,
         combos,
@@ -1019,4 +1085,409 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cfo")]
+#[pyo3(signature = (data, period=14, scalar=100.0, kernel=None))]
+pub fn cfo_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    scalar: f64,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // ---------- build input struct -------------------------------------------------
+    let params = CfoParams {
+        period: Some(period),
+        scalar: Some(scalar),
+    };
+    let cfo_in = CfoInput::from_slice(slice_in, params);
+
+    // ---------- allocate uninitialized NumPy output buffer -------------------------
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), CfoError> {
+        let data: &[f64] = cfo_in.as_ref();
+        let len = data.len();
+        let period = cfo_in.get_period();
+        let scalar = cfo_in.get_scalar();
+
+        if len == 0 {
+            return Err(CfoError::NoData);
+        }
+
+        let first = data
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(CfoError::AllValuesNaN)?;
+
+        if period == 0 || period > len {
+            return Err(CfoError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
+        }
+        if (len - first) < period {
+            return Err(CfoError::NotEnoughValidData {
+                needed: period,
+                valid: len - first,
+            });
+        }
+
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix to the first (first + period - 1) elements
+        if first + period - 1 > 0 {
+            slice_out[..first + period - 1].fill(f64::NAN);
+        }
+
+        // 2. cfo_scalar/SIMD MUST write to all elements from (first + period - 1) onwards
+        // This is guaranteed by the CFO algorithm implementation
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    cfo_scalar(data, period, scalar, first, slice_out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => cfo_avx2(data, period, scalar, first, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    cfo_avx512(data, period, scalar, first, slice_out)
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    // Fallback to scalar when AVX is not available
+                    cfo_scalar(data, period, scalar, first, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+        
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "CfoStream")]
+pub struct CfoStreamPy {
+    stream: CfoStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CfoStreamPy {
+    #[new]
+    fn new(period: usize, scalar: f64) -> PyResult<Self> {
+        let params = CfoParams {
+            period: Some(period),
+            scalar: Some(scalar),
+        };
+        let stream =
+            CfoStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(CfoStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated CFO value.
+    /// Returns `None` if the buffer is not yet full.
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyclass]
+pub struct CfoBatchResult {
+    #[pyo3(get)]
+    pub values: Py<numpy::PyArray2<f64>>,
+    #[pyo3(get)]
+    pub periods: Py<numpy::PyArray1<u64>>,
+    #[pyo3(get)]
+    pub scalars: Py<numpy::PyArray1<f64>>,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CfoBatchResult {
+    fn __repr__(&self) -> String {
+        format!("CfoBatchResult(rows={}, cols={})", 
+            Python::with_gil(|py| {
+                let values = self.values.bind(py);
+                let shape = values.shape();
+                format!("{}", shape[0])
+            }),
+            Python::with_gil(|py| {
+                let values = self.values.bind(py);
+                let shape = values.shape();
+                format!("{}", shape[1])
+            })
+        )
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cfo_batch")]
+#[pyo3(signature = (data, period_range, scalar_range, kernel=None))]
+pub fn cfo_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    scalar_range: (f64, f64, f64),
+    kernel: Option<&str>,
+) -> PyResult<CfoBatchResult> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = CfoBatchRange {
+        period: period_range,
+        scalar: scalar_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos_result = py.allow_threads(|| -> Result<Vec<CfoParams>, CfoError> {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Use uninit helper similar to ALMA
+        let first = slice_in
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(CfoError::AllValuesNaN)?;
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if slice_in.len() - first < max_p {
+            return Err(CfoError::NotEnoughValidData {
+                needed: max_p,
+                valid: slice_in.len() - first,
+            });
+        }
+
+        // Initialize NaN prefixes for each row
+        let warm: Vec<usize> = combos
+            .iter()
+            .map(|c| first + c.period.unwrap() - 1)
+            .collect();
+        
+        // SAFETY: We're writing to uninitialized memory that we own
+        // Convert slice_out to MaybeUninit for safety
+        let out_uninit = unsafe {
+            std::slice::from_raw_parts_mut(
+                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                slice_out.len()
+            )
+        };
+        
+        // Initialize NaN prefixes
+        for (row, &warmup) in warm.iter().enumerate() {
+            let row_start = row * cols;
+            for i in 0..warmup {
+                unsafe {
+                    out_uninit[row_start + i].write(f64::NAN);
+                }
+            }
+        }
+
+        // Process each row
+        let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+            let period = combos[row].period.unwrap();
+            let scalar = combos[row].scalar.unwrap();
+
+            // SAFETY: Only cast to &mut [f64] after NaN prefix is written and we're about to write the computation results
+            let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+            
+            match simd {
+                Kernel::Scalar => cfo_row_scalar(slice_in, first, period, max_p, scalar, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => cfo_row_avx2(slice_in, first, period, max_p, scalar, dst),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => cfo_row_avx512(slice_in, first, period, max_p, scalar, dst),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    cfo_row_scalar(slice_in, first, period, max_p, scalar, dst)
+                }
+                _ => unreachable!(),
+            }
+        };
+
+        // Process all rows
+        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+
+        Ok(combos.clone())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build structured result
+    let result = CfoBatchResult {
+        values: out_arr.reshape((rows, cols))?.into(),
+        periods: combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+            .into(),
+        scalars: combos
+            .iter()
+            .map(|p| p.scalar.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+            .into(),
+    };
+
+    Ok(result)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cfo_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsValue> {
+    let params = CfoParams {
+        period: Some(period),
+        scalar: Some(scalar),
+    };
+    let input = CfoInput::from_slice(data, params);
+
+    cfo_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// Deprecated - use cfo_batch instead
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(note = "Use cfo_batch instead")]
+pub fn cfo_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    scalar_start: f64,
+    scalar_end: f64,
+    scalar_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    // Deprecated - use cfo_batch instead
+    let sweep = CfoBatchRange {
+        period: (period_start, period_end, period_step),
+        scalar: (scalar_start, scalar_end, scalar_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    cfo_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// Deprecated - use cfo_batch instead
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(note = "Use cfo_batch instead")]
+pub fn cfo_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    scalar_start: f64,
+    scalar_end: f64,
+    scalar_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+    // Deprecated - use cfo_batch instead
+    let sweep = CfoBatchRange {
+        period: (period_start, period_end, period_step),
+        scalar: (scalar_start, scalar_end, scalar_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len() * 2);
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+        metadata.push(combo.scalar.unwrap());
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CfoBatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub scalar_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CfoBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<CfoParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cfo_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: CfoBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = CfoBatchRange {
+        period: config.period_range,
+        scalar: config.scalar_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = cfo_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = CfoBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
