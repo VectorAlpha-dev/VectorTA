@@ -8,9 +8,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 #[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-#[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -902,7 +902,7 @@ fn alma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    
+
     if cols == 0 {
         return Err(AlmaError::AllValuesNaN);
     }
@@ -918,22 +918,21 @@ fn alma_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm); // ──┘
 
-    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);          // keep capacity
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu); // keep capacity
     let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
-        )
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
     alma_batch_inner_into(data, sweep, kern, parallel, out)?;
 
     let values = unsafe {
-        Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64,
-                            buf_guard.len(),
-                            buf_guard.capacity())
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
     };
-    
+
     Ok(AlmaBatchOutput {
         values,
         combos,
@@ -1008,12 +1007,8 @@ fn alma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-
     let out_uninit = unsafe {
-        std::slice::from_raw_parts_mut(
-            out.as_mut_ptr() as *mut MaybeUninit<f64>,
-            out.len()
-        )
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -1046,7 +1041,8 @@ fn alma_batch_inner_into(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            out_uninit.par_chunks_mut(cols)
+            out_uninit
+                .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
@@ -1376,8 +1372,6 @@ unsafe fn long_kernel_with_tail(
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1689,34 +1683,34 @@ mod tests {
     #[cfg(debug_assertions)]
     fn check_alma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let input = AlmaInput::from_candles(&candles, "close", AlmaParams::default());
         let output = alma_with_kernel(&input, kernel)?;
-        
+
         for (i, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
                 continue;
             }
-            
+
             let bits = val.to_bits();
-            
+
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
                     test_name, val, bits, i
                 );
             }
-            
+
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
                     test_name, val, bits, i
                 );
             }
-            
+
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1724,7 +1718,7 @@ mod tests {
                 );
             }
         }
-        
+
         Ok(())
     }
 
@@ -1908,7 +1902,7 @@ mod tests {
             }
         };
     }
-    
+
     fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -1933,40 +1927,40 @@ mod tests {
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
-        
+
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
+
         let output = AlmaBatchBuilder::new()
             .kernel(kernel)
             .period_range(9, 15, 3)
             .offset_range(0.8, 0.9, 0.1)
             .sigma_range(6.0, 8.0, 2.0)
             .apply_candles(&c, "close")?;
-        
+
         for (idx, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
                 continue;
             }
-            
+
             let bits = val.to_bits();
             let row = idx / output.cols;
             let col = idx % output.cols;
-            
+
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
                     test, val, bits, row, col, idx
                 );
             }
-            
+
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
                     test, val, bits, row, col, idx
                 );
             }
-            
+
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1974,7 +1968,7 @@ mod tests {
                 );
             }
         }
-        
+
         Ok(())
     }
 
@@ -1982,7 +1976,7 @@ mod tests {
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    
+
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
@@ -2016,14 +2010,13 @@ pub fn alma_py<'py>(
 
     py.allow_threads(|| -> Result<(), AlmaError> {
         let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, kern)?;
-        
 
         if first + per - 1 > 0 {
             slice_out[..first + per - 1].fill(f64::NAN);
         }
-        
+
         alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
-        
+
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2089,20 +2082,21 @@ pub fn alma_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    let combos = py.allow_threads(|| {
-        let kernel = match kern {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
-        };
-        let simd = match kernel {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => unreachable!(),
-        };
-        alma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = py
+        .allow_threads(|| {
+            let kernel = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            let simd = match kernel {
+                Kernel::Avx512Batch => Kernel::Avx512,
+                Kernel::Avx2Batch => Kernel::Avx2,
+                Kernel::ScalarBatch => Kernel::Scalar,
+                _ => unreachable!(),
+            };
+            alma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
