@@ -17,16 +17,32 @@
 //!   with leading `NaN` until the warm-up period is reached.
 //! - **`Err(CgError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
-use aligned_vec::{AVec, CACHELINE_ALIGN};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CgInput<'a> {
@@ -53,7 +69,22 @@ pub struct CgOutput {
     pub values: Vec<f64>,
 }
 
+impl std::ops::Deref for CgOutput {
+    type Target = [f64];
+    
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl std::ops::DerefMut for CgOutput {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct CgParams {
     pub period: Option<usize>,
 }
@@ -155,13 +186,13 @@ impl CgBuilder {
 
 #[derive(Debug, Error)]
 pub enum CgError {
-    #[error("cg: Empty data provided for CG.")]
+    #[error("CG: Empty data provided for CG.")]
     EmptyData,
-    #[error("cg: Invalid period: period = {period}, data length = {data_len}")]
+    #[error("CG: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("cg: All values are NaN.")]
+    #[error("CG: All values are NaN.")]
     AllValuesNaN,
-    #[error("cg: Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("CG: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 }
 
@@ -201,7 +232,8 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
         });
     }
 
-    let mut out = vec![f64::NAN; len];
+    // Use helper function to allocate with NaN prefix only where needed
+    let mut out = alloc_with_nan_prefix(len, first + period);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -222,7 +254,18 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     Ok(CgOutput { values: out })
 }
 
-#[inline]
+// Pre-computed weights for common periods (1.0, 2.0, 3.0, ..., 64.0)
+const CG_WEIGHTS: [f64; 64] = [
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+    11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+    21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+    31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0,
+    41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0,
+    51.0, 52.0, 53.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0, 60.0,
+    61.0, 62.0, 63.0, 64.0,
+];
+
+#[inline(always)]
 pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // Start writing at i = first + period
     for i in (first + period)..data.len() {
@@ -230,10 +273,21 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         let mut denom = 0.0;
 
         // Sum exactly (period - 1) bars
-        for count in 0..(period - 1) {
-            let price = data[i - count];
-            num += (1.0 + count as f64) * price;
-            denom += price;
+        if period <= 65 {
+            // Use pre-computed weights for common periods
+            for count in 0..(period - 1) {
+                let price = data[i - count];
+                let weight = unsafe { *CG_WEIGHTS.get_unchecked(count) };
+                num += weight * price;
+                denom += price;
+            }
+        } else {
+            // Fall back to computing weights for large periods
+            for count in 0..(period - 1) {
+                let price = data[i - count];
+                num += (1.0 + count as f64) * price;
+                denom += price;
+            }
         }
 
         out[i] = if denom.abs() > f64::EPSILON {
@@ -500,7 +554,24 @@ fn cg_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Use helper to allocate uninitialized matrix
+    let mut buf = make_uninit_matrix(rows, cols);
+    
+    // Calculate warm-up prefixes for each row
+    let warm_prefixes: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    
+    // Initialize only the NaN prefixes
+    init_matrix_prefixes(&mut buf, cols, &warm_prefixes);
+    
+    // Convert to initialized memory
+    let ptr = buf.as_mut_ptr() as *mut f64;
+    std::mem::forget(buf);
+    let mut values = unsafe { Vec::from_raw_parts(ptr, rows * cols, rows * cols) };
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
@@ -807,4 +878,345 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cg")]
+#[pyo3(signature = (data, period=None, *, kernel=None))]
+pub fn cg_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: Option<usize>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{PyArray1, PyArrayMethods};
+
+    let slice_in = data.as_slice()?; // zero-copy, read-only view
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, false)?;
+
+    // ---------- build input struct -------------------------------------------------
+    let params = CgParams {
+        period: period,  // Now correctly passes the optional period
+    };
+    let cg_in = CgInput::from_slice(slice_in, params);
+
+    // ---------- allocate uninitialized NumPy output buffer -------------------------
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // ---------- heavy lifting without the GIL --------------------------------------
+    py.allow_threads(|| -> Result<(), CgError> {
+        // First, validate input and find first valid index
+        if slice_in.is_empty() {
+            return Err(CgError::EmptyData);
+        }
+        let first = slice_in
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(CgError::AllValuesNaN)?;
+        let len = slice_in.len();
+        let period = cg_in.get_period();
+
+        if period == 0 || period > len {
+            return Err(CgError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
+        }
+
+        // CG requires period + 1 valid points
+        if (len - first) < (period + 1) {
+            return Err(CgError::NotEnoughValidData {
+                needed: period + 1,
+                valid: len - first,
+            });
+        }
+
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix to the first (first + period) elements
+        if first + period > 0 {
+            slice_out[..first + period].fill(f64::NAN);
+        }
+
+        // 2. Compute CG values for the rest
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        };
+
+        // CG computation writes directly to slice_out
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => cg_scalar(slice_in, period, first, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => cg_avx2(slice_in, period, first, slice_out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => cg_avx512(slice_in, period, first, slice_out),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    // Fallback to scalar when AVX is not available
+                    cg_scalar(slice_in, period, first, slice_out)
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(())
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(out_arr)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "CgStream")]
+pub struct CgStreamPy {
+    stream: CgStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CgStreamPy {
+    #[new]
+    fn new(period: usize) -> PyResult<Self> {
+        let params = CgParams {
+            period: Some(period),
+        };
+        let stream =
+            CgStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(CgStreamPy { stream })
+    }
+
+    /// Updates the stream with a new value and returns the calculated CG value.
+    /// Returns `None` if the buffer is not yet full (needs period + 1 values).
+    fn update(&mut self, value: f64) -> Option<f64> {
+        self.stream.update(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cg_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn cg_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let slice_in = data.as_slice()?;
+
+    let sweep = CgBatchRange {
+        period: period_range,
+    };
+
+    // 1. Expand grid once to know rows*cols
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+
+    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
+    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Use kernel validation for safety
+    let kern = validate_kernel(kernel, true)?;
+
+    // 3. Heavy work without the GIL
+    let combos = py.allow_threads(|| {
+        // Resolve Kernel::Auto to a specific kernel
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+
+        // Check for empty data and all NaN first
+        if slice_in.is_empty() {
+            return Err(CgError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
+        }
+        let first = slice_in
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or(CgError::AllValuesNaN)?;
+        
+        // Check max period requirement
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if slice_in.len() - first < max_p + 1 {
+            return Err(CgError::NotEnoughValidData {
+                needed: max_p + 1,
+                valid: slice_in.len() - first,
+            });
+        }
+
+        // Fill NaN prefixes for each row
+        for (row, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap();
+            let warm = first + period;
+            let row_start = row * cols;
+            if warm > 0 {
+                slice_out[row_start..row_start + warm].fill(f64::NAN);
+            }
+        }
+
+        // Compute each row
+        let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+            let period = combos[row].period.unwrap();
+            match simd {
+                Kernel::Scalar => cg_row_scalar(slice_in, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => cg_row_avx2(slice_in, first, period, out_row),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => cg_row_avx512(slice_in, first, period, out_row),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    // Fall back to scalar on non-AVX systems
+                    cg_row_scalar(slice_in, first, period, out_row)
+                }
+                _ => unreachable!(),
+            }
+        };
+
+        // Use parallel processing
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice_out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in slice_out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+
+        Ok(combos)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // 4. Build dict with the GIL
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+    let params = CgParams {
+        period: Some(period),
+    };
+    let input = CgInput::from_slice(data, params);
+
+    cg_with_kernel(&input, Kernel::Scalar)
+        .map(|o| o.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cg_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = CgBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    // Use the existing batch function with parallel=false for WASM
+    cg_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map(|output| output.values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cg_batch_metadata_js(
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<Vec<f64>, JsValue> {
+    let sweep = CgBatchRange {
+        period: (period_start, period_end, period_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let mut metadata = Vec::with_capacity(combos.len());
+
+    for combo in combos {
+        metadata.push(combo.period.unwrap() as f64);
+    }
+
+    Ok(metadata)
+}
+
+// New ergonomic WASM API
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CgBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CgBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<CgParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = cg_batch)]
+pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    // 1. Deserialize the configuration object from JavaScript
+    let config: CgBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = CgBatchRange {
+        period: config.period_range,
+    };
+
+    // 2. Run the existing core logic
+    let output = cg_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // 3. Create the structured output
+    let js_output = CgBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    // 4. Serialize the output struct into a JavaScript object
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

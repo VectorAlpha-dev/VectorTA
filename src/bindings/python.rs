@@ -117,6 +117,8 @@ use crate::indicators::bollinger_bands_width::{bollinger_bands_width_py, bolling
 use crate::indicators::ao::{ao_py, ao_batch_py, AoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::atr::{atr_py, atr_batch_py, AtrStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::cg::{cg_py, cg_batch_py, CgStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -392,6 +394,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
     m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
     m.add_class::<BollingerBandsWidthStreamPy>()?;
+    
+    // Register CG functions with their user-facing names
+    m.add_function(wrap_pyfunction!(cg_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
+    m.add_class::<CgStreamPy>()?;
     
     // Register AO functions with their user-facing names
     m.add_function(wrap_pyfunction!(ao_py, m)?)?;
