@@ -103,6 +103,16 @@ const EXPECTED_OUTPUTS = {
             59165.14427332
         ]
     },
+    cg: {
+        defaultParams: { period: 10 },
+        last5Values: [
+            -4.99905186931943,
+            -4.998559827254377,
+            -4.9970065675119555,
+            -4.9928483984587295,
+            -5.004210799262688
+        ]
+    },
     cfo: {
         defaultParams: { period: 14, scalar: 100.0 },
         last5Values: [

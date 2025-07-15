@@ -18,6 +18,7 @@ use my_project::indicators::bollinger_bands_width::{
 };
 use my_project::indicators::bop::{bop, BopData, BopInput, BopParams};
 use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
+use my_project::indicators::cg::{cg, CgInput, CgParams};
 /// Binary to generate reference outputs for indicator testing
 /// This is used by Python and WASM tests to verify their outputs match Rust
 use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
@@ -80,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, cfo, bop, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
+        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, cg, cfo, bop, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, vwap, vwma, vpwma, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -1075,6 +1076,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "indicator": "bop",
                 "source": "ohlc",
                 "params": {},
+                "values": result.values,
+                "length": result.values.len()
+            })
+        }
+        "cg" => {
+            let params = CgParams::default();
+            let period = params.period.unwrap_or(10);
+            let input = CgInput::from_candles(&candles, source, params);
+            let result = cg(&input)?;
+            json!({
+                "indicator": "cg",
+                "source": source,
+                "params": {
+                    "period": period
+                },
                 "values": result.values,
                 "length": result.values.len()
             })
