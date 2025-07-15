@@ -7,9 +7,6 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Note: AVec<f64> already implements Send since f64 is Send
-// No wrapper types needed
-
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
@@ -724,13 +721,7 @@ impl AlmaBatchBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
-    /// Set the kernel to use for batch computation.
-    /// 
-    /// Note: Batch kernels must be explicitly specified if parallel
-    /// is desired.
-    /// compared to CPU implementations. Users should validate that GPU precision
-    /// meets their requirements before using in production.
+
     pub fn kernel(mut self, k: Kernel) -> Self {
         self.kernel = k;
         self
@@ -912,16 +903,12 @@ fn alma_batch_inner(
     let cols = data.len();
     let rows = combos.len();
     
-    // Check if data is empty to avoid issues with allocation
     if cols == 0 {
-        // Check if all values are NaN (in this case, empty means all are NaN)
         return Err(AlmaError::AllValuesNaN);
     }
 
-    // 1. Allocate *uninitialised* matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2. Fill the NaN warm-up prefix row-wise  ──────┐
     let warm: Vec<usize> = combos
         .iter()
         .map(|c|                                 //  first + period - 1
@@ -931,9 +918,6 @@ fn alma_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm); // ──┘
 
-    // 3. Convert &[MaybeUninit<f64>] → &mut [f64]
-    //    *after* the prefixes are written but *before*
-    //    the compute kernels run – they will write the rest.
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);          // keep capacity
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(
@@ -942,10 +926,8 @@ fn alma_batch_inner(
         )
     };
 
-    // 4. Compute into it in place
     alma_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // 5. Reclaim the buffer as a normal Vec<f64> for the return value
     let values = unsafe {
         Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64,
                             buf_guard.len(),
@@ -1026,8 +1008,7 @@ fn alma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-    // Note: NaN prefix initialization is now handled in alma_batch_inner
-    // We just need to convert the output slice to MaybeUninit for the row processing
+
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1040,7 +1021,6 @@ fn alma_batch_inner_into(
         let w_ptr = flat_w.as_ptr().add(row * max_p);
         let inv_n = *inv_norms.get_unchecked(row);
 
-        // Cast the row slice (which is definitely ours to mutate) to f64
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
@@ -1057,16 +1037,12 @@ fn alma_batch_inner_into(
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fall back to scalar on non-AVX systems
                 alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
             }
             Kernel::Auto => unreachable!(),
         }
     };
 
-    // ---------------------------------------------------------------------------
-    // 3. run every row kernel; no element is read before it is written
-    // ---------------------------------------------------------------------------
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1196,8 +1172,8 @@ unsafe fn alma_row_avx512_short(
     debug_assert!(period <= 32);
     const STEP: usize = 8;
 
-    let chunks = period / STEP; // number of full 8‑wide blocks (0‑4)
-    let tail_len = period % STEP; // 0‑7 remaining samples
+    let chunks = period / STEP;
+    let tail_len = period % STEP;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
     if chunks == 0 {
@@ -1710,7 +1686,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_alma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1718,20 +1693,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         
-        // Test with default parameters
         let input = AlmaInput::from_candles(&candles, "close", AlmaParams::default());
         let output = alma_with_kernel(&input, kernel)?;
         
-        // Check every value for poison patterns
         for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
             if val.is_nan() {
                 continue;
             }
             
             let bits = val.to_bits();
             
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1739,7 +1710,6 @@ mod tests {
                 );
             }
             
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1747,7 +1717,6 @@ mod tests {
                 );
             }
             
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1759,7 +1728,6 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
     fn check_alma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1773,10 +1741,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // ── 1. Pick a period first, then a vector that is long enough ───────────
         let strat = (1usize..=64) // period
             .prop_flat_map(|period| {
-                // ↙ dependents see it
                 (
                     prop::collection::vec(
                         (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
@@ -1790,7 +1756,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, offset, sigma)| {
-                // ── 2. Build Alma input and reference outputs ───────────────────
                 let params = AlmaParams {
                     period: Some(period),
                     offset: Some(offset),
@@ -1802,7 +1767,6 @@ mod tests {
                 let AlmaOutput { values: ref_out } =
                     alma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // ── 3. Core properties ──────────────────────────────────────────
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1810,18 +1774,15 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // (a) boundedness
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
                         "idx {i}: {y} ∉ [{lo}, {hi}]"
                     );
 
-                    // (b) period-1 identity
                     if period == 1 {
                         prop_assert!((y - data[i]).abs() <= f64::EPSILON);
                     }
 
-                    // (c) constant-series invariance
                     if data.windows(2).all(|w| w[0] == w[1]) {
                         prop_assert!((y - data[0]).abs() <= 1e-9);
                     }
@@ -1837,8 +1798,7 @@ mod tests {
                         continue;
                     }
 
-                    // ----------- safe ULP distance (no panics in debug) --------------------------
-                    let ulp_diff: u64 = y_bits.abs_diff(r_bits); // or: (y_bits.max(r_bits) - y_bits.min(r_bits));
+                    let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1892,7 +1852,6 @@ mod tests {
         check_alma_no_poison
     );
 
-    // Only generate proptest-based tests when proptest feature is enabled
     #[cfg(feature = "proptest")]
     generate_all_alma_tests!(check_alma_property);
 
@@ -1963,8 +1922,7 @@ mod tests {
             .sigma_range(3.0, 9.0, 1.0)
             .apply_candles(&c, "close")?;
 
-        // Check we got the expected number of parameter combinations
-        let expected_combos = 12 * 6 * 7; // periods * offsets * sigmas
+        let expected_combos = 12 * 6 * 7;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -1972,7 +1930,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1980,17 +1937,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         
-        // Test batch with multiple parameter combinations
         let output = AlmaBatchBuilder::new()
             .kernel(kernel)
-            .period_range(9, 15, 3)  // 3 periods: 9, 12, 15
-            .offset_range(0.8, 0.9, 0.1)  // 2 offsets: 0.8, 0.9
-            .sigma_range(6.0, 8.0, 2.0)  // 2 sigmas: 6.0, 8.0
+            .period_range(9, 15, 3)
+            .offset_range(0.8, 0.9, 0.1)
+            .sigma_range(6.0, 8.0, 2.0)
             .apply_candles(&c, "close")?;
         
-        // Check every value in the entire batch matrix for poison patterns
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
             if val.is_nan() {
                 continue;
             }
@@ -1999,7 +1953,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
             
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2007,7 +1960,6 @@ mod tests {
                 );
             }
             
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2015,7 +1967,6 @@ mod tests {
                 );
             }
             
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2027,7 +1978,6 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2052,12 +2002,8 @@ pub fn alma_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{PyArray1, PyArrayMethods};
 
-    let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-    // Use kernel validation for safety
+    let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
-
-    // ---------- build input struct -------------------------------------------------
     let params = AlmaParams {
         period: Some(period),
         offset: Some(offset),
@@ -2065,23 +2011,17 @@ pub fn alma_py<'py>(
     };
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
-    // ---------- allocate uninitialized NumPy output buffer -------------------------
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AlmaError> {
         let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, kern)?;
         
-        // SAFETY: We must write to ALL elements before returning to Python
-        // 1. Write NaN prefix only to the first (first + per - 1) elements
+
         if first + per - 1 > 0 {
             slice_out[..first + per - 1].fill(f64::NAN);
         }
         
-        // 2. alma_compute_into MUST write to all elements from (first + per - 1) onwards
-        // This is guaranteed by the ALMA algorithm implementation
         alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
         
         Ok(())
@@ -2112,8 +2052,6 @@ impl AlmaStreamPy {
         Ok(AlmaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated ALMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2142,22 +2080,16 @@ pub fn alma_batch_py<'py>(
         sigma: sigma_range,
     };
 
-    // 1. Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Use kernel validation for safety
     let kern = validate_kernel(kernel, true)?;
 
-    // 3. Heavy work without the GIL
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2168,12 +2100,10 @@ pub fn alma_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
         alma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 4. Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2239,7 +2169,6 @@ pub fn alma_batch_js(
         sigma: (sigma_start, sigma_end, sigma_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     alma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2276,7 +2205,6 @@ pub fn alma_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct AlmaBatchConfig {
@@ -2297,7 +2225,6 @@ pub struct AlmaBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = alma_batch)]
 pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    // 1. Deserialize the configuration object from JavaScript
     let config: AlmaBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2307,11 +2234,9 @@ pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         sigma: config.sigma_range,
     };
 
-    // 2. Run the existing core logic
     let output = alma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
     let js_output = AlmaBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2319,7 +2244,6 @@ pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

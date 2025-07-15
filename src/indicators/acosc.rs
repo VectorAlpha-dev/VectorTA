@@ -16,7 +16,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -24,6 +27,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -75,7 +79,12 @@ pub enum AcoscError {
 pub fn acosc(input: &AcoscInput) -> Result<AcoscOutput, AcoscError> {
     acosc_with_kernel(input, Kernel::Auto)
 }
-pub fn acosc_with_kernel(input: &AcoscInput, kernel: Kernel) -> Result<AcoscOutput, AcoscError> {
+
+#[inline(always)]
+fn acosc_prepare<'a>(
+    input: &'a AcoscInput,
+    kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], Kernel), AcoscError> {
     let (high, low) = match &input.data {
         AcoscData::Candles { candles } => {
             let h = candles.select_candle_field("high")
@@ -86,40 +95,70 @@ pub fn acosc_with_kernel(input: &AcoscInput, kernel: Kernel) -> Result<AcoscOutp
         }
         AcoscData::Slices { high, low } => (*high, *low),
     };
+    
     if high.len() != low.len() {
         return Err(AcoscError::LengthMismatch { high_len: high.len(), low_len: low.len() });
     }
+    
     let len = low.len();
-    const PERIOD_SMA5: usize = 5;
-    const PERIOD_SMA34: usize = 34;
-    const REQUIRED_LENGTH: usize = PERIOD_SMA34 + PERIOD_SMA5;
+    const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
     if len < REQUIRED_LENGTH {
         return Err(AcoscError::NotEnoughData { required: REQUIRED_LENGTH, actual: len });
     }
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut osc = vec![f64::NAN; len];
-    let mut change = vec![f64::NAN; len];
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                acosc_scalar(high, low, &mut osc, &mut change)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                acosc_avx2(high, low, &mut osc, &mut change)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                acosc_avx512(high, low, &mut osc, &mut change)
-            }
-            _ => unreachable!(),
-        }
-    }
+    
+    Ok((high, low, chosen))
+}
+pub fn acosc_with_kernel(input: &AcoscInput, kernel: Kernel) -> Result<AcoscOutput, AcoscError> {
+    let (high, low, chosen) = acosc_prepare(input, kernel)?;
+    
+    let len = low.len();
+    const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
+    
+    // Calculate warmup period (ACOSC needs 39 data points before producing values)
+    let warmup_period = REQUIRED_LENGTH - 1;  // 38 (since we start producing at index 38)
+    
+    // Use zero-copy allocation
+    let mut osc = alloc_with_nan_prefix(len, warmup_period);
+    let mut change = alloc_with_nan_prefix(len, warmup_period);
+    
+    // Use the compute_into pattern for consistency with ALMA
+    acosc_compute_into(high, low, chosen, &mut osc, &mut change);
     Ok(AcoscOutput { osc, change })
 }
+
+#[inline(always)]
+fn acosc_compute_into(
+    high: &[f64],
+    low: &[f64],
+    kernel: Kernel,
+    osc_out: &mut [f64],
+    change_out: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                acosc_scalar(high, low, osc_out, change_out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => acosc_avx2(high, low, osc_out, change_out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                acosc_avx512(high, low, osc_out, change_out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                acosc_scalar(high, low, osc_out, change_out)
+            }
+            Kernel::Auto => unreachable!("Kernel::Auto should be resolved before calling compute_into"),
+        }
+    }
+}
+
 #[inline]
 pub fn acosc_scalar(high: &[f64], low: &[f64], osc: &mut [f64], change: &mut [f64]) {
     // SCALAR LOGIC UNCHANGED
@@ -360,19 +399,66 @@ pub fn acosc_batch_par_slice(
 fn acosc_batch_inner(
     high: &[f64], low: &[f64], kern: Kernel, _parallel: bool,
 ) -> Result<AcoscBatchOutput, AcoscError> {
-    let mut osc = vec![f64::NAN; high.len()];
-    let mut change = vec![f64::NAN; high.len()];
-    unsafe {
-        match kern {
-            Kernel::Scalar => acosc_scalar(high, low, &mut osc, &mut change),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => acosc_avx2(high, low, &mut osc, &mut change),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => acosc_avx512(high, low, &mut osc, &mut change),
-            _ => unreachable!(),
-        }
+    let cols = high.len();
+    let rows = 1; // ACOSC has no parameters, so always 1 row
+    
+    // Check for minimum data length
+    const REQUIRED_LENGTH: usize = 39; // PERIOD_SMA34 + PERIOD_SMA5
+    if cols < REQUIRED_LENGTH {
+        return Err(AcoscError::NotEnoughData { required: REQUIRED_LENGTH, actual: cols });
     }
-    Ok(AcoscBatchOutput { osc, change, rows: 1, cols: high.len() })
+    
+    // Step 1: Allocate uninitialized matrices for both outputs
+    let mut buf_osc_mu = make_uninit_matrix(rows, cols);
+    let mut buf_change_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods (constant for ACOSC)
+    const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
+    let warmup_periods = vec![WARMUP_PERIOD]; // Single row
+    
+    // Step 3: Initialize NaN prefixes for each matrix
+    init_matrix_prefixes(&mut buf_osc_mu, cols, &warmup_periods);
+    init_matrix_prefixes(&mut buf_change_mu, cols, &warmup_periods);
+    
+    // Step 4: Convert to mutable slices for computation
+    let mut buf_osc_guard = ManuallyDrop::new(buf_osc_mu);
+    let mut buf_change_guard = ManuallyDrop::new(buf_change_mu);
+    
+    let osc_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_osc_guard.as_mut_ptr() as *mut f64,
+            buf_osc_guard.len(),
+        )
+    };
+    
+    let change_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_change_guard.as_mut_ptr() as *mut f64,
+            buf_change_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffers
+    acosc_compute_into(high, low, kern, osc_slice, change_slice);
+    
+    // Step 6: Reclaim as Vec<f64>
+    let osc = unsafe {
+        Vec::from_raw_parts(
+            buf_osc_guard.as_mut_ptr() as *mut f64,
+            buf_osc_guard.len(),
+            buf_osc_guard.capacity()
+        )
+    };
+    
+    let change = unsafe {
+        Vec::from_raw_parts(
+            buf_change_guard.as_mut_ptr() as *mut f64,
+            buf_change_guard.len(),
+            buf_change_guard.capacity()
+        )
+    };
+    
+    Ok(AcoscBatchOutput { osc, change, rows, cols })
 }
 #[inline(always)]
 pub fn expand_grid(_r: &AcoscBatchRange) -> Vec<AcoscParams> {
@@ -497,12 +583,24 @@ pub fn acosc_py<'py>(
 
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), AcoscError> {
-        // Use the main acosc function which has proper validation
-        let result = acosc_with_kernel(&acosc_in, kern)?;
+        // Prepare and resolve kernel
+        let (_, _, chosen) = acosc_prepare(&acosc_in, kern)?;
         
-        // Copy results to pre-allocated arrays
-        slice_osc.copy_from_slice(&result.osc);
-        slice_change.copy_from_slice(&result.change);
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix to the first 38 elements (ACOSC warmup period)
+        const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
+        if high_slice.len() >= WARMUP_PERIOD {
+            slice_osc[..WARMUP_PERIOD].fill(f64::NAN);
+            slice_change[..WARMUP_PERIOD].fill(f64::NAN);
+        } else {
+            // If data is shorter than warmup, fill everything with NaN
+            slice_osc.fill(f64::NAN);
+            slice_change.fill(f64::NAN);
+        }
+        
+        // 2. acosc_compute_into MUST write to all elements from index 38 onwards
+        // This is guaranteed by the ACOSC algorithm implementation
+        acosc_compute_into(high_slice, low_slice, chosen, slice_osc, slice_change);
         
         Ok(())
     })
@@ -593,20 +691,21 @@ pub fn acosc_batch_py<'py>(
             _ => unreachable!(),
         };
 
-        // Initialize NaN values
-        slice_osc.fill(f64::NAN);
-        slice_change.fill(f64::NAN);
-
-        unsafe {
-            match simd {
-                Kernel::Scalar => acosc_scalar(high_slice, low_slice, slice_osc, slice_change),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => acosc_avx2(high_slice, low_slice, slice_osc, slice_change),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => acosc_avx512(high_slice, low_slice, slice_osc, slice_change),
-                _ => unreachable!(),
-            }
+        // SAFETY: We must write to ALL elements before returning to Python
+        // 1. Write NaN prefix to the first 38 elements (ACOSC warmup period)
+        const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
+        if high_slice.len() >= WARMUP_PERIOD {
+            slice_osc[..WARMUP_PERIOD].fill(f64::NAN);
+            slice_change[..WARMUP_PERIOD].fill(f64::NAN);
+        } else {
+            // If data is shorter than warmup, fill everything with NaN
+            slice_osc.fill(f64::NAN);
+            slice_change.fill(f64::NAN);
         }
+        
+        // 2. acosc_compute_into MUST write to all elements from index 38 onwards
+        // This is guaranteed by the ACOSC algorithm implementation
+        acosc_compute_into(high_slice, low_slice, simd, slice_osc, slice_change);
         Ok(())
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -806,7 +905,8 @@ mod tests {
         check_acosc_too_short,
         check_acosc_reinput,
         check_acosc_nan_handling,
-        check_acosc_streaming
+        check_acosc_streaming,
+        check_acosc_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -815,6 +915,140 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let output = AcoscBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
         assert_eq!(output.osc.len(), c.close.len());
+        Ok(())
+    }
+
+    // Debug mode test to check for poison values
+    #[cfg(debug_assertions)]
+    fn check_acosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AcoscInput::with_default_candles(&candles);
+        let output = acosc_with_kernel(&input, kernel)?;
+        
+        // Check osc values for poison patterns
+        for (i, &val) in output.osc.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in osc",
+                    test_name, val, bits, i
+                );
+            }
+        }
+        
+        // Check change values for poison patterns
+        for (i, &val) in output.change.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in change",
+                    test_name, val, bits, i
+                );
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Debug mode test for batch operations
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = AcoscBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+        
+        // Check osc values for poison patterns
+        for (idx, &val) in output.osc.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in osc",
+                    test, val, bits, idx
+                );
+            }
+            
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in osc",
+                    test, val, bits, idx
+                );
+            }
+            
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in osc",
+                    test, val, bits, idx
+                );
+            }
+        }
+        
+        // Check change values for poison patterns
+        for (idx, &val) in output.change.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in change",
+                    test, val, bits, idx
+                );
+            }
+            
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in change",
+                    test, val, bits, idx
+                );
+            }
+            
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in change",
+                    test, val, bits, idx
+                );
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Release mode stubs
+    #[cfg(not(debug_assertions))]
+    fn check_acosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+    
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
     macro_rules! gen_batch_tests {
@@ -838,4 +1072,5 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
