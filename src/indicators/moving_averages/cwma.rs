@@ -213,6 +213,14 @@ fn cwma_prepare<'a>(
             data_len: len,
         });
     }
+    
+    // CWMA with period=1 would have no weights, handle it as an error
+    if period == 1 {
+        return Err(CwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
     if (len - first) < period {
         return Err(CwmaError::NotEnoughValidData {
             needed: period,
@@ -230,7 +238,7 @@ fn cwma_prepare<'a>(
     let mut inv_norm = 1.0 / norm;
     inv_norm = inv_norm * (2.0 - norm * inv_norm); 
 
-    let warm = first + period - 1;
+    let warm = first + weights.len();
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -443,19 +451,19 @@ pub unsafe fn cwma_avx512_short(
     for i in first_out..data.len() {
         let mut acc = _mm512_setzero_pd();
 
-        if chunks >= 1 {
+        if chunks >= 1 && i >= 7 {
             let d0 = _mm512_loadu_pd(data.as_ptr().add(i - 7));
             acc = _mm512_fmadd_pd(d0, wv[0], acc);
         }
-        if chunks >= 2 {
+        if chunks >= 2 && i >= STEP + 7 {
             let d1 = _mm512_loadu_pd(data.as_ptr().add(i - STEP - 7));
             acc = _mm512_fmadd_pd(d1, wv[1], acc);
         }
-        if chunks >= 3 {
+        if chunks >= 3 && i >= 2 * STEP + 7 {
             let d2 = _mm512_loadu_pd(data.as_ptr().add(i - 2 * STEP - 7));
             acc = _mm512_fmadd_pd(d2, wv[2], acc);
         }
-        if chunks == 4 {
+        if chunks == 4 && i >= 3 * STEP + 7 {
             let d3 = _mm512_loadu_pd(data.as_ptr().add(i - 3 * STEP - 7));
             acc = _mm512_fmadd_pd(d3, wv[3], acc);
         }
@@ -489,7 +497,7 @@ pub unsafe fn cwma_avx512_long(
     let wlen = weights.len();
     let chunks = wlen / STEP;
     let tail = wlen % STEP;
-    let first_out = first_valid + wlen + 1;
+    let first_out = first_valid + wlen;
 
     if wlen < 24 {
         cwma_avx2(data, weights, _period, first_valid, inv_norm, out);
@@ -506,16 +514,18 @@ pub unsafe fn cwma_avx512_long(
         let mut blk = 0;
 
         while blk < paired {
-            let d0 = _mm512_loadu_pd(data.as_ptr().add(i - blk * STEP - 7));
-            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - (blk + 1) * STEP - 7));
+            if i >= blk * STEP + 7 && i >= (blk + 1) * STEP + 7 {
+                let d0 = _mm512_loadu_pd(data.as_ptr().add(i - blk * STEP - 7));
+                let d1 = _mm512_loadu_pd(data.as_ptr().add(i - (blk + 1) * STEP - 7));
 
-            acc0 = _mm512_fmadd_pd(d0, *wblocks.get_unchecked(blk), acc0);
-            acc1 = _mm512_fmadd_pd(d1, *wblocks.get_unchecked(blk + 1), acc1);
+                acc0 = _mm512_fmadd_pd(d0, *wblocks.get_unchecked(blk), acc0);
+                acc1 = _mm512_fmadd_pd(d1, *wblocks.get_unchecked(blk + 1), acc1);
+            }
 
             blk += 2;
         }
 
-        if blk < chunks {
+        if blk < chunks && i >= blk * STEP + 7 {
             let d = _mm512_loadu_pd(data.as_ptr().add(i - blk * STEP - 7));
             acc0 = _mm512_fmadd_pd(d, *wblocks.get_unchecked(blk), acc0);
         }
@@ -995,17 +1005,22 @@ unsafe fn cwma_row_avx512_short(
         None
     };
 
-    let start = (first + wlen).max(7);  // Ensure we don't underflow
-    for i in start..data.len() {
-        let mut acc = _mm512_fmadd_pd(
-            _mm512_loadu_pd(data.as_ptr().add(i - 7)),
-            w0,
-            _mm512_setzero_pd(),
-        );
+    for i in (first + wlen)..data.len() {
+        let mut acc = _mm512_setzero_pd();
+        
+        if chunks >= 1 && i >= 7 {
+            acc = _mm512_fmadd_pd(
+                _mm512_loadu_pd(data.as_ptr().add(i - 7)),
+                w0,
+                acc,
+            );
+        }
 
         if let Some(w1v) = w1 {
-            let d1 = _mm512_loadu_pd(data.as_ptr().add(i - STEP - 7));
-            acc = _mm512_fmadd_pd(d1, w1v, acc);
+            if i >= STEP + 7 {
+                let d1 = _mm512_loadu_pd(data.as_ptr().add(i - STEP - 7));
+                acc = _mm512_fmadd_pd(d1, w1v, acc);
+            }
         }
 
         let mut tail_sum = 0.0;
@@ -1063,24 +1078,23 @@ unsafe fn cwma_row_avx512_long(
         n_chunks + (tail_len != 0) as usize,
     );
 
-    let paired = n_chunks & !3;
-    let mut start_ptr = data.as_ptr().add(first + 2);
-    let stop_ptr = data.as_ptr().add(data.len());
+    for i in (first + wlen)..data.len() {
+        // ------ window base pointer ------------------------------------------
+        let base_ptr = data.as_ptr().add(i - wlen);        // oldest value in window
 
-    for dst in &mut out[first + wlen + 1..] {
+        // ------ vector accumulators -----------------------------------------
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
         let mut s3 = _mm512_setzero_pd();
 
+        // ------ four-chunk unrolled FMA loop ---------------------------------
         let mut blk = 0;
-        while blk < paired {
-            _mm_prefetch(start_ptr.add((blk + 16) * STEP) as *const i8, _MM_HINT_T0);
-
-            let d0 = _mm512_loadu_pd(start_ptr.add((blk + 0) * STEP));
-            let d1 = _mm512_loadu_pd(start_ptr.add((blk + 1) * STEP));
-            let d2 = _mm512_loadu_pd(start_ptr.add((blk + 2) * STEP));
-            let d3 = _mm512_loadu_pd(start_ptr.add((blk + 3) * STEP));
+        while blk + 3 < n_chunks {
+            let d0 = _mm512_loadu_pd(base_ptr.add((blk + 0) * STEP));
+            let d1 = _mm512_loadu_pd(base_ptr.add((blk + 1) * STEP));
+            let d2 = _mm512_loadu_pd(base_ptr.add((blk + 2) * STEP));
+            let d3 = _mm512_loadu_pd(base_ptr.add((blk + 3) * STEP));
 
             s0 = _mm512_fmadd_pd(d0, *wregs.get_unchecked(blk + 0), s0);
             s1 = _mm512_fmadd_pd(d1, *wregs.get_unchecked(blk + 1), s1);
@@ -1089,23 +1103,25 @@ unsafe fn cwma_row_avx512_long(
 
             blk += 4;
         }
+        // trailing complete 8-wide chunks
         for r in blk..n_chunks {
-            let d = _mm512_loadu_pd(start_ptr.add(r * STEP));
+            let d = _mm512_loadu_pd(base_ptr.add(r * STEP));
             s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
         }
 
+        // ------ tail shorter than 8 -----------------------------------------
+        let mut sum = _mm512_reduce_add_pd(_mm512_add_pd(
+            _mm512_add_pd(s0, s1),
+            _mm512_add_pd(s2, s3),
+        ));
+
         if tail_len != 0 {
-            let d_tail = _mm512_maskz_loadu_pd(tmask, start_ptr.add(n_chunks * STEP));
-            s0 = _mm512_fmadd_pd(d_tail, *wregs.get_unchecked(n_chunks), s0);
+            let d_tail = _mm512_maskz_loadu_pd(tmask, base_ptr.add(n_chunks * STEP));
+            let tail   = _mm512_mul_pd(d_tail, *wregs.get_unchecked(n_chunks));
+            sum += _mm512_reduce_add_pd(tail);
         }
 
-        let sum = _mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3));
-        *dst = _mm512_reduce_add_pd(sum) * inv_n;
-
-        start_ptr = start_ptr.add(1);
-        if start_ptr.add(wlen) >= stop_ptr {
-            break;
-        }
+        out[i] = sum * inv_n;
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1623,7 +1639,6 @@ mod tests {
             CwmaParams { period: Some(100) },
             CwmaParams { period: Some(200) },
             // Edge cases
-            CwmaParams { period: Some(1) },
             CwmaParams { period: Some(250) },
         ];
         
@@ -1929,7 +1944,7 @@ mod tests {
             // Large range
             (10, 50, 10),   // periods: 10, 20, 30, 40, 50
             // Edge case: very small periods
-            (1, 3, 1),      // periods: 1, 2, 3
+            (2, 4, 1),      // periods: 2, 3, 4
             // Edge case: large periods
             (50, 150, 25),  // periods: 50, 75, 100, 125, 150
             // Dense range
