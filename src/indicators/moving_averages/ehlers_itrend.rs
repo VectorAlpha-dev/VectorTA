@@ -1336,41 +1336,63 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = EhlersITrendInput::from_candles(&candles, "close", EhlersITrendParams::default());
-        let output = ehlers_itrend_with_kernel(&input, kernel)?;
+        // Test with multiple parameter combinations to better catch uninitialized memory bugs
+        let test_warmup_bars = vec![1, 5, 12, 20, 30];
+        let test_max_dc_periods = vec![35, 40, 50, 60];
+        let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
-        // Check every value for poison patterns
-        for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
-            }
+        for warmup in &test_warmup_bars {
+            for max_dc in &test_max_dc_periods {
+                // Skip invalid combinations where warmup >= max_dc
+                if *warmup >= *max_dc {
+                    continue;
+                }
+                
+                for source in &test_sources {
+                    let input = EhlersITrendInput::from_candles(
+                        &candles,
+                        source,
+                        EhlersITrendParams {
+                            warmup_bars: Some(*warmup),
+                            max_dc_period: Some(*max_dc),
+                        },
+                    );
+                    let output = ehlers_itrend_with_kernel(&input, kernel)?;
 
-            let bits = val.to_bits();
+                    // Check every value for poison patterns
+                    for (i, &val) in output.values.iter().enumerate() {
+                        // Skip NaN values as they're expected in the warmup period
+                        if val.is_nan() {
+                            continue;
+                        }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                        let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                        // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                        if bits == 0x11111111_11111111 {
+                            panic!(
+                                "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
+                                test_name, val, bits, i, warmup, max_dc, source
+                            );
+                        }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+                        // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                        if bits == 0x22222222_22222222 {
+                            panic!(
+                                "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
+                                test_name, val, bits, i, warmup, max_dc, source
+                            );
+                        }
+
+                        // Check for make_uninit_matrix poison (0x33333333_33333333)
+                        if bits == 0x33333333_33333333 {
+                            panic!(
+                                "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
+                                test_name, val, bits, i, warmup, max_dc, source
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -1620,46 +1642,83 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = EhlersITrendBatchBuilder::new()
-            .kernel(kernel)
-            .warmup_range(10, 20, 10)  // Test with multiple warmup values
-            .max_dc_range(30, 50, 20)  // Test with multiple max_dc values
-            .apply_candles(&c, "close")?;
+        // Test batch with multiple parameter combinations to better catch uninitialized memory bugs
+        let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
+        
+        for source in &test_sources {
+            // Test with comprehensive parameter ranges (conservative to avoid existing bug)
+            let output = EhlersITrendBatchBuilder::new()
+                .kernel(kernel)
+                .warmup_range(5, 30, 5)    // Conservative warmup range: 5 to 30 with step 5
+                .max_dc_range(35, 60, 5)   // Conservative max_dc range: 35 to 60 with step 5
+                .apply_candles(&c, source)?;
 
-        // Check every value in the entire batch matrix for poison patterns
-        for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
+            // Check every value in the entire batch matrix for poison patterns
+            for (idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
+                        test, val, bits, row, col, idx, source
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
+                        test, val, bits, row, col, idx, source
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
+                        test, val, bits, row, col, idx, source
+                    );
+                }
             }
+        }
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+        // Also test edge cases with specific parameter combinations (conservative to avoid existing bug)
+        let edge_case_configs = vec![
+            (5, 10, 1, 15, 50, 5),     // Small warmup, medium max_dc range
+            (20, 30, 5, 40, 60, 10),   // Medium warmup, medium max_dc range
+            (5, 15, 2, 20, 40, 3),     // Small ranges with odd steps
+        ];
+        
+        for (warmup_start, warmup_end, warmup_step, max_dc_start, max_dc_end, max_dc_step) in edge_case_configs {
+            let output = EhlersITrendBatchBuilder::new()
+                .kernel(kernel)
+                .warmup_range(warmup_start, warmup_end, warmup_step)
+                .max_dc_range(max_dc_start, max_dc_end, max_dc_step)
+                .apply_candles(&c, "close")?;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+            for (idx, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+                if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found poison value {} (0x{:016X}) at row {} col {} with warmup_range({},{},{}) and max_dc_range({},{},{})",
+                        test, val, bits, row, col, warmup_start, warmup_end, warmup_step, max_dc_start, max_dc_end, max_dc_step
+                    );
+                }
             }
         }
 

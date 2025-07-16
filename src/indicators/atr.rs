@@ -32,7 +32,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -232,7 +235,15 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = vec![f64::NAN; len];
+    
+    // Find first valid index across all three arrays
+    let first_valid = (0..len)
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .unwrap_or(0);
+    
+    // Calculate warmup period: ATR needs at least 'length' values from first valid index
+    let warmup_period = first_valid + length - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => atr_scalar(high, low, close, length, &mut out),
@@ -519,7 +530,32 @@ fn atr_batch_inner(
     let len = close.len();
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Find first valid index across all three arrays
+    let first_valid = (0..len)
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .unwrap_or(0);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first_valid + c.length.unwrap() - 1)  // ATR warmup period includes leading NaNs
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        std::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let length = combos[row].length.unwrap();
@@ -552,8 +588,18 @@ fn atr_batch_inner(
             do_row(row, slice);
         }
     }
+    
+    // Step 5: Reclaim as Vec<f64>
+    let final_values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(AtrBatchOutput {
-        values,
+        values: final_values,
         combos,
         rows,
         cols,
@@ -763,6 +809,59 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
+    fn check_atr_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        
+        // Test multiple parameter combinations to increase coverage
+        let test_lengths = vec![2, 5, 10, 14, 20, 50, 100, 200];
+        
+        for length in test_lengths {
+            let params = AtrParams { length: Some(length) };
+            let input = AtrInput::from_candles(&candles, params);
+            let output = atr_with_kernel(&input, kernel)?;
+            
+            for (i, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+                
+                let bits = val.to_bits();
+                
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with length={}",
+                        test_name, val, bits, i, length
+                    );
+                }
+                
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with length={}",
+                        test_name, val, bits, i, length
+                    );
+                }
+                
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with length={}",
+                        test_name, val, bits, i, length
+                    );
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn check_atr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_atr_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -795,7 +894,8 @@ mod tests {
         check_atr_length_exceeding_data_length,
         check_atr_very_small_data_set,
         check_atr_with_slice_data_reinput,
-        check_atr_accuracy_nan_check
+        check_atr_accuracy_nan_check,
+        check_atr_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -821,6 +921,70 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        
+        // Test multiple diverse parameter ranges to increase coverage
+        let test_configs = vec![
+            (2, 10, 1),    // Small lengths with step 1
+            (5, 25, 5),    // Medium lengths with step 5
+            (10, 50, 10),  // Larger lengths with step 10
+            (14, 140, 14), // Default-based multiples
+            (50, 200, 50), // Large lengths
+            (100, 100, 0), // Single large length
+        ];
+        
+        for (start, end, step) in test_configs {
+            let output = AtrBatchBuilder::new()
+                .kernel(kernel)
+                .length_range(start, end, step)
+                .apply_candles(&c)?;
+
+            for (idx, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+                
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let length = output.combos[row].length.unwrap_or(14);
+                
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length={} in range ({},{},{})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+                
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length={} in range ({},{},{})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+                
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length={} in range ({},{},{})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -842,6 +1006,7 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 // ============= Python and WASM Bindings =============

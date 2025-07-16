@@ -20,13 +20,17 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -209,7 +213,8 @@ pub fn chande_with_kernel(
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    let warmup_period = first + period - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -244,7 +249,8 @@ pub fn chande_scalar(
     let alpha = 1.0 / period as f64;
     let mut sum_tr = 0.0;
     let mut rma = f64::NAN;
-    let mut atr = vec![f64::NAN; len];
+    let atr_warmup = first + period - 1;
+    let mut atr = alloc_with_nan_prefix(len, atr_warmup);
     for i in first..len {
         let tr = if i == first {
             high[i] - low[i]
@@ -655,7 +661,26 @@ fn chande_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Calculate warmup periods for each row
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    
+    // Allocate uninitialized matrix and set NaN prefixes
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let mult = combos[row].mult.unwrap();
@@ -678,7 +703,7 @@ fn chande_batch_inner(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            values
+            values_slice
                 .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
@@ -686,15 +711,25 @@ fn chande_batch_inner(
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
+            for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(ChandeBatchOutput {
         values,
         combos,
@@ -1003,6 +1038,89 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_chande_no_poison(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with multiple parameter combinations to increase chance of catching bugs
+        let param_combinations = vec![
+            ChandeParams {
+                period: Some(10),
+                mult: Some(2.0),
+                direction: Some("long".into()),
+            },
+            ChandeParams {
+                period: Some(22),
+                mult: Some(3.0),
+                direction: Some("short".into()),
+            },
+            ChandeParams {
+                period: Some(50),
+                mult: Some(5.0),
+                direction: Some("long".into()),
+            },
+        ];
+
+        for params in param_combinations {
+            let input = ChandeInput::from_candles(&candles, params.clone());
+            let output = chande_with_kernel(&input, kernel)?;
+
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
+                        test_name, val, bits, i, 
+                        params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_chande_no_poison(
+        _test_name: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_chande_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1028,7 +1146,8 @@ mod tests {
         check_chande_period_exceeds_length,
         check_chande_bad_direction,
         check_chande_nan_handling,
-        check_chande_streaming
+        check_chande_streaming,
+        check_chande_no_poison
     );
 
     fn check_batch_default_row(
@@ -1061,6 +1180,114 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = ChandeBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(10, 30, 10)  // Tests periods 10, 20, 30
+            .mult_range(2.0, 5.0, 1.5) // Tests multipliers 2.0, 3.5, 5.0
+            .direction("long")
+            .apply_candles(&c)?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+            let params = &output.combos[row];
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+        }
+
+        // Also test with "short" direction
+        let output_short = ChandeBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(15, 45, 15)  // Tests periods 15, 30, 45
+            .mult_range(1.0, 4.0, 1.5) // Tests multipliers 1.0, 2.5, 4.0
+            .direction("short")
+            .apply_candles(&c)?;
+
+        for (idx, &val) in output_short.values.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output_short.cols;
+            let col = idx % output_short.cols;
+            let params = &output_short.combos[row];
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
+                    test, val, bits, row, col, idx,
+                    params.period.unwrap(), params.mult.unwrap(), params.direction.as_ref().unwrap()
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1082,4 +1309,5 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
