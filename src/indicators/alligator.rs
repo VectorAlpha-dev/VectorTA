@@ -391,10 +391,10 @@ pub unsafe fn alligator_scalar(
     first: usize,
     len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    // Calculate warmup periods for each line (period only, offset is applied later)
-    let jaw_warmup = first + jaw_period - 1;
-    let teeth_warmup = first + teeth_period - 1;
-    let lips_warmup = first + lips_period - 1;
+    // Calculate warmup periods for each line (including offset)
+    let jaw_warmup = first + jaw_period - 1 + jaw_offset;
+    let teeth_warmup = first + teeth_period - 1 + teeth_offset;
+    let lips_warmup = first + lips_period - 1 + lips_offset;
     
     // Use zero-copy memory allocation
     let mut jaw = alloc_with_nan_prefix(len, jaw_warmup);
@@ -546,7 +546,7 @@ pub unsafe fn alligator_smma_scalar(
     teeth_offset: usize,
     lips_period: usize,
     lips_offset: usize,
-    _first: usize,
+    first: usize,
     len: usize,
     jaw: &mut [f64],
     teeth: &mut [f64],
@@ -573,12 +573,12 @@ pub unsafe fn alligator_smma_scalar(
     let lips_scale = (lips_period - 1) as f64;
     let lips_inv_period = 1.0 / lips_period as f64;
 
-    for i in 0..len {
+    for i in first..len {
         let data_point = data[i];
         if !jaw_ready {
-            if i < jaw_period {
+            if i < first + jaw_period {
                 jaw_sum += data_point;
-                if i == jaw_period - 1 {
+                if i == first + jaw_period - 1 {
                     jaw_smma_val = jaw_sum / (jaw_period as f64);
                     jaw_ready = true;
                     let shifted_index = i + jaw_offset;
@@ -596,9 +596,9 @@ pub unsafe fn alligator_smma_scalar(
         }
 
         if !teeth_ready {
-            if i < teeth_period {
+            if i < first + teeth_period {
                 teeth_sum += data_point;
-                if i == teeth_period - 1 {
+                if i == first + teeth_period - 1 {
                     teeth_smma_val = teeth_sum / (teeth_period as f64);
                     teeth_ready = true;
                     let shifted_index = i + teeth_offset;
@@ -616,9 +616,9 @@ pub unsafe fn alligator_smma_scalar(
         }
 
         if !lips_ready {
-            if i < lips_period {
+            if i < first + lips_period {
                 lips_sum += data_point;
-                if i == lips_period - 1 {
+                if i == first + lips_period - 1 {
                     lips_smma_val = lips_sum / (lips_period as f64);
                     lips_ready = true;
                     let shifted_index = i + lips_offset;
@@ -999,18 +999,18 @@ fn alligator_batch_inner(
     let mut teeth_mu = make_uninit_matrix(rows, cols);
     let mut lips_mu = make_uninit_matrix(rows, cols);
     
-    // Calculate warmup periods for each combination (period only, offset is applied later)
+    // Calculate warmup periods for each combination (including offset)
     let jaw_warmups: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.jaw_period.unwrap() - 1)
+        .map(|c| first + c.jaw_period.unwrap() - 1 + c.jaw_offset.unwrap())
         .collect();
     let teeth_warmups: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.teeth_period.unwrap() - 1)
+        .map(|c| first + c.teeth_period.unwrap() - 1 + c.teeth_offset.unwrap())
         .collect();
     let lips_warmups: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.lips_period.unwrap() - 1)
+        .map(|c| first + c.lips_period.unwrap() - 1 + c.lips_offset.unwrap())
         .collect();
         
     // Initialize NaN prefixes

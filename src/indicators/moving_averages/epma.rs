@@ -333,8 +333,13 @@ fn build_weights_rev(period: usize, offset: usize) -> (Vec<f64>, f64) {
     let p1 = period - 1;
     let mut w = Vec::with_capacity(p1);
     let mut sum = 0.0;
+    // Match the scalar implementation's weight formula
+    // Scalar uses: weights[i] = (period - i - offset) for i in 0..p1
+    // and then accesses as weights[p1 - 1 - i] when processing
+    // So for this reversed version, we want w[k] to match what would be weights[k] in scalar
     for k in 0..p1 {
-        let val = (k as isize + 2 - offset as isize) as f64;
+        // This gives us the weight that would be at position k in the reversed array
+        let val = (period as isize - (p1 - 1 - k) as isize - offset as isize) as f64;
         w.push(val);
         sum += val;
     }

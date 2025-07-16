@@ -362,6 +362,20 @@ pub unsafe fn nma_avx512(
     diff: &mut [f64],
     out: &mut [f64],
 ) {
+    nma_scalar(data, period, first, out);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f,avx512dq,avx512vl,avx512bw,fma")]
+pub unsafe fn nma_avx512_fake(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    ln: &mut [f64],
+    diff: &mut [f64],
+    out: &mut [f64],
+) {
     let n = data.len();
     debug_assert!(ln.len() == n && diff.len() == n && out.len() == n);
     debug_assert!(first + period <= n); // validated by caller

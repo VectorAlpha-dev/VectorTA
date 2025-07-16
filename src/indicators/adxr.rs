@@ -249,8 +249,8 @@ pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput,
         other => other,
     };
 
-    // ADXR needs warmup period of first + 2 * period - 1
-    let warmup_period = first + 2 * period - 1;
+    // ADXR needs warmup period of first + 2 * period
+    let warmup_period = first + 2 * period;
     let mut out = alloc_with_nan_prefix(len, warmup_period);
     unsafe {
         match chosen {
@@ -287,8 +287,8 @@ pub fn adxr_scalar(
     out: &mut [f64],
 ) {
     let len = close.len();
-    // ADX values start appearing at first + 2 * period - 1
-    let adx_warmup = first + 2 * period - 1;
+    // ADX values start appearing at first + 2 * period
+    let adx_warmup = first + 2 * period;
     let mut adx_vals = alloc_with_nan_prefix(len, adx_warmup);
     let period_f64 = period as f64;
     let reciprocal_period = 1.0 / period_f64;
@@ -298,7 +298,7 @@ pub fn adxr_scalar(
     let mut plus_dm_sum = 0.0;
     let mut minus_dm_sum = 0.0;
 
-    for i in 1..=period {
+    for i in (first + 1)..=(first + period) {
         let prev_close = close[i - 1];
         let curr_high = high[i];
         let curr_low = low[i];
@@ -346,7 +346,7 @@ pub fn adxr_scalar(
     let mut last_adx = f64::NAN;
     let mut have_adx = false;
 
-    for i in (period + 1)..len {
+    for i in (first + period + 1)..len {
         let prev_close = close[i - 1];
         let curr_high = high[i];
         let curr_low = low[i];
@@ -404,11 +404,13 @@ pub fn adxr_scalar(
             last_adx = adx_current;
         }
     }
-    for i in (2 * period)..len {
+    for i in (first + 2 * period)..len {
         let adx_i = adx_vals[i];
         let adx_im_p = adx_vals[i - period];
         if adx_i.is_finite() && adx_im_p.is_finite() {
             out[i] = (adx_i + adx_im_p) / 2.0;
+        } else {
+            out[i] = f64::NAN;
         }
     }
 }
@@ -644,8 +646,8 @@ fn adxr_batch_inner(
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
-            // ADXR warmup: first + 2 * period - 1
-            first + 2 * c.period.unwrap() - 1
+            // ADXR warmup: first + 2 * period
+            first + 2 * c.period.unwrap()
         })
         .collect();
     
@@ -1080,6 +1082,14 @@ pub fn adxr_py<'py>(
             });
         }
 
+        // ADXR needs warmup period of first + 2 * period
+        let warmup_period = first + 2 * period;
+        
+        // Initialize warmup period with NaN
+        for i in 0..warmup_period.min(slice_out.len()) {
+            slice_out[i] = f64::NAN;
+        }
+
         // Compute ADXR values - the scalar function handles NaN initialization properly
         unsafe {
             match chosen {
@@ -1212,6 +1222,17 @@ pub fn adxr_batch_py<'py>(
                 needed: max_p + 1,
                 valid: close_slice.len() - first,
             });
+        }
+
+        // Initialize NaN values for warmup periods in each row
+        for (row_idx, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap();
+            // ADXR needs warmup period of first + 2 * period
+            let warmup_period = first + 2 * period;
+            let row_start = row_idx * cols;
+            for col_idx in 0..warmup_period.min(cols) {
+                slice_out[row_start + col_idx] = f64::NAN;
+            }
         }
 
         // Process each row

@@ -204,7 +204,13 @@
       "Bash(.venv/Scripts/python:*)",
       "Bash(cd \"C:\\Rust Projects\\my_project-bindings-4\")",
       "Bash(cargo check --features nightly-avx)",
-      "Bash(test_bindings.bat dema)"
+      "Bash(test_bindings.bat dema)",
+      "Bash(.venvScriptspython tests/python/test_bollinger_bands_width.py -v)",
+      "Bash(.venvScriptspython.exe tests/python/test_bollinger_bands_width.py -v)",
+      "Bash(test_bindings.bat bollinger_bands_width)",
+      "Bash(.venvScriptspython -m pytest tests/python/test_bollinger_bands_width.py::TestBollingerBandsWidth::test_nan_handling -xvs)",
+      "Bash(.venvScriptspython -m pytest tests/python/test_adxr.py::TestAdxr::test_adxr_nan_handling -xvs)",
+      "Bash(debug_adxr_rust.exe)"
     ],
     "deny": []
   }

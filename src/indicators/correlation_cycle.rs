@@ -47,6 +47,7 @@ pub struct CorrelationCycleOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct CorrelationCycleParams {
     pub period: Option<usize>,
     pub threshold: Option<f64>,

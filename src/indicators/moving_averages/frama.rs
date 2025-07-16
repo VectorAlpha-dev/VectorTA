@@ -2166,6 +2166,19 @@ pub fn frama_batch_py<'py>(
             _ => Kernel::Scalar,
         };
         
+        // Find first valid index
+        let first = close_slice.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        
+        // Initialize NaN values for warmup periods in each row
+        for (row_idx, combo) in combos.iter().enumerate() {
+            let window = combo.window.unwrap_or(10);
+            let warmup_period = first + window - 1;
+            let row_start = row_idx * cols;
+            for col_idx in 0..warmup_period.min(cols) {
+                slice_out[row_start + col_idx] = f64::NAN;
+            }
+        }
+        
         frama_batch_inner_into(high_slice, low_slice, close_slice, &range, single_kernel, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;

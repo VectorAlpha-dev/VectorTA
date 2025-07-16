@@ -734,8 +734,9 @@ fn bollinger_bands_width_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     
+    // Check for empty data and return AllValuesNaN for consistency
     if cols == 0 {
-        return Err(BollingerBandsWidthError::EmptyData);
+        return Err(BollingerBandsWidthError::AllValuesNaN);
     }
     
     // Step 1: Allocate uninitialized matrix
@@ -1357,6 +1358,15 @@ pub fn bollinger_bands_width_py<'py>(
     
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), BollingerBandsWidthError> {
+        // First, we need to calculate the warmup period and initialize with NaN
+        let first_valid_idx = slice_in.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        let warmup_period = first_valid_idx + period - 1;
+        
+        // Initialize warmup period with NaN
+        for i in 0..warmup_period.min(slice_out.len()) {
+            slice_out[i] = f64::NAN;
+        }
+        
         // SAFETY: Compute directly into the pre-allocated NumPy buffer.
         // This avoids an extra allocation and copy.
         bollinger_bands_width_into(slice_in, &bbw_in, slice_out, kern)?;
@@ -1480,6 +1490,25 @@ pub fn bollinger_bands_width_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
+        
+        // Calculate warmup periods for each row and initialize NaN prefixes
+        let first_valid = slice_in.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        let warmup_periods: Vec<usize> = (0..rows).map(|i| {
+            let period = if period_range.2 == 0 {
+                period_range.0
+            } else {
+                period_range.0 + i * period_range.2
+            };
+            first_valid + period - 1
+        }).collect();
+        
+        // Initialize NaN values for warmup periods in each row
+        for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
+            let row_start = row_idx * cols;
+            for col_idx in 0..warmup.min(cols) {
+                slice_out[row_start + col_idx] = f64::NAN;
+            }
+        }
         
         // SAFETY: Compute directly into the pre-allocated NumPy buffer.
         // This avoids an extra allocation and copy.
