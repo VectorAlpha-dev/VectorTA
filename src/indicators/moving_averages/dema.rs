@@ -535,9 +535,47 @@ fn dema_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    let mut values = vec![0.0; rows * cols];
     
-    dema_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    if cols == 0 {
+        return Err(DemaError::EmptyInputData);
+    }
+    
+    // Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0) + c.period.unwrap() - 1  // DEMA warmup is period - 1
+        })
+        .collect();
+    
+    // Initialize NaN prefixes efficiently
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice using ManuallyDrop pattern
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Perform computation
+    dema_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
+    };
     
     Ok(DemaBatchOutput {
         values,
@@ -591,31 +629,15 @@ fn dema_batch_inner_into(
         return Err(DemaError::InvalidPeriod { period: 0 }); // TODO: better error
     }
 
-    // ── 2. Initialize NaN warm-ups using efficient method ────────────────────
+    // ── 2. Calculate warmup periods (NaN prefixes already initialized by caller) ─────
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + 2 * (c.period.unwrap() - 1))  // DEMA needs 2*(period-1) warmup
+        .map(|c| first + c.period.unwrap() - 1)  // DEMA warmup is period - 1
         .collect();
-    
-    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-    // init_matrix_prefixes function. This is safe because:
-    // 1. MaybeUninit<T> has the same layout as T
-    // 2. We ensure all values are written before the slice is used again
-    let out_uninit = unsafe {
-        std::slice::from_raw_parts_mut(
-            out.as_mut_ptr() as *mut MaybeUninit<f64>,
-            out.len()
-        )
-    };
 
-    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
-
-    // ── 3. per-row kernel closure; *dst_mu* is &mut [MaybeUninit<f64>] ─────
-    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+    // ── 3. per-row kernel closure; dst is &mut [f64] ─────
+    let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
-
-        // Cast just this slice to &mut [f64]
-        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -629,17 +651,17 @@ fn dema_batch_inner_into(
     // ── 4. run every row kernel, parallel or sequential ────────────────────
     if parallel {
         #[cfg(not(target_arch = "wasm32"))] {
-            out_uninit.par_chunks_mut(cols)
+            out.par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
         #[cfg(target_arch = "wasm32")] {
-            for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }

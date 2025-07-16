@@ -201,7 +201,10 @@
       "Bash(.\\test_bindings.bat cksp)",
       "Bash(test_bindings.bat correlation_cycle)",
       "Bash(.venvScriptspython.exe tests/python/test_correlation_cycle.py)",
-      "Bash(.venv/Scripts/python:*)"
+      "Bash(.venv/Scripts/python:*)",
+      "Bash(cd \"C:\\Rust Projects\\my_project-bindings-4\")",
+      "Bash(cargo check --features nightly-avx)",
+      "Bash(test_bindings.bat dema)"
     ],
     "deny": []
   }
