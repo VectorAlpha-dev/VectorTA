@@ -44,6 +44,8 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::correlation_cycle::{correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -423,6 +425,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cg_py, m)?)?;
     m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
     m.add_class::<CgStreamPy>()?;
+
+    // Register Correlation Cycle functions with their user-facing names
+    m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
+    m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
+    m.add_class::<CorrelationCycleStreamPy>()?;
 
     // Register AO functions with their user-facing names
     m.add_function(wrap_pyfunction!(ao_py, m)?)?;

@@ -5,7 +5,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+    init_matrix_prefixes, make_uninit_matrix
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -13,6 +16,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CorrelationCycleInput<'a> {
@@ -220,10 +224,15 @@ pub fn correlation_cycle_with_kernel(input: &CorrelationCycleInput, kernel: Kern
         other => other,
     };
 
-    let mut real = vec![f64::NAN; data.len()];
-    let mut imag = vec![f64::NAN; data.len()];
-    let mut angle = vec![f64::NAN; data.len()];
-    let mut state = vec![0.0; data.len()];
+    // Calculate first valid index and warmup period
+    let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+    let warmup_period = first_valid + period; // The computation starts at index 'period'
+    
+    // Use zero-copy memory allocation for all output arrays
+    let mut real = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut imag = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut angle = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut state = vec![0.0; data.len()]; // state doesn't need NaN prefix, it's 0.0 initialized
 
     unsafe {
         match chosen {
@@ -528,9 +537,10 @@ impl CorrelationCycleStream {
             small.push(0.0);
 
             // Prepare tiny result arrays of length = period+1
-            let mut real_arr = vec![f64::NAN; self.period + 1];
-            let mut imag_arr = vec![f64::NAN; self.period + 1];
-            let mut angle_arr = vec![f64::NAN; self.period + 1];
+            // Use alloc_with_nan_prefix with warmup = period (computation starts at index period)
+            let mut real_arr = alloc_with_nan_prefix(self.period + 1, self.period);
+            let mut imag_arr = alloc_with_nan_prefix(self.period + 1, self.period);
+            let mut angle_arr = alloc_with_nan_prefix(self.period + 1, self.period);
             let mut state_arr = vec![0.0; self.period + 1];
 
             // Call the scalar routine on small[0..(period+1)]
@@ -582,9 +592,10 @@ impl CorrelationCycleStream {
         small.push(0.0);
 
         // c) Compute correlation_cycle_scalar on that length=(period+1) slice
-        let mut real_arr = vec![f64::NAN; self.period + 1];
-        let mut imag_arr = vec![f64::NAN; self.period + 1];
-        let mut angle_arr = vec![f64::NAN; self.period + 1];
+        // Use alloc_with_nan_prefix with warmup = period (computation starts at index period)
+        let mut real_arr = alloc_with_nan_prefix(self.period + 1, self.period);
+        let mut imag_arr = alloc_with_nan_prefix(self.period + 1, self.period);
+        let mut angle_arr = alloc_with_nan_prefix(self.period + 1, self.period);
         let mut state_arr = vec![0.0; self.period + 1];
         unsafe {
             correlation_cycle_scalar(
@@ -821,10 +832,50 @@ fn correlation_cycle_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    let mut real = vec![f64::NAN; rows * cols];
-    let mut imag = vec![f64::NAN; rows * cols];
-    let mut angle = vec![f64::NAN; rows * cols];
-    let mut state = vec![0.0; rows * cols];
+    // Step 1: Allocate uninitialized matrices for each output
+    let mut real_mu = make_uninit_matrix(rows, cols);
+    let mut imag_mu = make_uninit_matrix(rows, cols);
+    let mut angle_mu = make_uninit_matrix(rows, cols);
+    let mut state = vec![0.0; rows * cols]; // state doesn't need NaN prefix
+
+    // Step 2: Calculate warmup periods for each row (each parameter combination)
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0) + c.period.unwrap()
+        })
+        .collect();
+
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut real_mu, cols, &warm);
+    init_matrix_prefixes(&mut imag_mu, cols, &warm);
+    init_matrix_prefixes(&mut angle_mu, cols, &warm);
+
+    // Step 4: Convert to mutable slices for computation
+    let mut real_guard = ManuallyDrop::new(real_mu);
+    let mut imag_guard = ManuallyDrop::new(imag_mu);
+    let mut angle_guard = ManuallyDrop::new(angle_mu);
+    
+    let real: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            real_guard.as_mut_ptr() as *mut f64,
+            real_guard.len(),
+        )
+    };
+    let imag: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            imag_guard.as_mut_ptr() as *mut f64,
+            imag_guard.len(),
+        )
+    };
+    let angle: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            angle_guard.as_mut_ptr() as *mut f64,
+            angle_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_real: &mut [f64], out_imag: &mut [f64], out_angle: &mut [f64], out_state: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
@@ -904,6 +955,29 @@ fn correlation_cycle_batch_inner(
             do_row(0, r, im, an, st); // fix: row tracking if needed, otherwise just keep as 0
         }
     }
+
+    // Step 5: Reclaim as Vec<f64>
+    let real = unsafe {
+        Vec::from_raw_parts(
+            real_guard.as_mut_ptr() as *mut f64,
+            real_guard.len(),
+            real_guard.capacity()
+        )
+    };
+    let imag = unsafe {
+        Vec::from_raw_parts(
+            imag_guard.as_mut_ptr() as *mut f64,
+            imag_guard.len(),
+            imag_guard.capacity()
+        )
+    };
+    let angle = unsafe {
+        Vec::from_raw_parts(
+            angle_guard.as_mut_ptr() as *mut f64,
+            angle_guard.len(),
+            angle_guard.capacity()
+        )
+    };
 
     Ok(CorrelationCycleBatchOutput {
         real,
@@ -1133,6 +1207,79 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_cc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with multiple parameter combinations to increase coverage
+        let test_params = vec![
+            CorrelationCycleParams { period: Some(20), threshold: Some(9.0) },
+            CorrelationCycleParams { period: Some(10), threshold: Some(5.0) },
+            CorrelationCycleParams { period: Some(30), threshold: Some(15.0) },
+            CorrelationCycleParams { period: None, threshold: None }, // default params
+        ];
+
+        for params in test_params {
+            let input = CorrelationCycleInput::from_candles(&candles, "close", params.clone());
+            let output = correlation_cycle_with_kernel(&input, kernel)?;
+
+            // Check every value in all output arrays for poison patterns
+            let arrays = vec![
+                ("real", &output.real),
+                ("imag", &output.imag),
+                ("angle", &output.angle),
+                ("state", &output.state),
+            ];
+
+            for (array_name, values) in arrays {
+                for (i, &val) in values.iter().enumerate() {
+                    // Skip NaN values as they're expected in the warmup period
+                    if val.is_nan() {
+                        continue;
+                    }
+
+                    let bits = val.to_bits();
+
+                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    if bits == 0x11111111_11111111 {
+                        panic!(
+                            "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
+                            test_name, val, bits, i, array_name, params
+                        );
+                    }
+
+                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    if bits == 0x22222222_22222222 {
+                        panic!(
+                            "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
+                            test_name, val, bits, i, array_name, params
+                        );
+                    }
+
+                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    if bits == 0x33333333_33333333 {
+                        panic!(
+                            "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
+                            test_name, val, bits, i, array_name, params
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_cc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_cc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1166,7 +1313,8 @@ mod tests {
         check_cc_very_small_dataset,
         check_cc_reinput,
         check_cc_nan_handling,
-        check_cc_streaming
+        check_cc_streaming,
+        check_cc_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1205,5 +1353,328 @@ mod tests {
             }
         };
     }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = CorrelationCycleBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(10, 40, 10)  // Test periods: 10, 20, 30, 40
+            .threshold_range(5.0, 15.0, 5.0)  // Test thresholds: 5.0, 10.0, 15.0
+            .apply_candles(&c, "close")?;
+
+        // Check every value in all batch matrices for poison patterns
+        let matrices = vec![
+            ("real", &output.real),
+            ("imag", &output.imag),
+            ("angle", &output.angle),
+            ("state", &output.state),
+        ];
+
+        for (matrix_name, values) in matrices {
+            for (idx, &val) in values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let period = output.combos[row].period.unwrap();
+                let threshold = output.combos[row].threshold.unwrap();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
+                        test, val, bits, row, col, idx, matrix_name, period, threshold
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
+                        test, val, bits, row, col, idx, matrix_name, period, threshold
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
+                        test, val, bits, row, col, idx, matrix_name, period, threshold
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
+}
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "correlation_cycle")]
+#[pyo3(signature = (data, period=None, threshold=None, kernel=None))]
+pub fn correlation_cycle_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: Option<usize>,
+    threshold: Option<f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let data_slice = data.as_slice()?;
+
+    let params = CorrelationCycleParams { period, threshold };
+    let input = CorrelationCycleInput::from_slice(data_slice, params);
+
+    let chosen_kernel = match kernel {
+        Some(k) => crate::utilities::kernel_validation::validate_kernel(Some(k), false)?,
+        None => Kernel::Auto,
+    };
+
+    let output = correlation_cycle_with_kernel(&input, chosen_kernel)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("real", PyArray1::from_vec(py, output.real))?;
+    dict.set_item("imag", PyArray1::from_vec(py, output.imag))?;
+    dict.set_item("angle", PyArray1::from_vec(py, output.angle))?;
+    dict.set_item("state", PyArray1::from_vec(py, output.state))?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "correlation_cycle_batch")]
+#[pyo3(signature = (data, period_range=None, threshold_range=None, kernel=None))]
+pub fn correlation_cycle_batch_py<'py>(
+    py: Python<'py>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: Option<(usize, usize, usize)>,
+    threshold_range: Option<(f64, f64, f64)>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{PyArray1, PyArray2, PyArrayMethods};
+    use pyo3::types::PyDict;
+
+    let data_slice = data.as_slice()?;
+
+    let mut sweep = CorrelationCycleBatchRange::default();
+    if let Some((start, end, step)) = period_range {
+        sweep.period = (start, end, step);
+    }
+    if let Some((start, end, step)) = threshold_range {
+        sweep.threshold = (start, end, step);
+    }
+
+    let k = match kernel {
+        Some(k_str) => crate::utilities::kernel_validation::validate_kernel(Some(k_str), true)?,
+        None => Kernel::Auto,
+    };
+
+    let batch_output = py
+        .allow_threads(|| correlation_cycle_batch_with_kernel(data_slice, &sweep, k))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let rows = batch_output.rows;
+    let cols = batch_output.cols;
+
+    // Create numpy arrays from the results
+    let real_array = batch_output.real.into_pyarray(py);
+    let imag_array = batch_output.imag.into_pyarray(py);
+    let angle_array = batch_output.angle.into_pyarray(py);
+    let state_array = batch_output.state.into_pyarray(py);
+
+    // Create output dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("real", real_array.reshape((rows, cols))?)?;
+    dict.set_item("imag", imag_array.reshape((rows, cols))?)?;
+    dict.set_item("angle", angle_array.reshape((rows, cols))?)?;
+    dict.set_item("state", state_array.reshape((rows, cols))?)?;
+    
+    // Add parameter information
+    dict.set_item(
+        "periods",
+        batch_output.combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "thresholds",
+        batch_output.combos
+            .iter()
+            .map(|p| p.threshold.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "CorrelationCycleStream")]
+pub struct CorrelationCycleStreamPy {
+    inner: CorrelationCycleStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CorrelationCycleStreamPy {
+    #[new]
+    #[pyo3(signature = (period=None, threshold=None))]
+    pub fn new(period: Option<usize>, threshold: Option<f64>) -> PyResult<Self> {
+        let params = CorrelationCycleParams { period, threshold };
+        let inner = CorrelationCycleStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
+        self.inner.update(value)
+    }
+}
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CorrelationCycleJsOutput {
+    pub real: Vec<f64>,
+    pub imag: Vec<f64>,
+    pub angle: Vec<f64>,
+    pub state: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_js(
+    data: &[f64],
+    period: Option<usize>,
+    threshold: Option<f64>,
+) -> Result<JsValue, JsValue> {
+    let params = CorrelationCycleParams { period, threshold };
+    let input = CorrelationCycleInput::from_slice(data, params);
+
+    let output = correlation_cycle_with_kernel(&input, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = CorrelationCycleJsOutput {
+        real: output.real,
+        imag: output.imag,
+        angle: output.angle,
+        state: output.state,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CorrelationCycleBatchJsOutput {
+    pub real: Vec<f64>,
+    pub imag: Vec<f64>,
+    pub angle: Vec<f64>,
+    pub state: Vec<f64>,
+    pub combos: Vec<CorrelationCycleParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_batch_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    threshold_start: f64,
+    threshold_end: f64,
+    threshold_step: f64,
+) -> Result<JsValue, JsValue> {
+    let sweep = CorrelationCycleBatchRange {
+        period: (period_start, period_end, period_step),
+        threshold: (threshold_start, threshold_end, threshold_step),
+    };
+
+    let output = correlation_cycle_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = CorrelationCycleBatchJsOutput {
+        real: output.real,
+        imag: output.imag,
+        angle: output.angle,
+        state: output.state,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_batch_metadata_js(
+    data_len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    threshold_start: f64,
+    threshold_end: f64,
+    threshold_step: f64,
+) -> Result<JsValue, JsValue> {
+    let sweep = CorrelationCycleBatchRange {
+        period: (period_start, period_end, period_step),
+        threshold: (threshold_start, threshold_end, threshold_step),
+    };
+
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = data_len;
+
+    let metadata = serde_json::json!({
+        "rows": rows,
+        "cols": cols,
+        "periods": combos.iter().map(|c| c.period.unwrap()).collect::<Vec<_>>(),
+        "thresholds": combos.iter().map(|c| c.threshold.unwrap()).collect::<Vec<_>>(),
+    });
+
+    serde_wasm_bindgen::to_value(&metadata)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
