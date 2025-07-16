@@ -35,7 +35,10 @@ use serde::{Deserialize, Serialize};
 use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -250,8 +253,22 @@ pub fn bandpass_with_kernel(input: &BandPassInput, kernel: Kernel) -> Result<Ban
     let gamma = (2.0 * PI * bandwidth / period as f64).cos();
     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-    let mut bp = hp.clone();
-    let mut bp_normalized = vec![0.0; len];
+    // Determine warmup period from the highpass output
+    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+    let warmup_bp = first_valid_hp.max(2); // bp calculation starts from index 2
+    
+    // Allocate bp with proper NaN prefix
+    let mut bp = alloc_with_nan_prefix(len, warmup_bp);
+    // Copy the first 2 values from hp (needed for the recursive calculation)
+    if len > 0 {
+        bp[0] = hp[0];
+    }
+    if len > 1 {
+        bp[1] = hp[1];
+    }
+    
+    // bp_normalized will have the same warmup as bp
+    let mut bp_normalized = alloc_with_nan_prefix(len, warmup_bp);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -301,7 +318,10 @@ pub fn bandpass_with_kernel(input: &BandPassInput, kernel: Kernel) -> Result<Ban
     let trigger_result = highpass(&trigger_input)?;
     let trigger = trigger_result.values;
 
-    let mut signal = vec![0.0; len];
+    // Signal warmup is the max of bp_normalized and trigger warmup periods
+    let first_valid_trigger = trigger.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+    let warmup_signal = warmup_bp.max(first_valid_trigger);
+    let mut signal = alloc_with_nan_prefix(len, warmup_signal);
     for i in 0..len {
         let bn = bp_normalized[i];
         let tr = trigger[i];
@@ -1056,6 +1076,162 @@ mod tests {
         }
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_bandpass_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test multiple parameter combinations to increase coverage
+        let test_params = vec![
+            BandPassParams { period: Some(10), bandwidth: Some(0.2) },
+            BandPassParams { period: Some(20), bandwidth: Some(0.3) },  // default
+            BandPassParams { period: Some(30), bandwidth: Some(0.4) },
+            BandPassParams { period: Some(50), bandwidth: Some(0.5) },
+            BandPassParams { period: Some(5), bandwidth: Some(0.1) },   // edge case: small period
+            BandPassParams { period: Some(100), bandwidth: Some(0.8) }, // edge case: large period
+        ];
+
+        for params in test_params {
+            let input = BandPassInput::from_candles(&candles, "close", params.clone());
+            let output = bandpass_with_kernel(&input, kernel)?;
+
+            // Check every value in all output vectors for poison patterns
+            for (i, &val) in output.bp.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+        }
+
+        // Check bp_normalized
+        for (i, &val) in output.bp_normalized.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp_normalized at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp_normalized at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp_normalized at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+        }
+
+        // Check signal
+        for (i, &val) in output.signal.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in signal at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in signal at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+        }
+
+        // Check trigger
+        for (i, &val) in output.trigger.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in trigger at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in trigger at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in trigger at index {} with params {:?}",
+                    test_name, val, bits, i, params
+                );
+            }
+        }
+        } // close the params loop
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_bandpass_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     generate_all_bandpass_tests!(
         check_bandpass_partial_params,
         check_bandpass_accuracy,
@@ -1064,7 +1240,8 @@ mod tests {
         check_bandpass_period_exceeds_length,
         check_bandpass_very_small_dataset,
         check_bandpass_reinput,
-        check_bandpass_nan_handling
+        check_bandpass_nan_handling,
+        check_bandpass_no_poison
     );
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
     skip_if_unsupported!(kernel, test);
@@ -1119,7 +1296,163 @@ macro_rules! gen_batch_tests {
         }
     };
 }
+
+// Check for poison values in batch output - only runs in debug mode
+#[cfg(debug_assertions)]
+fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    skip_if_unsupported!(kernel, test);
+
+    let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+    let c = read_candles_from_csv(file)?;
+
+    // Test batch with multiple parameter combinations - more comprehensive coverage
+    let output = BandPassBatchBuilder::new()
+        .kernel(kernel)
+        .period_range(5, 50, 5)  // 10 periods: 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+        .bandwidth_range(0.1, 0.9, 0.1)  // 9 bandwidths: 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+        .apply_candles(&c, "close")?;
+    
+    // This creates 90 parameter combinations (10 periods × 9 bandwidths)
+
+    // Check every value in all output vectors for poison patterns
+    for (row_idx, output_row) in output.values.iter().enumerate() {
+        let params = &output.combos[row_idx];  // Get params for this row
+        // Check bp values
+        for (col_idx, &val) in output_row.bp.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+        }
+
+        // Check bp_normalized values
+        for (col_idx, &val) in output_row.bp_normalized.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp_normalized at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp_normalized at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp_normalized at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+        }
+
+        // Check signal values
+        for (col_idx, &val) in output_row.signal.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in signal at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in signal at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+        }
+
+        // Check trigger values
+        for (col_idx, &val) in output_row.trigger.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in trigger at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in trigger at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in trigger at row {} col {} with params {:?}",
+                    test, val, bits, row_idx, col_idx, params
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// Release mode stub - does nothing
+#[cfg(not(debug_assertions))]
+fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
 gen_batch_tests!(check_batch_default_row);
+gen_batch_tests!(check_batch_no_poison);
 }
 
 // ========================= Python Bindings =========================

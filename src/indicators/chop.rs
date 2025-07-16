@@ -19,7 +19,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +30,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -248,7 +252,8 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
         });
     }
 
-    let mut out = vec![f64::NAN; len];
+    let warmup_period = first_valid_idx + period - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -703,7 +708,21 @@ fn chop_batch_inner(
 
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let ChopParams {
             period,
@@ -742,6 +761,14 @@ fn chop_batch_inner(
             do_row(row, slice);
         }
     }
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(ChopBatchOutput {
         values,
         combos,
@@ -1146,6 +1173,102 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_chop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with default parameters
+        let input = ChopInput::with_default_candles(&candles);
+        let output = chop_with_kernel(&input, kernel)?;
+
+        // Check every value for poison patterns
+        for (i, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        // Test with multiple parameter combinations to increase coverage
+        let param_combinations = vec![
+            ChopParams { period: Some(10), scalar: Some(50.0), drift: Some(1) },
+            ChopParams { period: Some(20), scalar: Some(100.0), drift: Some(2) },
+            ChopParams { period: Some(30), scalar: Some(150.0), drift: Some(3) },
+        ];
+
+        for params in param_combinations {
+            let input = ChopInput::from_candles(&candles, params);
+            let output = chop_with_kernel(&input, kernel)?;
+
+            for (i, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, input.params
+                    );
+                }
+
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, input.params
+                    );
+                }
+
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, input.params
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_chop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_chop_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1176,7 +1299,8 @@ mod tests {
         check_chop_zero_period,
         check_chop_period_exceeds_length,
         check_chop_nan_handling,
-        check_chop_streaming
+        check_chop_streaming,
+        check_chop_no_poison
     );
     #[cfg(test)]
 
@@ -1267,6 +1391,71 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        
+        let high = c.high.as_slice();
+        let low = c.low.as_slice();
+        let close = c.close.as_slice();
+
+        // Test batch with multiple parameter combinations
+        let output = ChopBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(10, 30, 10)
+            .scalar_range(50.0, 150.0, 50.0)
+            .drift_range(1, 3, 1)
+            .apply_slices(high, low, close)?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1290,4 +1479,5 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_param_row_lookup);
     gen_batch_tests!(check_batch_huge_period);
+    gen_batch_tests!(check_batch_no_poison);
 }

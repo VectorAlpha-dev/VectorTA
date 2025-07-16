@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -43,6 +46,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -227,7 +231,9 @@ pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, Ad
         return Err(AdxError::AllValuesNaN);
     }
 
-    let mut out = vec![f64::NAN; len];
+    // Calculate warmup period for ADX (2 * period - 1 is when ADX starts producing values)
+    let warmup_period = 2 * period - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -552,7 +558,27 @@ fn adx_batch_inner(
     }
     let rows = combos.len();
     let cols = close.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row (ADX warmup is 2 * period - 1)
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| 2 * c.period.unwrap() - 1)
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
@@ -584,6 +610,16 @@ fn adx_batch_inner(
             do_row(row, slice);
         }
     }
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(AdxBatchOutput {
         values,
         combos,
@@ -1098,9 +1134,6 @@ pub fn adx_py<'py>(
 
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), AdxError> {
-        // Initial fill with NaN for entire output
-        slice_out.fill(f64::NAN);
-        
         // Prepare data
         let period = adx_in.get_period();
         let len = close_slice.len();
@@ -1130,10 +1163,16 @@ pub fn adx_py<'py>(
             Kernel::Auto => detect_best_kernel(),
             k => k,
         };
+        
+        // Initialize warmup period with NaN values
+        let warmup_period = 2 * period - 1;
+        for i in 0..warmup_period.min(len) {
+            slice_out[i] = f64::NAN;
+        }
 
         // SAFETY: We must write to ALL elements before returning to Python
         // adx_scalar (and its AVX stubs) will write to appropriate indices
-        // The rest remain NaN as initialized above
+        // The warmup region has been initialized with NaN above
         unsafe {
             match chosen {
                 Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1233,9 +1272,6 @@ pub fn adx_batch_py<'py>(
 
     // 3. Heavy work without the GIL
     let combos = py.allow_threads(|| {
-        // Initialize all values to NaN first
-        slice_out.fill(f64::NAN);
-        
         // Resolve Kernel::Auto to a specific kernel
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
@@ -1253,6 +1289,12 @@ pub fn adx_batch_py<'py>(
             let period = combo.period.unwrap();
             let row_start = row * cols;
             let row_slice = &mut slice_out[row_start..row_start + cols];
+            
+            // Initialize warmup period with NaN values for this row
+            let warmup_period = 2 * period - 1;
+            for i in 0..warmup_period.min(cols) {
+                row_slice[i] = f64::NAN;
+            }
             
             unsafe {
                 match simd {
