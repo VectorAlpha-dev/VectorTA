@@ -24,11 +24,11 @@
 //!
 
 #[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
@@ -38,15 +38,18 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for VpwmaInput<'a> {
     #[inline(always)]
@@ -97,7 +100,10 @@ impl<'a> VpwmaInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: VpwmaParams) -> Self {
         Self {
-            data: VpwmaData::Candles { candles: c, source: s },
+            data: VpwmaData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -161,19 +167,28 @@ impl VpwmaBuilder {
     }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<VpwmaOutput, VpwmaError> {
-        let p = VpwmaParams { period: self.period, power: self.power };
+        let p = VpwmaParams {
+            period: self.period,
+            power: self.power,
+        };
         let i = VpwmaInput::from_candles(c, "close", p);
         vpwma_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<VpwmaOutput, VpwmaError> {
-        let p = VpwmaParams { period: self.period, power: self.power };
+        let p = VpwmaParams {
+            period: self.period,
+            power: self.power,
+        };
         let i = VpwmaInput::from_slice(d, p);
         vpwma_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<VpwmaStream, VpwmaError> {
-        let p = VpwmaParams { period: self.period, power: self.power };
+        let p = VpwmaParams {
+            period: self.period,
+            power: self.power,
+        };
         VpwmaStream::try_new(p)
     }
 }
@@ -216,10 +231,16 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
     let power = input.get_power();
 
     if period < 2 || period > len {
-        return Err(VpwmaError::InvalidPeriod { period, data_len: len });
+        return Err(VpwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
-        return Err(VpwmaError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(VpwmaError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
     }
     if power.is_nan() || power.is_infinite() {
         return Err(VpwmaError::InvalidPower { power });
@@ -275,8 +296,8 @@ pub fn vpwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    let win_len = period - 1;           // number of weights
-    let p4 = win_len & !3;              // largest multiple of 4 <= win_len
+    let win_len = period - 1; // number of weights
+    let p4 = win_len & !3; // largest multiple of 4 <= win_len
 
     // We start computing at i = first_val + win_len
     for i in (first_val + win_len)..data.len() {
@@ -284,10 +305,10 @@ pub fn vpwma_scalar(
 
         // Process in chunks of 4
         for k in (0..p4).step_by(4) {
-            sum += data[i - k]         * weights[k]
-                 + data[i - (k + 1)]   * weights[k + 1]
-                 + data[i - (k + 2)]   * weights[k + 2]
-                 + data[i - (k + 3)]   * weights[k + 3];
+            sum += data[i - k] * weights[k]
+                + data[i - (k + 1)] * weights[k + 1]
+                + data[i - (k + 2)] * weights[k + 2]
+                + data[i - (k + 3)] * weights[k + 3];
         }
 
         // Process any remainder
@@ -358,9 +379,9 @@ unsafe fn vpwma_avx512_long(
 #[derive(Debug, Clone)]
 pub struct VpwmaStream {
     period: usize,
-    weights: Vec<f64>,   // length = (period - 1)
+    weights: Vec<f64>, // length = (period - 1)
     inv_norm: f64,
-    buffer: Vec<f64>,    // length = period
+    buffer: Vec<f64>, // length = period
     head: usize,
     filled: bool,
 }
@@ -369,7 +390,10 @@ impl VpwmaStream {
     pub fn try_new(params: VpwmaParams) -> Result<Self, VpwmaError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(VpwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(VpwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let power = params.power.unwrap_or(0.382);
         if power.is_nan() || power.is_infinite() {
@@ -502,7 +526,10 @@ pub fn vpwma_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(VpwmaError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(VpwmaError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
     };
     let simd = match kernel {
@@ -603,14 +630,24 @@ fn vpwma_batch_inner(
     if data.is_empty() {
         return Err(VpwmaError::EmptyInputData);
     }
-    
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VpwmaError::InvalidPeriod { period: 0, data_len: 0 });
+        return Err(VpwmaError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
 
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(VpwmaError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(VpwmaError::AllValuesNaN)?;
+    let max_p = combos
+        .iter()
+        .map(|c| round_up8(c.period.unwrap()))
+        .max()
+        .unwrap();
     if data.len() - first < max_p {
         return Err(VpwmaError::NotEnoughValidData {
             needed: max_p,
@@ -655,19 +692,17 @@ fn vpwma_batch_inner(
     // --- 3.  closure that fills ONE row; it works on &mut [MaybeUninit<f64>] ----
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        let w_ptr  = flat_w.as_ptr().add(row * max_p);
-        let inv_n  = *inv_norms.get_unchecked(row);
+        let w_ptr = flat_w.as_ptr().add(row * max_p);
+        let inv_n = *inv_norms.get_unchecked(row);
 
         // Cast just this row to &mut [f64] so the row-kernel can write into it.
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             Kernel::Scalar => vpwma_row_scalar(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => vpwma_row_avx2  (data, first, period, max_p, w_ptr, inv_n, out_row),
+            Kernel::Avx2 => vpwma_row_avx2(data, first, period, max_p, w_ptr, inv_n, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => vpwma_row_avx512(data, first, period, max_p, w_ptr, inv_n, out_row),
             _ => unreachable!(),
@@ -676,24 +711,18 @@ fn vpwma_batch_inner(
 
     // --- 4.  run every row (parallel or serial) ---------------------------------
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            raw.par_chunks_mut(cols)
                 .enumerate()
-
                 .for_each(|(row, slice)| do_row(row, slice));
-
         }
 
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
@@ -731,10 +760,10 @@ unsafe fn vpwma_row_scalar(
 
         // Process k = 0..(p4-1) in blocks of 4
         for k in (0..p4).step_by(4) {
-            sum += *data.get_unchecked(i - k)         * *w_ptr.add(k)
-                 + *data.get_unchecked(i - (k + 1))   * *w_ptr.add(k + 1)
-                 + *data.get_unchecked(i - (k + 2))   * *w_ptr.add(k + 2)
-                 + *data.get_unchecked(i - (k + 3))   * *w_ptr.add(k + 3);
+            sum += *data.get_unchecked(i - k) * *w_ptr.add(k)
+                + *data.get_unchecked(i - (k + 1)) * *w_ptr.add(k + 1)
+                + *data.get_unchecked(i - (k + 2)) * *w_ptr.add(k + 2)
+                + *data.get_unchecked(i - (k + 3)) * *w_ptr.add(k + 3);
         }
 
         // Process remainder k = p4..(win_len-1)
@@ -773,8 +802,7 @@ pub unsafe fn vpwma_row_avx512(
 ) {
     if period <= 32 {
         vpwma_row_avx512_short(data, first, period, stride, w_ptr, inv_n, out);
-    
-        } else {
+    } else {
         vpwma_row_avx512_long(data, first, period, stride, w_ptr, inv_n, out);
     }
     _mm_sfence();
@@ -812,21 +840,30 @@ pub(crate) unsafe fn vpwma_row_avx512_long(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_vpwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_partial_params(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let default_params = VpwmaParams { period: None, power: None };
+        let default_params = VpwmaParams {
+            period: None,
+            power: None,
+        };
         let input = VpwmaInput::from_candles(&candles, "close", default_params);
         let output = vpwma_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
         Ok(())
     }
 
-    fn check_vpwma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_accuracy(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -855,44 +892,83 @@ mod tests {
         Ok(())
     }
 
-    fn check_vpwma_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_zero_period(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
-        let params = VpwmaParams { period: Some(0), power: None };
+        let params = VpwmaParams {
+            period: Some(0),
+            power: None,
+        };
         let input = VpwmaInput::from_slice(&input_data, params);
         let res = vpwma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] VPWMA should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] VPWMA should fail with zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_vpwma_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_period_exceeds_length(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data_small = [10.0, 20.0, 30.0];
-        let params = VpwmaParams { period: Some(10), power: None };
+        let params = VpwmaParams {
+            period: Some(10),
+            power: None,
+        };
         let input = VpwmaInput::from_slice(&data_small, params);
         let res = vpwma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] VPWMA should fail with period exceeding length", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] VPWMA should fail with period exceeding length",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_vpwma_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_very_small_dataset(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let single_point = [42.0];
-        let params = VpwmaParams { period: Some(2), power: None };
+        let params = VpwmaParams {
+            period: Some(2),
+            power: None,
+        };
         let input = VpwmaInput::from_slice(&single_point, params);
         let res = vpwma_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] VPWMA should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] VPWMA should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_vpwma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_reinput(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let first_params = VpwmaParams { period: Some(14), power: None };
+        let first_params = VpwmaParams {
+            period: Some(14),
+            power: None,
+        };
         let first_input = VpwmaInput::from_candles(&candles, "close", first_params);
         let first_result = vpwma_with_kernel(&first_input, kernel)?;
-        let second_params = VpwmaParams { period: Some(5), power: Some(0.5) };
+        let second_params = VpwmaParams {
+            period: Some(5),
+            power: Some(0.5),
+        };
         let second_input = VpwmaInput::from_slice(&first_result.values, second_params);
         let second_result = vpwma_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), first_result.values.len());
@@ -904,14 +980,20 @@ mod tests {
         Ok(())
     }
 
-    fn check_vpwma_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_nan_handling(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VpwmaInput::from_candles(
             &candles,
             "close",
-            VpwmaParams { period: Some(14), power: None }
+            VpwmaParams {
+                period: Some(14),
+                power: None,
+            },
         );
         let res = vpwma_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
@@ -928,7 +1010,10 @@ mod tests {
         Ok(())
     }
 
-    fn check_vpwma_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_streaming(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
@@ -937,10 +1022,16 @@ mod tests {
         let input = VpwmaInput::from_candles(
             &candles,
             "close",
-            VpwmaParams { period: Some(period), power: Some(power) }
+            VpwmaParams {
+                period: Some(period),
+                power: Some(power),
+            },
         );
         let batch_output = vpwma_with_kernel(&input, kernel)?.values;
-        let mut stream = VpwmaStream::try_new(VpwmaParams { period: Some(period), power: Some(power) })?;
+        let mut stream = VpwmaStream::try_new(VpwmaParams {
+            period: Some(period),
+            power: Some(power),
+        })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
             match stream.update(price) {
@@ -950,12 +1041,18 @@ mod tests {
         }
         assert_eq!(batch_output.len(), stream_values.len());
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
-            if b.is_nan() && s.is_nan() { continue; }
+            if b.is_nan() && s.is_nan() {
+                continue;
+            }
             let diff = (b - s).abs();
             assert!(
                 diff < 1e-9,
                 "[{}] VPWMA streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
-                test_name, i, b, s, diff
+                test_name,
+                i,
+                b,
+                s,
+                diff
             );
         }
         Ok(())
@@ -987,7 +1084,10 @@ mod tests {
 
     // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
-    fn check_vpwma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_no_poison(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1001,9 +1101,9 @@ mod tests {
         for period in test_periods {
             for power in &test_powers {
                 for source in &test_sources {
-                    let params = VpwmaParams { 
+                    let params = VpwmaParams {
                         period: Some(period),
-                        power: Some(*power)
+                        power: Some(*power),
                     };
                     let input = VpwmaInput::from_candles(&candles, source, params);
                     let output = vpwma_with_kernel(&input, kernel)?;
@@ -1050,7 +1150,10 @@ mod tests {
 
     // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
-    fn check_vpwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+    fn check_vpwma_no_poison(
+        _test_name: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
@@ -1065,147 +1168,117 @@ mod tests {
         check_vpwma_streaming,
         check_vpwma_no_poison
     );
-    
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-    skip_if_unsupported!(kernel, test);
-    let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-    let c = read_candles_from_csv(file)?;
-    let output = VpwmaBatchBuilder::new()
-        .kernel(kernel)
-        .apply_candles(&c, "close")?;
-    let def = VpwmaParams::default();
-    let row = output.values_for(&def).expect("default row missing");
-    assert_eq!(row.len(), c.close.len());
 
-    let expected = [
-        59363.927599446455,
-        59296.83894519251,
-        59196.82476139941,
-        59180.8040249446,
-        59113.84473799056,
-    ];
-    let start = row.len() - 5;
-    for (i, &v) in row[start..].iter().enumerate() {
-        assert!(
-            (v - expected[i]).abs() < 1e-2,
-            "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
-        );
-    }
-    Ok(())
-}
+    fn check_batch_default_row(
+        test: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let output = VpwmaBatchBuilder::new()
+            .kernel(kernel)
+            .apply_candles(&c, "close")?;
+        let def = VpwmaParams::default();
+        let row = output.values_for(&def).expect("default row missing");
+        assert_eq!(row.len(), c.close.len());
 
-macro_rules! gen_batch_tests {
-    ($fn_name:ident) => {
-        paste::paste! {
-            #[test] fn [<$fn_name _scalar>]()      {
-                let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            #[test] fn [<$fn_name _avx2>]()        {
-                let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            #[test] fn [<$fn_name _avx512>]()      {
-                let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-            }
-            #[test] fn [<$fn_name _auto_detect>]() {
-                let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
-            }
+        let expected = [
+            59363.927599446455,
+            59296.83894519251,
+            59196.82476139941,
+            59180.8040249446,
+            59113.84473799056,
+        ];
+        let start = row.len() - 5;
+        for (i, &v) in row[start..].iter().enumerate() {
+            assert!(
+                (v - expected[i]).abs() < 1e-2,
+                "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
+            );
         }
-    };
-}
-// Check for poison values in batch output - only runs in debug mode
-#[cfg(debug_assertions)]
-fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-    skip_if_unsupported!(kernel, test);
+        Ok(())
+    }
 
-    let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-    let c = read_candles_from_csv(file)?;
-
-    // Test batch with multiple parameter range combinations
-    let period_ranges = vec![
-        (2, 10, 2),    // Small periods
-        (10, 30, 5),   // Medium periods  
-        (30, 60, 10),  // Large periods
-        (5, 15, 1),    // Dense small range
-    ];
-    
-    let power_ranges = vec![
-        (0.1, 0.5, 0.1),   // Low powers
-        (0.3, 1.0, 0.2),   // Medium powers
-        (1.0, 3.0, 0.5),   // High powers
-    ];
-
-    let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
-
-    for (p_start, p_end, p_step) in period_ranges {
-        for (pow_start, pow_end, pow_step) in &power_ranges {
-            for source in &test_sources {
-                // Create power values from range
-                let mut power_values = vec![];
-                let mut current = *pow_start;
-                while current <= *pow_end {
-                    power_values.push(current);
-                    current += pow_step;
+    macro_rules! gen_batch_tests {
+        ($fn_name:ident) => {
+            paste::paste! {
+                #[test] fn [<$fn_name _scalar>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
                 }
-                
-                let output = VpwmaBatchBuilder::new()
-                    .kernel(kernel)
-                    .period_range(p_start, p_end, p_step)
-                    .power_range(*pow_start, *pow_end, *pow_step)
-                    .apply_candles(&c, source)?;
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx2>]()        {
+                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                #[test] fn [<$fn_name _avx512>]()      {
+                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+                }
+                #[test] fn [<$fn_name _auto_detect>]() {
+                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+                }
+            }
+        };
+    }
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
 
-                // Check every value in the entire batch matrix for poison patterns
-                for (idx, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in warmup periods
-                    if val.is_nan() {
-                        continue;
-                    }
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
 
-                    let bits = val.to_bits();
-                    let row = idx / output.cols;
-                    let col = idx % output.cols;
+        let period_ranges = vec![(2, 10, 2), (10, 30, 5), (30, 60, 10), (5, 15, 1)];
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-                    if bits == 0x11111111_11111111 {
-                        panic!(
-                            "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) power_range({},{},{}) source={}",
-                            test, val, bits, row, col, idx, p_start, p_end, p_step, pow_start, pow_end, pow_step, source
-                        );
-                    }
+        let power_ranges = vec![(0.1, 0.5, 0.1), (0.3, 1.0, 0.2), (1.0, 3.0, 0.5)];
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
-                    if bits == 0x22222222_22222222 {
-                        panic!(
-                            "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) power_range({},{},{}) source={}",
-                            test, val, bits, row, col, idx, p_start, p_end, p_step, pow_start, pow_end, pow_step, source
-                        );
-                    }
+        let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
-                    if bits == 0x33333333_33333333 {
-                        panic!(
-                            "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) power_range({},{},{}) source={}",
-                            test, val, bits, row, col, idx, p_start, p_end, p_step, pow_start, pow_end, pow_step, source
-                        );
+        for &(p_start, p_end, p_step) in &period_ranges {
+            for &(pow_start, pow_end, pow_step) in &power_ranges {
+                for &source in &test_sources {
+                    let output = VpwmaBatchBuilder::new()
+                        .kernel(kernel)
+                        .period_range(p_start, p_end, p_step)
+                        .power_range(pow_start, pow_end, pow_step) // ← change
+                        .apply_candles(&c, source)?;
+
+                    for (idx, &val) in output.values.iter().enumerate() {
+                        if val.is_nan() {
+                            continue;
+                        }
+
+                        let bits = val.to_bits();
+                        let row = idx / output.cols;
+                        let col = idx % output.cols;
+
+                        const POISON1: u64 = 0x1111_1111_1111_1111;
+                        const POISON2: u64 = 0x2222_2222_2222_2222;
+                        const POISON3: u64 = 0x3333_3333_3333_3333;
+
+                        if bits == POISON1 || bits == POISON2 || bits == POISON3 {
+                            panic!(
+                                "[{test}] poison value (0x{bits:016X}) row={row} col={col} \
+                             period_range=({p_start},{p_end},{p_step}) \
+                             power_range=({pow_start},{pow_end},{pow_step}) source={source}"
+                            );
+                        }
                     }
                 }
             }
         }
+        Ok(())
+    }
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(
+        _test: &str,
+        _kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
     }
 
-    Ok(())
-}
-
-// Release mode stub - does nothing
-#[cfg(not(debug_assertions))]
-fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
-gen_batch_tests!(check_batch_default_row);
-gen_batch_tests!(check_batch_no_poison);
-
+    gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1213,8 +1286,8 @@ gen_batch_tests!(check_batch_no_poison);
 #[pyo3(signature = (data, period, power, kernel=None))]
 /// Compute the Variable Power Weighted Moving Average (VPWMA) of the input data.
 ///
-/// VPWMA adjusts the weights of each price data point based on their respective 
-/// positions, with the weight raised to a specified power to control how 
+/// VPWMA adjusts the weights of each price data point based on their respective
+/// positions, with the weight raised to a specified power to control how
 /// aggressively recent data points dominate the average.
 ///
 /// Parameters:
@@ -1279,7 +1352,10 @@ pub fn vpwma_py<'py>(
 
         // Validation
         if period < 2 || period > len {
-            return Err(VpwmaError::InvalidPeriod { period, data_len: len });
+            return Err(VpwmaError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
         }
         if data.len() - first < period {
             return Err(VpwmaError::NotEnoughValidData {
@@ -1312,9 +1388,7 @@ pub fn vpwma_py<'py>(
         // Compute VPWMA
         unsafe {
             match chosen {
-                Kernel::Scalar => {
-                    vpwma_scalar(data, &weights, period, first, inv_norm, slice_out)
-                }
+                Kernel::Scalar => vpwma_scalar(data, &weights, period, first, inv_norm, slice_out),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx2 => vpwma_avx2(data, &weights, period, first, inv_norm, slice_out),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1424,11 +1498,11 @@ pub fn vpwma_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        
+
         // Use the existing batch function
         let output = vpwma_batch_inner(slice_in, &sweep, simd, true)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        
+
         // Copy the values to our pre-allocated buffer
         slice_out.copy_from_slice(&output.values);
         Ok::<Vec<VpwmaParams>, PyErr>(output.combos)

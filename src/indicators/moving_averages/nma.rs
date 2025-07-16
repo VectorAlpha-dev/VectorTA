@@ -351,6 +351,8 @@ pub fn nma_scalar_with_precomputed(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,avx512bw,fma")]
 pub unsafe fn nma_avx512(
     data: &[f64],
@@ -362,23 +364,24 @@ pub unsafe fn nma_avx512(
 ) {
     let n = data.len();
     debug_assert!(ln.len() == n && diff.len() == n && out.len() == n);
+    debug_assert!(first + period <= n); // validated by caller
 
     /* --------------------------------------------------------
-     * 1. ln(x) * 1 000  (clamped to 1 e‑10 to avoid −∞)
+     * 1. ln(x) * 1 000  (x clamped to 1 e-10)
      * ------------------------------------------------------*/
-    let eps = _mm512_set1_pd(1.0e-10); // clamp constant :contentReference[oaicite:0]{index=0}
+    let eps = _mm512_set1_pd(1.0e-10);
     let scale = _mm512_set1_pd(1_000.0);
+
     let mut i = 0usize;
     while i + 8 <= n {
-        let mut v = _mm512_loadu_pd(data.as_ptr().add(i)); // 8 × f64 wide :contentReference[oaicite:1]{index=1}
-        v = _mm512_max_pd(v, eps); // clamp
-        #[cfg(feature = "sleef")] // optional: vector log via Sleef
+        let mut v = _mm512_loadu_pd(data.as_ptr().add(i));
+        v = _mm512_max_pd(v, eps); // clamp negatives / zeros
+        #[cfg(feature = "sleef")]
         {
-            v = Sleef_logd8_u10(v); // SVML/Sleef intrinsic (≈ 2 × faster)
+            v = Sleef_logd8_u10(v); // vectorised ln
         }
         #[cfg(not(feature = "sleef"))]
         {
-            /* portable fallback – scalar ln per lane (rarely reached on hot path) */
             let mut tmp = [0.0f64; 8];
             _mm512_storeu_pd(tmp.as_mut_ptr(), v);
             for x in &mut tmp {
@@ -386,12 +389,12 @@ pub unsafe fn nma_avx512(
             }
             v = _mm512_loadu_pd(tmp.as_ptr());
         }
-        v = _mm512_mul_pd(v, scale); // scale to ‑dB range
+        v = _mm512_mul_pd(v, scale);
         _mm512_storeu_pd(ln.as_mut_ptr().add(i), v);
         i += 8;
     }
     for k in i..n {
-        ln[k] = data[k].max(1.0e-10).ln() * 1_000.0; // tail
+        ln[k] = data[k].max(1.0e-10).ln() * 1_000.0;
     }
 
     /* --------------------------------------------------------
@@ -403,66 +406,56 @@ pub unsafe fn nma_avx512(
     }
 
     /* --------------------------------------------------------
-     * 3. Pre‑compute √‑weight blocks (8‑packed)
+     * 3. Pre-compute √-weights, 8-packed and **reversed**
+     *    (lane 0 corresponds to diff[j-0], lane 7 to diff[j-7])
      * ------------------------------------------------------*/
-    let mut wv: Vec<__m512d> = Vec::with_capacity((period + 7) / 8);
+    let blocks = (period + 7) / 8;
+    let mut wv: Vec<__m512d> = Vec::with_capacity(blocks);
+
     for base in (0..period).step_by(8) {
-        let mut buf = [0.0; 8];
+        let mut buf = [0.0_f64; 8];
         for j in 0..8 {
-            if base + j < period {
-                buf[j] = (((base + j + 1) as f64).sqrt() - ((base + j) as f64).sqrt());
+            let k = base + j;
+            if k < period {
+                buf[7 - j] = ((k as f64 + 1.0).sqrt() - (k as f64).sqrt());
             }
         }
         wv.push(_mm512_loadu_pd(buf.as_ptr()));
     }
 
     /* --------------------------------------------------------
-     * 4. Initial denominator (sliding)
+     * 4. Initial denominator (= Σ|Δln| over the first window)
      * ------------------------------------------------------*/
     let mut denom: f64 = diff[first..first + period].iter().sum();
 
     /* --------------------------------------------------------
-     * 5. Main loop – dot‑product + blend
+     * 5. Main loop – dot-product, blend, slide window
      * ------------------------------------------------------*/
     for j in (first + period)..n {
-        // 5.1 dot‑product (numerator)
+        // 5.1 Dot-product of the last `period` diffs with weights
         let mut acc = _mm512_setzero_pd();
         for (blk, &w) in wv.iter().enumerate() {
-            let d = _mm512_loadu_pd(diff.as_ptr().add(j - blk * 8 - 7));
-            acc = _mm512_fmadd_pd(d, w, acc); // fused mul‑add :contentReference[oaicite:2]{index=2}
+            // Load diff[j-0 … j-7], then diff[j-8 … j-15], …
+            let d = _mm512_loadu_pd(diff.as_ptr().add(j - blk * 8));
+            acc = _mm512_fmadd_pd(d, w, acc); // fused multiply-add
         }
 
-        // 5.2 horizontal add
-        #[cfg(target_feature = "avx512f")]
-        let num = _mm512_reduce_add_pd(acc); // single‑intrinsic reduce :contentReference[oaicite:3]{index=3}
-        #[cfg(not(target_feature = "avx512f"))] // (never hit – kept for completeness)
-        let num = {
-            // manually reduce 8 lanes to scalar
-            let hi = _mm256_castpd256_pd128(_mm512_extractf64x4_pd(acc, 1));
-            let lo = _mm256_castpd256_pd128(_mm512_extractf64x4_pd(acc, 0));
-            let sum256 = _mm256_add_pd(
-                _mm512_extractf64x4_pd(acc, 1),
-                _mm512_extractf64x4_pd(acc, 0),
-            );
-            let hi128 = _mm256_extractf128_pd(sum256, 1);
-            let lo128 = _mm256_castpd256_pd128(sum256);
-            let sum128 = _mm_add_pd(hi128, lo128);
-            let swapped = _mm_permute_pd(sum128, 0x1);
-            _mm_cvtsd_f64(_mm_add_sd(sum128, swapped))
-        };
+        // 5.2 Horizontal reduce to scalar
+        let num = _mm512_reduce_add_pd(acc);
 
-        // 5.3 blend two price points
+        // 5.3 Blend the two price points using num/denom
         let ratio = if denom == 0.0 { 0.0 } else { num / denom };
-        let tail = period - 1;
+        let tail = period - 1; // newest value’s look-back
         out[j] = data[j - tail] * ratio + data[j - tail - 1] * (1.0 - ratio);
 
-        // 5.4 slide denominator window
+        // 5.4 Slide denominator window
         denom += diff[j] - diff[j - period];
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[cfg(target_feature = "avx2")]
 pub fn nma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     unsafe { nma_scalar(data, period, first, out) }
 }
