@@ -264,7 +264,20 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
 #[inline(always)]
 pub fn edcf_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     let len = data.len();
-    let mut dist: Vec<f64> = vec![0.0; len];
+    
+    // Allocate uninitialized memory for dist buffer
+    let mut dist: Vec<f64> = Vec::with_capacity(len);
+    unsafe {
+        // Initialize only the portion that will be read before being written
+        // The computation reads from indices [j-period+1..=j] where j starts at first_valid + 2*period
+        // So we need zeros up to first_valid + period
+        let zero_end = (first_valid + period).min(len);
+        dist.set_len(zero_end);
+        dist.fill(0.0);
+        
+        // Extend to full length without initialization
+        dist.set_len(len);
+    }
 
     unsafe {
         let dp = data.as_ptr();
@@ -317,7 +330,17 @@ pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
     let chunks = period / STEP;
     let tail_len = period % STEP;
 
-    let mut dist: Vec<f64> = vec![0.0; len];
+    // Allocate uninitialized memory for dist buffer
+    let mut dist: Vec<f64> = Vec::with_capacity(len);
+    unsafe {
+        // Initialize only the portion that will be read before being written
+        let zero_end = (first_valid + period).min(len);
+        dist.set_len(zero_end);
+        dist.fill(0.0);
+        
+        // Extend to full length without initialization
+        dist.set_len(len);
+    }
     let dp = data.as_ptr();
     let wp = dist.as_mut_ptr();
 
@@ -380,7 +403,17 @@ pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: 
     let tail_len = p_minus1 % STEP;
     let tail_mask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    let mut dist: Vec<f64> = vec![0.0; len];
+    // Allocate uninitialized memory for dist buffer
+    let mut dist: Vec<f64> = Vec::with_capacity(len);
+    unsafe {
+        // Initialize only the portion that will be read before being written
+        let zero_end = (first_valid + period).min(len);
+        dist.set_len(zero_end);
+        dist.fill(0.0);
+        
+        // Extend to full length without initialization
+        dist.set_len(len);
+    }
     let dp = data.as_ptr();
     let wp = dist.as_mut_ptr();
 
@@ -459,10 +492,17 @@ impl EdcfStream {
                 data_len: 0,
             });
         }
+        
+        // Use alloc_with_nan_prefix for the buffer (all values should be NaN initially)
+        let buffer = alloc_with_nan_prefix(period, period);
+        
+        // dist needs to be zero-initialized as it's read before being written
+        let dist = vec![0.0; period];
+        
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
-            dist: vec![0.0; period],
+            buffer,
+            dist,
             head: 0,
             filled: false,
         })
@@ -672,9 +712,42 @@ fn edcf_batch_inner(
     
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
     
-    let result_combos = edcf_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    // Use zero-copy allocation pattern from alma.rs
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0) + 2 * c.period.unwrap_or(15)
+        })
+        .collect();
+    
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    let result_combos = edcf_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(EdcfBatchOutput {
         values,
@@ -719,67 +792,36 @@ fn edcf_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // ─────────────────── 1️⃣ reinterpret as MaybeUninit ───────────────────
-    let raw = unsafe {
-        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
-    };
-
-    // ─────────────────── 2️⃣ seed NaN prefixes ────────────────────────
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + 2 * c.period.unwrap())
-        .collect();
-    unsafe { init_matrix_prefixes(raw, cols, &warm) };
-
-    // ─────────────────── 3️⃣ per-row kernel writes into MaybeUninit ───
-    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+    // The buffer already has NaN prefixes initialized by the caller
+    // Just compute into the provided buffer
+    let do_row = |row: usize, dst: &mut [f64]| {
         let period = combos[row].period.unwrap();
-
-        // Cast this single row to &mut [f64] for the kernel call
-        let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => edcf_row_avx512(data, first, period, dst),
+            Kernel::Avx512 => unsafe { edcf_row_avx512(data, first, period, dst) },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => edcf_row_avx2(data, first, period, dst),
-            _ => edcf_row_scalar(data, first, period, dst),
+            Kernel::Avx2 => unsafe { edcf_row_avx2(data, first, period, dst) },
+            _ => unsafe { edcf_row_scalar(data, first, period, dst) },
         }
     };
 
     if parallel {
-
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-
-        raw.par_chunks_mut(cols)
-
-
-                    .enumerate()
-
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
 
-
-        #[cfg(target_arch = "wasm32")] {
-
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-
-                    do_row(row, slice);
-
-
-        }
-
-
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
