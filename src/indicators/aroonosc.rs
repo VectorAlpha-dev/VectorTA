@@ -23,7 +23,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 use paste::paste;
@@ -31,6 +31,7 @@ use paste::paste;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+use std::mem::ManuallyDrop;
 
 #[derive(Debug, Clone)]
 pub enum AroonOscData<'a> {
@@ -207,7 +208,11 @@ pub fn aroon_osc_with_kernel(
             found: len,
         });
     }
-    let mut out = vec![f64::NAN; len];
+    
+    // Calculate warmup period for Aroon Oscillator
+    // Aroon needs (length + 1) data points to start producing values
+    let warmup_period = length; // Values before index (length) are NaN
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -450,7 +455,27 @@ fn aroon_osc_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| c.length.unwrap())  // Each row needs length warmup period
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let length = combos[row].length.unwrap();
@@ -484,6 +509,16 @@ fn aroon_osc_batch_inner(
             do_row(row, slice);
         }
     }
+    
+    // Step 5: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(AroonOscBatchOutput {
         values,
         combos,
@@ -702,6 +737,80 @@ mod tests {
         }
         Ok(())
     }
+    
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_aroonosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with multiple parameter combinations to catch edge cases
+        let test_lengths = vec![
+            5,    // Very small period
+            14,   // Default period
+            25,   // Medium period
+            50,   // Large period
+            100,  // Very large period
+            200,  // Extra large period
+        ];
+
+        for length in test_lengths {
+            let params = AroonOscParams { length: Some(length) };
+            let input = AroonOscInput::from_candles(&candles, params);
+            
+            // Skip if not enough data for this length
+            if candles.close.len() < length {
+                continue;
+            }
+            
+            let output = aroon_osc_with_kernel(&input, kernel)?;
+
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with length {}",
+                        test_name, val, bits, i, length
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with length {}",
+                        test_name, val, bits, i, length
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with length {}",
+                        test_name, val, bits, i, length
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_aroonosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+    
     macro_rules! generate_all_aroonosc_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -730,7 +839,8 @@ mod tests {
         check_aroonosc_accuracy,
         check_aroonosc_default_candles,
         check_aroonosc_with_slices_data_reinput,
-        check_aroonosc_nan_handling
+        check_aroonosc_nan_handling,
+        check_aroonosc_no_poison
     );
     fn check_batch_default_row(
         test: &str,
@@ -747,6 +857,84 @@ mod tests {
         assert_eq!(row.len(), c.close.len());
         Ok(())
     }
+    
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test multiple batch configurations to catch edge cases
+        let test_configs = vec![
+            // (start, end, step) for length ranges
+            (2, 10, 2),    // Small lengths: 2, 4, 6, 8, 10
+            (5, 25, 5),    // Medium lengths: 5, 10, 15, 20, 25
+            (10, 100, 10), // Large lengths: 10, 20, 30, ..., 100
+            (50, 200, 50), // Very large lengths: 50, 100, 150, 200
+            (14, 14, 0),   // Single parameter (default)
+            (1, 5, 1),     // Edge case: very small lengths 1, 2, 3, 4, 5
+        ];
+
+        for (start, end, step) in test_configs {
+            // Skip if data is not sufficient for the largest length
+            if c.close.len() < end {
+                continue;
+            }
+
+            let output = AroonOscBatchBuilder::new()
+                .kernel(kernel)
+                .length_range(start, end, step)
+                .apply_candles(&c)?;
+
+            // Check every value in the entire batch matrix for poison patterns
+            for (idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let length = output.combos[row].length.unwrap_or(14);
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
+                        test, val, bits, row, col, idx, length, start, end, step
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste! {
@@ -759,6 +947,7 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

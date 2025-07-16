@@ -16,12 +16,16 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 #[cfg(feature = "python")]
 use pyo3::{pyfunction, Python, PyResult, Bound};
@@ -190,7 +194,9 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
         k => k,
     };
 
-    let mut out = vec![0.0; size];
+    // For AD, warmup period is 0 since it's a cumulative indicator starting from 0
+    // We use alloc_with_nan_prefix with warmup=0 to get an uninitialized vector
+    let mut out = alloc_with_nan_prefix(size, 0);
 
     unsafe {
         match chosen {
@@ -293,9 +299,36 @@ fn ad_batch_inner(
 ) -> Result<AdBatchOutput, AdError> {
     let rows = data.highs.len();
     let cols = if rows > 0 { data.highs[0].len() } else { 0 };
-    let mut values = vec![0.0; rows * cols];
     
-    ad_batch_inner_into(data, kern, parallel, &mut values)?;
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: AD has no warmup period - all rows start at index 0
+    let warm: Vec<usize> = vec![0; rows];
+    
+    // Step 3: Initialize NaN prefixes (for AD, this is always 0)
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    ad_batch_inner_into(data, kern, parallel, out)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(AdBatchOutput { values, rows, cols })
 }

@@ -42,7 +42,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CgInput<'a> {
@@ -556,7 +556,7 @@ fn cg_batch_inner(
     let cols = data.len();
     
     // Use helper to allocate uninitialized matrix
-    let mut buf = make_uninit_matrix(rows, cols);
+    let mut buf_mu = make_uninit_matrix(rows, cols);
     
     // Calculate warm-up prefixes for each row
     let warm_prefixes: Vec<usize> = combos
@@ -565,12 +565,16 @@ fn cg_batch_inner(
         .collect();
     
     // Initialize only the NaN prefixes
-    init_matrix_prefixes(&mut buf, cols, &warm_prefixes);
+    init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
     
-    // Convert to initialized memory
-    let ptr = buf.as_mut_ptr() as *mut f64;
-    std::mem::forget(buf);
-    let mut values = unsafe { Vec::from_raw_parts(ptr, rows * cols, rows * cols) };
+    // Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
     
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
@@ -586,7 +590,7 @@ fn cg_batch_inner(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            values
+            out
                 .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
@@ -594,15 +598,25 @@ fn cg_batch_inner(
 
         #[cfg(target_arch = "wasm32")]
         {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(CgBatchOutput {
         values,
         combos,
@@ -806,6 +820,66 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_cg_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        
+        // Test with multiple parameter combinations to increase coverage
+        let test_periods = vec![5, 10, 20, 50];
+        
+        for period in test_periods {
+            let params = CgParams { period: Some(period) };
+            let input = CgInput::from_candles(&candles, "close", params);
+            let output = cg_with_kernel(&input, kernel)?;
+            
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+                
+                let bits = val.to_bits();
+                
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
+                
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
+                
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_cg_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_cg_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -838,7 +912,8 @@ mod tests {
         check_cg_period_exceeds_length,
         check_cg_very_small_dataset,
         check_cg_nan_handling,
-        check_cg_streaming
+        check_cg_streaming,
+        check_cg_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -854,6 +929,66 @@ mod tests {
         let def = CgParams::default();
         let row = output.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
+        Ok(())
+    }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+        
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        
+        // Test batch with multiple parameter combinations
+        let output = CgBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(5, 50, 5)  // Test periods from 5 to 50 in steps of 5
+            .apply_candles(&c, "close")?;
+        
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+            let period = output.combos[row].period.unwrap_or(10);
+            
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
+                    test, val, bits, row, col, idx, period
+                );
+            }
+            
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
+                    test, val, bits, row, col, idx, period
+                );
+            }
+            
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
+                    test, val, bits, row, col, idx, period
+                );
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
@@ -878,6 +1013,7 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

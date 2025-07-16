@@ -17,13 +17,17 @@ use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -427,10 +431,11 @@ pub unsafe fn bollinger_bands_scalar(
     let dev_values = deviation(&dev_input)
         .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
 
-    let mut upper_band = vec![f64::NAN; data.len()];
-    let mut middle_band = vec![f64::NAN; data.len()];
-    let mut lower_band = vec![f64::NAN; data.len()];
     let first = data.iter().position(|x| !x.is_nan()).unwrap();
+    let warmup_period = first + period - 1;
+    let mut upper_band = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut middle_band = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut lower_band = alloc_with_nan_prefix(data.len(), warmup_period);
     for i in (first + period - 1)..data.len() {
         middle_band[i] = middle[i];
         upper_band[i] = middle[i] + devup * dev_values[i];
@@ -888,9 +893,50 @@ fn bollinger_bands_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut upper = vec![f64::NAN; rows * cols];
-    let mut middle = vec![f64::NAN; rows * cols];
-    let mut lower = vec![f64::NAN; rows * cols];
+    
+    // Allocate uninitialized matrices
+    let mut upper_mu = make_uninit_matrix(rows, cols);
+    let mut middle_mu = make_uninit_matrix(rows, cols);
+    let mut lower_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0) + c.period.unwrap() - 1
+        })
+        .collect();
+    
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut upper_mu, cols, &warm);
+    init_matrix_prefixes(&mut middle_mu, cols, &warm);
+    init_matrix_prefixes(&mut lower_mu, cols, &warm);
+    
+    // Convert to mutable slices for computation
+    let mut upper_guard = ManuallyDrop::new(upper_mu);
+    let mut middle_guard = ManuallyDrop::new(middle_mu);
+    let mut lower_guard = ManuallyDrop::new(lower_mu);
+    
+    let upper: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            upper_guard.as_mut_ptr() as *mut f64,
+            upper_guard.len(),
+        )
+    };
+    let middle: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            middle_guard.as_mut_ptr() as *mut f64,
+            middle_guard.len(),
+        )
+    };
+    let lower: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            lower_guard.as_mut_ptr() as *mut f64,
+            lower_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_u: &mut [f64], out_m: &mut [f64], out_l: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
@@ -960,10 +1006,33 @@ fn bollinger_bands_batch_inner(
         }
     }
 
+    // Reclaim as Vec<f64>
+    let upper_vec = unsafe {
+        Vec::from_raw_parts(
+            upper_guard.as_mut_ptr() as *mut f64,
+            upper_guard.len(),
+            upper_guard.capacity()
+        )
+    };
+    let middle_vec = unsafe {
+        Vec::from_raw_parts(
+            middle_guard.as_mut_ptr() as *mut f64,
+            middle_guard.len(),
+            middle_guard.capacity()
+        )
+    };
+    let lower_vec = unsafe {
+        Vec::from_raw_parts(
+            lower_guard.as_mut_ptr() as *mut f64,
+            lower_guard.len(),
+            lower_guard.capacity()
+        )
+    };
+    
     Ok(BollingerBandsBatchOutput {
-        upper,
-        middle,
-        lower,
+        upper: upper_vec,
+        middle: middle_vec,
+        lower: lower_vec,
         combos,
         rows,
         cols,
@@ -1273,6 +1342,102 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_bb_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with multiple parameter combinations to increase chance of catching bugs
+        let params_list = vec![
+            BollingerBandsParams::default(),
+            BollingerBandsParams {
+                period: Some(10),
+                devup: Some(1.5),
+                devdn: Some(1.5),
+                matype: Some("ema".to_string()),
+                devtype: Some(1),
+            },
+            BollingerBandsParams {
+                period: Some(30),
+                devup: Some(3.0),
+                devdn: Some(2.0),
+                matype: Some("sma".to_string()),
+                devtype: Some(2),
+            },
+        ];
+
+        for params in params_list {
+            let input = BollingerBandsInput::from_candles(&candles, "close", params.clone());
+            let output = bollinger_bands_with_kernel(&input, kernel)?;
+
+            // Check all three bands for poison patterns
+            for (band_name, band_data) in [
+                ("upper", &output.upper_band),
+                ("middle", &output.middle_band),
+                ("lower", &output.lower_band),
+            ] {
+                for (i, &val) in band_data.iter().enumerate() {
+                    // Skip NaN values as they're expected in the warmup period
+                    if val.is_nan() {
+                        continue;
+                    }
+
+                    let bits = val.to_bits();
+
+                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    if bits == 0x11111111_11111111 {
+                        panic!(
+                            "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
+                            test_name, val, bits, i, band_name,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            params.matype.as_ref().unwrap_or(&"sma".to_string()),
+                            params.devtype.unwrap_or(0)
+                        );
+                    }
+
+                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    if bits == 0x22222222_22222222 {
+                        panic!(
+                            "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
+                            test_name, val, bits, i, band_name,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            params.matype.as_ref().unwrap_or(&"sma".to_string()),
+                            params.devtype.unwrap_or(0)
+                        );
+                    }
+
+                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    if bits == 0x33333333_33333333 {
+                        panic!(
+                            "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
+                            test_name, val, bits, i, band_name,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            params.matype.as_ref().unwrap_or(&"sma".to_string()),
+                            params.devtype.unwrap_or(0)
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_bb_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_bb_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1306,7 +1471,8 @@ mod tests {
         check_bb_very_small_dataset,
         check_bb_reinput,
         check_bb_nan_handling,
-        check_bb_streaming
+        check_bb_streaming,
+        check_bb_no_poison
     );
 
     fn check_batch_default_row(
@@ -1326,6 +1492,85 @@ mod tests {
         let (_up, mid, _low) = output.bands_for(&def).expect("default row missing");
 
         assert_eq!(mid.len(), c.close.len());
+        Ok(())
+    }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = BollingerBandsBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(10, 30, 10)  // Tests periods: 10, 20, 30
+            .devup_range(1.0, 3.0, 1.0)  // Tests devup: 1.0, 2.0, 3.0
+            .devdn_range(1.0, 2.0, 0.5)  // Tests devdn: 1.0, 1.5, 2.0
+            .matype_static("sma")
+            .devtype_static(0)
+            .apply_candles(&c, "close")?;
+
+        // Check every value in all three batch matrices for poison patterns
+        for (band_name, band_data) in [
+            ("upper", &output.upper),
+            ("middle", &output.middle),
+            ("lower", &output.lower),
+        ] {
+            for (idx, &val) in band_data.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let params = &output.combos[row];
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
+                        test, val, bits, row, col, idx, band_name,
+                        params.period.unwrap_or(20),
+                        params.devup.unwrap_or(2.0),
+                        params.devdn.unwrap_or(2.0)
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
+                        test, val, bits, row, col, idx, band_name,
+                        params.period.unwrap_or(20),
+                        params.devup.unwrap_or(2.0),
+                        params.devdn.unwrap_or(2.0)
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
+                        test, val, bits, row, col, idx, band_name,
+                        params.period.unwrap_or(20),
+                        params.devup.unwrap_or(2.0),
+                        params.devdn.unwrap_or(2.0)
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
@@ -1350,6 +1595,7 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1649,10 +1895,6 @@ pub fn bollinger_bands_js(
     matype: &str,
     devtype: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    let mut up = vec![f64::NAN; data.len()];
-    let mut mid = vec![f64::NAN; data.len()];
-    let mut low = vec![f64::NAN; data.len()];
-    
     // prepare once
     let params = BollingerBandsParams {
         period: Some(period),
@@ -1664,6 +1906,12 @@ pub fn bollinger_bands_js(
     let bb_in = BollingerBandsInput::from_slice(data, params);
     let (d, per, du, dd, mt, dt, first, chosen) = bb_prepare(&bb_in, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // Allocate with proper warmup period
+    let warmup_period = first + per - 1;
+    let mut up = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut mid = alloc_with_nan_prefix(data.len(), warmup_period);
+    let mut low = alloc_with_nan_prefix(data.len(), warmup_period);
     
     // Compute into pre-allocated vectors
     bollinger_bands_compute_into(d, per, du, dd, &mt, dt, first, chosen,
@@ -1706,12 +1954,48 @@ pub fn bollinger_bands_batch_js(
     let rows = combos.len();
     let cols = data.len();
     
-    let mut upper_vec = vec![f64::NAN; rows * cols];
-    let mut middle_vec = vec![f64::NAN; rows * cols];
-    let mut lower_vec = vec![f64::NAN; rows * cols];
-    
     // Find first valid index
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+    
+    // Allocate uninitialized matrices
+    let mut upper_mu = make_uninit_matrix(rows, cols);
+    let mut middle_mu = make_uninit_matrix(rows, cols);
+    let mut lower_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut upper_mu, cols, &warm);
+    init_matrix_prefixes(&mut middle_mu, cols, &warm);
+    init_matrix_prefixes(&mut lower_mu, cols, &warm);
+    
+    // Convert to mutable slices
+    let mut upper_guard = ManuallyDrop::new(upper_mu);
+    let mut middle_guard = ManuallyDrop::new(middle_mu);
+    let mut lower_guard = ManuallyDrop::new(lower_mu);
+    
+    let upper_vec: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            upper_guard.as_mut_ptr() as *mut f64,
+            upper_guard.len(),
+        )
+    };
+    let middle_vec: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            middle_guard.as_mut_ptr() as *mut f64,
+            middle_guard.len(),
+        )
+    };
+    let lower_vec: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            lower_guard.as_mut_ptr() as *mut f64,
+            lower_guard.len(),
+        )
+    };
     
     // Process each row
     for (i, combo) in combos.iter().enumerate() {
@@ -1740,6 +2024,29 @@ pub fn bollinger_bands_batch_js(
             out_u, out_m, out_l,
         ).map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
+    
+    // Reclaim as Vec<f64>
+    let upper_vec = unsafe {
+        Vec::from_raw_parts(
+            upper_guard.as_mut_ptr() as *mut f64,
+            upper_guard.len(),
+            upper_guard.capacity()
+        )
+    };
+    let middle_vec = unsafe {
+        Vec::from_raw_parts(
+            middle_guard.as_mut_ptr() as *mut f64,
+            middle_guard.len(),
+            middle_guard.capacity()
+        )
+    };
+    let lower_vec = unsafe {
+        Vec::from_raw_parts(
+            lower_guard.as_mut_ptr() as *mut f64,
+            lower_guard.len(),
+            lower_guard.capacity()
+        )
+    };
     
     // Flatten into single output vector
     let mut result = upper_vec;
