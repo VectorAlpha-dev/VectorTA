@@ -1152,7 +1152,7 @@ fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::
                 let output = VpwmaBatchBuilder::new()
                     .kernel(kernel)
                     .period_range(p_start, p_end, p_step)
-                    .power_values(power_values.clone())
+                    .power_range(*pow_start, *pow_end, *pow_step)
                     .apply_candles(&c, source)?;
 
                 // Check every value in the entire batch matrix for poison patterns

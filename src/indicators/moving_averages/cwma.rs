@@ -765,9 +765,48 @@ fn cwma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    let mut values = vec![0.0; rows * cols];
     
-    cwma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    if cols == 0 {
+        return Err(CwmaError::EmptyInputData);
+    }
+    
+    // Step 1: Allocate uninitialized matrix using the helper
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CwmaError::AllValuesNaN)?;
+    
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    cwma_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(CwmaBatchOutput {
         values,
@@ -785,32 +824,19 @@ fn cwma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CwmaParams>, CwmaError> {
-    if data.is_empty() {
-        return Err(CwmaError::EmptyInputData);
-    }
+    // Note: Input validation and warmup initialization already done in cwma_batch_inner
     let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CwmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(CwmaError::AllValuesNaN)?;
+        .unwrap_or(0);  // Already validated in cwma_batch_inner
+    
     let max_p = combos
         .iter()
         .map(|c| round_up8(c.period.unwrap()))
         .max()
         .unwrap();
-    if data.len() - first < max_p {
-        return Err(CwmaError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
-        });
-    }
 
     let rows = combos.len();
     let cols = data.len();
@@ -833,23 +859,15 @@ fn cwma_batch_inner_into(
         inv_norms[row] = inv_norm;
     }
 
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap() - 1).collect();
-
-    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-    // init_matrix_prefixes function. This is safe because:
-    // 1. MaybeUninit<T> has the same layout as T
-    // 2. We ensure all values are written before the slice is used again
+    // Convert output slice to MaybeUninit for row processing
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
             out.len()
         )
     };
-    
-    // Use the efficient prefix initialization
-    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // 2. closure that fills one row; takes &mut [MaybeUninit<f64>]
+    // Closure that fills one row
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -977,7 +995,8 @@ unsafe fn cwma_row_avx512_short(
         None
     };
 
-    for i in (first + wlen)..data.len() {
+    let start = (first + wlen).max(7);  // Ensure we don't underflow
+    for i in start..data.len() {
         let mut acc = _mm512_fmadd_pd(
             _mm512_loadu_pd(data.as_ptr().add(i - 7)),
             w0,
