@@ -860,9 +860,43 @@ fn ehlers_itrend_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![0.0; rows * cols];
     
-    let result_combos = ehlers_itrend_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(EhlersITrendError::AllValuesNaN)?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.warmup_bars.unwrap())
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    let result_combos = ehlers_itrend_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(EhlersITrendBatchOutput {
         values,
@@ -880,9 +914,8 @@ fn ehlers_itrend_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
-    // ────────────────────────────────────────────────────────────────────
-    // unchanged validity checks
-    // ────────────────────────────────────────────────────────────────────
+    // Note: NaN prefixes have already been initialized by the caller
+    // We just need to compute the values
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(EhlersITrendError::InvalidBatchRange);
@@ -899,25 +932,14 @@ fn ehlers_itrend_batch_inner_into(
         });
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // ❶ reinterpret out as MaybeUninit
-    // ────────────────────────────────────────────────────────────────────
     let rows = combos.len();
     let cols = data.len();
     debug_assert_eq!(out.len(), rows * cols);
     
+    // Reinterpret out as MaybeUninit for row processing
     let raw = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-
-    // ────────────────────────────────────────────────────────────────────
-    // ❷ fill per-row NaN prefixes
-    // ────────────────────────────────────────────────────────────────────
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.warmup_bars.unwrap())
-        .collect();
-    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // ────────────────────────────────────────────────────────────────────
     // ❸ closure that writes one row; receives &mut [MaybeUninit<f64>]

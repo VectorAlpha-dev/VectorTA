@@ -561,8 +561,42 @@ fn ema_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     
-    let mut values = vec![f64::NAN; rows * cols];
-    let returned_combos = ema_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|_| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0)
+        })
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    let returned_combos = ema_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(EmaBatchOutput {
         values,
@@ -608,12 +642,10 @@ fn ema_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // ------------ 1. allocate & warm-up prefixes ---------------------------
+    // ------------ 1. Convert slice to MaybeUninit for row-kernel operations ----
     let raw = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-    let warm: Vec<usize> = vec![first; rows]; // same warm-up for every row
-    unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
     // ------------ 2. row-kernel closure on MaybeUninit rows ---------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
