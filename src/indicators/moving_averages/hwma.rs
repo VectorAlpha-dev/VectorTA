@@ -1368,41 +1368,81 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = HwmaInput::from_candles(&candles, "close", HwmaParams::default());
-        let output = hwma_with_kernel(&input, kernel)?;
+        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        let test_params = vec![
+            // Default parameters
+            HwmaParams::default(),
+            // Small na, nb, nc values
+            HwmaParams { na: Some(0.05), nb: Some(0.05), nc: Some(0.05) },
+            HwmaParams { na: Some(0.1), nb: Some(0.1), nc: Some(0.1) },
+            HwmaParams { na: Some(0.15), nb: Some(0.1), nc: Some(0.05) },
+            // Medium values
+            HwmaParams { na: Some(0.2), nb: Some(0.2), nc: Some(0.2) },
+            HwmaParams { na: Some(0.3), nb: Some(0.3), nc: Some(0.3) },
+            HwmaParams { na: Some(0.4), nb: Some(0.4), nc: Some(0.4) },
+            HwmaParams { na: Some(0.5), nb: Some(0.5), nc: Some(0.5) },
+            // Large values
+            HwmaParams { na: Some(0.6), nb: Some(0.6), nc: Some(0.6) },
+            HwmaParams { na: Some(0.7), nb: Some(0.7), nc: Some(0.7) },
+            HwmaParams { na: Some(0.8), nb: Some(0.8), nc: Some(0.8) },
+            HwmaParams { na: Some(0.9), nb: Some(0.9), nc: Some(0.9) },
+            // Mixed values
+            HwmaParams { na: Some(0.1), nb: Some(0.5), nc: Some(0.9) },
+            HwmaParams { na: Some(0.9), nb: Some(0.5), nc: Some(0.1) },
+            HwmaParams { na: Some(0.5), nb: Some(0.3), nc: Some(0.2) },
+            // Edge cases
+            HwmaParams { na: Some(0.01), nb: Some(0.01), nc: Some(0.01) },
+            HwmaParams { na: Some(0.99), nb: Some(0.99), nc: Some(0.99) },
+        ];
 
-        // Check every value for poison patterns
-        for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
-            }
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = HwmaInput::from_candles(&candles, "close", params.clone());
+            let output = hwma_with_kernel(&input, kernel)?;
 
-            let bits = val.to_bits();
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                        with params: na={}, nb={}, nc={}",
+                        test_name, val, bits, i,
+                        params.na.unwrap_or(0.2),
+                        params.nb.unwrap_or(0.1),
+                        params.nc.unwrap_or(0.1)
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                        with params: na={}, nb={}, nc={}",
+                        test_name, val, bits, i,
+                        params.na.unwrap_or(0.2),
+                        params.nb.unwrap_or(0.1),
+                        params.nc.unwrap_or(0.1)
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                        with params: na={}, nb={}, nc={}",
+                        test_name, val, bits, i,
+                        params.na.unwrap_or(0.2),
+                        params.nb.unwrap_or(0.1),
+                        params.nc.unwrap_or(0.1)
+                    );
+                }
             }
         }
 
@@ -1487,47 +1527,83 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = HwmaBatchBuilder::new()
-            .kernel(kernel)
-            .na_range(0.1, 0.9, 0.4)
-            .nb_range(0.1, 0.9, 0.4)
-            .nc_range(0.1, 0.9, 0.4)
-            .apply_candles(&c, "close")?;
+        // Test multiple batch configurations to better catch uninitialized memory bugs
+        let test_configs = vec![
+            // Small ranges with all params
+            (0.05, 0.15, 0.05, 0.05, 0.15, 0.05, 0.05, 0.15, 0.05),
+            // Medium ranges
+            (0.1, 0.5, 0.1, 0.1, 0.5, 0.1, 0.1, 0.5, 0.1),
+            // Large ranges
+            (0.5, 0.9, 0.1, 0.5, 0.9, 0.1, 0.5, 0.9, 0.1),
+            // Different param ranges
+            (0.1, 0.9, 0.4, 0.1, 0.5, 0.2, 0.1, 0.3, 0.1),
+            // Edge case: very small values
+            (0.01, 0.05, 0.01, 0.01, 0.05, 0.01, 0.01, 0.05, 0.01),
+            // Edge case: near 1.0 values
+            (0.8, 0.99, 0.05, 0.8, 0.99, 0.05, 0.8, 0.99, 0.05),
+            // Mixed ranges
+            (0.1, 0.9, 0.2, 0.2, 0.8, 0.3, 0.3, 0.7, 0.2),
+            // Original configuration
+            (0.1, 0.9, 0.4, 0.1, 0.9, 0.4, 0.1, 0.9, 0.4),
+            // Dense grid
+            (0.1, 0.3, 0.05, 0.1, 0.3, 0.05, 0.1, 0.3, 0.05),
+        ];
 
-        // Check every value in the entire batch matrix for poison patterns
-        for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
-            }
+        for (cfg_idx, &(na_start, na_end, na_step, nb_start, nb_end, nb_step, nc_start, nc_end, nc_step)) in test_configs.iter().enumerate() {
+            let output = HwmaBatchBuilder::new()
+                .kernel(kernel)
+                .na_range(na_start, na_end, na_step)
+                .nb_range(nb_start, nb_end, nb_step)
+                .nc_range(nc_start, nc_end, nc_step)
+                .apply_candles(&c, "close")?;
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+            // Check every value in the entire batch matrix for poison patterns
+            for (idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: na={}, nb={}, nc={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.na.unwrap_or(0.2),
+                        combo.nb.unwrap_or(0.1),
+                        combo.nc.unwrap_or(0.1)
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: na={}, nb={}, nc={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.na.unwrap_or(0.2),
+                        combo.nb.unwrap_or(0.1),
+                        combo.nc.unwrap_or(0.1)
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: na={}, nb={}, nc={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.na.unwrap_or(0.2),
+                        combo.nb.unwrap_or(0.1),
+                        combo.nc.unwrap_or(0.1)
+                    );
+                }
             }
         }
 

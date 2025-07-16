@@ -1070,41 +1070,80 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = JmaInput::from_candles(&candles, "close", JmaParams::default());
-        let output = jma_with_kernel(&input, kernel)?;
+        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        let test_params = vec![
+            // Default parameters
+            JmaParams::default(),
+            // Small periods with various phases and powers
+            JmaParams { period: Some(3), phase: Some(0.0), power: Some(1) },
+            JmaParams { period: Some(3), phase: Some(50.0), power: Some(2) },
+            JmaParams { period: Some(3), phase: Some(100.0), power: Some(3) },
+            // Medium periods
+            JmaParams { period: Some(7), phase: Some(25.0), power: Some(1) },
+            JmaParams { period: Some(7), phase: Some(50.0), power: Some(2) },
+            JmaParams { period: Some(7), phase: Some(75.0), power: Some(3) },
+            JmaParams { period: Some(10), phase: Some(0.0), power: Some(2) },
+            JmaParams { period: Some(14), phase: Some(100.0), power: Some(2) },
+            // Large periods
+            JmaParams { period: Some(20), phase: Some(50.0), power: Some(1) },
+            JmaParams { period: Some(30), phase: Some(50.0), power: Some(2) },
+            JmaParams { period: Some(50), phase: Some(50.0), power: Some(3) },
+            // Edge cases
+            JmaParams { period: Some(1), phase: Some(0.0), power: Some(1) },
+            JmaParams { period: Some(100), phase: Some(100.0), power: Some(5) },
+            // Extreme phases
+            JmaParams { period: Some(10), phase: Some(-100.0), power: Some(2) },
+            JmaParams { period: Some(10), phase: Some(200.0), power: Some(2) },
+        ];
 
-        // Check every value for poison patterns
-        for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
-            }
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = JmaInput::from_candles(&candles, "close", params.clone());
+            let output = jma_with_kernel(&input, kernel)?;
 
-            let bits = val.to_bits();
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, phase={}, power={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(7),
+                        params.phase.unwrap_or(50.0),
+                        params.power.unwrap_or(2)
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, phase={}, power={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(7),
+                        params.phase.unwrap_or(50.0),
+                        params.power.unwrap_or(2)
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, phase={}, power={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(7),
+                        params.phase.unwrap_or(50.0),
+                        params.power.unwrap_or(2)
+                    );
+                }
             }
         }
 
@@ -1194,47 +1233,83 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = JmaBatchBuilder::new()
-            .kernel(kernel)
-            .period_range(5, 20, 5)
-            .phase_range(0.0, 100.0, 50.0)
-            .power_range(1, 3, 1)
-            .apply_candles(&c, "close")?;
+        // Test multiple batch configurations to better catch uninitialized memory bugs
+        let batch_configs = vec![
+            // Default test case
+            (5, 20, 5, 0.0, 100.0, 50.0, 1, 3, 1),
+            // Small periods with extreme phases
+            (1, 10, 3, -100.0, 200.0, 100.0, 1, 5, 2),
+            // Large periods with small phase increments
+            (50, 100, 25, -50.0, 50.0, 25.0, 2, 4, 1),
+            // Single period, varying phase and power
+            (14, 14, 1, -100.0, 200.0, 50.0, 1, 5, 1),
+            // Edge cases with minimum values
+            (1, 1, 1, 0.0, 0.0, 1.0, 1, 1, 1),
+            // Testing with power variations
+            (10, 30, 10, 50.0, 50.0, 1.0, 1, 5, 2),
+            // Large batch with many combinations
+            (5, 50, 5, -50.0, 150.0, 25.0, 1, 3, 1),
+            // Testing negative to positive phase transitions
+            (7, 21, 7, -100.0, 100.0, 40.0, 2, 2, 1),
+            // Maximum practical values
+            (80, 100, 20, 100.0, 200.0, 50.0, 4, 5, 1),
+        ];
 
-        // Check every value in the entire batch matrix for poison patterns
-        for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
-            }
+        for (idx, config) in batch_configs.iter().enumerate() {
+            let output = JmaBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(config.0, config.1, config.2)
+                .phase_range(config.3, config.4, config.5)
+                .power_range(config.6, config.7, config.8)
+                .apply_candles(&c, "close")?;
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+            // Check every value in the entire batch matrix for poison patterns
+            for (val_idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = val_idx / output.cols;
+                let col = val_idx % output.cols;
+                let combo = &output.combos[row];
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
+                        in batch config #{}: period_range=({},{},{}), phase_range=({},{},{}), power_range=({},{},{}) \
+                        combo params: period={}, phase={}, power={}",
+                        test, val, bits, row, col, val_idx, idx,
+                        config.0, config.1, config.2, config.3, config.4, config.5, config.6, config.7, config.8,
+                        combo.period.unwrap_or(7), combo.phase.unwrap_or(50.0), combo.power.unwrap_or(2)
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
+                        in batch config #{}: period_range=({},{},{}), phase_range=({},{},{}), power_range=({},{},{}) \
+                        combo params: period={}, phase={}, power={}",
+                        test, val, bits, row, col, val_idx, idx,
+                        config.0, config.1, config.2, config.3, config.4, config.5, config.6, config.7, config.8,
+                        combo.period.unwrap_or(7), combo.phase.unwrap_or(50.0), combo.power.unwrap_or(2)
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
+                        in batch config #{}: period_range=({},{},{}), phase_range=({},{},{}), power_range=({},{},{}) \
+                        combo params: period={}, phase={}, power={}",
+                        test, val, bits, row, col, val_idx, idx,
+                        config.0, config.1, config.2, config.3, config.4, config.5, config.6, config.7, config.8,
+                        combo.period.unwrap_or(7), combo.phase.unwrap_or(50.0), combo.power.unwrap_or(2)
+                    );
+                }
             }
         }
 

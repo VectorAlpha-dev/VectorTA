@@ -1693,35 +1693,72 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         
-        let input = AlmaInput::from_candles(&candles, "close", AlmaParams::default());
-        let output = alma_with_kernel(&input, kernel)?;
+        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        let test_params = vec![
+            // Default parameters
+            AlmaParams::default(),
+            // Small period, various offsets and sigmas
+            AlmaParams { period: Some(5), offset: Some(0.5), sigma: Some(3.0) },
+            AlmaParams { period: Some(5), offset: Some(0.85), sigma: Some(6.0) },
+            AlmaParams { period: Some(5), offset: Some(1.0), sigma: Some(10.0) },
+            // Medium period variations
+            AlmaParams { period: Some(9), offset: Some(0.2), sigma: Some(4.0) },
+            AlmaParams { period: Some(9), offset: Some(0.85), sigma: Some(6.0) },
+            AlmaParams { period: Some(9), offset: Some(0.95), sigma: Some(8.0) },
+            // Large period variations
+            AlmaParams { period: Some(20), offset: Some(0.0), sigma: Some(2.0) },
+            AlmaParams { period: Some(20), offset: Some(0.5), sigma: Some(5.0) },
+            AlmaParams { period: Some(20), offset: Some(0.85), sigma: Some(6.0) },
+            AlmaParams { period: Some(20), offset: Some(1.0), sigma: Some(10.0) },
+            // Edge case parameters
+            AlmaParams { period: Some(2), offset: Some(0.0), sigma: Some(0.1) },
+            AlmaParams { period: Some(50), offset: Some(0.5), sigma: Some(15.0) },
+            AlmaParams { period: Some(100), offset: Some(0.85), sigma: Some(20.0) },
+        ];
         
-        for (i, &val) in output.values.iter().enumerate() {
-            if val.is_nan() {
-                continue;
-            }
+        for (param_idx, params) in test_params.iter().enumerate() {
+            let input = AlmaInput::from_candles(&candles, "close", params.clone());
+            let output = alma_with_kernel(&input, kernel)?;
             
-            let bits = val.to_bits();
-            
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
-            
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
-            
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+            for (i, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+                
+                let bits = val.to_bits();
+                
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, offset={}, sigma={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(9),
+                        params.offset.unwrap_or(0.85),
+                        params.sigma.unwrap_or(6.0)
+                    );
+                }
+                
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, offset={}, sigma={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(9),
+                        params.offset.unwrap_or(0.85),
+                        params.sigma.unwrap_or(6.0)
+                    );
+                }
+                
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                        with params: period={}, offset={}, sigma={}",
+                        test_name, val, bits, i,
+                        params.period.unwrap_or(9),
+                        params.offset.unwrap_or(0.85),
+                        params.sigma.unwrap_or(6.0)
+                    );
+                }
             }
         }
         
@@ -1937,41 +1974,74 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         
-        let output = AlmaBatchBuilder::new()
-            .kernel(kernel)
-            .period_range(9, 15, 3)
-            .offset_range(0.8, 0.9, 0.1)
-            .sigma_range(6.0, 8.0, 2.0)
-            .apply_candles(&c, "close")?;
+        // Test multiple batch configurations to better catch uninitialized memory bugs
+        let test_configs = vec![
+            // Small batch with varying all parameters
+            (2, 10, 2, 0.0, 1.0, 0.2, 1.0, 10.0, 3.0),
+            // Medium batch focusing on period variations
+            (5, 25, 5, 0.85, 0.85, 0.0, 6.0, 6.0, 0.0),
+            // Large batch focusing on offset variations
+            (10, 10, 0, 0.0, 1.0, 0.1, 5.0, 5.0, 0.0),
+            // Edge case: very small periods
+            (2, 5, 1, 0.5, 0.5, 0.0, 3.0, 8.0, 1.0),
+            // Edge case: large periods
+            (30, 60, 15, 0.85, 0.85, 0.0, 6.0, 6.0, 0.0),
+            // Mixed parameter sweep
+            (9, 15, 3, 0.8, 0.9, 0.1, 6.0, 8.0, 2.0),
+            // Dense parameter grid
+            (8, 12, 1, 0.7, 0.9, 0.05, 4.0, 8.0, 0.5),
+        ];
         
-        for (idx, &val) in output.values.iter().enumerate() {
-            if val.is_nan() {
-                continue;
-            }
+        for (cfg_idx, &(p_start, p_end, p_step, o_start, o_end, o_step, s_start, s_end, s_step)) in test_configs.iter().enumerate() {
+            let output = AlmaBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(p_start, p_end, p_step)
+                .offset_range(o_start, o_end, o_step)
+                .sigma_range(s_start, s_end, s_step)
+                .apply_candles(&c, "close")?;
             
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
-            
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
-            
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
-            
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+            for (idx, &val) in output.values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+                
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
+                
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: period={}, offset={}, sigma={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.period.unwrap_or(9),
+                        combo.offset.unwrap_or(0.85),
+                        combo.sigma.unwrap_or(6.0)
+                    );
+                }
+                
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: period={}, offset={}, sigma={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.period.unwrap_or(9),
+                        combo.offset.unwrap_or(0.85),
+                        combo.sigma.unwrap_or(6.0)
+                    );
+                }
+                
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+                        at row {} col {} (flat index {}) with params: period={}, offset={}, sigma={}",
+                        test, cfg_idx, val, bits, row, col, idx,
+                        combo.period.unwrap_or(9),
+                        combo.offset.unwrap_or(0.85),
+                        combo.sigma.unwrap_or(6.0)
+                    );
+                }
             }
         }
         
