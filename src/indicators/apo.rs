@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -43,6 +43,7 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 // --- Data Representation
@@ -211,14 +212,18 @@ pub fn apo(input: &ApoInput) -> Result<ApoOutput, ApoError> {
     apo_with_kernel(input, Kernel::Auto)
 }
 
-pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, ApoError> {
+#[inline(always)]
+fn apo_prepare<'a>(input: &'a ApoInput, kernel: Kernel) -> Result<(&'a [f64], usize, usize, usize, usize, Kernel), ApoError> {
     let data: &[f64] = input.as_ref();
-
+    let len = data.len();
+    if len == 0 {
+        return Err(ApoError::AllValuesNaN);
+    }
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ApoError::AllValuesNaN)?;
-    let len = data.len();
     let short = input.get_short_period();
     let long = input.get_long_period();
 
@@ -239,19 +244,35 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
+    
+    Ok((data, first, short, long, len, chosen))
+}
 
-    let mut out = vec![f64::NAN; len];
-
+#[inline(always)]
+fn apo_compute_into(data: &[f64], first: usize, short: usize, long: usize, kernel: Kernel, out: &mut [f64]) {
     unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => apo_scalar(data, short, long, first, &mut out),
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => apo_scalar(data, short, long, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => apo_avx2(data, short, long, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch => apo_avx2(data, short, long, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => apo_avx512(data, short, long, first, &mut out),
+            Kernel::Avx512 | Kernel::Avx512Batch => apo_avx512(data, short, long, first, out),
             _ => unreachable!(),
         }
     }
+}
+
+pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, ApoError> {
+    let (data, first, short, long, len, chosen) = apo_prepare(input, kernel)?;
+    
+    // Calculate warmup period: first valid data point
+    let warmup_period = first;
+    
+    // Use zero-copy allocation with NaN prefix
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
+
+    apo_compute_into(data, first, short, long, chosen, &mut out);
+    
     Ok(ApoOutput { values: out })
 }
 
@@ -265,16 +286,13 @@ pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &m
     let mut short_ema = data[first];
     let mut long_ema = data[first];
 
-    for i in 0..data.len() {
+    // Start from first valid index - warmup region already has NaN values
+    for i in first..data.len() {
         let price = data[i];
-        if i < first {
-            out[i] = f64::NAN;
-            continue;
-        }
         if i == first {
             short_ema = price;
             long_ema = price;
-            out[i] = short_ema - long_ema;
+            out[i] = short_ema - long_ema;  // This will be 0.0
             continue;
         }
         short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
@@ -562,7 +580,31 @@ fn apo_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|_c| {
+            // For APO, warmup is simply the first valid data index
+            first
+        })
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let s = combos[row].short_period.unwrap();
         let l = combos[row].long_period.unwrap();
@@ -597,6 +639,15 @@ fn apo_batch_inner(
         }
     }
 
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(ApoBatchOutput {
         values,
         combos,
@@ -840,6 +891,55 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
+    fn check_apo_no_poison(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        
+        let input = ApoInput::from_candles(&candles, "close", ApoParams::default());
+        let output = apo_with_kernel(&input, kernel)?;
+        
+        for (i, &val) in output.values.iter().enumerate() {
+            if val.is_nan() {
+                continue;
+            }
+            
+            let bits = val.to_bits();
+            
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+            
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+            
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn check_apo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_apo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -872,7 +972,8 @@ mod tests {
         check_apo_period_invalid,
         check_apo_very_small_dataset,
         check_apo_reinput,
-        check_apo_nan_handling
+        check_apo_nan_handling,
+        check_apo_no_poison
     );
 
     fn check_batch_default_row(
@@ -948,11 +1049,15 @@ pub fn apo_py<'py>(
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), ApoError> {
-        let result = apo_with_kernel(&apo_in, kern)?;
+        let (data, first, short, long, _len, chosen) = apo_prepare(&apo_in, kern)?;
         
-        // SAFETY: We must write to ALL elements before returning to Python
-        // The APO algorithm guarantees that result.values has exactly the same length as input
-        slice_out.copy_from_slice(&result.values);
+        // Fill the warmup region with NaN
+        if first > 0 {
+            slice_out[..first].fill(f64::NAN);
+        }
+        
+        // Compute directly into the NumPy array
+        apo_compute_into(data, first, short, long, chosen, slice_out);
         
         Ok(())
     })

@@ -1488,75 +1488,92 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = MamaInput::from_candles(&candles, "close", MamaParams::default());
-        let output = mama_with_kernel(&input, kernel)?;
+        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        let test_cases = vec![
+            // Default parameters
+            MamaParams::default(),
+            // Various fast_limit/slow_limit combinations
+            MamaParams { fast_limit: Some(0.3), slow_limit: Some(0.03) },
+            MamaParams { fast_limit: Some(0.4), slow_limit: Some(0.04) },
+            MamaParams { fast_limit: Some(0.5), slow_limit: Some(0.05) },
+            MamaParams { fast_limit: Some(0.6), slow_limit: Some(0.06) },
+            MamaParams { fast_limit: Some(0.7), slow_limit: Some(0.07) },
+            // Edge cases
+            MamaParams { fast_limit: Some(0.8), slow_limit: Some(0.01) },
+            MamaParams { fast_limit: Some(0.2), slow_limit: Some(0.1) },
+            MamaParams { fast_limit: Some(0.9), slow_limit: Some(0.02) },
+        ];
 
-        // Check every value for poison patterns in mama_values
-        for (i, &val) in output.mama_values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
+        for params in test_cases {
+            let input = MamaInput::from_candles(&candles, "close", params.clone());
+            let output = mama_with_kernel(&input, kernel)?;
+
+            // Check every value for poison patterns in mama_values
+            for (i, &val) in output.mama_values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
             }
 
-            let bits = val.to_bits();
+            // Check every value for poison patterns in fama_values
+            for (i, &val) in output.fama_values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in mama_values",
-                    test_name, val, bits, i
-                );
-            }
+                let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in mama_values",
-                    test_name, val, bits, i
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in mama_values",
-                    test_name, val, bits, i
-                );
-            }
-        }
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
 
-        // Check every value for poison patterns in fama_values
-        for (i, &val) in output.fama_values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
-            }
-
-            let bits = val.to_bits();
-
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in fama_values",
-                    test_name, val, bits, i
-                );
-            }
-
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in fama_values",
-                    test_name, val, bits, i
-                );
-            }
-
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in fama_values",
-                    test_name, val, bits, i
-                );
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
+                        test_name, val, bits, i, params.fast_limit, params.slow_limit
+                    );
+                }
             }
         }
 
@@ -1622,82 +1639,99 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = MamaBatchBuilder::new()
-            .kernel(kernel)
-            .fast_limit_range(0.3, 0.7, 0.2)
-            .slow_limit_range(0.03, 0.07, 0.02)
-            .apply_candles(&c, "close")?;
+        // Test multiple batch configurations to better catch uninitialized memory bugs
+        let test_configs = vec![
+            // Small ranges
+            ((0.2, 0.4, 0.1), (0.02, 0.04, 0.01)),
+            // Medium ranges
+            ((0.3, 0.7, 0.2), (0.03, 0.07, 0.02)),
+            // Large ranges
+            ((0.4, 0.9, 0.1), (0.01, 0.09, 0.02)),
+            // Edge case: small slow_limit
+            ((0.5, 0.8, 0.15), (0.01, 0.03, 0.01)),
+            // Dense parameter sweep
+            ((0.2, 0.6, 0.05), (0.02, 0.08, 0.01)),
+        ];
 
-        // Check every value in the entire batch matrix for poison patterns in mama_values
-        for (idx, &val) in output.mama_values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
+        for (fast_range, slow_range) in test_configs {
+            let output = MamaBatchBuilder::new()
+                .kernel(kernel)
+                .fast_limit_range(fast_range.0, fast_range.1, fast_range.2)
+                .slow_limit_range(slow_range.0, slow_range.1, slow_range.2)
+                .apply_candles(&c, "close")?;
+
+            // Check every value in the entire batch matrix for poison patterns in mama_values
+            for (idx, &val) in output.mama_values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let params = &output.combos[row];
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
             }
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+            // Check every value in the entire batch matrix for poison patterns in fama_values
+            for (idx, &val) in output.fama_values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in mama_values",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let params = &output.combos[row];
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in mama_values",
-                    test, val, bits, row, col, idx
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in mama_values",
-                    test, val, bits, row, col, idx
-                );
-            }
-        }
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
 
-        // Check every value in the entire batch matrix for poison patterns in fama_values
-        for (idx, &val) in output.fama_values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
-            }
-
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
-
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in fama_values",
-                    test, val, bits, row, col, idx
-                );
-            }
-
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in fama_values",
-                    test, val, bits, row, col, idx
-                );
-            }
-
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in fama_values",
-                    test, val, bits, row, col, idx
-                );
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
+                        test, val, bits, row, col, params.fast_limit, params.slow_limit
+                    );
+                }
             }
         }
 

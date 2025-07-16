@@ -21,12 +21,13 @@
 
 use crate::utilities::data_loader::{Candles, source_type};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -205,7 +206,8 @@ pub fn correl_hl_with_kernel(input: &CorrelHlInput, kernel: Kernel) -> Result<Co
         other => other,
     };
 
-    let mut out = vec![f64::NAN; high.len()];
+    let warmup_period = first_valid_idx + period - 1;
+    let mut out = alloc_with_nan_prefix(high.len(), warmup_period);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -594,7 +596,27 @@ fn correl_hl_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+
+    // Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
@@ -614,7 +636,7 @@ fn correl_hl_batch_inner(
         #[cfg(not(target_arch = "wasm32"))] {
 
 
-        values
+        values_slice
 
 
                     .par_chunks_mut(cols)
@@ -632,7 +654,7 @@ fn correl_hl_batch_inner(
         #[cfg(target_arch = "wasm32")] {
 
 
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 
 
                     do_row(row, slice);
@@ -643,10 +665,19 @@ fn correl_hl_batch_inner(
 
         }
     } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
+        for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
 
     Ok(CorrelHlBatchOutput {
         values,
@@ -835,6 +866,61 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_correl_hl_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with default parameters
+        let input = CorrelHlInput::from_candles(&candles, CorrelHlParams::default());
+        let output = correl_hl_with_kernel(&input, kernel)?;
+
+        // Check every value for poison patterns
+        for (i, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_correl_hl_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_correl_hl_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -867,7 +953,8 @@ mod tests {
         check_correl_hl_data_length_mismatch,
         check_correl_hl_all_nan,
         check_correl_hl_from_candles,
-        check_correl_hl_reinput
+        check_correl_hl_reinput,
+        check_correl_hl_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -884,6 +971,65 @@ mod tests {
         let row = output.values_for(&def).expect("default row missing");
 
         assert_eq!(row.len(), c.close.len());
+        Ok(())
+    }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = CorrelHlBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(5, 20, 5)  // Test with periods 5, 10, 15, 20
+            .apply_candles(&c)?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
@@ -908,4 +1054,5 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }

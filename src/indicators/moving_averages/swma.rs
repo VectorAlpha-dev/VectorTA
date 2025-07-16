@@ -1014,41 +1014,52 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = SwmaInput::from_candles(&candles, "close", SwmaParams::default());
-        let output = swma_with_kernel(&input, kernel)?;
-
-        // Check every value for poison patterns
-        for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
+        // Test multiple parameter combinations to catch uninitialized memory reads
+        let test_periods = vec![1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 100];
+        
+        for period in test_periods {
+            let params = SwmaParams { period: Some(period) };
+            let input = SwmaInput::from_candles(&candles, "close", params);
+            
+            // Skip if period is too large for the data
+            if period > candles.close.len() {
                 continue;
             }
+            
+            let output = swma_with_kernel(&input, kernel)?;
 
-            let bits = val.to_bits();
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
+                        test_name, val, bits, i, period
+                    );
+                }
             }
         }
 
@@ -1133,45 +1144,67 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = SwmaBatchBuilder::new()
-            .kernel(kernel)
-            .period_range(3, 9, 3)  // Adjust ranges based on indicator
-            .apply_candles(&c, "close")?;
+        // Test multiple different batch configurations to catch edge cases
+        // SWMA typically uses smaller periods than other indicators
+        let batch_configs = vec![
+            (1, 10, 1),    // All small periods including edge cases
+            (3, 9, 3),     // Small periods with gaps
+            (5, 25, 5),    // Medium periods  
+            (10, 50, 10),  // Larger periods
+            (2, 2, 1),     // Single period (edge case)
+            (1, 30, 2),    // Odd periods only
+        ];
 
-        // Check every value in the entire batch matrix for poison patterns
-        for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
+        for (start, end, step) in batch_configs {
+            // Skip if the largest period exceeds data length
+            if end > c.close.len() {
                 continue;
             }
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+            let output = SwmaBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(start, end, step)
+                .apply_candles(&c, "close")?;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+            // Check every value in the entire batch matrix for poison patterns
+            for (idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let period = if row < output.combos.len() {
+                    output.combos[row].period.unwrap_or(0)
+                } else {
+                    0
+                };
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
+                        test, val, bits, row, col, idx, period, start, end, step
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
+                        test, val, bits, row, col, idx, period, start, end, step
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
+                        test, val, bits, row, col, idx, period, start, end, step
+                    );
+                }
             }
         }
 
