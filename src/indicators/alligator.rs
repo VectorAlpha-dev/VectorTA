@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -391,9 +391,15 @@ pub unsafe fn alligator_scalar(
     first: usize,
     len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    let mut jaw = vec![f64::NAN; len];
-    let mut teeth = vec![f64::NAN; len];
-    let mut lips = vec![f64::NAN; len];
+    // Calculate warmup periods for each line (period only, offset is applied later)
+    let jaw_warmup = first + jaw_period - 1;
+    let teeth_warmup = first + teeth_period - 1;
+    let lips_warmup = first + lips_period - 1;
+    
+    // Use zero-copy memory allocation
+    let mut jaw = alloc_with_nan_prefix(len, jaw_warmup);
+    let mut teeth = alloc_with_nan_prefix(len, teeth_warmup);
+    let mut lips = alloc_with_nan_prefix(len, lips_warmup);
 
     let (jaw_val, teeth_val, lips_val) = alligator_smma_scalar(
         data,
@@ -987,9 +993,54 @@ fn alligator_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let mut jaw = vec![f64::NAN; rows * cols];
-    let mut teeth = vec![f64::NAN; rows * cols];
-    let mut lips = vec![f64::NAN; rows * cols];
+    
+    // Allocate uninitialized matrices for zero-copy memory
+    let mut jaw_mu = make_uninit_matrix(rows, cols);
+    let mut teeth_mu = make_uninit_matrix(rows, cols);
+    let mut lips_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each combination (period only, offset is applied later)
+    let jaw_warmups: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.jaw_period.unwrap() - 1)
+        .collect();
+    let teeth_warmups: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.teeth_period.unwrap() - 1)
+        .collect();
+    let lips_warmups: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.lips_period.unwrap() - 1)
+        .collect();
+        
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut jaw_mu, cols, &jaw_warmups);
+    init_matrix_prefixes(&mut teeth_mu, cols, &teeth_warmups);
+    init_matrix_prefixes(&mut lips_mu, cols, &lips_warmups);
+    
+    // Convert to mutable slices
+    let mut jaw_guard = std::mem::ManuallyDrop::new(jaw_mu);
+    let mut teeth_guard = std::mem::ManuallyDrop::new(teeth_mu);
+    let mut lips_guard = std::mem::ManuallyDrop::new(lips_mu);
+    
+    let jaw: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            jaw_guard.as_mut_ptr() as *mut f64,
+            jaw_guard.len(),
+        )
+    };
+    let teeth: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            teeth_guard.as_mut_ptr() as *mut f64,
+            teeth_guard.len(),
+        )
+    };
+    let lips: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            lips_guard.as_mut_ptr() as *mut f64,
+            lips_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, jaw_out: &mut [f64], teeth_out: &mut [f64], lips_out: &mut [f64]| unsafe {
         let prm = &combos[row];
@@ -1072,10 +1123,33 @@ fn alligator_batch_inner(
             do_row(row, j, t, l);
         }
     }
+    // Reclaim as Vec<f64> (takes ownership from ManuallyDrop)
+    let jaw_vec = unsafe {
+        Vec::from_raw_parts(
+            jaw_guard.as_mut_ptr() as *mut f64,
+            jaw_guard.len(),
+            jaw_guard.capacity()
+        )
+    };
+    let teeth_vec = unsafe {
+        Vec::from_raw_parts(
+            teeth_guard.as_mut_ptr() as *mut f64,
+            teeth_guard.len(),
+            teeth_guard.capacity()
+        )
+    };
+    let lips_vec = unsafe {
+        Vec::from_raw_parts(
+            lips_guard.as_mut_ptr() as *mut f64,
+            lips_guard.len(),
+            lips_guard.capacity()
+        )
+    };
+    
     Ok(AlligatorBatchOutput {
-        jaw,
-        teeth,
-        lips,
+        jaw: jaw_vec,
+        teeth: teeth_vec,
+        lips: lips_vec,
         combos,
         rows,
         cols,
