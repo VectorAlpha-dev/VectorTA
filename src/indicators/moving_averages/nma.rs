@@ -925,7 +925,7 @@ pub fn nma_py<'py>(
 
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), NmaError> {
-        let (data, period, first, ln_values, sqrt_diffs, chosen) =
+        let (data, period, first, mut ln_values, mut sqrt_diffs, chosen) =
             nma_prepare(&nma_in, Kernel::Auto)?;
         // Initialize prefix with NaN
         let warm = first + period;
@@ -934,8 +934,8 @@ pub fn nma_py<'py>(
             data,
             period,
             first,
-            &ln_values,
-            &sqrt_diffs,
+            &mut ln_values,
+            &mut sqrt_diffs,
             chosen,
             slice_out,
         );

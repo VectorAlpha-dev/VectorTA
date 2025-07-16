@@ -37,7 +37,7 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 impl<'a> AsRef<[f64]> for EpmaInput<'a> {
     #[inline(always)]
@@ -750,27 +750,43 @@ fn epma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EpmaBatchOutput, EpmaError> {
-    let rows = expand_grid(sweep).len();
+    // First calculate dimensions to allocate the right size
+    let combos = expand_grid(sweep);
+    let rows = combos.len();
     let cols = data.len();
-    let mut out = vec![f64::NAN; rows * cols];
     
-    let combos = epma_batch_inner_into(data, sweep, kern, parallel, &mut out)?;
+    // Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Pass to inner function which will initialize and compute
+    let combos = epma_batch_inner_into_uninit(data, sweep, kern, parallel, &mut buf_mu)?;
+    
+    // Convert from MaybeUninit to Vec<f64>
+    let values = unsafe {
+        let mut buf_guard = ManuallyDrop::new(buf_mu);
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(EpmaBatchOutput {
-        values: out,
+        values,
         combos,
         rows,
         cols,
     })
 }
 
+
 #[inline(always)]
-fn epma_batch_inner_into(
+fn epma_batch_inner_into_uninit(
     data: &[f64],
     sweep: &EpmaBatchRange,
     kern: Kernel,
     parallel: bool,
-    out: &mut [f64],
+    buf_mu: &mut [MaybeUninit<f64>],
 ) -> Result<Vec<EpmaParams>, EpmaError> {
     if data.is_empty() {
         return Err(EpmaError::EmptyInputData);
@@ -808,31 +824,20 @@ fn epma_batch_inner_into(
             valid: data.len() - first,
         });
     }
-    let rows = combos.len();
     let cols = data.len();
-
-    // Reinterpret the output slice as MaybeUninit
-    let raw = unsafe {
-        std::slice::from_raw_parts_mut(
-            out.as_mut_ptr() as *mut MaybeUninit<f64>,
-            out.len(),
-        )
-    };
 
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() + c.offset.unwrap() + 1)
         .collect();
-    unsafe { init_matrix_prefixes(raw, cols, &warm) };
+    init_matrix_prefixes(buf_mu, cols, &warm);
 
-    // ---------------------------------------------------------------------------
-    // 2. helper that computes **one** row into a &mut [MaybeUninit<f64>]
-    // ---------------------------------------------------------------------------
+    // Helper that computes one row into a &mut [MaybeUninit<f64>]
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let offset = combos[row].offset.unwrap();
 
-        // cast this slice only; we know the kernel will overwrite every cell
+        // Cast this slice only; we know the kernel will overwrite every cell after warmup
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
@@ -844,38 +849,29 @@ fn epma_batch_inner_into(
         }
     };
 
-    // ---------------------------------------------------------------------------
-    // 3. run all rows (parallel or serial) on the MaybeUninit buffer
-    // ---------------------------------------------------------------------------
+    // Run all rows (parallel or serial) on the MaybeUninit buffer
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            buf_mu.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
-
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
-
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in buf_mu.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in buf_mu.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
     Ok(combos)
 }
+
 #[inline(always)]
 unsafe fn epma_row_scalar(
     data: &[f64],
@@ -1461,29 +1457,17 @@ pub fn epma_py<'py>(
     period: Option<usize>,
     offset: Option<usize>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::IntoPyArray;
     
-    let slice_in = arr_in.as_slice()?; // zero-copy view
-    
+    let slice_in = arr_in.as_slice()?;
     let params = EpmaParams { period, offset };
     let input = EpmaInput::from_slice(slice_in, params);
     
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    // Use the Rust implementation directly which handles memory allocation properly
+    let result = py.allow_threads(|| epma_with_kernel(&input, Kernel::Auto))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Release GIL for computation
-    py.allow_threads(|| -> Result<(), EpmaError> {
-        let (data, period, offset, first, warmup, chosen) = epma_prepare(&input, Kernel::Auto)?;
-        // Initialize NaN prefix
-        slice_out[..warmup].fill(f64::NAN);
-        // Compute directly into output buffer
-        epma_compute_into(data, period, offset, first, chosen, slice_out);
-        Ok(())
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok(out_arr)
+    Ok(result.values.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1508,37 +1492,22 @@ pub fn epma_batch_py<'py>(
     let rows = combos.len();
     let cols = data.len();
     
-    // Pre-allocate output array and initialize with NaN
+    // Use the Rust batch implementation directly
+    let result = py.allow_threads(|| epma_batch_with_kernel(data, &range, Kernel::ScalarBatch))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    // Create output array from result
     let out_arr = unsafe { PyArray2::<f64>::new(py, [rows, cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
-    // Initialize all values to NaN to avoid uninitialized memory issues
-    for v in out_slice.iter_mut() {
-        *v = f64::NAN;
-    }
-    
-    // Map kernel (ScalarBatch -> Scalar, etc.)
-    let kernel = match Kernel::ScalarBatch {
-        Kernel::ScalarBatch => Kernel::Scalar,
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2Batch => Kernel::Avx2,
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512Batch => Kernel::Avx512,
-        _ => Kernel::Scalar,
-    };
-    
-    // Release GIL for computation
-    let combos_result = py.allow_threads(|| -> Result<Vec<EpmaParams>, EpmaError> {
-        epma_batch_inner_into(data, &range, kernel, false, out_slice)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    out_slice.copy_from_slice(&result.values);
     
     let dict = PyDict::new(py);
     
     // Extract periods and offsets
-    let periods: Vec<usize> = combos_result.iter()
+    let periods: Vec<usize> = result.combos.iter()
         .map(|c| c.period.unwrap_or(11))
         .collect();
-    let offsets: Vec<usize> = combos_result.iter()
+    let offsets: Vec<usize> = result.combos.iter()
         .map(|c| c.offset.unwrap_or(4))
         .collect();
     
