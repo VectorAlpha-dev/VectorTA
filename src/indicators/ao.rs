@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -44,6 +47,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for AoInput<'a> {
@@ -264,7 +268,12 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let mut out = vec![f64::NAN; len];
+    
+    // Calculate warmup period
+    let warmup_period = first + long - 1;
+    
+    // Use zero-copy allocation helper
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     unsafe {
         match chosen {
@@ -299,9 +308,9 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
             long_sum -= data[i - long];
         }
         
-        if i < first + long - 1 {
-            out[i] = f64::NAN;  // Explicit write for warmup period
-        } else {
+        if i >= first + long - 1 {
+            // Only write values after warmup period
+            // NaN values in warmup are already set by alloc_with_nan_prefix
             let short_sma = short_sum / (short as f64);
             let long_sma = long_sum / (long as f64);
             out[i] = short_sma - long_sma;
@@ -633,9 +642,44 @@ fn ao_batch_inner(
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
     
-    let combos = ao_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    if cols == 0 {
+        return Err(AoError::NoData);
+    }
+    
+    // Use zero-copy matrix allocation
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each combination
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .unwrap_or(0);
+    
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.long_period.unwrap() - 1)
+        .collect();
+    
+    // Initialize NaN prefixes
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
+    let values_len = buf_guard.len();
+    let values_cap = buf_guard.capacity();
+    
+    let values = unsafe {
+        // Create slice for ao_batch_inner_into
+        let slice = std::slice::from_raw_parts_mut(values_ptr, values_len);
+        
+        // Do the computation
+        ao_batch_inner_into(data, sweep, kern, parallel, slice)?;
+        
+        // Reclaim as Vec<f64>
+        Vec::from_raw_parts(values_ptr, values_len, values_cap)
+    };
     
     Ok(AoBatchOutput {
         values,
@@ -959,13 +1003,16 @@ pub fn ao_py<'py>(
     // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [hl2.len()], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Pre-fill with NaN to ensure all elements are initialized
-    slice_out.fill(f64::NAN);
 
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), AoError> {
         let (data, short, long, first, _len) = ao_prepare(&ao_in)?;
+        
+        // Calculate warmup period and initialize NaN prefix
+        let warmup_period = first + long - 1;
+        if warmup_period > 0 {
+            slice_out[..warmup_period].fill(f64::NAN);
+        }
         
         // Resolve Kernel::Auto to a specific kernel
         let chosen = match kern {
@@ -974,7 +1021,7 @@ pub fn ao_py<'py>(
         };
 
         // SAFETY: We must write to ALL elements before returning to Python
-        // ao_scalar writes NaN values for warmup period and valid values after
+        // ao_scalar now only writes values after warmup period
         unsafe {
             match chosen {
                 Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, slice_out),
@@ -1063,15 +1110,30 @@ pub fn ao_batch_py<'py>(
     // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Pre-fill with NaN to ensure all elements are initialized
-    slice_out.fill(f64::NAN);
 
     // Use kernel validation for safety
     let kern = validate_kernel(kernel, true)?;
 
     // 3. Heavy work without the GIL
     let combos = py.allow_threads(|| -> Result<Vec<AoParams>, AoError> {
+        // Initialize NaN prefixes for each row
+        let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let warm: Vec<usize> = combos
+            .iter()
+            .map(|c| first + c.long_period.unwrap() - 1)
+            .collect();
+        
+        // Convert slice to MaybeUninit for init_matrix_prefixes
+        let slice_mu = unsafe {
+            std::slice::from_raw_parts_mut(
+                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                slice_out.len()
+            )
+        };
+        
+        // Initialize NaN prefixes
+        init_matrix_prefixes(slice_mu, cols, &warm);
+        
         // Resolve Kernel::Auto to a specific kernel
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),

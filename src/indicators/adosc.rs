@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+    init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -353,7 +354,8 @@ pub unsafe fn adosc_scalar(
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
 
-    let mut adosc_values = vec![0.0; len];
+    // ADOSC starts computing from index 0, no warmup period
+    let mut adosc_values = alloc_with_nan_prefix(len, 0);
     let mut sum_ad = 0.0;
     let h = high[0];
     let l = low[0];
@@ -630,7 +632,21 @@ fn adosc_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    let mut values = vec![f64::NAN; rows * cols];
+    // Use zero-copy memory allocation
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // ADOSC computes from index 0, so warmup period is 0 for all rows
+    let warm: Vec<usize> = vec![0; rows];
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        std::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let short = prm.short_period.unwrap();
@@ -679,6 +695,16 @@ fn adosc_batch_inner(
             do_row(row, slice);
         }
     }
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
+    
     Ok(AdoscBatchOutput {
         values,
         combos,

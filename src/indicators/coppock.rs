@@ -30,7 +30,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -38,6 +41,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 use crate::indicators::moving_averages::ma::{ma, MaData};
 
@@ -259,8 +263,13 @@ pub fn coppock_with_kernel(input: &CoppockInput, kernel: Kernel) -> Result<Coppo
         return Err(CoppockError::NotEnoughValidData { needed: largest_roc, valid: data_len - first });
     }
 
-    let mut sum_roc = AVec::<f64>::with_capacity(CACHELINE_ALIGN, data_len);
-    sum_roc.resize(data_len, f64::NAN);
+    // Calculate warmup period for sum_roc
+    let warmup_period = first + largest_roc;
+    
+    // REPLACE: let mut sum_roc = AVec::<f64>::with_capacity(CACHELINE_ALIGN, data_len);
+    // REPLACE: sum_roc.resize(data_len, f64::NAN);
+    // WITH:
+    let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
     unsafe {
         match match kernel { Kernel::Auto => detect_best_kernel(), other => other } {
@@ -660,10 +669,41 @@ fn coppock_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrix
+    // REPLACE: let mut values = vec![f64::NAN; rows * cols];
+    // WITH:
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+
+    // Step 2: Calculate warmup periods for each row
+    // For Coppock, warmup = first_valid + largest_roc + (ma_period - 1)
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            let short = c.short_roc_period.unwrap();
+            let long = c.long_roc_period.unwrap();
+            let ma_p = c.ma_period.unwrap();
+            let largest = short.max(long);
+            // The sum_roc starts producing values at first + largest
+            // Then MA adds its own warmup of (ma_p - 1)
+            first + largest + (ma_p - 1)
+        })
+        .collect();
+
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
 
     // A single closure that (for a given row) computes:
-    // 1) raw “sum_roc” into a temporary Vec<f64>
+    // 1) raw "sum_roc" into a temporary Vec<f64>
     // 2) applies ma(...) to that temp
     // 3) writes the smoothed result into out_row
     let do_row = |row: usize, out_row: &mut [f64]| {
@@ -674,8 +714,13 @@ fn coppock_batch_inner(
         let ma_type = c.ma_type.clone().unwrap_or_else(|| "wma".to_string());
         let largest = short.max(long);
 
-        // Prepare a “sum_roc” buffer, initially all NaN
-        let mut sum_roc = vec![f64::NAN; cols];
+        // Calculate warmup for sum_roc
+        let sum_roc_warmup = first + largest;
+        
+        // Prepare a "sum_roc" buffer
+        // REPLACE: let mut sum_roc = vec![f64::NAN; cols];
+        // WITH:
+        let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
 
         // Fill sum_roc[i] = ROC_short + ROC_long for i >= first + largest
         for i in (first + largest)..cols {
@@ -697,44 +742,33 @@ fn coppock_batch_inner(
     };
 
     if parallel {
-
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-
-        values
-
-
-                    .par_chunks_mut(cols)
-
-
-                    .enumerate()
-
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
-
-
-        #[cfg(target_arch = "wasm32")] {
-
-
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-
-
-                    do_row(row, slice);
-
-
-        }
-
-
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
         for (row, slice) in values.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
+
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
 
     Ok(CoppockBatchOutput {
         values,
@@ -1065,6 +1099,85 @@ mod tests {
         }
         Ok(())
     }
+    
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_coppock_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with multiple parameter combinations to increase chance of catching bugs
+        let param_combos = vec![
+            CoppockParams {
+                short_roc_period: Some(11),
+                long_roc_period: Some(14),
+                ma_period: Some(10),
+                ma_type: Some("wma".to_string()),
+            },
+            CoppockParams {
+                short_roc_period: Some(5),
+                long_roc_period: Some(8),
+                ma_period: Some(3),
+                ma_type: Some("sma".to_string()),
+            },
+            CoppockParams {
+                short_roc_period: Some(20),
+                long_roc_period: Some(25),
+                ma_period: Some(15),
+                ma_type: Some("ema".to_string()),
+            },
+        ];
+
+        for params in param_combos {
+            let input = CoppockInput::from_candles(&candles, "close", params);
+            let output = coppock_with_kernel(&input, kernel)?;
+
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                        test_name, val, bits, i
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                        test_name, val, bits, i
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                        test_name, val, bits, i
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_coppock_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+    
     macro_rules! generate_all_coppock_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1097,7 +1210,8 @@ mod tests {
         check_coppock_very_small_dataset,
         check_coppock_reinput,
         check_coppock_nan_handling,
-        check_coppock_streaming
+        check_coppock_streaming,
+        check_coppock_no_poison
     );
         fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1127,6 +1241,67 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = CoppockBatchBuilder::new()
+            .kernel(kernel)
+            .short_range(5, 15, 5)    // 5, 10, 15
+            .long_range(10, 20, 5)    // 10, 15, 20
+            .ma_range(3, 9, 3)        // 3, 6, 9
+            .apply_candles(&c, "close")?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1148,4 +1323,5 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }

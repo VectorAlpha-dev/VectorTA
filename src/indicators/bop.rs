@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{Candles, source_type};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -192,11 +192,20 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
     if len != high.len() || len != low.len() || len != close.len() {
         return Err(BopError::InconsistentLengths);
     }
+    
+    // Calculate the warmup period - first index where all arrays have valid values
+    let warmup_period = (0..len)
+        .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .unwrap_or(len);
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    let mut out = vec![0.0; len];
+    
+    // Use zero-copy allocation with NaN prefix
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -224,7 +233,13 @@ pub unsafe fn bop_scalar(
     close: &[f64],
     out: &mut [f64],
 ) {
-    for i in 0..open.len() {
+    // Find the first valid index where all arrays have non-NaN values
+    let first_valid = (0..open.len())
+        .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .unwrap_or(open.len());
+    
+    // Only compute values starting from the first valid index
+    for i in first_valid..open.len() {
         let denom = high[i] - low[i];
         out[i] = if denom <= 0.0 { 0.0 } else { (close[i] - open[i]) / denom };
     }
@@ -427,11 +442,20 @@ pub fn bop_batch_with_kernel(
     if len == 0 || high.len() != len || low.len() != len || close.len() != len {
         return Err(BopError::InconsistentLengths);
     }
+    
+    // Calculate the warmup period - first index where all arrays have valid values
+    let warmup_period = (0..len)
+        .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .unwrap_or(len);
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
-    let mut values = vec![0.0; len];
+    
+    // Use zero-copy allocation with NaN prefix
+    let mut values = alloc_with_nan_prefix(len, warmup_period);
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, &mut values),
@@ -628,6 +652,61 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_bop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with default parameters
+        let input = BopInput::with_default_candles(&candles);
+        let output = bop_with_kernel(&input, kernel)?;
+
+        // Check every value for poison patterns
+        for (i, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_bop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_bop_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -655,7 +734,8 @@ mod tests {
         check_bop_very_small_dataset,
         check_bop_with_slice_data_reinput,
         check_bop_nan_handling,
-        check_bop_streaming
+        check_bop_streaming,
+        check_bop_no_poison
     );
         fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -709,6 +789,71 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        let open = source_type(&c, "open");
+        let high = source_type(&c, "high");
+        let low = source_type(&c, "low");
+        let close = source_type(&c, "close");
+
+        // BOP has no parameters, so we just test the single batch row
+        let output = BopBatchBuilder::new()
+            .kernel(kernel)
+            .apply_slices(open, high, low, close)?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+    
+    gen_batch_tests!(check_batch_no_poison);
 
 }
 

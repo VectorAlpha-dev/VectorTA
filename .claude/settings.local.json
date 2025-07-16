@@ -190,7 +190,8 @@
       "Bash(test_bindings.bat supersmoother --python)",
       "WebFetch(domain:doc.rust-lang.org)",
       "Bash(.venvScriptspython.exe tests/python/test_acosc.py)",
-      "Bash(del test_acosc_quick.py)"
+      "Bash(del test_acosc_quick.py)",
+      "Bash(test_bindings.bat coppock)"
     ],
     "deny": []
   }
