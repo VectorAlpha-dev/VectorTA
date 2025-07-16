@@ -21,7 +21,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,15 +32,15 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
-use thiserror::Error;
 use std::mem::MaybeUninit;
+use thiserror::Error;
 
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyArray2};
+use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
@@ -68,7 +71,7 @@ pub struct ReflexOutput {
     pub values: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ReflexParams {
     pub period: Option<usize>,
 }
@@ -89,7 +92,10 @@ impl<'a> ReflexInput<'a> {
     #[inline]
     pub fn from_candles(c: &'a Candles, s: &'a str, p: ReflexParams) -> Self {
         Self {
-            data: ReflexData::Candles { candles: c, source: s },
+            data: ReflexData::Candles {
+                candles: c,
+                source: s,
+            },
             params: p,
         }
     }
@@ -142,19 +148,25 @@ impl ReflexBuilder {
     }
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<ReflexOutput, ReflexError> {
-        let p = ReflexParams { period: self.period };
+        let p = ReflexParams {
+            period: self.period,
+        };
         let i = ReflexInput::from_candles(c, "close", p);
         reflex_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn apply_slice(self, d: &[f64]) -> Result<ReflexOutput, ReflexError> {
-        let p = ReflexParams { period: self.period };
+        let p = ReflexParams {
+            period: self.period,
+        };
         let i = ReflexInput::from_slice(d, p);
         reflex_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
     pub fn into_stream(self) -> Result<ReflexStream, ReflexError> {
-        let p = ReflexParams { period: self.period };
+        let p = ReflexParams {
+            period: self.period,
+        };
         ReflexStream::try_new(p)
     }
 }
@@ -176,20 +188,23 @@ pub fn reflex(input: &ReflexInput) -> Result<ReflexOutput, ReflexError> {
     reflex_with_kernel(input, Kernel::Auto)
 }
 
-pub fn reflex_with_kernel(input: &ReflexInput, kernel: Kernel) -> Result<ReflexOutput, ReflexError> {
+pub fn reflex_with_kernel(
+    input: &ReflexInput,
+    kernel: Kernel,
+) -> Result<ReflexOutput, ReflexError> {
     let (data, period, first, chosen) = reflex_prepare(input, kernel)?;
     let len = data.len();
-    
+
     let warm = first + period;
     let mut out = alloc_with_nan_prefix(len, warm);
-    
+
     reflex_compute_into(data, period, first, chosen, &mut out);
-    
+
     // Reflex fills zeros for the first period values
     for x in &mut out[..period.min(len)] {
         *x = 0.0;
     }
-    
+
     Ok(ReflexOutput { values: out })
 }
 
@@ -204,17 +219,17 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
     // 2-pole smoothing filter coefficients (identical to the original version)
     // ------------------------------------------------------------------------
     let half_period = (period / 2).max(1);
-    let a     = (-1.414_f64 * std::f64::consts::PI / half_period as f64).exp();
-    let a_sq  = a * a;
-    let b     = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period as f64).cos();
-    let c     = (1.0 + a_sq - b) * 0.5;
+    let a = (-1.414_f64 * std::f64::consts::PI / half_period as f64).exp();
+    let a_sq = a * a;
+    let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period as f64).cos();
+    let c = (1.0 + a_sq - b) * 0.5;
 
     // ------------------------------------------------------------------------
     // Working buffers
     // ------------------------------------------------------------------------
-    let mut ssf  = vec![0.0; len];   // 2-pole smoothed series
-    let mut ms   = vec![0.0; len];   // rolling mean-square of “my_sum”
-    let mut sums = vec![0.0; len];   // raw “my_sum” values (for debugging)
+    let mut ssf = vec![0.0; len]; // 2-pole smoothed series
+    let mut ms = vec![0.0; len]; // rolling mean-square of “my_sum”
+    let mut sums = vec![0.0; len]; // raw “my_sum” values (for debugging)
 
     // ------------------------------------------------------------------------
     // Seed the first two ssf values (per the original algorithm)
@@ -231,8 +246,8 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
     // ------------------------------------------------------------------------
     for i in 2..len {
         // ---- 1. update the 2-pole smoothed price (ssf[i]) -------------------
-        let d_i     = data[i];
-        let d_im1   = data[i - 1];
+        let d_i = data[i];
+        let d_im1 = data[i - 1];
         let ssf_im1 = ssf[i - 1];
         let ssf_im2 = ssf[i - 2];
 
@@ -256,7 +271,7 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
 
             // exponentially-weighted rolling variance proxy (ms[i])
             let ms_im1 = ms[i - 1];
-            let ms_i   = 0.04 * my_sum * my_sum + 0.96 * ms_im1;
+            let ms_i = 0.04 * my_sum * my_sum + 0.96 * ms_im1;
             ms[i] = ms_i;
 
             // ---- 3. write output *only* after the warm-up prefix ------------
@@ -267,7 +282,6 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
         }
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -316,15 +330,18 @@ fn reflex_prepare<'a>(
         ReflexData::Candles { candles, source } => source_type(candles, source),
         ReflexData::Slice(sl) => sl,
     };
-    
+
     let len = data.len();
     if len == 0 {
         return Err(ReflexError::NoData);
     }
-    
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ReflexError::AllValuesNaN)?;
     let period = input.get_period();
-    
+
     if period < 2 {
         return Err(ReflexError::InvalidPeriod { period });
     }
@@ -334,37 +351,25 @@ fn reflex_prepare<'a>(
             found: len - first,
         });
     }
-    
+
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    
+
     Ok((data, period, first, chosen))
 }
 
 #[inline(always)]
-fn reflex_compute_into(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    kernel: Kernel,
-    out: &mut [f64],
-) {
+fn reflex_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
     // No need to fill warmup - reflex implementations handle this
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                reflex_scalar(data, period, first, out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => reflex_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                reflex_avx2(data, period, first, out)
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch => reflex_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                reflex_avx512(data, period, first, out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => reflex_avx512(data, period, first, out),
             _ => unreachable!(),
         }
     }
@@ -377,10 +382,10 @@ pub struct ReflexStream {
     period: usize,
 
     // coefficients (all constant after construction)
-    a:    f64,
+    a: f64,
     a_sq: f64,
-    b:    f64,
-    c:    f64,
+    b: f64,
+    c: f64,
 
     // we keep a circular buffer of length (period + 1) for all past ssf[]
     ssf_buf: Vec<f64>,
@@ -388,7 +393,7 @@ pub struct ReflexStream {
     // running sum of “last period” ssf values:
     //   at time t (just before computing output if t >= period),
     //   `ssf_sum` = Σ_{k = t - period .. t - 1} ssf[k].
-    ssf_sum:  f64,
+    ssf_sum: f64,
 
     // we need the raw price from one step ago, so we can compute
     //   ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
@@ -398,7 +403,7 @@ pub struct ReflexStream {
     last_ms: f64,
 
     // how many values have been fed in so far (this is “t” in the batch code)
-    count:   usize,
+    count: usize,
 }
 
 impl ReflexStream {
@@ -418,10 +423,10 @@ impl ReflexStream {
         //
         // we compute `half_period` as f64 because that’s how the scalar version does it.
         let half_period = (period / 2).max(1) as f64;
-        let a          = (-1.414_f64 * std::f64::consts::PI / half_period).exp();
-        let a_sq       = a * a;
-        let b          = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period).cos();
-        let c          = (1.0 + a_sq - b) * 0.5;
+        let a = (-1.414_f64 * std::f64::consts::PI / half_period).exp();
+        let a_sq = a * a;
+        let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_period).cos();
+        let c = (1.0 + a_sq - b) * 0.5;
 
         Ok(Self {
             period,
@@ -438,8 +443,8 @@ impl ReflexStream {
             ssf_sum: 0.0,
 
             last_data: None,
-            last_ms:   0.0,
-            count:     0,
+            last_ms: 0.0,
+            count: 0,
         })
     }
 
@@ -454,8 +459,7 @@ impl ReflexStream {
         } else if t == 1 {
             // at t = 1: ssf[1] = data[1]
             value
-        
-            } else {
+        } else {
             // for t >= 2: ssf[t] = c*(data[t] + data[t-1]) + b*ssf[t-1] - a_sq*ssf[t-2]
             let prev_data = self.last_data.unwrap();
             let idx1 = (t - 1) % (period + 1);
@@ -473,8 +477,7 @@ impl ReflexStream {
             let ssf_t_period = self.ssf_buf[idx_period];
 
             let period_f = period as f64;
-            let my_sum = ssf_t
-                + ((ssf_t_period - ssf_t) * (period_f + 1.0) / (2.0 * period_f))
+            let my_sum = ssf_t + ((ssf_t_period - ssf_t) * (period_f + 1.0) / (2.0 * period_f))
                 - (self.ssf_sum / period_f);
 
             let my_sum_sq = my_sum * my_sum;
@@ -483,7 +486,7 @@ impl ReflexStream {
 
             if ms_t > 0.0 {
                 out_val = my_sum / ms_t.sqrt();
-} else {
+            } else {
                 out_val = 0.0;
             }
         }
@@ -500,8 +503,7 @@ impl ReflexStream {
         //    next iteration.
         if t < period {
             self.ssf_sum += ssf_t;
-        
-            } else {
+        } else {
             let idx_remove = (t - period) % (period + 1);
             let remove_ssf = self.ssf_buf[idx_remove];
             self.ssf_sum = self.ssf_sum - remove_ssf + ssf_t;
@@ -519,13 +521,11 @@ impl ReflexStream {
         // 7) return `Some(out_val)` only once t >= period; otherwise return None
         if t >= period {
             Some(out_val)
-        
-            } else {
+        } else {
             None
         }
     }
 }
-
 
 // --- Batch/grid API ---
 
@@ -536,7 +536,9 @@ pub struct ReflexBatchRange {
 
 impl Default for ReflexBatchRange {
     fn default() -> Self {
-        Self { period: (20, 20, 0) }
+        Self {
+            period: (20, 20, 0),
+        }
     }
 }
 
@@ -610,9 +612,9 @@ pub struct ReflexBatchOutput {
 
 impl ReflexBatchOutput {
     pub fn row_for_params(&self, p: &ReflexParams) -> Option<usize> {
-        self.combos.iter().position(|c| {
-            c.period.unwrap_or(20) == p.period.unwrap_or(20)
-        })
+        self.combos
+            .iter()
+            .position(|c| c.period.unwrap_or(20) == p.period.unwrap_or(20))
     }
     pub fn values_for(&self, p: &ReflexParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -667,17 +669,21 @@ fn reflex_batch_inner(
     if combos.is_empty() {
         return Err(ReflexError::InvalidPeriod { period: 0 });
     }
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ReflexError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(ReflexError::NotEnoughData { needed: max_p, found: data.len() - first });
+        return Err(ReflexError::NotEnoughData {
+            needed: max_p,
+            found: data.len() - first,
+        });
     }
 
     let rows = combos.len();
     let cols = data.len();
-    let warm: Vec<usize> = combos.iter()
-                                .map(|c| c.period.unwrap())
-                                .collect();
+    let warm: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     let mut raw: Vec<MaybeUninit<f64>> = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
@@ -686,15 +692,13 @@ fn reflex_batch_inner(
         let period = combos[row].period.unwrap();
 
         // cast this row to &mut [f64]
-        let out_row = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             Kernel::Scalar => reflex_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => reflex_row_avx2  (data, first, period, out_row),
+            Kernel::Avx2 => reflex_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => reflex_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
@@ -703,24 +707,18 @@ fn reflex_batch_inner(
 
     // ---- fill every row directly into `raw` ------------------------------------
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            raw.par_chunks_mut(cols)
                 .enumerate()
-
                 .for_each(|(row, slice)| do_row(row, slice));
-
         }
 
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
         for (row, slice) in raw.chunks_mut(cols).enumerate() {
@@ -734,11 +732,16 @@ fn reflex_batch_inner(
     for (row, prm) in combos.iter().enumerate() {
         let p = prm.period.unwrap();
         let start = row * cols;
-        for cell in &mut values[start .. start + p.min(cols)] {
+        for cell in &mut values[start..start + p.min(cols)] {
             *cell = 0.0;
         }
     }
-    return Ok(ReflexBatchOutput { values, combos, rows, cols });
+    return Ok(ReflexBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    });
 }
 
 #[inline(always)]
@@ -757,8 +760,7 @@ unsafe fn reflex_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [
 unsafe fn reflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     if period <= 32 {
         reflex_row_avx512_short(data, first, period, out);
-    
-        } else {
+    } else {
         reflex_row_avx512_long(data, first, period, out);
     }
 }
@@ -789,42 +791,50 @@ fn reflex_batch_inner_into(
     if combos.is_empty() {
         return Err(ReflexError::InvalidPeriod { period: 0 });
     }
-    
-    let first = data.iter().position(|x| !x.is_nan()).ok_or(ReflexError::AllValuesNaN)?;
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ReflexError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(ReflexError::NotEnoughData { needed: max_p, found: data.len() - first });
+        return Err(ReflexError::NotEnoughData {
+            needed: max_p,
+            found: data.len() - first,
+        });
     }
-    
+
     let rows = combos.len();
     let cols = data.len();
-    
+
     // Write into the provided output buffer
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        
+
         // Fill warmup with zeros
         for x in &mut dst[..period.min(cols)] {
             *x = 0.0;
         }
-        
+
         match kern {
             Kernel::Scalar => reflex_row_scalar(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => reflex_row_avx2  (data, first, period, dst),
+            Kernel::Avx2 => reflex_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => reflex_row_avx512(data, first, period, dst),
             _ => unreachable!(),
         }
     };
-    
+
     if parallel {
-        #[cfg(not(target_arch = "wasm32"))] {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
             out.par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
-        #[cfg(target_arch = "wasm32")] {
+        #[cfg(target_arch = "wasm32")]
+        {
             for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
@@ -834,12 +844,8 @@ fn reflex_batch_inner_into(
             do_row(row, slice);
         }
     }
-    
-    Ok(ReflexBatchMetadata { 
-        combos, 
-        rows, 
-        cols 
-    })
+
+    Ok(ReflexBatchMetadata { combos, rows, cols })
 }
 
 #[derive(Clone, Debug)]
@@ -880,11 +886,13 @@ pub fn reflex_py<'py>(
     numpy.ndarray
         Reflex values
     "#;
-    
+
     let data_slice = data.as_slice()?;
-    let params = ReflexParams { period: Some(period) };
+    let params = ReflexParams {
+        period: Some(period),
+    };
     let input = ReflexInput::from_slice(data_slice, params);
-    
+
     let kernel_enum = match kernel {
         Some("scalar") => Kernel::Scalar,
         Some("avx2") => Kernel::Avx2,
@@ -892,25 +900,25 @@ pub fn reflex_py<'py>(
         Some("auto") | None => Kernel::Auto,
         Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
     };
-    
+
     // Use prepare/compute_into pattern
     let (data, period, first, chosen) = reflex_prepare(&input, kernel_enum)
         .map_err(|e| PyValueError::new_err(format!("reflex error: {}", e)))?;
-    
+
     let len = data.len();
     let warm = first + period;
-    
+
     // Release GIL during computation
     let mut output = alloc_with_nan_prefix(len, warm);
     py.allow_threads(|| {
         reflex_compute_into(data, period, first, chosen, &mut output);
     });
-    
+
     // Reflex fills zeros for the first period values
     for x in &mut output[..period.min(len)] {
         *x = 0.0;
     }
-    
+
     Ok(output.into_pyarray(py).into())
 }
 
@@ -939,9 +947,9 @@ pub fn reflex_batch_py<'py>(
     dict
         Dictionary with 'values' (2D array) and 'periods' (list)
     "#;
-    
+
     let data_slice = data.as_slice()?;
-    
+
     let kernel_enum = match kernel {
         Some("scalar") => Kernel::ScalarBatch,
         Some("avx2") => Kernel::Avx2Batch,
@@ -949,54 +957,58 @@ pub fn reflex_batch_py<'py>(
         Some("auto") | None => Kernel::Auto,
         Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
     };
-    
+
     let range = ReflexBatchRange { period: periods };
-    
+
     // Pre-calculate metadata
     let combos = expand_grid(&range);
     let rows = combos.len();
     let cols = data_slice.len();
-    
+
     // Allocate output array directly in numpy
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
+
     // Initialize with NaN (will be overwritten with zeros in warmup)
     slice_out.fill(f64::NAN);
-    
+
     // Release GIL during computation
-    let metadata = py.allow_threads(|| {
-        let simd = match kernel_enum {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            Kernel::Auto => match detect_best_batch_kernel() {
+    let metadata = py
+        .allow_threads(|| {
+            let simd = match kernel_enum {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
+                Kernel::ScalarBatch => Kernel::Scalar,
+                Kernel::Auto => match detect_best_batch_kernel() {
+                    Kernel::Avx512Batch => Kernel::Avx512,
+                    Kernel::Avx2Batch => Kernel::Avx2,
+                    _ => Kernel::Scalar,
+                },
                 _ => Kernel::Scalar,
-            },
-            _ => Kernel::Scalar,
-        };
-        
-        reflex_batch_inner_into(data_slice, &range, simd, true, slice_out)
-    }).map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
-    
+            };
+
+            reflex_batch_inner_into(data_slice, &range, simd, true, slice_out)
+        })
+        .map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
+
     // Create output dictionary
     let dict = PyDict::new(py);
-    
+
     // Reshape the array
     let reshaped = out_arr.reshape([rows, cols])?;
     dict.set_item("values", reshaped)?;
-    
+
     // Add periods array
-    dict.set_item("periods", 
-        metadata.combos
+    dict.set_item(
+        "periods",
+        metadata
+            .combos
             .iter()
             .map(|c| c.period.unwrap_or(20) as u64)
             .collect::<Vec<_>>()
-            .into_pyarray(py)
+            .into_pyarray(py),
     )?;
-    
+
     Ok(dict.into())
 }
 
@@ -1012,12 +1024,14 @@ impl ReflexStreamPy {
     #[new]
     #[pyo3(signature = (period = 20))]
     pub fn new(period: usize) -> PyResult<Self> {
-        let params = ReflexParams { period: Some(period) };
+        let params = ReflexParams {
+            period: Some(period),
+        };
         let inner = ReflexStream::try_new(params)
             .map_err(|e| PyValueError::new_err(format!("reflex stream error: {}", e)))?;
         Ok(Self { inner })
     }
-    
+
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
     }
@@ -1028,12 +1042,13 @@ impl ReflexStreamPy {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn reflex_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-    let params = ReflexParams { period: Some(period) };
+    let params = ReflexParams {
+        period: Some(period),
+    };
     let input = ReflexInput::from_slice(data, params);
-    
-    let output = reflex(&input)
-        .map_err(|e| JsValue::from_str(&format!("reflex error: {}", e)))?;
-    
+
+    let output = reflex(&input).map_err(|e| JsValue::from_str(&format!("reflex error: {}", e)))?;
+
     Ok(output.values)
 }
 
@@ -1048,10 +1063,10 @@ pub fn reflex_batch_js(
     let range = ReflexBatchRange {
         period: (period_start, period_end, period_step),
     };
-    
+
     let output = reflex_batch_with_kernel(data, &range, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&format!("reflex batch error: {}", e)))?;
-    
+
     Ok(output.values)
 }
 
@@ -1089,8 +1104,8 @@ pub fn reflex_batch_rows_cols_js(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
     use crate::skip_if_unsupported;
+    use crate::utilities::data_loader::read_candles_from_csv;
 
     fn check_reflex_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1134,7 +1149,10 @@ mod tests {
             assert!(
                 (val - exp).abs() < 1e-7,
                 "[{}] Reflex mismatch at idx {}: got {}, expected {}",
-                test_name, i, val, exp
+                test_name,
+                i,
+                val,
+                exp
             );
         }
         Ok(())
@@ -1160,27 +1178,45 @@ mod tests {
         let params = ReflexParams { period: Some(0) };
         let input = ReflexInput::from_slice(&input_data, params);
         let res = reflex_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Reflex should fail with zero period", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Reflex should fail with zero period",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_reflex_period_less_than_two(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_reflex_period_less_than_two(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = ReflexParams { period: Some(1) };
         let input = ReflexInput::from_slice(&input_data, params);
         let res = reflex_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Reflex should fail with period<2", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Reflex should fail with period<2",
+            test_name
+        );
         Ok(())
     }
 
-    fn check_reflex_very_small_data_set(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+    fn check_reflex_very_small_data_set(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [42.0];
         let params = ReflexParams { period: Some(2) };
         let input = ReflexInput::from_slice(&input_data, params);
         let res = reflex_with_kernel(&input, kernel);
-        assert!(res.is_err(), "[{}] Reflex should fail with insufficient data", test_name);
+        assert!(
+            res.is_err(),
+            "[{}] Reflex should fail with insufficient data",
+            test_name
+        );
         Ok(())
     }
 
@@ -1207,7 +1243,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 14;
-        let params = ReflexParams { period: Some(period) };
+        let params = ReflexParams {
+            period: Some(period),
+        };
         let input = ReflexInput::from_candles(&candles, "close", params);
         let result = reflex_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), candles.close.len());
@@ -1216,7 +1254,8 @@ mod tests {
                 assert!(
                     result.values[i].is_finite(),
                     "[{}] Unexpected NaN at index {}",
-                    test_name, i
+                    test_name,
+                    i
                 );
             }
         }
@@ -1228,7 +1267,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let period = 14;
-        let params = ReflexParams { period: Some(period) };
+        let params = ReflexParams {
+            period: Some(period),
+        };
         let input = ReflexInput::from_candles(&candles, "close", params.clone());
         let batch_output = reflex_with_kernel(&input, kernel)?.values;
         let mut stream = ReflexStream::try_new(params)?;
@@ -1245,7 +1286,11 @@ mod tests {
             assert!(
                 diff < 1e-9,
                 "[{}] Reflex streaming f64 mismatch at idx {}: batch={}, stream={}, diff={}",
-                test_name, i, b, s, diff
+                test_name,
+                i,
+                b,
+                s,
+                diff
             );
         }
         Ok(())
@@ -1277,18 +1322,26 @@ mod tests {
 
     // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
-    fn check_reflex_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>>      
-    {
+    fn check_reflex_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to increase coverage
-        let test_periods = vec![5, 10, 14, 20, 30, 50];
-        
-        for period in test_periods {
-            let params = ReflexParams { period: Some(period) };
+        // Test with multiple parameter combinations
+        let test_cases = vec![
+            ReflexParams { period: Some(20) }, // default
+            ReflexParams { period: Some(2) },  // minimum period (must be >= 2)
+            ReflexParams { period: Some(5) },  // small period
+            ReflexParams { period: Some(10) }, // smaller medium
+            ReflexParams { period: Some(30) }, // larger period
+            ReflexParams { period: Some(50) }, // large period
+            ReflexParams { period: Some(15) }, // different medium
+            ReflexParams { period: Some(40) }, // another large
+            ReflexParams { period: None },     // None value (use default)
+        ];
+
+        for params in test_cases {
             let input = ReflexInput::from_candles(&candles, "close", params);
             let output = reflex_with_kernel(&input, kernel)?;
 
@@ -1304,24 +1357,27 @@ mod tests {
                 // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
                 if bits == 0x11111111_11111111 {
                     panic!(
-                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={})",        
-                        test_name, val, bits, i, period
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}",
+                        test_name, val, bits, i, params.period
                     );
                 }
 
                 // Check for init_matrix_prefixes poison (0x22222222_22222222)
                 if bits == 0x22222222_22222222 {
                     panic!(
-                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={})",
-                        test_name, val, bits, i, period
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}",
+                        test_name, val, bits, i, params.period
                     );
                 }
 
                 // Check for make_uninit_matrix poison (0x33333333_33333333)
                 if bits == 0x33333333_33333333 {
                     panic!(
-                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={})",
-                        test_name, val, bits, i, period
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}",
+                        test_name, val, bits, i, params.period
                     );
                 }
             }
@@ -1408,18 +1464,24 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase coverage
-        let test_configs = vec![
-            (5, 15, 5),   // Small periods
-            (10, 30, 10), // Medium periods
-            (20, 50, 15), // Large periods
-            (2, 10, 2),   // Edge case: very small periods
+        // Test multiple batch configurations with different parameter ranges
+        let batch_configs = vec![
+            // Original test case
+            (10, 30, 10),
+            // Edge cases (period must be >= 2)
+            (20, 20, 0),  // Single parameter (default)
+            (2, 10, 2),   // Small periods starting from minimum
+            (25, 50, 25), // Large periods
+            (5, 20, 5),   // Different step
+            (15, 45, 15), // Medium to large
+            (3, 15, 3),   // Small range
+            (30, 60, 10), // Large periods with smaller step
         ];
 
-        for (start, end, step) in test_configs {
+        for (p_start, p_end, p_step) in batch_configs {
             let output = ReflexBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(start, end, step)
+                .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
             // Check every value in the entire batch matrix for poison patterns
@@ -1432,29 +1494,32 @@ mod tests {
                 let bits = val.to_bits();
                 let row = idx / output.cols;
                 let col = idx % output.cols;
-                let period = output.combos[row].period.unwrap();
+                let combo = &output.combos[row];
 
                 // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
                 if bits == 0x11111111_11111111 {
                     panic!(
-                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
-                        test, val, bits, row, col, idx, period
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}",
+                        test, val, bits, row, col, idx, combo.period
                     );
                 }
 
                 // Check for init_matrix_prefixes poison (0x22222222_22222222)
                 if bits == 0x22222222_22222222 {
                     panic!(
-                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
-                        test, val, bits, row, col, idx, period
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}",
+                        test, val, bits, row, col, idx, combo.period
                     );
                 }
 
                 // Check for make_uninit_matrix poison (0x33333333_33333333)
                 if bits == 0x33333333_33333333 {
                     panic!(
-                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
-                        test, val, bits, row, col, idx, period
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}",
+                        test, val, bits, row, col, idx, combo.period
                     );
                 }
             }

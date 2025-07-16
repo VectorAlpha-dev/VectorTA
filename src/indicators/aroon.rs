@@ -34,12 +34,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+use std::mem::ManuallyDrop;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -206,8 +207,10 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         other => other,
     };
 
-    let mut up = vec![f64::NAN; len];
-    let mut down = vec![f64::NAN; len];
+    // Calculate warmup period: Aroon needs 'length' bars before producing valid values
+    let warmup_period = length;
+    let mut up = alloc_with_nan_prefix(len, warmup_period);
+    let mut down = alloc_with_nan_prefix(len, warmup_period);
 
     unsafe {
         match chosen {
@@ -245,11 +248,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
 
     let inv_length = 1.0 / (length as f64);
 
-    // 1) Fill first `length` entries with NaN
-    for i in 0..length {
-        up[i] = f64::NAN;
-        down[i] = f64::NAN;
-    }
+    // Note: The first `length` entries are already filled with NaN by alloc_with_nan_prefix
 
     // 2) For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
     for i in length..len {
@@ -346,8 +345,8 @@ impl AroonStream {
         Ok(AroonStream {
             length,
             buf_size,
-            buffer_high: vec![f64::NAN; buf_size],
-            buffer_low: vec![f64::NAN; buf_size],
+            buffer_high: alloc_with_nan_prefix(buf_size, buf_size), // All NaN for circular buffer
+            buffer_low: alloc_with_nan_prefix(buf_size, buf_size),   // All NaN for circular buffer
             head: 0,
             count: 0,
         })
@@ -589,8 +588,36 @@ fn aroon_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
-    let mut up = vec![f64::NAN; rows * cols];
-    let mut down = vec![f64::NAN; rows * cols];
+    
+    // Step 1: Allocate uninitialized matrices
+    let mut buf_up_mu = make_uninit_matrix(rows, cols);
+    let mut buf_down_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| c.length.unwrap())
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_up_mu, cols, &warmup_periods);
+    init_matrix_prefixes(&mut buf_down_mu, cols, &warmup_periods);
+    
+    // Step 4: Convert to mutable slices for computation
+    let mut buf_up_guard = ManuallyDrop::new(buf_up_mu);
+    let mut buf_down_guard = ManuallyDrop::new(buf_down_mu);
+    let up: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_up_guard.as_mut_ptr() as *mut f64,
+            buf_up_guard.len(),
+        )
+    };
+    let down: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_down_guard.as_mut_ptr() as *mut f64,
+            buf_down_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_up: &mut [f64], out_down: &mut [f64]| unsafe {
         let length = combos[row].length.unwrap();
@@ -623,9 +650,25 @@ fn aroon_batch_inner(
             do_row(row, u, d);
         }
     }
+    // Step 6: Reclaim as Vec<f64>
+    let up_values = unsafe {
+        Vec::from_raw_parts(
+            buf_up_guard.as_mut_ptr() as *mut f64,
+            buf_up_guard.len(),
+            buf_up_guard.capacity()
+        )
+    };
+    let down_values = unsafe {
+        Vec::from_raw_parts(
+            buf_down_guard.as_mut_ptr() as *mut f64,
+            buf_down_guard.len(),
+            buf_down_guard.capacity()
+        )
+    };
+    
     Ok(AroonBatchOutput {
-        up,
-        down,
+        up: up_values,
+        down: down_values,
         combos,
         rows,
         cols,

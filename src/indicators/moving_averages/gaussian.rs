@@ -1708,41 +1708,57 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
-        let input = GaussianInput::from_candles(&candles, "close", GaussianParams::default());
-        let output = gaussian_with_kernel(&input, kernel)?;
+        // Test with multiple parameter combinations
+        let test_cases = vec![
+            GaussianParams { period: Some(14), poles: Some(4) }, // default
+            GaussianParams { period: Some(10), poles: Some(1) }, // minimum poles
+            GaussianParams { period: Some(30), poles: Some(2) }, // medium values
+            GaussianParams { period: Some(20), poles: Some(3) }, // different combination
+            GaussianParams { period: Some(50), poles: Some(4) }, // larger period
+            GaussianParams { period: Some(5), poles: Some(1) },  // small period, min poles
+            GaussianParams { period: Some(100), poles: Some(4) }, // large period
+            GaussianParams { period: None, poles: None },        // None values (use defaults)
+        ];
 
-        // Check every value for poison patterns
-        for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
-            if val.is_nan() {
-                continue;
-            }
+        for params in test_cases {
+            let input = GaussianInput::from_candles(&candles, "close", params);
+            let output = gaussian_with_kernel(&input, kernel)?;
 
-            let bits = val.to_bits();
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",        
-                    test_name, val, bits, i
-                );
-            }
+                let bits = val.to_bits();
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}, poles={:?}",        
+                        test_name, val, bits, i, params.period, params.poles
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
-                    test_name, val, bits, i
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}, poles={:?}",
+                        test_name, val, bits, i, params.period, params.poles
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+                         with params period={:?}, poles={:?}",
+                        test_name, val, bits, i, params.period, params.poles
+                    );
+                }
             }
         }
 
@@ -1828,49 +1844,63 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
-        let output = GaussianBatchBuilder::new()
-            .kernel(kernel)
-            .period_range(10, 30, 10)
-            .poles_range(1, 4, 1)
-            .apply_candles(&c, "close")?;
+        // Test multiple batch configurations with different parameter ranges
+        let batch_configs = vec![
+            // Original test case
+            ((10, 30, 10), (1, 4, 1)),
+            // Edge cases
+            ((5, 5, 0), (1, 1, 0)),       // Single parameter combo
+            ((100, 120, 20), (2, 4, 2)),  // Larger periods
+            ((7, 21, 7), (1, 3, 2)),      // Different steps
+            ((15, 45, 15), (1, 4, 3)),    // Multiple poles
+            ((3, 12, 3), (1, 2, 1)),      // Small periods
+        ];
 
-        // Check every value in the entire batch matrix for poison patterns
-        for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
-            if val.is_nan() {
-                continue;
-            }
+        for ((p_start, p_end, p_step), (poles_start, poles_end, poles_step)) in batch_configs {
+            let output = GaussianBatchBuilder::new()
+                .kernel(kernel)
+                .period_range(p_start, p_end, p_step)
+                .poles_range(poles_start, poles_end, poles_step)
+                .apply_candles(&c, "close")?;
 
-            let bits = val.to_bits();
-            let row = idx / output.cols;
-            let col = idx % output.cols;
+            // Check every value in the entire batch matrix for poison patterns
+            for (idx, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in warmup periods
+                if val.is_nan() {
+                    continue;
+                }
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
-            if bits == 0x11111111_11111111 {
-                panic!(
-                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {}     
-   (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                let bits = val.to_bits();
+                let row = idx / output.cols;
+                let col = idx % output.cols;
+                let combo = &output.combos[row];
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
-            if bits == 0x22222222_22222222 {
-                panic!(
-                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {}      
-  (flat index {})",
-                    test, val, bits, row, col, idx
-                );
-            }
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}, poles={:?}",
+                        test, val, bits, row, col, idx, combo.period, combo.poles
+                    );
+                }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
-            if bits == 0x33333333_33333333 {
-                panic!(
-                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {}        
-  (flat index {})",
-                    test, val, bits, row, col, idx
-                );
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}, poles={:?}",
+                        test, val, bits, row, col, idx, combo.period, combo.poles
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
+                         (flat index {}) with params period={:?}, poles={:?}",
+                        test, val, bits, row, col, idx, combo.period, combo.poles
+                    );
+                }
             }
         }
 

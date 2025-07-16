@@ -1,10 +1,5 @@
 //! # Bollinger Bands Width (BBW)
 //!
-//! ## MEMORY COPY OPERATION NOTE
-//! The Python batch binding (`bollinger_bands_width_batch_py`) contains a memory copy operation
-//! where the output array is initialized with NaN values to prevent uninitialized memory issues.
-//! This was added to fix memory safety issues but introduces a performance overhead.
-//!
 //! Bollinger Bands Width (sometimes called Bandwidth) shows the relative distance between
 //! the upper and lower Bollinger Bands compared to the middle band.
 //! It is typically calculated as: `(upper_band - lower_band) / middle_band`
@@ -36,7 +31,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -44,6 +42,7 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
@@ -262,7 +261,34 @@ pub fn bollinger_bands_width_with_kernel(
     kernel: Kernel,
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
     let data: &[f64] = input.as_ref();
-    let mut out = vec![f64::NAN; data.len()];
+    if data.is_empty() {
+        return Err(BollingerBandsWidthError::EmptyData);
+    }
+    
+    let period = input.get_period();
+    if period == 0 || period > data.len() {
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
+    }
+    
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(BollingerBandsWidthError::AllValuesNaN),
+    };
+    
+    if (data.len() - first_valid_idx) < period {
+        return Err(BollingerBandsWidthError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first_valid_idx,
+        });
+    }
+    
+    // Calculate warmup period for zero-copy allocation
+    let warmup_period = first_valid_idx + period - 1;
+    let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+    
     bollinger_bands_width_into(data, input, &mut out, kernel)?;
     Ok(BollingerBandsWidthOutput { values: out })
 }
@@ -302,8 +328,8 @@ pub fn bollinger_bands_width_into(
         });
     }
     
-    // Fill with NaN up to the warmup period
-    out[..first_valid_idx + period - 1].fill(f64::NAN);
+    // Note: The caller is responsible for pre-filling NaN values in the warmup period
+    // using alloc_with_nan_prefix or similar methods
     
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -334,7 +360,9 @@ pub unsafe fn bollinger_bands_width_scalar(
     input: &BollingerBandsWidthInput,
     first_valid_idx: usize,
 ) -> Result<BollingerBandsWidthOutput, BollingerBandsWidthError> {
-    let mut out = vec![f64::NAN; data.len()];
+    let period = input.get_period();
+    let warmup_period = first_valid_idx + period - 1;
+    let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
     bollinger_bands_width_scalar_into(data, input, first_valid_idx, &mut out)?;
     Ok(BollingerBandsWidthOutput { values: out })
 }
@@ -705,9 +733,47 @@ fn bollinger_bands_width_batch_inner(
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
     
-    bollinger_bands_width_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    if cols == 0 {
+        return Err(BollingerBandsWidthError::EmptyData);
+    }
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0) + c.period.unwrap() - 1
+        })
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let values_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    bollinger_bands_width_batch_inner_into(data, sweep, kern, parallel, values_slice)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(BollingerBandsWidthBatchOutput {
         values,
@@ -982,6 +1048,215 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_bollinger_bands_width_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test multiple parameter combinations to increase coverage
+        let test_params = vec![
+            // Default parameters
+            BollingerBandsWidthParams::default(),
+            // Small period
+            BollingerBandsWidthParams {
+                period: Some(5),
+                devup: Some(1.0),
+                devdn: Some(1.0),
+                matype: Some("sma".to_string()),
+                devtype: Some(0),
+            },
+            // Large period
+            BollingerBandsWidthParams {
+                period: Some(50),
+                devup: Some(3.0),
+                devdn: Some(3.0),
+                matype: Some("ema".to_string()),
+                devtype: Some(1),
+            },
+            // Asymmetric deviations
+            BollingerBandsWidthParams {
+                period: Some(15),
+                devup: Some(2.5),
+                devdn: Some(1.5),
+                matype: Some("wma".to_string()),
+                devtype: Some(2),
+            },
+            // Edge case parameters
+            BollingerBandsWidthParams {
+                period: Some(2),
+                devup: Some(0.5),
+                devdn: Some(0.5),
+                matype: Some("sma".to_string()),
+                devtype: Some(0),
+            },
+        ];
+
+        // Test with different sources too
+        let sources = vec!["close", "hl2", "hlc3", "ohlc4"];
+
+        for params in test_params {
+            for &source in &sources {
+                let input = BollingerBandsWidthInput::from_candles(&candles, source, params.clone());
+                let output = bollinger_bands_width_with_kernel(&input, kernel)?;
+
+                // Check every value for poison patterns
+                for (i, &val) in output.values.iter().enumerate() {
+                    // Skip NaN values as they're expected in the warmup period
+                    if val.is_nan() {
+                        continue;
+                    }
+
+                    let bits = val.to_bits();
+
+                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    if bits == 0x11111111_11111111 {
+                        panic!(
+                            "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
+                            test_name, val, bits, i, 
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+
+                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    if bits == 0x22222222_22222222 {
+                        panic!(
+                            "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
+                            test_name, val, bits, i,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+
+                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    if bits == 0x33333333_33333333 {
+                        panic!(
+                            "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
+                            test_name, val, bits, i,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_bollinger_bands_width_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test multiple batch configurations with diverse parameter ranges
+        let batch_configs = vec![
+            // Wide range of periods with standard deviations
+            (2, 50, 5, 1.0, 3.0, 0.5, 1.0, 3.0, 0.5),
+            // Small periods with varying deviations
+            (5, 15, 2, 0.5, 3.5, 0.25, 0.5, 3.5, 0.25),
+            // Large periods with small deviation range
+            (40, 100, 10, 1.5, 2.5, 0.1, 1.5, 2.5, 0.1),
+            // Asymmetric deviations
+            (10, 30, 5, 1.0, 4.0, 1.0, 0.5, 2.0, 0.5),
+            // Edge case: very small periods
+            (2, 5, 1, 0.1, 5.0, 0.5, 0.1, 5.0, 0.5),
+        ];
+
+        let sources = vec!["close", "hl2", "ohlc4"];
+
+        for (period_start, period_end, period_step, 
+             devup_start, devup_end, devup_step,
+             devdn_start, devdn_end, devdn_step) in batch_configs {
+            
+            for &source in &sources {
+                let output = BollingerBandsWidthBatchBuilder::new()
+                    .kernel(kernel)
+                    .period_range(period_start, period_end, period_step)
+                    .devup_range(devup_start, devup_end, devup_step)
+                    .devdn_range(devdn_start, devdn_end, devdn_step)
+                    .apply_candles(&c, source)?;
+
+                // Check every value in the entire batch matrix for poison patterns
+                for (idx, &val) in output.values.iter().enumerate() {
+                    // Skip NaN values as they're expected in warmup periods
+                    if val.is_nan() {
+                        continue;
+                    }
+
+                    let bits = val.to_bits();
+                    let row = idx / output.cols;
+                    let col = idx % output.cols;
+                    
+                    // Get the parameters for this row
+                    let params = &output.combos[row];
+
+                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    if bits == 0x11111111_11111111 {
+                        panic!(
+                            "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
+                            test, val, bits, row, col, idx,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+
+                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    if bits == 0x22222222_22222222 {
+                        panic!(
+                            "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
+                            test, val, bits, row, col, idx,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+
+                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    if bits == 0x33333333_33333333 {
+                        panic!(
+                            "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
+                            test, val, bits, row, col, idx,
+                            params.period.unwrap_or(20),
+                            params.devup.unwrap_or(2.0),
+                            params.devdn.unwrap_or(2.0),
+                            source
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_bbw_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1012,7 +1287,8 @@ mod tests {
         check_bbw_zero_period,
         check_bbw_period_exceeds_length,
         check_bbw_very_small_dataset,
-        check_bbw_nan_check
+        check_bbw_nan_check,
+        check_bollinger_bands_width_no_poison
     );
 
     macro_rules! gen_batch_tests {
@@ -1036,6 +1312,7 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1188,15 +1465,10 @@ pub fn bollinger_bands_width_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // SAFETY: Pre-allocate NumPy array and initialize with NaN.
-    // This ensures that even if some calculations fail, we return valid NaN values
-    // instead of uninitialized memory.
+    // SAFETY: Pre-allocate NumPy array. The zero-copy functions will handle NaN initialization
+    // for the warmup periods.
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    // Initialize all values to NaN to avoid uninitialized memory issues
-    for v in slice_out.iter_mut() {
-        *v = f64::NAN;
-    }
     
     // Heavy work without the GIL
     let (combos, matype_used, devtype_used) = py.allow_threads(|| -> Result<(Vec<BollingerBandsWidthParams>, String, usize), BollingerBandsWidthError> {

@@ -40,7 +40,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -246,7 +249,9 @@ pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput,
         other => other,
     };
 
-    let mut out = vec![f64::NAN; len];
+    // ADXR needs warmup period of first + 2 * period - 1
+    let warmup_period = first + 2 * period - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -259,6 +264,11 @@ pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 adxr_avx512(high, low, close, period, first, &mut out)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                // Fallback to scalar when AVX is not available
+                adxr_scalar(high, low, close, period, first, &mut out)
             }
             _ => unreachable!(),
         }
@@ -277,7 +287,9 @@ pub fn adxr_scalar(
     out: &mut [f64],
 ) {
     let len = close.len();
-    let mut adx_vals = vec![f64::NAN; len];
+    // ADX values start appearing at first + 2 * period - 1
+    let adx_warmup = first + 2 * period - 1;
+    let mut adx_vals = alloc_with_nan_prefix(len, adx_warmup);
     let period_f64 = period as f64;
     let reciprocal_period = 1.0 / period_f64;
     let one_minus_rp = 1.0 - reciprocal_period;
@@ -624,13 +636,33 @@ fn adxr_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
-    let mut values = vec![f64::NAN; rows * cols];
+    
+    // Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            // ADXR warmup: first + 2 * period - 1
+            first + 2 * c.period.unwrap() - 1
+        })
+        .collect();
+    
+    // Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+    let values: &mut [f64] = unsafe {
+        std::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        
-        // Note: out_row is already initialized to NaN, but ADXR only writes from 2*period
-        // Since we pre-initialized with NaN, the prefix is already correct
         
         match kern {
             Kernel::Scalar => adxr_row_scalar(high, low, close, first, period, out_row),
@@ -666,6 +698,15 @@ fn adxr_batch_inner(
             do_row(row, slice);
         }
     }
+
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
 
     Ok(AdxrBatchOutput {
         values,
@@ -1007,14 +1048,9 @@ pub fn adxr_py<'py>(
     };
     let adxr_in = AdxrInput::from_slices(high_slice, low_slice, close_slice, params);
 
-    // ---------- allocate NumPy output buffer and initialize with NaN ---------------
-    // NOTE: PyArray1::new() creates uninitialized memory, so we must initialize it
+    // ---------- allocate NumPy output buffer -----------------------------------------------
     let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    // Initialize all values to NaN to avoid uninitialized memory issues
-    for v in slice_out.iter_mut() {
-        *v = f64::NAN;
-    }
 
     // ---------- heavy lifting without the GIL --------------------------------------
     py.allow_threads(|| -> Result<(), AdxrError> {
@@ -1044,14 +1080,7 @@ pub fn adxr_py<'py>(
             });
         }
 
-        // SAFETY: We must write to ALL elements before returning to Python
-        // ADXR only writes starting at index 2*period, so we must fill the prefix with NaN
-        let fill_len = (first + 2 * period).min(slice_out.len());
-        if fill_len > 0 {
-            slice_out[..fill_len].fill(f64::NAN);
-        }
-        
-        // Now compute ADXR values for the remaining indices
+        // Compute ADXR values - the scalar function handles NaN initialization properly
         unsafe {
             match chosen {
                 Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1151,15 +1180,9 @@ pub fn adxr_batch_py<'py>(
     let rows = combos.len();
     let cols = close_slice.len();
 
-    // 2. Pre-allocate NumPy array and initialize with NaN
-    // NOTE: PyArray1::new() creates uninitialized memory, so we must initialize it
-    // SAFETY: We initialize all elements to NaN to ensure valid values
+    // 2. Pre-allocate NumPy array
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    // Initialize all values to NaN to avoid uninitialized memory issues
-    for v in slice_out.iter_mut() {
-        *v = f64::NAN;
-    }
 
     // Use kernel validation for safety
     let kern = validate_kernel(kernel, true)?;
@@ -1194,12 +1217,6 @@ pub fn adxr_batch_py<'py>(
         // Process each row
         let do_row = |row: usize, out_row: &mut [f64]| unsafe {
             let period = combos[row].period.unwrap();
-            
-            // SAFETY: Fill prefix with NaN since ADXR only writes from index 2*period onwards
-            let fill_len = (first + 2 * period).min(out_row.len());
-            if fill_len > 0 {
-                out_row[..fill_len].fill(f64::NAN);
-            }
             
             match simd {
                 Kernel::Scalar => adxr_row_scalar(high_slice, low_slice, close_slice, first, period, out_row),

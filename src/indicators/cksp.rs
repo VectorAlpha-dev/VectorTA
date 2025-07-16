@@ -20,7 +20,10 @@
 //!
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,6 +31,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 // ========================= Input Structs, AsRef =========================
@@ -303,8 +307,12 @@ pub unsafe fn cksp_scalar(
     first_valid_idx: usize,
 ) -> Result<CkspOutput, CkspError> {
     let size = close.len();
-    let mut long_values = vec![f64::NAN; size];
-    let mut short_values = vec![f64::NAN; size];
+    
+    // Calculate warmup period: we need p periods for ATR, then additional periods for rolling windows
+    let warmup_period = first_valid_idx + p + q - 1;
+    
+    let mut long_values = alloc_with_nan_prefix(size, warmup_period);
+    let mut short_values = alloc_with_nan_prefix(size, warmup_period);
     let mut atr = vec![0.0; size];
     let mut sum_tr = 0.0;
     let mut rma = 0.0;
@@ -943,8 +951,39 @@ fn cksp_batch_inner(
     let rows = combos.len();
     let cols = size;
 
-    let mut long_values = vec![f64::NAN; rows * cols];
-    let mut short_values = vec![f64::NAN; rows * cols];
+    // Step 1: Allocate uninitialized matrices
+    let mut long_buf_mu = make_uninit_matrix(rows, cols);
+    let mut short_buf_mu = make_uninit_matrix(rows, cols);
+
+    // Step 2: Calculate warmup periods for each row
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| {
+            first_valid + c.p.unwrap() + c.q.unwrap() - 1
+        })
+        .collect();
+
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut long_buf_mu, cols, &warm);
+    init_matrix_prefixes(&mut short_buf_mu, cols, &warm);
+
+    // Step 4: Convert to mutable slices for computation
+    let mut long_guard = ManuallyDrop::new(long_buf_mu);
+    let mut short_guard = ManuallyDrop::new(short_buf_mu);
+    
+    let long_values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            long_guard.as_mut_ptr() as *mut f64,
+            long_guard.len(),
+        )
+    };
+    
+    let short_values: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            short_guard.as_mut_ptr() as *mut f64,
+            short_guard.len(),
+        )
+    };
 
     let do_row = |row: usize, out_long: &mut [f64], out_short: &mut [f64]| unsafe {
         let prm = &combos[row];
@@ -1000,6 +1039,23 @@ fn cksp_batch_inner(
             do_row(row, lv, sv);
         }
     }
+
+    // Step 5: Reclaim as Vec<f64>
+    let long_values = unsafe {
+        Vec::from_raw_parts(
+            long_guard.as_mut_ptr() as *mut f64,
+            long_guard.len(),
+            long_guard.capacity()
+        )
+    };
+    
+    let short_values = unsafe {
+        Vec::from_raw_parts(
+            short_guard.as_mut_ptr() as *mut f64,
+            short_guard.len(),
+            short_guard.capacity()
+        )
+    };
 
     Ok(CkspBatchOutput {
         long_values,
@@ -1285,6 +1341,137 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_cksp_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with default parameters
+        let input = CkspInput::from_candles(&candles, CkspParams::default());
+        let output = cksp_with_kernel(&input, kernel)?;
+
+        // Check every value for poison patterns in long_values
+        for (i, &val) in output.long_values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in long_values",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in long_values",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in long_values",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        // Check every value for poison patterns in short_values
+        for (i, &val) in output.short_values.iter().enumerate() {
+            // Skip NaN values as they're expected in the warmup period
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in short_values",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in short_values",
+                    test_name, val, bits, i
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in short_values",
+                    test_name, val, bits, i
+                );
+            }
+        }
+
+        // Test with multiple parameter combinations
+        let param_combos = vec![
+            CkspParams { p: Some(5), x: Some(0.5), q: Some(5) },
+            CkspParams { p: Some(20), x: Some(2.0), q: Some(15) },
+            CkspParams { p: Some(30), x: Some(1.5), q: Some(20) },
+        ];
+
+        for params in param_combos {
+            let input = CkspInput::from_candles(&candles, params.clone());
+            let output = cksp_with_kernel(&input, kernel)?;
+
+            // Check long_values
+            for (i, &val) in output.long_values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found poison value {} (0x{:016X}) at index {} in long_values with params p={}, x={}, q={}",
+                        test_name, val, bits, i, params.p.unwrap(), params.x.unwrap(), params.q.unwrap()
+                    );
+                }
+            }
+
+            // Check short_values
+            for (i, &val) in output.short_values.iter().enumerate() {
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+                if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found poison value {} (0x{:016X}) at index {} in short_values with params p={}, x={}, q={}",
+                        test_name, val, bits, i, params.p.unwrap(), params.x.unwrap(), params.q.unwrap()
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_cksp_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_cksp_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1318,7 +1505,8 @@ mod tests {
         check_cksp_very_small_dataset,
         check_cksp_reinput,
         check_cksp_nan_handling,
-        check_cksp_streaming
+        check_cksp_streaming,
+        check_cksp_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1368,6 +1556,103 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = CkspBatchBuilder::new()
+            .kernel(kernel)
+            .p_range(5, 25, 5)    // Test p values: 5, 10, 15, 20, 25
+            .x_range(0.5, 2.5, 0.5)  // Test x values: 0.5, 1.0, 1.5, 2.0, 2.5
+            .q_range(5, 20, 5)    // Test q values: 5, 10, 15, 20
+            .apply_candles(&c)?;
+
+        // Check every value in the entire batch matrix for poison patterns - long_values
+        for (idx, &val) in output.long_values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        // Check every value in the entire batch matrix for poison patterns - short_values
+        for (idx, &val) in output.short_values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1389,4 +1674,5 @@ mod tests {
         };
     }
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }

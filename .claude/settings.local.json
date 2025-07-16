@@ -191,11 +191,17 @@
       "WebFetch(domain:doc.rust-lang.org)",
       "Bash(.venvScriptspython.exe tests/python/test_acosc.py)",
       "Bash(del test_acosc_quick.py)",
-      "Bash(test_bindings.bat adx)",
-      "Bash(.venvScriptspython.exe tests/python/test_adx.py)",
-      "Bash(del test_adx_nan.rs)",
-      "Bash(test_bindings.bat bandpass)",
-      "Bash(test_bindings.bat correl_hl)"
+      "Bash(.venvScriptspython.exe tests/python/test_adxr.py)",
+      "Bash(test_bindings.bat adxr)",
+      "Bash(test_bindings.bat aroon)",
+      "Bash(.venvScriptspython.exe tests/python/test_aroon.py)",
+      "Bash(.venvScriptspython.exe tests/python/test_cfo.py)",
+      "Bash(\".venv/Scripts/python.exe\" tests/python/test_cfo.py)",
+      "Bash(test_bindings.bat cksp)",
+      "Bash(.\\test_bindings.bat cksp)",
+      "Bash(test_bindings.bat correlation_cycle)",
+      "Bash(.venvScriptspython.exe tests/python/test_correlation_cycle.py)",
+      "Bash(.venv/Scripts/python:*)"
     ],
     "deny": []
   }

@@ -997,6 +997,70 @@ mod tests {
         Ok(())
     }
 
+    // Check for poison values in single output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_cfo_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Test with different parameter combinations to better catch uninitialized reads
+        let param_sets = vec![
+            CfoParams { period: Some(14), scalar: Some(100.0) },
+            CfoParams { period: Some(7), scalar: Some(50.0) },
+            CfoParams { period: Some(21), scalar: Some(200.0) },
+            CfoParams { period: Some(30), scalar: Some(100.0) },
+        ];
+
+        for params in param_sets {
+            let input = CfoInput::from_candles(&candles, "close", params.clone());
+            let output = cfo_with_kernel(&input, kernel)?;
+
+            // Check every value for poison patterns
+            for (i, &val) in output.values.iter().enumerate() {
+                // Skip NaN values as they're expected in the warmup period
+                if val.is_nan() {
+                    continue;
+                }
+
+                let bits = val.to_bits();
+
+                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                if bits == 0x11111111_11111111 {
+                    panic!(
+                        "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, params
+                    );
+                }
+
+                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                if bits == 0x22222222_22222222 {
+                    panic!(
+                        "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, params
+                    );
+                }
+
+                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                if bits == 0x33333333_33333333 {
+                    panic!(
+                        "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params {:?}",
+                        test_name, val, bits, i, params
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_cfo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     macro_rules! generate_all_cfo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1030,7 +1094,8 @@ mod tests {
         check_cfo_very_small_dataset,
         check_cfo_reinput,
         check_cfo_nan_handling,
-        check_cfo_streaming
+        check_cfo_streaming,
+        check_cfo_no_poison
     );
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1084,7 +1149,69 @@ mod tests {
             }
         };
     }
+
+    // Check for poison values in batch output - only runs in debug mode
+    #[cfg(debug_assertions)]
+    fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test);
+
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+
+        // Test batch with multiple parameter combinations
+        let output = CfoBatchBuilder::new()
+            .kernel(kernel)
+            .period_range(5, 30, 5)  // 5, 10, 15, 20, 25, 30
+            .scalar_range(50.0, 200.0, 50.0)  // 50, 100, 150, 200
+            .apply_candles(&c, "close")?;
+
+        // Check every value in the entire batch matrix for poison patterns
+        for (idx, &val) in output.values.iter().enumerate() {
+            // Skip NaN values as they're expected in warmup periods
+            if val.is_nan() {
+                continue;
+            }
+
+            let bits = val.to_bits();
+            let row = idx / output.cols;
+            let col = idx % output.cols;
+
+            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            if bits == 0x11111111_11111111 {
+                panic!(
+                    "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            if bits == 0x22222222_22222222 {
+                panic!(
+                    "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+
+            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            if bits == 0x33333333_33333333 {
+                panic!(
+                    "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
+                    test, val, bits, row, col, idx
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // Release mode stub - does nothing
+    #[cfg(not(debug_assertions))]
+    fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
     gen_batch_tests!(check_batch_default_row);
+    gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1253,7 +1380,6 @@ pub fn cfo_batch_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<CfoBatchResult> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-    use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
 
@@ -1289,7 +1415,7 @@ pub fn cfo_batch_py<'py>(
             _ => unreachable!(),
         };
 
-        // Use uninit helper similar to ALMA
+        // Validate data and compute first valid index
         let first = slice_in
             .iter()
             .position(|x| !x.is_nan())
@@ -1302,56 +1428,41 @@ pub fn cfo_batch_py<'py>(
             });
         }
 
-        // Initialize NaN prefixes for each row
+        // Initialize NaN prefixes for each row using helper pattern
         let warm: Vec<usize> = combos
             .iter()
             .map(|c| first + c.period.unwrap() - 1)
             .collect();
         
-        // SAFETY: We're writing to uninitialized memory that we own
-        // Convert slice_out to MaybeUninit for safety
-        let out_uninit = unsafe {
-            std::slice::from_raw_parts_mut(
-                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
-                slice_out.len()
-            )
-        };
-        
-        // Initialize NaN prefixes
+        // Initialize warmup NaN values row by row
         for (row, &warmup) in warm.iter().enumerate() {
             let row_start = row * cols;
-            for i in 0..warmup {
-                unsafe {
-                    out_uninit[row_start + i].write(f64::NAN);
-                }
-            }
+            let warmup = warmup.min(cols);
+            // Fill NaN prefix
+            slice_out[row_start..row_start + warmup].fill(f64::NAN);
         }
 
-        // Process each row
-        let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+        // Process each row - the computation functions will write to remaining elements
+        for (row, &warmup) in warm.iter().enumerate() {
             let period = combos[row].period.unwrap();
             let scalar = combos[row].scalar.unwrap();
-
-            // SAFETY: Only cast to &mut [f64] after NaN prefix is written and we're about to write the computation results
-            let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+            let row_start = row * cols;
+            let row_slice = &mut slice_out[row_start..row_start + cols];
             
-            match simd {
-                Kernel::Scalar => cfo_row_scalar(slice_in, first, period, max_p, scalar, dst),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => cfo_row_avx2(slice_in, first, period, max_p, scalar, dst),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => cfo_row_avx512(slice_in, first, period, max_p, scalar, dst),
-                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                Kernel::Avx2 | Kernel::Avx512 => {
-                    cfo_row_scalar(slice_in, first, period, max_p, scalar, dst)
+            unsafe {
+                match simd {
+                    Kernel::Scalar => cfo_row_scalar(slice_in, first, period, max_p, scalar, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2 => cfo_row_avx2(slice_in, first, period, max_p, scalar, row_slice),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => cfo_row_avx512(slice_in, first, period, max_p, scalar, row_slice),
+                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                    Kernel::Avx2 | Kernel::Avx512 => {
+                        cfo_row_scalar(slice_in, first, period, max_p, scalar, row_slice)
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
             }
-        };
-
-        // Process all rows
-        for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
         }
 
         Ok(combos.clone())
