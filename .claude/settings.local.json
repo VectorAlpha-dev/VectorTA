@@ -202,6 +202,7 @@
       "Bash(test_bindings.bat correlation_cycle)",
       "Bash(.venvScriptspython.exe tests/python/test_correlation_cycle.py)",
       "Bash(.venv/Scripts/python:*)",
+      "Bash(powershell:*)",
       "Bash(test_bindings.bat ehlers_itrend)",
       "Bash(test_bindings.bat ema)",
       "Bash(./test_bindings.bat ema)"
