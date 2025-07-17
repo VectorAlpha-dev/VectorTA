@@ -6,7 +6,7 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "edcf": 4.160665
+    "ehlers_itrend": 8.30354
   },
   "rust_results": {},
   "comparisons": [],
