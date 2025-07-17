@@ -2127,7 +2127,7 @@ pub fn alma_py<'py>(
     sigma: f64,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
@@ -2138,23 +2138,13 @@ pub fn alma_py<'py>(
     };
     let alma_in = AlmaInput::from_slice(slice_in, params);
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    py.allow_threads(|| -> Result<(), AlmaError> {
-        let (data, weights, per, first, inv_n, chosen) = alma_prepare(&alma_in, kern)?;
-
-        if first + per - 1 > 0 {
-            slice_out[..first + per - 1].fill(f64::NAN);
-        }
-
-        alma_compute_into(data, &weights, per, first, inv_n, chosen, slice_out);
-
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        alma_with_kernel(&alma_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
