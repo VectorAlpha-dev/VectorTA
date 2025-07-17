@@ -75,12 +75,13 @@ strip = "none"
 split-debuginfo = "unpacked"
 # LTO is conditionally enabled based on target
 
-# Additional WASM-specific optimizations
 [profile.wasm]
 inherits = "release"
-opt-level = "z"  # Optimize for size which often improves performance in browsers
-lto = false      # Disable LTO for WASM
-strip = "symbols"
+opt-level     = 3      # full speed
+lto           = "thin" # size win + cross-crate inlining
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
 
 [profile.bench]
 opt-level = 3

@@ -225,7 +225,8 @@
       "Bash(set RUSTFLAGS=-Zdylib-lto)",
       "Bash(run_wasm_benchmark.bat alma)",
       "Bash(call run_wasm_benchmark.bat:*)",
-      "Bash(set CARGO_PROFILE_RELEASE_LTO=off)"
+      "Bash(set CARGO_PROFILE_RELEASE_LTO=off)",
+      "Bash(if exist:*)"
     ],
     "deny": []
   }

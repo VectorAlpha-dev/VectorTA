@@ -1,6 +1,13 @@
 @echo off
 REM Run Python benchmarks with accurate methodology and optimizations
-cd /d "C:\Rust Projects\my_project-bindings-4"
+
+REM Get the directory where this batch file is located
+set SCRIPT_DIR=%~dp0
+
+REM Change to the script directory (removes trailing backslash)
+cd /d "%SCRIPT_DIR:~0,-1%"
+
+REM Activate virtual environment
 call .venv\Scripts\activate
 
 echo Setting optimization flags...
