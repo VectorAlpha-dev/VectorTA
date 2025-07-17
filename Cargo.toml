@@ -66,7 +66,6 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-lto             = "thin"
 codegen-units   = 1
 incremental = false
 panic           = "abort"
@@ -74,12 +73,13 @@ overflow-checks = false
 debug = true
 strip = "none"
 split-debuginfo = "unpacked"
+# LTO is conditionally enabled based on target
 
 # Additional WASM-specific optimizations
 [profile.wasm]
 inherits = "release"
 opt-level = "z"  # Optimize for size which often improves performance in browsers
-lto = "fat"      # Full link-time optimization
+lto = false      # Disable LTO for WASM
 strip = "symbols"
 
 [profile.bench]

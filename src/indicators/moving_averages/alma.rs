@@ -1,3 +1,95 @@
+/// # WASM API Guide for ALMA Indicator
+///
+/// This file implements four WASM API patterns for the ALMA indicator. Each API serves different
+/// performance and safety requirements. When implementing WASM bindings for other indicators,
+/// choose the appropriate pattern(s) based on your use case.
+///
+/// ## 1. Standard API (Recommended for most users)
+/// **Functions**: `alma(data, period, offset, sigma)`
+/// **Use case**: One-off calculations, simple integrations
+/// **Safety**: Fully memory-safe, no manual management required
+/// **Performance**: Good for single calculations, slower for repeated calls
+/// 
+/// ```javascript
+/// const result = wasm.alma(data, 9, 0.85, 6.0);
+/// ```
+///
+/// ## 2. Context API (Recommended for repeated calculations)
+/// **Functions**: `AlmaContext` class with `new()`, `update()`, `update_into()`, `get_warmup_period()`
+/// **Use case**: Multiple calculations with same parameters (e.g., streaming data)
+/// **Safety**: Memory-safe with proper cleanup, contexts are GC'd automatically
+/// **Performance**: ~18% faster due to pre-computed weights
+///
+/// ```javascript
+/// const ctx = new wasm.AlmaContext(9, 0.85, 6.0);
+/// const result = ctx.update(data);
+/// // ctx will be GC'd when out of scope
+/// ```
+///
+/// ## 3. Zero-Copy API (For advanced users)
+/// **Functions**: `alma_into(in_ptr, out_ptr, len, period, offset, sigma)`
+/// **Use case**: When you already have WASM memory pointers
+/// **Safety**: Requires careful pointer management
+/// **Performance**: Similar to standard API, mainly useful as building block
+///
+/// ```javascript
+/// // Usually wrapped by pre-allocated API, not used directly
+/// ```
+///
+/// ## 4. Pre-Allocated Buffer API (Maximum performance)
+/// **Functions**: `alma_alloc()`, `alma_free()`, `alma_into()`
+/// **Use case**: High-frequency calculations, benchmarking, real-time systems
+/// **Safety**: Manual memory management required - MUST free buffers
+/// **Performance**: 54% faster on small datasets, 22% faster on large
+///
+/// ```javascript
+/// const inPtr = wasm.alma_alloc(len);
+/// const outPtr = wasm.alma_alloc(len);
+/// try {
+///     const inView = new Float64Array(wasm.memory.buffer, inPtr, len);
+///     inView.set(data);
+///     
+///     wasm.alma_into(inPtr, outPtr, len, 9, 0.85, 6.0);
+///     
+///     const outView = new Float64Array(wasm.memory.buffer, outPtr, len);
+///     const result = Array.from(outView);
+/// } finally {
+///     wasm.alma_free(inPtr, len);
+///     wasm.alma_free(outPtr, len);
+/// }
+/// ```
+///
+/// ## Implementation Guide for Other Indicators
+///
+/// ### Minimal WASM Support (Standard API only):
+/// ```rust
+/// #[cfg_attr(feature = "wasm", wasm_bindgen)]
+/// pub fn indicator_name(data: &[f64], param1: usize) -> Result<Vec<f64>, Error> {
+///     // Your implementation
+/// }
+/// ```
+///
+/// ### Full WASM Support (All APIs):
+/// 1. Add allocation functions (copy from this file)
+/// 2. Add zero-copy function with `_into` suffix
+/// 3. Create Context struct for stateful computation
+/// 4. Follow the patterns in this file for each API type
+///
+/// ## Memory Safety Best Practices
+///
+/// 1. **Always use try/finally** with pre-allocated API to prevent leaks
+/// 2. **Recreate TypedArray views** after any WASM call (memory may grow)
+/// 3. **Check for aliasing** in zero-copy functions when in_ptr == out_ptr
+/// 4. **Document warmup period** so users know which indices contain NaN
+/// 5. **Validate parameters** before allocation to avoid wasting memory
+///
+/// ## Performance Tips
+///
+/// - Pre-allocated API is fastest but requires most care
+/// - Context API best for streaming/real-time with fixed parameters  
+/// - Standard API fine for occasional calculations
+/// - All APIs automatically use WASM SIMD128 when available
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]

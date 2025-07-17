@@ -239,39 +239,78 @@ class WasmBenchmark {
         console.log('\nRunning ALMA batch benchmarks...');
         console.log('='.repeat(80));
 
-        // Only run batch on smaller datasets to avoid memory issues
-        const batchData = this.data['100k'];
-        
-        // Test batch with 232 combinations (matching Rust default)
-        const benchName = 'alma_batch_232_combos';
-        
-        const result = this.benchmarkFunction(() => {
-            this.wasm.alma_batch_js(
-                batchData,
-                9, 240, 1,        // period range: 232 values
-                0.85, 0.85, 0.0,  // offset range: 1 value
-                6.0, 6.0, 0.0     // sigma range: 1 value
-            );
-        }, benchName);
+        // Test different batch sizes to understand performance characteristics
+        const batchConfigs = [
+            {
+                name: 'small_batch',
+                data: this.data['10k'],
+                params: {
+                    period: { start: 5, end: 20, step: 5 },      // 4 values
+                    offset: { start: 0.7, end: 0.9, step: 0.1 }, // 3 values
+                    sigma: { start: 4.0, end: 8.0, step: 2.0 }   // 3 values
+                },
+                totalCombos: 36
+            },
+            {
+                name: 'medium_batch',
+                data: this.data['10k'],
+                params: {
+                    period: { start: 5, end: 25, step: 2 },      // 11 values
+                    offset: { start: 0.5, end: 1.0, step: 0.1 }, // 6 values
+                    sigma: { start: 3.0, end: 9.0, step: 3.0 }   // 3 values
+                },
+                totalCombos: 198
+            },
+            {
+                name: 'large_batch',
+                data: this.data['10k'],
+                params: {
+                    period: { start: 5, end: 50, step: 1 },      // 46 values
+                    offset: { start: 0.5, end: 1.0, step: 0.05 },// 11 values
+                    sigma: { start: 2.0, end: 10.0, step: 2.0 }  // 5 values
+                },
+                totalCombos: 2530
+            }
+        ];
 
-        this.results[benchName] = result;
-        this.printResult(result);
-
-        // Test new ergonomic API if available
-        if (this.wasm.alma_batch) {
-            const benchName2 = 'alma_batch_new_api';
+        // 1. Test old batch API
+        console.log('\n--- Old Batch API ---');
+        for (const config of batchConfigs) {
+            const benchName = `alma_batch_old_${config.name}`;
             
-            const result2 = this.benchmarkFunction(() => {
-                this.wasm.alma_batch(batchData, {
-                    period_range: [9, 240, 1],
-                    offset_range: [0.85, 0.85, 0.0],
-                    sigma_range: [6.0, 6.0, 0.0],
-                });
-            }, benchName2);
+            const result = this.benchmarkFunction(() => {
+                this.wasm.alma_batch_js(
+                    config.data,
+                    config.params.period.start, config.params.period.end, config.params.period.step,
+                    config.params.offset.start, config.params.offset.end, config.params.offset.step,
+                    config.params.sigma.start, config.params.sigma.end, config.params.sigma.step
+                );
+            }, benchName);
 
-            this.results[benchName2] = result2;
-            this.printResult(result2);
+            this.results[benchName] = result;
+            this.printResult(result);
+            console.log(`  Total combinations: ${config.totalCombos}`);
         }
+
+        // 2. Test new ergonomic API if available
+        if (this.wasm.alma_batch) {
+            console.log('\n--- New Batch API ---');
+            for (const config of batchConfigs) {
+                const benchName = `alma_batch_new_${config.name}`;
+                
+                const result = this.benchmarkFunction(() => {
+                    this.wasm.alma_batch(config.data, {
+                        period_range: [config.params.period.start, config.params.period.end, config.params.period.step],
+                        offset_range: [config.params.offset.start, config.params.offset.end, config.params.offset.step],
+                        sigma_range: [config.params.sigma.start, config.params.sigma.end, config.params.sigma.step],
+                    });
+                }, benchName);
+
+                this.results[benchName] = result;
+                this.printResult(result);
+            }
+        }
+
     }
 
     printResult(result) {
@@ -318,8 +357,10 @@ class WasmBenchmark {
         }
     }
 
-    async run() {
+    async run(options = {}) {
         await this.initialize();
+        
+        const { runSingle = false, runBatch = false, runAll = true } = options;
         
         console.log('\nWASM Performance Benchmark');
         console.log('='.repeat(80));
@@ -329,10 +370,14 @@ class WasmBenchmark {
         console.log(`  Min iterations: ${CONFIG.minIterations}`);
         console.log(`  GC disabled: ${CONFIG.disableGC}`);
 
-        // Run benchmarks
-        this.runAlmaBenchmarks();
-        // Skip batch for now to avoid timeout
-        // this.runAlmaBatchBenchmarks();
+        // Run benchmarks based on options
+        if (runAll || runSingle) {
+            this.runAlmaBenchmarks();
+        }
+        
+        if (runAll || runBatch) {
+            this.runAlmaBatchBenchmarks();
+        }
         
         // Print summary
         this.printSummary();
@@ -347,9 +392,27 @@ async function main() {
     if (!global.gc && CONFIG.disableGC) {
         console.warn('\nWarning: GC control not available. Run with: node --expose-gc wasm_benchmark.js\n');
     }
+    
+    // Parse command line arguments
+    const runBatch = args.includes('--batch') || args.includes('batch');
+    const runSingle = args.includes('--single') || args.includes('single');
+    const runAll = !runBatch && !runSingle; // Default to all if nothing specified
 
     const benchmark = new WasmBenchmark();
-    await benchmark.run();
+    await benchmark.run({
+        runSingle: runSingle,
+        runBatch: runBatch,
+        runAll: runAll
+    });
+    
+    // Show usage if specific argument requested
+    if (args.includes('--help') || args.includes('-h')) {
+        console.log('\nUsage: node --expose-gc wasm_benchmark.js [options]');
+        console.log('Options:');
+        console.log('  --single    Run only single ALMA benchmarks');
+        console.log('  --batch     Run only batch ALMA benchmarks');
+        console.log('  (default)   Run all benchmarks');
+    }
 }
 
 // Run if called directly

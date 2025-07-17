@@ -70,6 +70,8 @@ if "%RUN_PYTHON%"=="true" (
     
     echo.
     echo Building Python bindings...
+    REM Enable dylib-lto for Python builds
+    set "RUSTFLAGS=-Zdylib-lto"
     maturin develop --features python,nightly-avx --release
     if !errorlevel! equ 0 (
         echo Python build successful
@@ -97,6 +99,8 @@ REM WASM tests
 if "%RUN_WASM%"=="true" (
     echo.
     echo Building WASM bindings...
+    REM Disable LTO for WASM builds
+    set "CARGO_PROFILE_RELEASE_LTO=off"
     wasm-pack build --target nodejs --features wasm
     if !errorlevel! equ 0 (
         echo WASM build successful

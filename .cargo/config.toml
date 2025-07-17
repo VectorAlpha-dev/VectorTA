@@ -1,7 +1,5 @@
 [build]
 rustc-wrapper = "sccache"
-# Apply to ALL builds including proc-macros and build scripts
-rustflags = ["-Zdylib-lto"]
 
 # Limit test parallelism to prevent crashes from memory exhaustion
 [test]
@@ -27,3 +25,4 @@ rustflags = [
   "-C", "link-arg=--import-memory",
   "-C", "link-arg=-zstack-size=32768",
 ]
+
