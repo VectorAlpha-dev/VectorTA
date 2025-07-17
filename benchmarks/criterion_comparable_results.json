@@ -6,17 +6,17 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "cwma": 1.76659,
-    "cwma_batch": 1.644165
+    "dema": 1.2812272727272727,
+    "dema_batch": 1.2612636363636363
   },
   "rust_results": {},
   "comparisons": [],
   "batch_comparisons": [
     {
-      "indicator": "cwma",
-      "single_ms": 1.76659,
-      "batch_ms": 1.644165,
-      "overhead_pct": -6.930017717750014
+      "indicator": "dema",
+      "single_ms": 1.2812272727272727,
+      "batch_ms": 1.2612636363636363,
+      "overhead_pct": -1.5581651115762596
     }
   ]
 }

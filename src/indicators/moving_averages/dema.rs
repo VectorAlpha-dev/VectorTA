@@ -32,6 +32,8 @@ use core::arch::x86_64::*;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1313,32 +1315,30 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "dema")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn dema_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
     let params = DemaParams {
         period: Some(period),
     };
     let dema_in = DemaInput::from_slice(slice_in, params);
     
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    py.allow_threads(|| -> Result<(), DemaError> {
-        let (data, period, first, warm, chosen) = dema_prepare(&dema_in, Kernel::Auto)?;
-        slice_out[..warm].fill(f64::NAN);
-        dema_compute_into(data, period, first, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        dema_with_kernel(&dema_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1367,15 +1367,18 @@ impl DemaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "dema_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn dema_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
     
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = DemaBatchRange {
         period: period_range,
@@ -1389,11 +1392,17 @@ pub fn dema_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     let combos = py.allow_threads(|| {
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        dema_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        dema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
