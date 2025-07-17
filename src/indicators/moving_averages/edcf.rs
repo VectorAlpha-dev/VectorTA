@@ -26,9 +26,15 @@ use crate::utilities::helpers::{
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1431,32 +1437,30 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "edcf")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn edcf_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
     let params = EdcfParams {
         period: Some(period),
     };
     let edcf_in = EdcfInput::from_slice(slice_in, params);
     
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    py.allow_threads(|| -> Result<(), EdcfError> {
-        let (data, period, first, warm, chosen) = edcf_prepare(&edcf_in, Kernel::Auto)?;
-        slice_out[..warm].fill(f64::NAN);
-        edcf_compute_into(data, period, first, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        edcf_with_kernel(&edcf_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1485,13 +1489,14 @@ impl EdcfStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "edcf_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn edcf_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
-    use pyo3::types::PyDict;
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     
     let slice_in = data.as_slice()?;
     
@@ -1499,22 +1504,27 @@ pub fn edcf_batch_py<'py>(
         period: period_range,
     };
     
-    let rows = expand_grid(&sweep).len();
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
     let cols = slice_in.len();
     
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
+    let kern = validate_kernel(kernel, true)?;
+    
     let combos = py.allow_threads(|| {
-        let kernel = match detect_best_batch_kernel() {
-            Kernel::ScalarBatch => Kernel::Scalar,
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2Batch => Kernel::Avx2,
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512Batch => Kernel::Avx512,
-            _ => Kernel::Scalar,
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
         };
-        edcf_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
+        };
+        edcf_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     

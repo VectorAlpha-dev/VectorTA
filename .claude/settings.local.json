@@ -227,7 +227,10 @@
       "Bash(call run_wasm_benchmark.bat:*)",
       "Bash(set CARGO_PROFILE_RELEASE_LTO=off)",
       "Bash(if exist:*)",
-      "Bash(.venvScriptspython.exe -m pytest tests/python/test_kama.py -v)"
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_kama.py -v)",
+      "Bash(test_bindings.bat edcf)",
+      "Bash(.venv\\Scripts\\python.exe tests/python/test_edcf.py:*)",
+      "Bash(del test_edcf_performance.py)"
     ],
     "deny": []
   }
