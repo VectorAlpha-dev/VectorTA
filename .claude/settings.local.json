@@ -210,7 +210,8 @@
       "Bash(test_bindings.bat bollinger_bands_width)",
       "Bash(.venvScriptspython -m pytest tests/python/test_bollinger_bands_width.py::TestBollingerBandsWidth::test_nan_handling -xvs)",
       "Bash(.venvScriptspython -m pytest tests/python/test_adxr.py::TestAdxr::test_adxr_nan_handling -xvs)",
-      "Bash(debug_adxr_rust.exe)"
+      "Bash(debug_adxr_rust.exe)",
+      "Bash(test_bindings.bat fwma)"
     ],
     "deny": []
   }

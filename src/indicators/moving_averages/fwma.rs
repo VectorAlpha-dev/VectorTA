@@ -23,6 +23,8 @@ use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
@@ -37,7 +39,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-use std::mem::MaybeUninit;
+use std::mem::{MaybeUninit, ManuallyDrop};
 
 impl<'a> AsRef<[f64]> for FwmaInput<'a> {
     #[inline(always)]
@@ -773,9 +775,42 @@ fn fwma_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let mut values = vec![f64::NAN; rows * cols];
     
-    fwma_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    // Use zero-copy allocation
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .unwrap_or(0);
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    
+    // Initialize NaN prefixes efficiently
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let values_slice: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    fwma_batch_inner_into(data, sweep, kern, parallel, values_slice)?;
+    
+    // Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(FwmaBatchOutput {
         values,
@@ -818,6 +853,7 @@ fn fwma_batch_inner_into(
     let mut aligned = AlignedVec::with_capacity(cap);
     let flat_fib = aligned.as_mut_slice();
 
+    // Pre-compute Fibonacci weights for all rows
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let base = row * max_p;
@@ -835,28 +871,10 @@ fn fwma_batch_inner_into(
         }
     }
 
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
-    
-    // Reinterpret out slice as MaybeUninit
-    let out_ptr = out.as_mut_ptr() as *mut MaybeUninit<f64>;
-    let raw = unsafe { core::slice::from_raw_parts_mut(out_ptr, out.len()) };
-    
-    // Initialize NaN prefixes
-    unsafe { init_matrix_prefixes(raw, cols, &warm) };
-
-    // 2. per-row closure works on &mut [MaybeUninit<f64>]
-    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
-        let period  = combos[row].period.unwrap();
+    // Define per-row processing closure
+    let do_row = |row: usize, dst: &mut [f64]| unsafe {
+        let period = combos[row].period.unwrap();
         let fib_ptr = flat_fib.as_ptr().add(row * max_p);
-
-        // Cast *just this slice* to &mut [f64] – we're about to fully initialise it.
-        let dst = core::slice::from_raw_parts_mut(
-            dst_mu.as_mut_ptr() as *mut f64,
-            dst_mu.len(),
-        );
 
         match kern {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -867,20 +885,20 @@ fn fwma_batch_inner_into(
         }
     };
 
-    // 3. run every row kernel – no element is read before it is written
+    // Process rows in parallel or sequentially
     if parallel {
         #[cfg(not(target_arch = "wasm32"))] {
-            raw.par_chunks_mut(cols)
+            out.par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
         #[cfg(target_arch = "wasm32")] {
-            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
                 do_row(row, slice);
             }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
@@ -1434,35 +1452,31 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "fwma")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn fwma_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{PyArray1, PyArrayMethods};
 
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
 
     let params = FwmaParams {
         period: Some(period),
     };
     let fwma_in = FwmaInput::from_slice(slice_in, params);
 
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), FwmaError> {
-        let (data, fib, per, first, chosen) = fwma_prepare(&fwma_in, Kernel::Auto)?;
-        // Prefix initialize exactly once
-        slice_out[..first + per - 1].fill(f64::NAN);
-        fwma_compute_into(data, &fib, per, first, chosen, slice_out);
-        Ok(())
+    // Use the optimized function that handles NaN initialization
+    let result = py.allow_threads(|| -> Result<FwmaOutput, FwmaError> {
+        fwma_with_kernel(&fwma_in, kern)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    // Convert result to NumPy array
+    Ok(PyArray1::from_vec(py, result.values))
 }
 
 #[cfg(feature = "python")]
@@ -1493,51 +1507,39 @@ impl FwmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "fwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn fwma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = FwmaBatchRange {
         period: period_range,
     };
 
-    // Expand grid once to know rows*cols
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
-    let cols = slice_in.len();
-
-    // Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    // Heavy work without the GIL
-    let kernel = detect_best_batch_kernel();
-    let simd = match kernel {
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512Batch => Kernel::Avx512,
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
-    };
-    
-    let combos = py.allow_threads(|| {
-        fwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    // Use the optimized batch function that handles NaN initialization
+    let result = py.allow_threads(|| -> Result<FwmaBatchOutput, FwmaError> {
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        fwma_batch_with_kernel(slice_in, &sweep, kernel)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // Build dict with the GIL
     let dict = PyDict::new(py);
-    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item("values", result.values.into_pyarray(py).reshape((result.rows, result.cols))?)?;
     dict.set_item(
         "periods",
-        combos
+        result.combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
