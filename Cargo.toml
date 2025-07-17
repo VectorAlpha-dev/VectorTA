@@ -66,7 +66,7 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 255
+codegen-units   = 1
 incremental = false
 panic           = "abort"
 overflow-checks = false
@@ -75,18 +75,17 @@ strip = "none"
 split-debuginfo = "unpacked"
 # LTO is conditionally enabled based on target
 
+# Additional WASM-specific optimizations
 [profile.wasm]
 inherits = "release"
-opt-level     = 3      # full speed
-lto           = "thin" # size win + cross-crate inlining
-codegen-units = 1
-strip         = "symbols"
-panic         = "abort"
+opt-level = "z"  # Optimize for size which often improves performance in browsers
+lto = false      # Disable LTO for WASM
+strip = "symbols"
 
 [profile.bench]
 opt-level = 3
 lto = "thin"
-codegen-units = 255
+codegen-units = 1
 incremental = false
 # Don't inherit panic=abort from release
 panic = "unwind"
