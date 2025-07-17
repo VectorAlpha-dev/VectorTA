@@ -308,9 +308,8 @@ fn highpass_with_kernel_into(
         other => other,
     };
 
-    let warm = first + period;
-    // Initialize NaN prefix
-    out[..warm].fill(f64::NAN);
+    // The caller is responsible for initializing the output buffer
+    // No need to fill with NaN here as the buffer should be pre-initialized
     
     unsafe {
         match chosen {
@@ -558,11 +557,48 @@ fn highpass_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     
-    // Allocate output buffer
-    let mut values = vec![0.0; rows * cols];
+    if combos.is_empty() {
+        return Err(HighPassError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
+    }
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
     
-    // Delegate to the _into version which contains all the logic
-    highpass_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    // Find first valid value
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(HighPassError::AllValuesNaN)?;
+    
+    // Allocate uninitialized matrix using zero-copy approach
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Calculate warmup periods for each row
+    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    
+    // Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Use ManuallyDrop to keep capacity when converting
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+    };
+    
+    // Delegate to the _into version which contains all the computation logic
+    highpass_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Reclaim ownership as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
+    };
     
     Ok(HighPassBatchOutput {
         values,
@@ -1139,27 +1175,12 @@ fn highpass_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<HighPassParams>, HighPassError> {
     let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(HighPassError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
-    if data.is_empty() {
-        return Err(HighPassError::EmptyInputData);
-    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
-        .ok_or(HighPassError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if data.len() - first < max_p {
-        return Err(HighPassError::NotEnoughValidData {
-            needed: max_p,
-            valid: data.len() - first,
-        });
-    }
+        .unwrap_or(0);
 
+    // Validate alpha for all parameter combinations
     for c in &combos {
         let period = c.period.unwrap();
         let k = 1.0;
@@ -1171,22 +1192,22 @@ fn highpass_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-
-    // ---------- per-row warm-up lengths ----------
+    
+    // Calculate warmup periods for each row
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
-    // Reinterpret output slice as MaybeUninit
+    
+    // Reinterpret output slice as MaybeUninit for row processing
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
             out.len()
         )
     };
-
+    
     // Initialize NaN prefixes
-    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
+    init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // ---------- 2. worker that fills one row ----------
+    // ---------- worker that fills one row ----------
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
@@ -1248,6 +1269,17 @@ pub fn highpass_py<'py>(
     
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), HighPassError> {
+        // Find first valid value and calculate warmup period
+        let data = hp_in.as_ref();
+        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let period = hp_in.get_period();
+        let warm = first + period;
+        
+        // Initialize NaN prefix (matching ALMA's approach)
+        if warm > 0 && warm <= slice_out.len() {
+            slice_out[..warm].fill(f64::NAN);
+        }
+        
         highpass_into(&hp_in, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
