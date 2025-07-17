@@ -211,13 +211,8 @@
       "Bash(.venvScriptspython -m pytest tests/python/test_bollinger_bands_width.py::TestBollingerBandsWidth::test_nan_handling -xvs)",
       "Bash(.venvScriptspython -m pytest tests/python/test_adxr.py::TestAdxr::test_adxr_nan_handling -xvs)",
       "Bash(debug_adxr_rust.exe)",
-      "Bash(test_bindings.bat fwma)",
-      "Bash(.venv\\Scripts\\python.exe:*)",
-      "Bash(test_venv/Scripts/activate:*)",
-      "Bash(test_bindings.bat --python epma)",
-      "Bash(.venvScriptspython.exe debug_epma_batch.py)",
-      "Bash(clean_and_test_epma.bat)",
-      "Bash(./test_epma_weights)"
+      "Bash(test_bindings.bat hwma)",
+      "Bash(.venv\\Scripts\\python.exe tests/python/test_hwma.py:*)"
     ],
     "deny": []
   }

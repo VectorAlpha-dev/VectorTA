@@ -250,11 +250,44 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     Ok(HwmaOutput { values: out })
 }
 
+/// Computes HWMA into a pre-allocated output buffer.
+/// 
+/// # Zero-Copy Design
+/// This function follows a zero-copy philosophy for optimal performance.
+/// The output buffer must be pre-allocated by the caller and should already
+/// contain appropriate NaN values in the warmup period if needed.
+/// 
+/// # Arguments
+/// * `input` - The HWMA input containing data and parameters
+/// * `out` - Pre-allocated output buffer (must be same length as input data)
+/// 
+/// # Returns
+/// * `Ok(())` if successful
+/// * `Err(HwmaError)` if the computation fails
 #[inline]
 pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
     hwma_with_kernel_into(input, Kernel::Auto, out)
 }
 
+/// Computes HWMA into a pre-allocated output buffer with specified kernel.
+/// 
+/// # Zero-Copy Design
+/// This function is designed for zero-copy operation and maximum performance.
+/// Unlike the allocating version, this function does NOT initialize the warmup
+/// period with NaN values. The caller is responsible for any necessary
+/// initialization of the output buffer.
+/// 
+/// This design choice eliminates redundant memory operations when the buffer
+/// is already properly initialized (e.g., from Python/WASM bindings).
+/// 
+/// # Arguments
+/// * `input` - The HWMA input containing data and parameters
+/// * `kernel` - SIMD kernel to use for computation
+/// * `out` - Pre-allocated output buffer (must be same length as input data)
+/// 
+/// # Returns
+/// * `Ok(())` if successful
+/// * `Err(HwmaError)` if the computation fails
 pub fn hwma_with_kernel_into(
     input: &HwmaInput,
     kernel: Kernel,
@@ -294,8 +327,9 @@ pub fn hwma_with_kernel_into(
         other => other,
     };
 
-    // Initialize NaN prefix
-    out[..first].fill(f64::NAN);
+    // NOTE: This function expects the output buffer to be pre-initialized.
+    // The caller is responsible for handling NaN prefix initialization.
+    // This follows the zero-copy philosophy to avoid redundant memory operations.
     
     unsafe {
         match chosen {
@@ -699,19 +733,21 @@ fn hwma_batch_inner(
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
     // ----- 2. allocate rows×cols as MaybeUninit and write the NaN prefixes --------
-    let mut raw = make_uninit_matrix(rows, cols);
-    unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    unsafe { init_matrix_prefixes(&mut buf_mu, cols, &warm) };
+
+    // Use ManuallyDrop pattern to maintain capacity (following alma.rs pattern)
+    let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+    };
 
     // ----- 3. closure that fills one row ------------------------------------------
-    let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let na = prm.na.unwrap();
         let nb = prm.nb.unwrap();
         let nc = prm.nc.unwrap();
-
-        // cast this row to &mut [f64]
-        let out_row =
-            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
             Kernel::Scalar => hwma_row_scalar(data, first, na, nb, nc, out_row),
@@ -723,35 +759,34 @@ fn hwma_batch_inner(
         }
     };
 
-    // ----- 4. run every row, writing directly into `raw` ---------------------------
+    // ----- 4. run every row, writing directly into `out` ---------------------------
     if parallel {
-
-        #[cfg(not(target_arch = "wasm32"))] {
-
-        raw.par_chunks_mut(cols)
-
-                    .enumerate()
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
         }
-
-        #[cfg(target_arch = "wasm32")] {
-
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
-
-                    do_row(row, slice);
-
-        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in out.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
         }
     } else {
-        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+        for (row, slice) in out.chunks_mut(cols).enumerate() {
             do_row(row, slice);
         }
     }
 
-    // ----- 5. transmute to Vec<f64> once everything is initialised -----------------
-    let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
+    // ----- 5. reclaim as Vec<f64> once everything is initialized -----------------
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
+    };
 
     Ok(HwmaBatchOutput {
         values,
@@ -947,6 +982,14 @@ pub fn hwma_py<'py>(
     
     // Heavy lifting without the GIL
     py.allow_threads(|| -> Result<(), HwmaError> {
+        // Find first non-NaN value for warmup calculation
+        let first_valid = slice_in.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        
+        // Initialize NaN prefix - HWMA has warmup period of first_valid (no additional period like ALMA)
+        if first_valid > 0 {
+            slice_out[..first_valid].fill(f64::NAN);
+        }
+        
         hwma_into(&hwma_in, slice_out)
     })
     .map_err(|e| PyValueError::new_err(format!("HWMA error: {}", e)))?;
