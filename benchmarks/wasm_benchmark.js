@@ -12,7 +12,7 @@ import { performance } from 'perf_hooks';
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { AlmaZeroCopy, AlmaContextWrapper, AlmaBenchmarkHelper } from './wasm_zero_copy_helpers.js';
+import { AlmaZeroCopy, AlmaBenchmarkHelper } from './wasm_zero_copy_helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -199,28 +199,12 @@ class WasmBenchmark {
             this.printResult(result);
         }
 
-        // 3. Context-based benchmarks (reusing weights)
-        console.log('\n--- Context-Based API ---');
-        const context = new AlmaContextWrapper(
-            this.wasm, 
-            almaParams.period, 
-            almaParams.offset, 
-            almaParams.sigma
-        );
-        
-        for (const [sizeName, data] of Object.entries(this.data)) {
-            const benchName = `alma_context_${sizeName}`;
-            
-            const result = this.benchmarkFunction(() => {
-                context.process(data);
-            }, benchName);
+        // Note: Context API has been deprecated. For weight reuse patterns,
+        // use the Fast/Unsafe API with persistent buffers as shown in the
+        // pre-allocated buffer benchmarks below.
 
-            this.results[benchName] = result;
-            this.printResult(result);
-        }
-
-        // 4. Pre-allocated buffer benchmarks (minimal overhead)
-        console.log('\n--- Pre-allocated Buffers ---');
+        // 3. Pre-allocated buffer benchmarks (minimal overhead)
+        console.log('\n--- Pre-allocated Buffers (Fast/Unsafe API) ---');
         for (const [sizeName, data] of Object.entries(this.data)) {
             const benchName = `alma_preallocated_${sizeName}`;
             const helper = new AlmaBenchmarkHelper(this.wasm, data.length);
@@ -256,35 +240,34 @@ class WasmBenchmark {
                 data: this.data['10k'],
                 params: {
                     period: { start: 5, end: 25, step: 2 },      // 11 values
-                    offset: { start: 0.5, end: 1.0, step: 0.1 }, // 6 values
+                    offset: { start: 0.5, end: 0.95, step: 0.1 }, // 5 values (avoid hitting 1.0)
                     sigma: { start: 3.0, end: 9.0, step: 3.0 }   // 3 values
                 },
-                totalCombos: 198
+                totalCombos: 165
             },
             {
                 name: 'large_batch',
                 data: this.data['10k'],
                 params: {
                     period: { start: 5, end: 50, step: 1 },      // 46 values
-                    offset: { start: 0.5, end: 1.0, step: 0.05 },// 11 values
+                    offset: { start: 0.5, end: 0.95, step: 0.05 },// 10 values (avoid hitting 1.0)
                     sigma: { start: 2.0, end: 10.0, step: 2.0 }  // 5 values
                 },
-                totalCombos: 2530
+                totalCombos: 2300
             }
         ];
 
-        // 1. Test old batch API
-        console.log('\n--- Old Batch API ---');
+        // 1. Test Safe/Simple batch API
+        console.log('\n--- Safe/Simple Batch API ---');
         for (const config of batchConfigs) {
-            const benchName = `alma_batch_old_${config.name}`;
+            const benchName = `alma_batch_${config.name}`;
             
             const result = this.benchmarkFunction(() => {
-                this.wasm.alma_batch_js(
-                    config.data,
-                    config.params.period.start, config.params.period.end, config.params.period.step,
-                    config.params.offset.start, config.params.offset.end, config.params.offset.step,
-                    config.params.sigma.start, config.params.sigma.end, config.params.sigma.step
-                );
+                this.wasm.alma_batch(config.data, {
+                    period_range: [config.params.period.start, config.params.period.end, config.params.period.step],
+                    offset_range: [config.params.offset.start, config.params.offset.end, config.params.offset.step],
+                    sigma_range: [config.params.sigma.start, config.params.sigma.end, config.params.sigma.step],
+                });
             }, benchName);
 
             this.results[benchName] = result;
@@ -292,22 +275,38 @@ class WasmBenchmark {
             console.log(`  Total combinations: ${config.totalCombos}`);
         }
 
-        // 2. Test new ergonomic API if available
-        if (this.wasm.alma_batch) {
-            console.log('\n--- New Batch API ---');
+        // 2. Test Fast/Unsafe batch API (if available)
+        if (this.wasm.alma_batch_into) {
+            console.log('\n--- Fast/Unsafe Batch API ---');
             for (const config of batchConfigs) {
-                const benchName = `alma_batch_new_${config.name}`;
+                const benchName = `alma_batch_unsafe_${config.name}`;
+                const dataLen = config.data.length;
+                const outLen = config.totalCombos * dataLen;
                 
-                const result = this.benchmarkFunction(() => {
-                    this.wasm.alma_batch(config.data, {
-                        period_range: [config.params.period.start, config.params.period.end, config.params.period.step],
-                        offset_range: [config.params.offset.start, config.params.offset.end, config.params.offset.step],
-                        sigma_range: [config.params.sigma.start, config.params.sigma.end, config.params.sigma.step],
-                    });
-                }, benchName);
+                // Allocate buffers
+                const inPtr = this.wasm.alma_alloc(dataLen);
+                const outPtr = this.wasm.alma_alloc(outLen);
+                
+                try {
+                    // Copy data to WASM memory
+                    const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, dataLen);
+                    inView.set(config.data);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        this.wasm.alma_batch_into(
+                            inPtr, outPtr, dataLen,
+                            config.params.period.start, config.params.period.end, config.params.period.step,
+                            config.params.offset.start, config.params.offset.end, config.params.offset.step,
+                            config.params.sigma.start, config.params.sigma.end, config.params.sigma.step
+                        );
+                    }, benchName);
 
-                this.results[benchName] = result;
-                this.printResult(result);
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                } finally {
+                    this.wasm.alma_free(inPtr, dataLen);
+                    this.wasm.alma_free(outPtr, outLen);
+                }
             }
         }
 

@@ -140,91 +140,9 @@ export class AlmaZeroCopy {
     }
 }
 
-/**
- * Context-based ALMA for repeated computations with same parameters
- */
-export class AlmaContextWrapper {
-    constructor(wasm, period, offset, sigma) {
-        this.wasm = wasm;
-        // Access memory through the __wasm export
-        this.memory = wasm.__wasm ? wasm.__wasm.memory : wasm.memory;
-        this.context = new wasm.AlmaContext(period, offset, sigma);
-        this.warmupPeriod = this.context.get_warmup_period();
-    }
-
-    /**
-     * Process data using the context
-     * @param {Float64Array} inputData - Input data
-     * @returns {Float64Array} Output data
-     */
-    process(inputData) {
-        const len = inputData.length;
-        
-        // Allocate buffers
-        const inputPtr = this.wasm.alma_alloc(len);
-        const outputPtr = this.wasm.alma_alloc(len);
-        
-        try {
-            // Create views
-            const inputView = new Float64Array(this.memory.buffer, inputPtr, len);
-            const outputView = new Float64Array(this.memory.buffer, outputPtr, len);
-            
-            // Copy input data
-            inputView.set(inputData);
-            
-            // Process
-            const result = this.context.update_into(inputPtr, outputPtr, len);
-            if (result !== undefined) {
-                throw new Error('ALMA context update failed');
-            }
-            
-            // Copy result
-            const output = new Float64Array(outputView);
-            
-            return output;
-        } finally {
-            // Always clean up
-            this.wasm.alma_free(inputPtr, len);
-            this.wasm.alma_free(outputPtr, len);
-        }
-    }
-
-    /**
-     * Process data in-place (modifies input array)
-     * @param {Float64Array} data - Input/output data
-     */
-    processInPlace(data) {
-        const len = data.length;
-        
-        // Allocate single buffer
-        const ptr = this.wasm.alma_alloc(len);
-        
-        try {
-            // Create view and copy data
-            const view = new Float64Array(this.memory.buffer, ptr, len);
-            view.set(data);
-            
-            // Process in-place
-            const result = this.context.update_into(ptr, ptr, len);
-            if (result !== undefined) {
-                throw new Error('ALMA context update failed');
-            }
-            
-            // Copy back
-            data.set(view);
-        } finally {
-            this.wasm.alma_free(ptr, len);
-        }
-    }
-
-    /**
-     * Clean up the context
-     */
-    free() {
-        // The context will be freed by WASM GC
-        this.context = null;
-    }
-}
+// Note: AlmaContext API has been deprecated.
+// For weight reuse patterns, use the AlmaBenchmarkHelper class below
+// which demonstrates the recommended approach using the Fast/Unsafe API.
 
 /**
  * Benchmark helper that reuses buffers

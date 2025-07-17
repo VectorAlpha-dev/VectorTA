@@ -30,7 +30,6 @@ use crate::utilities::helpers::{
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 use std::arch::x86_64::*;
 use std::f64::consts::PI;
 use std::mem::MaybeUninit;
@@ -856,8 +855,8 @@ fn alpha_from(period: usize, poles: usize) -> f64 {
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
+#[inline]
 unsafe fn gaussian_rows8_avx512(
     data: &[f64],
     params: &[GaussianParams],
@@ -936,8 +935,8 @@ unsafe fn gaussian_rows8_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
 unsafe fn gaussian_batch_tile_avx2(
     data: &[f64],
     combos: &[GaussianParams],
@@ -963,8 +962,8 @@ unsafe fn gaussian_batch_tile_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
 unsafe fn gaussian_rows4_avx2(
     data: &[f64],
     params: &[GaussianParams],
@@ -1032,8 +1031,8 @@ unsafe fn gaussian_rows4_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
+#[inline]
 unsafe fn gaussian_batch_tile_avx512(
     data: &[f64],
     combos: &[GaussianParams],
@@ -1335,7 +1334,8 @@ pub unsafe fn gaussian_row_scalar(data: &[f64], prm: &GaussianParams, out: &mut 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
 pub unsafe fn gaussian_row_avx2(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {
     let mut combos = [prm.clone(); LANES_AVX2];
     let mut buf = vec![0.0f64; LANES_AVX2 * data.len()];
@@ -1344,7 +1344,8 @@ pub unsafe fn gaussian_row_avx2(data: &[f64], prm: &GaussianParams, out: &mut [f
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
+#[inline]
 pub unsafe fn gaussian_row_avx512(data: &[f64], prm: &GaussianParams, out: &mut [f64]) {
     // fast path: 1-row “batch” using the SIMD core
     let mut combos = [prm.clone(); LANES_AVX512];

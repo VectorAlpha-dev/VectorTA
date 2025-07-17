@@ -1,48 +1,39 @@
 /// # WASM API Guide for ALMA Indicator
 ///
-/// This file implements four WASM API patterns for the ALMA indicator. Each API serves different
-/// performance and safety requirements. When implementing WASM bindings for other indicators,
-/// choose the appropriate pattern(s) based on your use case.
+/// This file implements two primary WASM API patterns for the ALMA indicator, designed to cover
+/// both ease of use and maximum performance requirements.
 ///
-/// ## 1. Standard API (Recommended for most users)
-/// **Functions**: `alma(data, period, offset, sigma)`
-/// **Use case**: One-off calculations, simple integrations
+/// ## 1. Safe/Simple API (Recommended for most users)
+/// **Functions**: 
+/// - Single: `alma_js(data, period, offset, sigma)`
+/// - Batch: `alma_batch(data, config)` with ergonomic parameter ranges
+/// **Use case**: General purpose calculations, parameter sweeps, ease of use
 /// **Safety**: Fully memory-safe, no manual management required
-/// **Performance**: Good for single calculations, slower for repeated calls
+/// **Performance**: Good performance with automatic SIMD optimization
 /// 
 /// ```javascript
-/// const result = wasm.alma(data, 9, 0.85, 6.0);
+/// // Single calculation
+/// const result = wasm.alma_js(data, 9, 0.85, 6.0);
+/// 
+/// // Batch calculation
+/// const batch = wasm.alma_batch(data, {
+///     period_range: [5, 15, 1],
+///     offset_range: [0.5, 1.0, 0.1],
+///     sigma_range: [4.0, 8.0, 1.0]
+/// });
 /// ```
 ///
-/// ## 2. Context API (Recommended for repeated calculations)
-/// **Functions**: `AlmaContext` class with `new()`, `update()`, `update_into()`, `get_warmup_period()`
-/// **Use case**: Multiple calculations with same parameters (e.g., streaming data)
-/// **Safety**: Memory-safe with proper cleanup, contexts are GC'd automatically
-/// **Performance**: ~18% faster due to pre-computed weights
-///
-/// ```javascript
-/// const ctx = new wasm.AlmaContext(9, 0.85, 6.0);
-/// const result = ctx.update(data);
-/// // ctx will be GC'd when out of scope
-/// ```
-///
-/// ## 3. Zero-Copy API (For advanced users)
-/// **Functions**: `alma_into(in_ptr, out_ptr, len, period, offset, sigma)`
-/// **Use case**: When you already have WASM memory pointers
-/// **Safety**: Requires careful pointer management
-/// **Performance**: Similar to standard API, mainly useful as building block
-///
-/// ```javascript
-/// // Usually wrapped by pre-allocated API, not used directly
-/// ```
-///
-/// ## 4. Pre-Allocated Buffer API (Maximum performance)
-/// **Functions**: `alma_alloc()`, `alma_free()`, `alma_into()`
-/// **Use case**: High-frequency calculations, benchmarking, real-time systems
+/// ## 2. Fast/Unsafe API (Maximum performance)
+/// **Functions**: 
+/// - Single: `alma_into(in_ptr, out_ptr, len, period, offset, sigma)`
+/// - Batch: `alma_batch_into(in_ptr, out_ptr, len, ...params)`
+/// - Memory: `alma_alloc()`, `alma_free()`
+/// **Use case**: High-frequency calculations, real-time systems, minimal overhead
 /// **Safety**: Manual memory management required - MUST free buffers
-/// **Performance**: 54% faster on small datasets, 22% faster on large
+/// **Performance**: Zero-copy operations, 54% faster for repeated calculations
 ///
 /// ```javascript
+/// // Pre-allocated buffer pattern
 /// const inPtr = wasm.alma_alloc(len);
 /// const outPtr = wasm.alma_alloc(len);
 /// try {
@@ -59,25 +50,32 @@
 /// }
 /// ```
 ///
+/// ## Deprecated APIs
+///
+/// The following APIs are deprecated and will be removed in a future version:
+/// - `alma_batch_js`: Use `alma_batch` instead (ergonomic config object)
+/// - `AlmaContext`: For weight reuse patterns, use the fast/unsafe API with persistent buffers
+/// - `alma_input_ptr`: Use `alma_alloc` directly
+///
 /// ## Implementation Guide for Other Indicators
 ///
-/// ### Minimal WASM Support (Standard API only):
+/// ### Minimal WASM Support (Safe API only):
 /// ```rust
 /// #[cfg_attr(feature = "wasm", wasm_bindgen)]
-/// pub fn indicator_name(data: &[f64], param1: usize) -> Result<Vec<f64>, Error> {
+/// pub fn indicator_name_js(data: &[f64], param1: usize) -> Result<Vec<f64>, JsValue> {
 ///     // Your implementation
 /// }
 /// ```
 ///
-/// ### Full WASM Support (All APIs):
-/// 1. Add allocation functions (copy from this file)
-/// 2. Add zero-copy function with `_into` suffix
-/// 3. Create Context struct for stateful computation
-/// 4. Follow the patterns in this file for each API type
+/// ### Full WASM Support (Both APIs):
+/// 1. Implement safe API with `_js` suffix
+/// 2. Add allocation functions `indicator_alloc`, `indicator_free`
+/// 3. Add zero-copy function with `_into` suffix
+/// 4. For batch operations, provide both safe and unsafe versions
 ///
 /// ## Memory Safety Best Practices
 ///
-/// 1. **Always use try/finally** with pre-allocated API to prevent leaks
+/// 1. **Always use try/finally** with unsafe API to prevent memory leaks
 /// 2. **Recreate TypedArray views** after any WASM call (memory may grow)
 /// 3. **Check for aliasing** in zero-copy functions when in_ptr == out_ptr
 /// 4. **Document warmup period** so users know which indices contain NaN
@@ -85,9 +83,9 @@
 ///
 /// ## Performance Tips
 ///
-/// - Pre-allocated API is fastest but requires most care
-/// - Context API best for streaming/real-time with fixed parameters  
-/// - Standard API fine for occasional calculations
+/// - Use Safe API for one-off calculations or when ease of use is priority
+/// - Use Fast/Unsafe API for high-frequency calculations or real-time systems
+/// - For repeated calculations with same parameters, persist buffers with unsafe API
 /// - All APIs automatically use WASM SIMD128 when available
 
 #[cfg(feature = "python")]
@@ -2463,6 +2461,7 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+#[deprecated(since = "1.0.0", note = "Use alma_batch() with config object instead")]
 pub fn alma_batch_js(
     data: &[f64],
     period_start: usize,
@@ -2581,12 +2580,6 @@ pub fn alma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn alma_input_ptr(len: usize) -> *mut f64 {
-    // Pre-allocate an input buffer in WASM for JS to write into
-    alma_alloc(len)
-}
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2633,6 +2626,7 @@ pub fn alma_into(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+#[deprecated(since = "1.0.0", note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers")]
 pub struct AlmaContext {
     weights: AVec<f64>,
     inv_norm: f64,
@@ -2643,8 +2637,10 @@ pub struct AlmaContext {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+#[allow(deprecated)]
 impl AlmaContext {
     #[wasm_bindgen(constructor)]
+    #[deprecated(since = "1.0.0", note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers")]
     pub fn new(period: usize, offset: f64, sigma: f64) -> Result<AlmaContext, JsValue> {
         // Validate parameters
         if period == 0 {
