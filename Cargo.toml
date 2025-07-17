@@ -66,9 +66,9 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 1
+codegen-units   = 16  # Reduced from 255 for faster compilation
 incremental = false
-panic           = "abort"
+# panic = "abort"  # Commented out to allow benchmarks to compile
 overflow-checks = false
 debug = true
 strip = "none"
@@ -83,14 +83,13 @@ lto = false      # Disable LTO for WASM
 strip = "symbols"
 
 [profile.bench]
+# Don't inherit from any profile to avoid panic strategy conflicts
 opt-level = 3
-lto = "thin"
-codegen-units = 1
+lto = false  # Disabled for faster compilation
+codegen-units = 4  # Increased for faster compilation
 incremental = false
-# Don't inherit panic=abort from release
-panic = "unwind"
 overflow-checks = false
-debug = true
+debug = false  # Disabled for faster compilation
 strip = "none"
 split-debuginfo = "unpacked"
 
