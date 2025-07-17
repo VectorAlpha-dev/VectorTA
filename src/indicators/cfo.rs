@@ -228,6 +228,10 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
     let period = input.get_period();
     let scalar = input.get_scalar();
 
+    if len == 0 {
+        return Err(CfoError::NoData);
+    }
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -244,9 +248,6 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
             needed: period,
             valid: len - first,
         });
-    }
-    if len == 0 {
-        return Err(CfoError::NoData);
     }
 
     let chosen = match kernel {
@@ -685,6 +686,9 @@ fn cfo_batch_inner(
             period: 0,
             data_len: 0,
         });
+    }
+    if data.is_empty() {
+        return Err(CfoError::NoData);
     }
     let first = data
         .iter()

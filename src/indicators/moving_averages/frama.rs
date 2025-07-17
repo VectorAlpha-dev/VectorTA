@@ -1194,6 +1194,10 @@ fn frama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<FramaBatchOutput, FramaError> {
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(FramaError::EmptyInputData);
+    }
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(FramaError::InvalidWindow {

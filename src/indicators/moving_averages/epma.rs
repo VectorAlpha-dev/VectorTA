@@ -267,15 +267,11 @@ fn epma_compute_into(
 ) {
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                epma_scalar(data, period, offset, first, out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => epma_scalar(data, period, offset, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => epma_avx2(data, period, offset, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                epma_avx512(data, period, offset, first, out)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => epma_avx512(data, period, offset, first, out),
             _ => unreachable!(),
         }
     }
@@ -283,10 +279,10 @@ fn epma_compute_into(
 
 pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput, EpmaError> {
     let (data, period, offset, first, warmup, chosen) = epma_prepare(input, kernel)?;
-    
+
     let mut out = alloc_with_nan_prefix(data.len(), warmup);
     epma_compute_into(data, period, offset, first, chosen, &mut out);
-    
+
     Ok(EpmaOutput { values: out })
 }
 
@@ -405,8 +401,7 @@ pub unsafe fn epma_avx512(
 ) {
     if period <= 32 {
         epma_avx512_short(data, period, offset, first_valid, out)
-    
-        } else {
+    } else {
         epma_avx512_long(data, period, offset, first_valid, out)
     }
 }
@@ -432,26 +427,31 @@ unsafe fn epma_avx512_short(
     let w0 = _mm512_loadu_pd(weights.as_ptr());
     let w1 = if chunks >= 2 {
         Some(_mm512_loadu_pd(weights.as_ptr().add(STEP)))
-    
-        } else {
+    } else {
         None
     };
     let w_tail = if tail != 0 {
         _mm512_maskz_loadu_pd(tmask, weights.as_ptr().add(chunks * STEP))
-    
-        } else {
+    } else {
         _mm512_setzero_pd()
     };
 
     for j in (first_valid + period + offset + 1)..data.len() {
         let start = j + 1 - p1;
-        let mut acc = _mm512_mul_pd(_mm512_loadu_pd(data.as_ptr().add(start)), w0);
+        let mut acc = if chunks == 0 && tail != 0 {
+            // For p1 < 8, use masked load to avoid garbage values
+            let w_masked = _mm512_maskz_loadu_pd(tmask, weights.as_ptr());
+            let d_masked = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start));
+            _mm512_mul_pd(d_masked, w_masked)
+        } else {
+            _mm512_mul_pd(_mm512_loadu_pd(data.as_ptr().add(start)), w0)
+        };
 
         if let Some(w1v) = w1 {
             let d1 = _mm512_loadu_pd(data.as_ptr().add(start + STEP));
             acc = _mm512_fmadd_pd(d1, w1v, acc);
         }
-        if tail != 0 {
+        if tail != 0 && chunks > 0 {
             let d_t = _mm512_maskz_loadu_pd(tmask, data.as_ptr().add(start + chunks * STEP));
             acc = _mm512_fmadd_pd(d_t, w_tail, acc);
         }
@@ -759,23 +759,23 @@ fn epma_batch_inner(
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
-    
+
     // Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    
+
     // Pass to inner function which will initialize and compute
     let combos = epma_batch_inner_into_uninit(data, sweep, kern, parallel, &mut buf_mu)?;
-    
+
     // Convert from MaybeUninit to Vec<f64>
     let values = unsafe {
         let mut buf_guard = ManuallyDrop::new(buf_mu);
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
             buf_guard.len(),
-            buf_guard.capacity()
+            buf_guard.capacity(),
         )
     };
-    
+
     Ok(EpmaBatchOutput {
         values,
         combos,
@@ -783,7 +783,6 @@ fn epma_batch_inner(
         cols,
     })
 }
-
 
 #[inline(always)]
 fn epma_batch_inner_into_uninit(
@@ -858,7 +857,8 @@ fn epma_batch_inner_into_uninit(
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            buf_mu.par_chunks_mut(cols)
+            buf_mu
+                .par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| do_row(row, slice));
         }
@@ -1094,8 +1094,12 @@ mod tests {
                     // polynomial weighting scheme which can include negative weights.
                     // This is expected behavior for a leading indicator.
                     // We only check that the output is finite (not NaN or infinite).
-                    prop_assert!(y.is_nan() || y.is_finite(), 
-                        "EPMA output at index {} is not finite: {}", i, y);
+                    prop_assert!(
+                        y.is_nan() || y.is_finite(),
+                        "EPMA output at index {} is not finite: {}",
+                        i,
+                        y
+                    );
                 }
                 Ok(())
             })
@@ -1217,16 +1221,37 @@ mod tests {
             // Default parameters
             EpmaParams::default(),
             // Small period
-            EpmaParams { period: Some(2), offset: Some(0) },
+            EpmaParams {
+                period: Some(2),
+                offset: Some(0),
+            },
             // Medium period with various offsets
-            EpmaParams { period: Some(5), offset: Some(1) },
-            EpmaParams { period: Some(10), offset: Some(3) },
-            EpmaParams { period: Some(10), offset: Some(9) },
+            EpmaParams {
+                period: Some(5),
+                offset: Some(1),
+            },
+            EpmaParams {
+                period: Some(10),
+                offset: Some(3),
+            },
+            EpmaParams {
+                period: Some(10),
+                offset: Some(9),
+            },
             // Large period
-            EpmaParams { period: Some(20), offset: Some(5) },
-            EpmaParams { period: Some(30), offset: Some(10) },
+            EpmaParams {
+                period: Some(20),
+                offset: Some(5),
+            },
+            EpmaParams {
+                period: Some(30),
+                offset: Some(10),
+            },
             // Edge case: period - 1 offset
-            EpmaParams { period: Some(15), offset: Some(14) },
+            EpmaParams {
+                period: Some(15),
+                offset: Some(14),
+            },
         ];
 
         for params in test_cases {
@@ -1445,13 +1470,13 @@ mod tests {
 
 // Python bindings
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
+use numpy;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use numpy;
+use pyo3::types::PyDict;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "epma")]
@@ -1463,15 +1488,16 @@ pub fn epma_py<'py>(
     offset: Option<usize>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::IntoPyArray;
-    
+
     let slice_in = arr_in.as_slice()?;
     let params = EpmaParams { period, offset };
     let input = EpmaInput::from_slice(slice_in, params);
-    
+
     // Use the Rust implementation directly which handles memory allocation properly
-    let result = py.allow_threads(|| epma_with_kernel(&input, Kernel::Auto))
+    let result = py
+        .allow_threads(|| epma_with_kernel(&input, Kernel::Auto))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
     Ok(result.values.into_pyarray(py))
 }
 
@@ -1485,37 +1511,42 @@ pub fn epma_batch_py<'py>(
     offset_range: (usize, usize, usize),
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{PyArray1, PyArray2, PyArrayMethods};
-    
+
     let data = arr_in.as_slice()?;
     let range = EpmaBatchRange {
         period: period_range,
         offset: offset_range,
     };
-    
+
     // Pre-calculate dimensions
     let combos = expand_grid(&range);
     let rows = combos.len();
     let cols = data.len();
-    
+
     // Use the Rust batch implementation directly
-    let result = py.allow_threads(|| epma_batch_with_kernel(data, &range, Kernel::ScalarBatch))
+    let result = py
+        .allow_threads(|| epma_batch_with_kernel(data, &range, Kernel::ScalarBatch))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
+
     // Create output array from result
     let out_arr = unsafe { PyArray2::<f64>::new(py, [rows, cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
     out_slice.copy_from_slice(&result.values);
-    
+
     let dict = PyDict::new(py);
-    
+
     // Extract periods and offsets
-    let periods: Vec<usize> = result.combos.iter()
+    let periods: Vec<usize> = result
+        .combos
+        .iter()
         .map(|c| c.period.unwrap_or(11))
         .collect();
-    let offsets: Vec<usize> = result.combos.iter()
+    let offsets: Vec<usize> = result
+        .combos
+        .iter()
         .map(|c| c.offset.unwrap_or(4))
         .collect();
-    
+
     dict.set_item("values", out_arr)?;
     dict.set_item("periods", PyArray1::from_vec(py, periods))?;
     dict.set_item("offsets", PyArray1::from_vec(py, offsets))?;
@@ -1540,7 +1571,7 @@ impl EpmaStreamPy {
             Err(e) => Err(PyValueError::new_err(e.to_string())),
         }
     }
-    
+
     fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
     }
@@ -1552,10 +1583,14 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn epma_js(data: &[f64], period: Option<usize>, offset: Option<usize>) -> Result<Vec<f64>, JsValue> {
+pub fn epma_js(
+    data: &[f64],
+    period: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<f64>, JsValue> {
     let params = EpmaParams { period, offset };
     let input = EpmaInput::from_slice(data, params);
-    
+
     match epma_with_kernel(&input, Kernel::Scalar) {
         Ok(output) => Ok(output.values),
         Err(e) => Err(JsValue::from_str(&e.to_string())),
@@ -1577,7 +1612,7 @@ pub fn epma_batch_js(
         period: (period_start, period_end, period_step),
         offset: (offset_start, offset_end, offset_step),
     };
-    
+
     match epma_batch_with_kernel(data, &range, Kernel::ScalarBatch) {
         Ok(output) => Ok(output.values),
         Err(e) => Err(JsValue::from_str(&e.to_string())),
@@ -1598,14 +1633,14 @@ pub fn epma_batch_metadata_js(
         period: (period_start, period_end, period_step),
         offset: (offset_start, offset_end, offset_step),
     };
-    
+
     let combos = expand_grid(&range);
     let mut metadata = Vec::with_capacity(combos.len() * 2);
-    
+
     for combo in combos {
         metadata.push(combo.period.unwrap_or(11));
         metadata.push(combo.offset.unwrap_or(4));
     }
-    
+
     metadata
 }

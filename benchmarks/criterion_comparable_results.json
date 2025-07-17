@@ -6,35 +6,35 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "alma": 1.83683,
-    "alma_batch": 1.79635
+    "alma": 1.874685,
+    "alma_batch": 1.777125
   },
   "rust_results": {
-    "alma": 1.1361491666666668,
-    "alma_batch": 121.8571
+    "alma": 1.1716001831501832,
+    "alma_batch": 125.9426
   },
   "comparisons": [
     {
       "indicator": "alma",
-      "python_ms": 1.83683,
-      "rust_ms": 1.1361491666666668,
-      "overhead_ms": 0.7006808333333332,
-      "overhead_pct": 61.6715528110672
+      "python_ms": 1.874685,
+      "rust_ms": 1.1716001831501832,
+      "overhead_ms": 0.7030848168498167,
+      "overhead_pct": 60.010644156726876
     },
     {
       "indicator": "alma_batch",
-      "python_ms": 1.79635,
-      "rust_ms": 121.8571,
-      "overhead_ms": -120.06075,
-      "overhead_pct": -98.52585528459154
+      "python_ms": 1.777125,
+      "rust_ms": 125.9426,
+      "overhead_ms": -124.165475,
+      "overhead_pct": -98.58894051734678
     }
   ],
   "batch_comparisons": [
     {
       "indicator": "alma",
-      "single_ms": 1.83683,
-      "batch_ms": 1.79635,
-      "overhead_pct": -2.203796758545973
+      "single_ms": 1.874685,
+      "batch_ms": 1.777125,
+      "overhead_pct": -5.204074284479788
     }
   ]
 }

@@ -128,3 +128,4 @@ pub use moving_averages::{
     sinwma, sma, smma, sqwma, srwma, supersmoother, supersmoother_3_pole, swma, tema, tilson,
     trendflex, trima, vpwma, vwap, vwma, wilders, wma, zlema,
 };
+pub use cci::{cci, CciInput, CciOutput, CciParams};

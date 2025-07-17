@@ -61,25 +61,25 @@ if "%RUN_PYTHON%"=="true" (
     REM Activate virtual environment
     call .venv\Scripts\activate.bat
     
-    REM Install dependencies
-    python -m pip install --upgrade pip
-    python -m pip install maturin pytest pytest-xdist numpy
+    REM Install dependencies using venv Python explicitly
+    .venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+    .venv\Scripts\python.exe -m pip install maturin pytest pytest-xdist numpy --quiet
     
     REM Ensure maturin is in PATH for this session
-    for /f %%i in ('python -m site --user-base') do set PATH=%%i\Scripts;!PATH!
+    for /f %%i in ('.venv\Scripts\python.exe -m site --user-base') do set PATH=%%i\Scripts;!PATH!
     
     echo.
     echo Building Python bindings...
-    maturin develop --features python,nightly-avx --release
+    .venv\Scripts\python.exe -m maturin develop --features python,nightly-avx --release
     if !errorlevel! equ 0 (
         echo Python build successful
         
         echo.
         echo Running Python tests...
         if "%TEST_PATTERN%"=="" (
-            python tests/python/run_all_tests.py
+            .venv\Scripts\python.exe tests/python/run_all_tests.py
         ) else (
-            python tests/python/run_all_tests.py %TEST_PATTERN%
+            .venv\Scripts\python.exe tests/python/run_all_tests.py %TEST_PATTERN%
         )
         if !errorlevel! neq 0 (
             echo Python tests failed

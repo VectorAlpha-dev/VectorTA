@@ -702,6 +702,10 @@ fn edcf_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
+    if data.is_empty() {
+        return Err(EdcfError::NoData);
+    }
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(EdcfError::InvalidPeriod {

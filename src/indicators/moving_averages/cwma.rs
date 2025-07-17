@@ -780,15 +780,31 @@ fn cwma_batch_inner(
         return Err(CwmaError::EmptyInputData);
     }
     
-    // Step 1: Allocate uninitialized matrix using the helper
-    let mut buf_mu = make_uninit_matrix(rows, cols);
-    
-    // Step 2: Calculate warmup periods for each row
+    // Check for NaN values first
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
     
+    // Calculate max period needed (rounded up to 8)
+    let max_p = combos
+        .iter()
+        .map(|c| round_up8(c.period.unwrap()))
+        .max()
+        .unwrap();
+    
+    // Validate we have enough data
+    if (cols - first) < max_p {
+        return Err(CwmaError::NotEnoughValidData {
+            needed: max_p,
+            valid: cols - first,
+        });
+    }
+    
+    // Step 1: Allocate uninitialized matrix using the helper
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
