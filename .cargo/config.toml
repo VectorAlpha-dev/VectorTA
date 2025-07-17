@@ -1,5 +1,7 @@
 [build]
 rustc-wrapper = "sccache"
+# Apply to ALL builds including proc-macros and build scripts
+rustflags = ["-Zdylib-lto"]
 
 # Limit test parallelism to prevent crashes from memory exhaustion
 [test]
@@ -13,6 +15,7 @@ rustflags = [
 
 [target.x86_64-pc-windows-msvc]
 rustflags = [
+  "-Zdylib-lto",
   "-C", "target-cpu=native",
   "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
   "-C", "linker=lld-link",

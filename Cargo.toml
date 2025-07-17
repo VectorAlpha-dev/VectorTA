@@ -94,6 +94,14 @@ debug = true
 strip = "none"
 split-debuginfo = "unpacked"
 
+[profile.dev]
+# Development profile settings
+
+[profile.dev.build-override]
+# Ensure proc-macros don't use LTO in dev builds
+opt-level = 0
+codegen-units = 16
+
 [features]
 default = ["proptest"]
 nightly-avx = []
@@ -102,3 +110,20 @@ python = ["pyo3", "numpy"]
 
 [package.metadata.wasm-pack]
 "wasm-opt" = ["-O4", "--enable-simd"]
+
+[profile.release.build-override]
+# Applies only to build-scripts & proc-macros, *not* to your library/bin code.
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1      # optional tidy-up; keeps small helper crates optimised
+
+[profile.bench.build-override]
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1
+
+
+# ────────────────────────────────────────────────────────────────
+# 2.  Custom WASM profile used by wasm-pack  (inherits release)
+# ────────────────────────────────────────────────────────────────
+[profile.wasm.build-override]
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1

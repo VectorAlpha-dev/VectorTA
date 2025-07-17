@@ -1066,6 +1066,12 @@ fn alma_batch_inner_into(
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
+    // Resolve Auto kernel before processing
+    let actual_kern = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
+
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -1073,7 +1079,7 @@ fn alma_batch_inner_into(
 
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        match kern {
+        match actual_kern {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
             }
@@ -1089,7 +1095,7 @@ fn alma_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 alma_row_scalar(data, first, period, max_p, w_ptr, inv_n, dst)
             }
-            Kernel::Auto => unreachable!(),
+            Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
         }
     };
 
@@ -2485,6 +2491,13 @@ pub fn alma_free(ptr: *mut f64, len: usize) {
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+pub fn alma_input_ptr(len: usize) -> *mut f64 {
+    // Pre-allocate an input buffer in WASM for JS to write into
+    alma_alloc(len)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
 pub fn alma_into(
     in_ptr: *const f64,
     out_ptr: *mut f64,
@@ -2493,12 +2506,22 @@ pub fn alma_into(
     offset: f64,
     sigma: f64,
 ) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to alma_into"));
+    }
+    
     unsafe {
         // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
         
-        // Create input
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate ALMA directly into output buffer
         let params = AlmaParams {
             period: Some(period),
             offset: Some(offset),
@@ -2506,20 +2529,11 @@ pub fn alma_into(
         };
         let input = AlmaInput::from_slice(data, params);
         
-        // Get optimal kernel for WASM
-        let kernel = detect_best_kernel();
+        // Use the regular alma function and copy results
+        let result = alma(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
         
-        // Prepare computation
-        let (data, weights, period, first, inv_n, chosen) = alma_prepare(&input, kernel)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        // Initialize output with NaN for warmup period
-        for i in 0..(first + period - 1) {
-            out[i] = f64::NAN;
-        }
-        
-        // Compute directly into output buffer
-        alma_compute_into(data, &weights, period, first, inv_n, chosen, out);
+        // Copy results to output buffer
+        out.copy_from_slice(&result.values);
         
         Ok(())
     }
@@ -2567,13 +2581,12 @@ impl AlmaContext {
         }
         
         let inv_norm = 1.0 / norm;
-        let first = 0; // For raw slices, first is always 0
         
         Ok(AlmaContext {
             weights,
             inv_norm,
             period,
-            first,
+            first: 0,
             kernel: detect_best_kernel(),
         })
     }
@@ -2587,19 +2600,77 @@ impl AlmaContext {
             let data = std::slice::from_raw_parts(in_ptr, len);
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             
-            // Initialize warmup with NaN
-            for i in 0..(self.first + self.period - 1) {
-                out[i] = f64::NAN;
+            // Find first non-NaN value
+            let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+            
+            // Check if input and output buffers are the same (aliasing)
+            if in_ptr == out_ptr {
+                // Use temporary buffer to avoid corruption during sliding window computation
+                let mut temp = vec![0.0; len];
+                alma_compute_into(data, self.weights.as_slice(), self.period, first, self.inv_norm, self.kernel, &mut temp);
+                
+                // Copy results to output
+                out.copy_from_slice(&temp);
+            } else {
+                // No aliasing, compute directly into output
+                alma_compute_into(data, self.weights.as_slice(), self.period, first, self.inv_norm, self.kernel, out);
             }
             
-            // Compute
-            alma_compute_into(data, &self.weights, self.period, self.first, self.inv_norm, self.kernel, out);
+            // Overwrite warmup region with NaN
+            for i in 0..(first + self.period - 1) {
+                out[i] = f64::NAN;
+            }
         }
         
         Ok(())
     }
     
     pub fn get_warmup_period(&self) -> usize {
-        self.first + self.period - 1
+        self.period - 1
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    offset_start: f64,
+    offset_end: f64,
+    offset_step: f64,
+    sigma_start: f64,
+    sigma_end: f64,
+    sigma_step: f64,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to alma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = AlmaBatchRange {
+            period: (period_start, period_end, period_step),
+            offset: (offset_start, offset_end, offset_step),
+            sigma: (sigma_start, sigma_end, sigma_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        alma_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
     }
 }

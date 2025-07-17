@@ -220,7 +220,11 @@
       "Bash(run_wasm_benchmark.bat)",
       "Bash(set RUSTFLAGS=-C opt-level=3 -C lto=thin)",
       "Bash(set RUSTFLAGS=-C target-feature=+simd128)",
-      "Bash(wasm-opt:*)"
+      "Bash(wasm-opt:*)",
+      "Bash(del:*)",
+      "Bash(set RUSTFLAGS=-Zdylib-lto)",
+      "Bash(run_wasm_benchmark.bat alma)",
+      "Bash(call run_wasm_benchmark.bat:*)"
     ],
     "deny": []
   }

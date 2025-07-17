@@ -116,8 +116,15 @@ export class AlmaZeroCopy {
                 throw new Error('ALMA computation failed');
             }
 
+            // Create a new view in case memory grew
+            const currentOutputView = new Float64Array(
+                this.wasm.__wasm.memory.buffer,
+                output.ptr,
+                len
+            );
+            
             // Copy result before freeing
-            const resultCopy = new Float64Array(output.view);
+            const resultCopy = new Float64Array(currentOutputView);
             
             // Free buffers
             this.freeBuffer(input.ptr, len);

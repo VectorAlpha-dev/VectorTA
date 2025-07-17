@@ -10,7 +10,7 @@ REM Set build flags for optimization
 set RUSTFLAGS=-C target-cpu=native -C opt-level=3 -C lto=fat -C embed-bitcode=yes
 
 REM Build WASM module
-call wasm-pack build --features wasm --target nodejs --release
+call wasm-pack build --target nodejs --features wasm
 
 echo.
 echo Running WASM benchmarks...

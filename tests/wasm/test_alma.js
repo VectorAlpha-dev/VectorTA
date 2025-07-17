@@ -566,14 +566,17 @@ test('ALMA zero-copy with large dataset', () => {
         
         wasm.alma_into(ptr, ptr, size, 9, 0.85, 6.0);
         
+        // Recreate view in case memory grew
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        
         // Check warmup period has NaN
         for (let i = 0; i < 8; i++) {
-            assert(isNaN(memView[i]), `Expected NaN at warmup index ${i}`);
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
         }
         
         // Check after warmup has values
         for (let i = 8; i < Math.min(100, size); i++) {
-            assert(!isNaN(memView[i]), `Unexpected NaN at index ${i}`);
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
         }
     } finally {
         wasm.alma_free(ptr, size);
@@ -605,13 +608,16 @@ test('ALMA context API basic', () => {
             
             ctx.update_into(ptr, ptr, data.length);
             
+            // Recreate view in case memory grew
+            const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+            
             // Compare with regular API
             const regularResult = wasm.alma_js(data, period, offset, sigma);
             for (let i = 0; i < data.length; i++) {
-                if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                if (isNaN(regularResult[i]) && isNaN(memView2[i])) {
                     continue;
                 }
-                assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                assert(Math.abs(regularResult[i] - memView2[i]) < 1e-10,
                        `Context mismatch at index ${i}`);
             }
         } finally {
@@ -645,10 +651,13 @@ test('ALMA context reuse performance', () => {
                 memView.set(data);
                 ctx.update_into(ptr, ptr, data.length);
                 
+                // Recreate view after update
+                const memViewAfter = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+                
                 // Verify some values are computed
                 let hasValues = false;
                 for (let i = 8; i < 20; i++) {
-                    if (!isNaN(memView[i])) {
+                    if (!isNaN(memViewAfter[i])) {
                         hasValues = true;
                         break;
                     }

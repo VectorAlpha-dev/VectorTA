@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-17T03:59:35.231Z",
+  "timestamp": "2025-07-17T13:26:51.694Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -9,123 +9,123 @@
   "results": {
     "alma_10k": {
       "name": "alma_10k",
-      "median": 0.037716985645932836,
-      "mean": 0.03549083732057416,
-      "min": 0.03172799043062224,
-      "max": 0.04048325358851681,
+      "median": 0.038151635514018636,
+      "mean": 0.03580941588785044,
+      "min": 0.031302803738317786,
+      "max": 0.04342757009345792,
       "samples": 10,
-      "warmupIterations": 4183,
-      "throughput": 0.2651325345528597
+      "warmupIterations": 4283,
+      "throughput": 0.26211196100166
     },
     "alma_100k": {
       "name": "alma_100k",
-      "median": 0.2920480769230774,
-      "mean": 0.28284461538461475,
-      "min": 0.251792307692306,
-      "max": 0.30895769230769166,
+      "median": 0.3005037735849053,
+      "mean": 0.29128132075471697,
+      "min": 0.24959811320754724,
+      "max": 0.3547792452830195,
       "samples": 10,
-      "warmupIterations": 529,
-      "throughput": 0.34240937674908584
+      "warmupIterations": 533,
+      "throughput": 0.3327745232847989
     },
     "alma_1M": {
       "name": "alma_1M",
-      "median": 2.6027399999999945,
-      "mean": 2.618161999999995,
-      "min": 2.5310699999999997,
-      "max": 2.8390300000000024,
+      "median": 2.5700700000000096,
+      "mean": 2.5729400000000013,
+      "min": 2.5237499999999953,
+      "max": 2.6682600000000094,
       "samples": 10,
-      "warmupIterations": 58,
-      "throughput": 0.3842104858725813
+      "warmupIterations": 59,
+      "throughput": 0.38909446046216495
     },
     "alma_zerocopy_10k": {
       "name": "alma_zerocopy_10k",
-      "median": 0.03753957845433284,
-      "mean": 0.03477348946135842,
-      "min": 0.030961358313817633,
-      "max": 0.038704215456674754,
+      "median": 0.03271126760563368,
+      "mean": 0.03590406103286379,
+      "min": 0.030670657276995555,
+      "max": 0.046423708920187656,
       "samples": 10,
-      "warmupIterations": 4276,
-      "throughput": 0.2663855166132212
+      "warmupIterations": 4266,
+      "throughput": 0.3057050592034457
     },
     "alma_zerocopy_100k": {
       "name": "alma_zerocopy_100k",
-      "median": 0.2856240740740751,
-      "mean": 0.27721185185185243,
-      "min": 0.2451611111111131,
-      "max": 0.3110166666666685,
+      "median": 0.30246274509803983,
+      "mean": 0.2843211764705882,
+      "min": 0.24414901960784507,
+      "max": 0.3201803921568608,
       "samples": 10,
-      "warmupIterations": 549,
-      "throughput": 0.35011054416255377
+      "warmupIterations": 512,
+      "throughput": 0.3306192303702929
     },
     "alma_zerocopy_1M": {
       "name": "alma_zerocopy_1M",
-      "median": 2.6450500000000376,
-      "mean": 2.663334,
-      "min": 2.5722200000000157,
-      "max": 2.89674,
+      "median": 2.805199999999968,
+      "mean": 2.8044370000000027,
+      "min": 2.7769900000000236,
+      "max": 2.8494700000000193,
       "samples": 10,
-      "warmupIterations": 57,
-      "throughput": 0.3780646868679178
+      "warmupIterations": 54,
+      "throughput": 0.3564808213318164
     },
     "alma_context_10k": {
       "name": "alma_context_10k",
-      "median": 0.03192313084112093,
-      "mean": 0.03409925233644854,
-      "min": 0.029607242990653794,
-      "max": 0.04011355140186909,
+      "median": 0.03439223744292215,
+      "mean": 0.03531134703196349,
+      "min": 0.03139794520547969,
+      "max": 0.04663858447488523,
       "samples": 10,
-      "warmupIterations": 4287,
-      "throughput": 0.313252482965072
+      "warmupIterations": 4381,
+      "throughput": 0.2907632868200606
     },
     "alma_context_100k": {
       "name": "alma_context_100k",
-      "median": 0.2371155172413794,
-      "mean": 0.2420994827586222,
-      "min": 0.21700000000000413,
-      "max": 0.2920862068965562,
+      "median": 0.2479344827586217,
+      "mean": 0.24193224137931152,
+      "min": 0.19999482758621054,
+      "max": 0.303394827586207,
       "samples": 10,
-      "warmupIterations": 584,
-      "throughput": 0.4217353683276737
+      "warmupIterations": 585,
+      "throughput": 0.4033323597724633
     },
     "alma_context_1M": {
       "name": "alma_context_1M",
-      "median": 2.585939999999982,
-      "mean": 2.601276999999996,
-      "min": 2.51882999999998,
-      "max": 2.7152700000000096,
+      "median": 2.5393799999999827,
+      "mean": 2.5349699999999986,
+      "min": 2.5173899999999776,
+      "max": 2.5495000000000347,
       "samples": 10,
-      "warmupIterations": 60,
-      "throughput": 0.3867065747851871
+      "warmupIterations": 59,
+      "throughput": 0.39379691105703235
     },
     "alma_preallocated_10k": {
       "name": "alma_preallocated_10k",
-      "median": 0.016234167573449206,
-      "mean": 0.016236093579978326,
-      "min": 0.016060391730141586,
-      "max": 0.016509684439608683,
+      "median": 0.016618930957683773,
+      "mean": 0.016601013363028848,
+      "min": 0.016460801781736912,
+      "max": 0.016740757238307185,
       "samples": 10,
-      "warmupIterations": 9193,
-      "throughput": 0.6159847713014177
+      "warmupIterations": 8985,
+      "throughput": 0.6017234216486407
     },
     "alma_preallocated_100k": {
       "name": "alma_preallocated_100k",
-      "median": 0.1723279069767455,
-      "mean": 0.17338872093023386,
-      "min": 0.1673337209302317,
-      "max": 0.19228255813953732,
+      "median": 0.1743999999999994,
+      "mean": 0.17442895348837295,
+      "min": 0.1727151162790717,
+      "max": 0.17689186046511676,
       "samples": 10,
-      "warmupIterations": 869,
-      "throughput": 0.5802890649248954
+      "warmupIterations": 864,
+      "throughput": 0.573394495412846
     },
     "alma_preallocated_1M": {
       "name": "alma_preallocated_1M",
-      "median": 1.7842800000000352,
-      "mean": 1.8158070000000226,
-      "min": 1.7659599999999955,
-      "max": 2.1114900000000487,
+      "median": 2.0137699999999312,
+      "mean": 2.017424000000001,
+      "min": 2.0056999999999787,
+      "max": 2.036920000000009,
       "samples": 10,
-      "warmupIterations": 81,
-      "throughput": 0.560450153563331
+      "warmupIterations": 75,
+      "throughput": 0.4965810395427651
     }
   }
 }
