@@ -24,6 +24,8 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,11 +36,13 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy;
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -1785,15 +1789,18 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_itrend")]
+#[pyo3(signature = (data, warmup_bars=None, max_dc_period=None, kernel=None))]
 pub fn ehlers_itrend_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     warmup_bars: Option<usize>,
     max_dc_period: Option<usize>,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
     let params = EhlersITrendParams {
         warmup_bars,
@@ -1801,18 +1808,13 @@ pub fn ehlers_itrend_py<'py>(
     };
     let input = EhlersITrendInput::from_slice(slice_in, params);
     
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    py.allow_threads(|| -> Result<(), EhlersITrendError> {
-        let (data, warmup_bars, max_dc, first, warm, chosen) = ehlers_itrend_prepare(&input, Kernel::Auto)?;
-        slice_out[..warm].fill(f64::NAN);
-        ehlers_itrend_compute_into(data, warmup_bars, max_dc, first, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        ehlers_itrend_with_kernel(&input, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1842,42 +1844,44 @@ impl EhlersITrendStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_itrend_batch")]
+#[pyo3(signature = (data, warmup_bars_range, max_dc_period_range, kernel=None))]
 pub fn ehlers_itrend_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     warmup_bars_range: (usize, usize, usize),
     max_dc_period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
     
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = EhlersITrendBatchRange {
         warmup_bars: warmup_bars_range,
         max_dc_period: max_dc_period_range,
     };
     
-    let rows = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?.len();
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos.len();
     let cols = slice_in.len();
     
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
     let combos = py.allow_threads(|| {
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
         
         // Map batch kernel to regular kernel
         let simd = match kernel {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512Batch => Kernel::Avx512,
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2Batch => Kernel::Avx2,
             Kernel::ScalarBatch => Kernel::Scalar,
-            _ => Kernel::Scalar,
+            _ => unreachable!(),
         };
         
         ehlers_itrend_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -1886,13 +1890,22 @@ pub fn ehlers_itrend_batch_py<'py>(
     
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    
-    // Create tuple arrays for warmup_bars and max_dc_period
-    let warmup_bars: Vec<u64> = combos.iter().map(|p| p.warmup_bars.unwrap_or(12) as u64).collect();
-    let max_dc_periods: Vec<u64> = combos.iter().map(|p| p.max_dc_period.unwrap_or(50) as u64).collect();
-    
-    dict.set_item("warmup_bars", warmup_bars.into_pyarray(py))?;
-    dict.set_item("max_dc_periods", max_dc_periods.into_pyarray(py))?;
+    dict.set_item(
+        "warmup_bars",
+        combos
+            .iter()
+            .map(|p| p.warmup_bars.unwrap_or(12) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "max_dc_periods",
+        combos
+            .iter()
+            .map(|p| p.max_dc_period.unwrap_or(50) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     
     Ok(dict)
 }
