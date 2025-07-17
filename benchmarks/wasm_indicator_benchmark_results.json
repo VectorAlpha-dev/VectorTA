@@ -1,0 +1,117 @@
+{
+  "timestamp": "2025-07-17T19:49:57.446Z",
+  "config": {
+    "warmupTargetMs": 150,
+    "sampleCount": 10,
+    "minIterations": 10,
+    "disableGC": true
+  },
+  "results": {
+    "alma_safe_10k": {
+      "name": "alma_safe_10k",
+      "median": 0.046970897832817375,
+      "mean": 0.04706244582043348,
+      "min": 0.04280804953560371,
+      "max": 0.05278080495356057,
+      "samples": 10,
+      "warmupIterations": 3235,
+      "throughput": 0.2128977826992537,
+      "dataSize": 10000,
+      "api": "safe",
+      "indicator": "alma"
+    },
+    "alma_safe_100k": {
+      "name": "alma_safe_100k",
+      "median": 0.4104305555555546,
+      "mean": 0.41333361111111155,
+      "min": 0.3831972222222235,
+      "max": 0.45940277777777777,
+      "samples": 10,
+      "warmupIterations": 360,
+      "throughput": 0.2436465771039903,
+      "dataSize": 100000,
+      "api": "safe",
+      "indicator": "alma"
+    },
+    "alma_safe_1M": {
+      "name": "alma_safe_1M",
+      "median": 4.01130999999998,
+      "mean": 3.9874119999999946,
+      "min": 3.773039999999992,
+      "max": 4.047640000000001,
+      "samples": 10,
+      "warmupIterations": 38,
+      "throughput": 0.24985353911814467,
+      "dataSize": 1002240,
+      "api": "safe",
+      "indicator": "alma"
+    },
+    "alma_fast_10k": {
+      "name": "alma_fast_10k",
+      "median": 0.02389022435897404,
+      "mean": 0.023879134615384597,
+      "min": 0.023602243589743777,
+      "max": 0.024123237179487396,
+      "samples": 10,
+      "warmupIterations": 6247,
+      "throughput": 0.41858125104813576,
+      "dataSize": 10000,
+      "api": "fast",
+      "indicator": "alma"
+    },
+    "alma_fast_100k": {
+      "name": "alma_fast_100k",
+      "median": 0.2368951612903189,
+      "mean": 0.23798725806451632,
+      "min": 0.23519032258065137,
+      "max": 0.2521048387096808,
+      "samples": 10,
+      "warmupIterations": 626,
+      "throughput": 0.4221276595744746,
+      "dataSize": 100000,
+      "api": "fast",
+      "indicator": "alma"
+    },
+    "alma_fast_1M": {
+      "name": "alma_fast_1M",
+      "median": 2.3684699999999794,
+      "mean": 2.372008999999994,
+      "min": 2.358159999999998,
+      "max": 2.4110599999999978,
+      "samples": 10,
+      "warmupIterations": 64,
+      "throughput": 0.4231592547087397,
+      "dataSize": 1002240,
+      "api": "fast",
+      "indicator": "alma"
+    },
+    "alma_batch_small": {
+      "name": "alma_batch_small",
+      "median": 8.726569999999992,
+      "mean": 8.703591000000003,
+      "min": 8.346079999999983,
+      "max": 9.142540000000007,
+      "samples": 10,
+      "warmupIterations": 16,
+      "throughput": 0.001145925604217924,
+      "dataSize": 10000,
+      "api": "batch",
+      "indicator": "alma",
+      "batchSize": "small"
+    },
+    "alma_batch_medium": {
+      "name": "alma_batch_medium",
+      "median": 30.334320000000027,
+      "mean": 30.270136999999995,
+      "min": 28.833550000000013,
+      "max": 31.469969999999922,
+      "samples": 10,
+      "warmupIterations": 6,
+      "throughput": 0.0003296596066765298,
+      "dataSize": 10000,
+      "api": "batch",
+      "indicator": "alma",
+      "batchSize": "medium"
+    }
+  }
+}

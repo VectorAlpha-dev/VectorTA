@@ -431,6 +431,32 @@ pub fn alma_with_kernel(input: &AlmaInput, kernel: Kernel) -> Result<AlmaOutput,
     Ok(AlmaOutput { values: out })
 }
 
+/// Computes ALMA directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn alma_into_slice(dst: &mut [f64], input: &AlmaInput, kern: Kernel) -> Result<(), AlmaError> {
+    let (data, weights, period, first, inv_n, chosen) = alma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(AlmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute ALMA values directly into dst
+    alma_compute_into(data, &weights, period, first, inv_n, chosen, dst);
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f")]
@@ -2453,67 +2479,15 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
         sigma: Some(sigma),
     };
     let input = AlmaInput::from_slice(data, params);
-
-    alma_with_kernel(&input, Kernel::Auto)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-#[deprecated(since = "1.0.0", note = "Use alma_batch() with config object instead")]
-pub fn alma_batch_js(
-    data: &[f64],
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    offset_start: f64,
-    offset_end: f64,
-    offset_step: f64,
-    sigma_start: f64,
-    sigma_end: f64,
-    sigma_step: f64,
-) -> Result<Vec<f64>, JsValue> {
-    let sweep = AlmaBatchRange {
-        period: (period_start, period_end, period_step),
-        offset: (offset_start, offset_end, offset_step),
-        sigma: (sigma_start, sigma_end, sigma_step),
-    };
-
-    alma_batch_inner(data, &sweep, Kernel::Auto, false)
-        .map(|output| output.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn alma_batch_metadata_js(
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    offset_start: f64,
-    offset_end: f64,
-    offset_step: f64,
-    sigma_start: f64,
-    sigma_end: f64,
-    sigma_step: f64,
-) -> Result<Vec<f64>, JsValue> {
-    let sweep = AlmaBatchRange {
-        period: (period_start, period_end, period_step),
-        offset: (offset_start, offset_end, offset_step),
-        sigma: (sigma_start, sigma_end, sigma_step),
-    };
-
-    let combos = expand_grid(&sweep);
-    let mut metadata = Vec::with_capacity(combos.len() * 3);
-
-    for combo in combos {
-        metadata.push(combo.period.unwrap() as f64);
-        metadata.push(combo.offset.unwrap());
-        metadata.push(combo.sigma.unwrap());
-    }
-
-    Ok(metadata)
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    alma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -2599,14 +2573,13 @@ pub fn alma_into(
     unsafe {
         // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
-        let out = std::slice::from_raw_parts_mut(out_ptr, len);
         
         // Validate inputs
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
         
-        // Calculate ALMA directly into output buffer
+        // Calculate ALMA
         let params = AlmaParams {
             period: Some(period),
             offset: Some(offset),
@@ -2614,11 +2587,22 @@ pub fn alma_into(
         };
         let input = AlmaInput::from_slice(data, params);
         
-        // Use the regular alma function and copy results
-        let result = alma(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
-        // Copy results to output buffer
-        out.copy_from_slice(&result.values);
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            alma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            alma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
         
         Ok(())
     }
