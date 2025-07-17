@@ -28,9 +28,15 @@ use crate::utilities::helpers::{
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -1195,37 +1201,23 @@ pub fn cwma_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
-    use pyo3::exceptions::PyValueError;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-
+    let kern = validate_kernel(kernel, false)?;
+    
     let params = CwmaParams {
         period: Some(period),
     };
     let cwma_in = CwmaInput::from_slice(slice_in, params);
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    py.allow_threads(|| -> Result<(), CwmaError> {
-        let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(&cwma_in, kern)?;
-        slice_out[..warm].fill(f64::NAN);
-        cwma_compute_into(data, &weights, period, first, inv_norm, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        cwma_with_kernel(&cwma_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1254,15 +1246,18 @@ impl CwmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "cwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn cwma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = CwmaBatchRange {
         period: period_range,
@@ -1277,18 +1272,14 @@ pub fn cwma_batch_py<'py>(
 
     let combos = py
         .allow_threads(|| {
-            let kernel = match Kernel::Auto {
+            let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
             let simd = match kernel {
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx512Batch => Kernel::Avx512,
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::Scalar,
                 _ => unreachable!(),
             };
             // Use the _into variant that writes directly to our pre-allocated buffer
