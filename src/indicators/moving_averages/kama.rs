@@ -708,6 +708,13 @@ fn kama_batch_inner(
     
     // Step 2: Calculate warmup periods for each row
     let first = data.iter().position(|x| !x.is_nan()).ok_or(KamaError::AllValuesNaN)?;
+    
+    // Validate that no period exceeds data length
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first <= max_p {
+        return Err(KamaError::NotEnoughData { needed: max_p + 1, valid: data.len() - first });
+    }
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap())
@@ -917,39 +924,23 @@ pub fn kama_batch_py<'py>(
         period: period_range,
     };
     
-    // 1. Expand grid once to know rows*cols
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
-    let cols = slice_in.len();
-    
-    // 2. Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // 3. Heavy work without the GIL
-    let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
-        let kernel = match Kernel::Auto {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
-        };
-        let simd = match kernel {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => unreachable!(),
-        };
-        // Use the _into variant that writes directly to our pre-allocated buffer
-        kama_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+    // Call the full batch function which properly initializes NaN values
+    let output = py.allow_threads(|| {
+        kama_batch_with_kernel(slice_in, &sweep, Kernel::Auto)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // 4. Build dict with the GIL
+    // Create NumPy array and copy the results
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [output.values.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    slice_out.copy_from_slice(&output.values);
+    
+    // Build dict with the GIL
     let dict = PyDict::new(py);
-    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item("values", out_arr.reshape((output.rows, output.cols))?)?;
     dict.set_item(
         "periods",
-        combos
+        output.combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
