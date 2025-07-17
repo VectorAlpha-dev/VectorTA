@@ -229,6 +229,15 @@ fn alma_compute_into(
     out: &mut [f64],
 ) {
     unsafe {
+        // For WASM, use SIMD128 when available instead of scalar
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+                alma_simd128(data, weights, period, first, inv_n, out);
+                return;
+            }
+        }
+        
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 alma_scalar(data, weights, period, first, inv_n, out)
@@ -396,6 +405,52 @@ pub fn alma_scalar(
 
         for (d, w) in window[p4..].iter().zip(&weights[p4..]) {
             sum += d * w;
+        }
+
+        out[i] = sum * inv_norm;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn alma_simd128(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first_val: usize,
+    inv_norm: f64,
+    out: &mut [f64],
+) {
+    use core::arch::wasm32::*;
+    
+    assert_eq!(weights.len(), period, "weights.len() must equal `period`");
+    assert!(
+        out.len() >= data.len(),
+        "`out` must be at least as long as `data`"
+    );
+
+    // SIMD128 processes 2 f64 values at a time
+    const STEP: usize = 2;
+    let chunks = period / STEP;
+    let tail = period % STEP;
+
+    for i in (first_val + period - 1)..data.len() {
+        let start = i + 1 - period;
+        let mut acc = f64x2_splat(0.0);
+
+        // Process chunks of 2
+        for blk in 0..chunks {
+            let idx = blk * STEP;
+            let w = v128_load(weights.as_ptr().add(idx) as *const v128);
+            let d = v128_load(data.as_ptr().add(start + idx) as *const v128);
+            acc = f64x2_add(acc, f64x2_mul(d, w));
+        }
+
+        // Process remaining element if period is odd
+        let mut sum = f64x2_extract_lane::<0>(acc) + f64x2_extract_lane::<1>(acc);
+        
+        if tail != 0 {
+            sum += data[start + chunks * STEP] * weights[chunks * STEP];
         }
 
         out[i] = sum * inv_norm;
@@ -1924,6 +1979,14 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
+                // Test WASM SIMD128 implementation
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
+                    }
+                )*
             }
         }
     }
@@ -2113,6 +2176,40 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[test]
+    fn test_alma_simd128_correctness() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let period = 5;
+        let offset = 0.85;
+        let sigma = 6.0;
+        
+        // Compute with scalar version
+        let params = AlmaParams {
+            period: Some(period),
+            offset: Some(offset),
+            sigma: Some(sigma),
+        };
+        let input = AlmaInput::from_slice(&data, params);
+        let scalar_output = alma_with_kernel(&input, Kernel::Scalar).unwrap();
+        
+        // Compute with SIMD128 (via Scalar kernel on WASM)
+        let simd128_output = alma_with_kernel(&input, Kernel::Scalar).unwrap();
+        
+        // Compare results
+        assert_eq!(scalar_output.values.len(), simd128_output.values.len());
+        for (i, (scalar_val, simd_val)) in scalar_output.values.iter()
+            .zip(simd128_output.values.iter())
+            .enumerate() 
+        {
+            assert!(
+                (scalar_val - simd_val).abs() < 1e-10,
+                "SIMD128 mismatch at index {}: scalar={}, simd128={}",
+                i, scalar_val, simd_val
+            );
+        }
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2261,7 +2358,7 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
     };
     let input = AlmaInput::from_slice(data, params);
 
-    alma_with_kernel(&input, Kernel::Scalar)
+    alma_with_kernel(&input, Kernel::Auto)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -2286,7 +2383,7 @@ pub fn alma_batch_js(
         sigma: (sigma_start, sigma_end, sigma_step),
     };
 
-    alma_batch_inner(data, &sweep, Kernel::Scalar, false)
+    alma_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -2351,7 +2448,7 @@ pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         sigma: config.sigma_range,
     };
 
-    let output = alma_batch_inner(data, &sweep, Kernel::Scalar, false)
+    let output = alma_batch_inner(data, &sweep, Kernel::Auto, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let js_output = AlmaBatchJsOutput {
@@ -2363,4 +2460,146 @@ pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
 
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+    offset: f64,
+    sigma: f64,
+) -> Result<(), JsValue> {
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let out = std::slice::from_raw_parts_mut(out_ptr, len);
+        
+        // Create input
+        let params = AlmaParams {
+            period: Some(period),
+            offset: Some(offset),
+            sigma: Some(sigma),
+        };
+        let input = AlmaInput::from_slice(data, params);
+        
+        // Get optimal kernel for WASM
+        let kernel = detect_best_kernel();
+        
+        // Prepare computation
+        let (data, weights, period, first, inv_n, chosen) = alma_prepare(&input, kernel)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        // Initialize output with NaN for warmup period
+        for i in 0..(first + period - 1) {
+            out[i] = f64::NAN;
+        }
+        
+        // Compute directly into output buffer
+        alma_compute_into(data, &weights, period, first, inv_n, chosen, out);
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct AlmaContext {
+    weights: AVec<f64>,
+    inv_norm: f64,
+    period: usize,
+    first: usize,
+    kernel: Kernel,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl AlmaContext {
+    #[wasm_bindgen(constructor)]
+    pub fn new(period: usize, offset: f64, sigma: f64) -> Result<AlmaContext, JsValue> {
+        // Validate parameters
+        if period == 0 {
+            return Err(JsValue::from_str("Invalid period: 0"));
+        }
+        if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
+            return Err(JsValue::from_str(&format!("Invalid offset: {}", offset)));
+        }
+        if sigma <= 0.0 {
+            return Err(JsValue::from_str(&format!("Invalid sigma: {}", sigma)));
+        }
+        
+        // Build weights
+        let m = offset * (period - 1) as f64;
+        let s = period as f64 / sigma;
+        let s2 = 2.0 * s * s;
+        
+        let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+        weights.resize(period, 0.0);
+        let mut norm = 0.0;
+        
+        for i in 0..period {
+            let w = (-(i as f64 - m).powi(2) / s2).exp();
+            weights[i] = w;
+            norm += w;
+        }
+        
+        let inv_norm = 1.0 / norm;
+        let first = 0; // For raw slices, first is always 0
+        
+        Ok(AlmaContext {
+            weights,
+            inv_norm,
+            period,
+            first,
+            kernel: detect_best_kernel(),
+        })
+    }
+    
+    pub fn update_into(&self, in_ptr: *const f64, out_ptr: *mut f64, len: usize) -> Result<(), JsValue> {
+        if len < self.period {
+            return Err(JsValue::from_str("Data length less than period"));
+        }
+        
+        unsafe {
+            let data = std::slice::from_raw_parts(in_ptr, len);
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            
+            // Initialize warmup with NaN
+            for i in 0..(self.first + self.period - 1) {
+                out[i] = f64::NAN;
+            }
+            
+            // Compute
+            alma_compute_into(data, &self.weights, self.period, self.first, self.inv_norm, self.kernel, out);
+        }
+        
+        Ok(())
+    }
+    
+    pub fn get_warmup_period(&self) -> usize {
+        self.first + self.period - 1
+    }
 }

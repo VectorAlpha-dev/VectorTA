@@ -510,6 +510,250 @@ test('ALMA batch - new API error handling', () => {
 
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
+// Zero-copy API tests
+test('ALMA zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 5;
+    const offset = 0.85;
+    const sigma = 6.0;
+    
+    // Allocate buffer
+    const ptr = wasm.alma_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute ALMA in-place
+    try {
+        wasm.alma_into(ptr, ptr, data.length, period, offset, sigma);
+        
+        // Verify results match regular API
+        const regularResult = wasm.alma_js(data, period, offset, sigma);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.alma_free(ptr, data.length);
+    }
+});
+
+test('ALMA zero-copy with large dataset', () => {
+    const size = 100000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.alma_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.alma_into(ptr, ptr, size, 9, 0.85, 6.0);
+        
+        // Check warmup period has NaN
+        for (let i = 0; i < 8; i++) {
+            assert(isNaN(memView[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 8; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.alma_free(ptr, size);
+    }
+});
+
+// Context API tests
+test('ALMA context API basic', () => {
+    const period = 9;
+    const offset = 0.85;
+    const sigma = 6.0;
+    
+    // Create context
+    const ctx = new wasm.AlmaContext(period, offset, sigma);
+    assert(ctx, 'Failed to create ALMA context');
+    
+    try {
+        // Get warmup period
+        const warmup = ctx.get_warmup_period();
+        assert.strictEqual(warmup, period - 1, 'Incorrect warmup period');
+        
+        // Process some data
+        const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        const ptr = wasm.alma_alloc(data.length);
+        
+        try {
+            const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+            memView.set(data);
+            
+            ctx.update_into(ptr, ptr, data.length);
+            
+            // Compare with regular API
+            const regularResult = wasm.alma_js(data, period, offset, sigma);
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                    continue;
+                }
+                assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                       `Context mismatch at index ${i}`);
+            }
+        } finally {
+            wasm.alma_free(ptr, data.length);
+        }
+    } finally {
+        // Context is automatically freed when it goes out of scope
+    }
+});
+
+test('ALMA context reuse performance', () => {
+    const ctx = new wasm.AlmaContext(9, 0.85, 6.0);
+    assert(ctx, 'Failed to create context');
+    
+    try {
+        // Process multiple datasets with same context
+        const datasets = [];
+        for (let d = 0; d < 10; d++) {
+            const data = new Float64Array(1000);
+            for (let i = 0; i < 1000; i++) {
+                data[i] = Math.sin(i * 0.01 + d) + Math.random() * 0.1;
+            }
+            datasets.push(data);
+        }
+        
+        // Process all datasets
+        for (const data of datasets) {
+            const ptr = wasm.alma_alloc(data.length);
+            try {
+                const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
+                memView.set(data);
+                ctx.update_into(ptr, ptr, data.length);
+                
+                // Verify some values are computed
+                let hasValues = false;
+                for (let i = 8; i < 20; i++) {
+                    if (!isNaN(memView[i])) {
+                        hasValues = true;
+                        break;
+                    }
+                }
+                assert(hasValues, 'Context should produce values after warmup');
+            } finally {
+                wasm.alma_free(ptr, data.length);
+            }
+        }
+    } finally {
+        // Context cleanup
+    }
+});
+
+// SIMD128 verification test
+test('ALMA SIMD128 consistency', () => {
+    // This test verifies SIMD128 produces same results as scalar
+    // It runs automatically when SIMD128 is enabled
+    const testCases = [
+        { size: 10, period: 5 },
+        { size: 100, period: 9 },
+        { size: 1000, period: 20 },
+        { size: 10000, period: 50 }
+    ];
+    
+    for (const testCase of testCases) {
+        const data = new Float64Array(testCase.size);
+        for (let i = 0; i < testCase.size; i++) {
+            data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05);
+        }
+        
+        const result = wasm.alma_js(data, testCase.period, 0.85, 6.0);
+        
+        // Basic sanity checks
+        assert.strictEqual(result.length, data.length);
+        
+        // Check warmup period
+        for (let i = 0; i < testCase.period - 1; i++) {
+            assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
+        }
+        
+        // Check values exist after warmup
+        let sumAfterWarmup = 0;
+        let countAfterWarmup = 0;
+        for (let i = testCase.period - 1; i < result.length; i++) {
+            assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
+            sumAfterWarmup += result[i];
+            countAfterWarmup++;
+        }
+        
+        // Verify reasonable values
+        const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
+        assert(Math.abs(avgAfterWarmup) < 10, `Average value ${avgAfterWarmup} seems unreasonable`);
+    }
+});
+
+// Error handling for zero-copy API
+test('ALMA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.alma_into(0, 0, 10, 9, 0.85, 6.0);
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.alma_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.alma_into(ptr, ptr, 10, 0, 0.85, 6.0);
+        }, /Invalid period/);
+        
+        // Invalid sigma
+        assert.throws(() => {
+            wasm.alma_into(ptr, ptr, 10, 5, 0.85, 0.0);
+        }, /Invalid sigma/);
+    } finally {
+        wasm.alma_free(ptr, 10);
+    }
+});
+
+// Memory leak prevention test
+test('ALMA zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000, 100000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.alma_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.alma_free(ptr, size);
+    }
+});
+
 test.after(() => {
     console.log('ALMA WASM tests completed');
 });

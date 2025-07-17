@@ -215,7 +215,12 @@
       "Bash(.venv\\Scripts\\python.exe tests/python/test_kama.py:*)",
       "Bash(.venvScriptspython.exe -OO benchmarksminimal_alma_bench.py)",
       "Bash(set PYTHONOPTIMIZE=2)",
-      "Bash(set NPY_RELAXED_STRIDES_CHECKING=1)"
+      "Bash(set NPY_RELAXED_STRIDES_CHECKING=1)",
+      "Bash(del benchescore_benchmark.rs)",
+      "Bash(run_wasm_benchmark.bat)",
+      "Bash(set RUSTFLAGS=-C opt-level=3 -C lto=thin)",
+      "Bash(set RUSTFLAGS=-C target-feature=+simd128)",
+      "Bash(wasm-opt:*)"
     ],
     "deny": []
   }

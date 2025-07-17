@@ -75,6 +75,13 @@ debug = true
 strip = "none"
 split-debuginfo = "unpacked"
 
+# Additional WASM-specific optimizations
+[profile.wasm]
+inherits = "release"
+opt-level = "z"  # Optimize for size which often improves performance in browsers
+lto = "fat"      # Full link-time optimization
+strip = "symbols"
+
 [profile.bench]
 opt-level = 3
 lto = "thin"
@@ -94,4 +101,4 @@ wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
 
 [package.metadata.wasm-pack]
-"wasm-opt" = false
+"wasm-opt" = ["-O4", "--enable-simd"]
