@@ -66,7 +66,7 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 1
+codegen-units   = 255
 incremental = false
 panic           = "abort"
 overflow-checks = false
@@ -85,7 +85,7 @@ strip = "symbols"
 [profile.bench]
 opt-level = 3
 lto = "thin"
-codegen-units = 1
+codegen-units = 255
 incremental = false
 # Don't inherit panic=abort from release
 panic = "unwind"
