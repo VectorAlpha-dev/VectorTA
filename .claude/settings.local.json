@@ -211,12 +211,22 @@
       "Bash(.venvScriptspython -m pytest tests/python/test_bollinger_bands_width.py::TestBollingerBandsWidth::test_nan_handling -xvs)",
       "Bash(.venvScriptspython -m pytest tests/python/test_adxr.py::TestAdxr::test_adxr_nan_handling -xvs)",
       "Bash(debug_adxr_rust.exe)",
-      "Bash(test_bindings.bat hwma)",
-      "Bash(.venv\\Scripts\\python.exe tests/python/test_hwma.py:*)",
-      "Bash(del analyze_bindings.py)",
-      "Bash(del analyze_wasm_bindings.py)",
-      "Bash(del check_helpers.py)",
-      "WebFetch(domain:garysvenson09.medium.com)"
+      "Bash(test_bindings.bat kama)",
+      "Bash(.venv\\Scripts\\python.exe tests/python/test_kama.py:*)",
+      "Bash(.venvScriptspython.exe -OO benchmarksminimal_alma_bench.py)",
+      "Bash(set PYTHONOPTIMIZE=2)",
+      "Bash(set NPY_RELAXED_STRIDES_CHECKING=1)",
+      "Bash(del benchescore_benchmark.rs)",
+      "Bash(run_wasm_benchmark.bat)",
+      "Bash(set RUSTFLAGS=-C opt-level=3 -C lto=thin)",
+      "Bash(set RUSTFLAGS=-C target-feature=+simd128)",
+      "Bash(wasm-opt:*)",
+      "Bash(del:*)",
+      "Bash(set RUSTFLAGS=-Zdylib-lto)",
+      "Bash(run_wasm_benchmark.bat alma)",
+      "Bash(call run_wasm_benchmark.bat:*)",
+      "Bash(set CARGO_PROFILE_RELEASE_LTO=off)",
+      "Bash(if exist:*)"
     ],
     "deny": []
   }

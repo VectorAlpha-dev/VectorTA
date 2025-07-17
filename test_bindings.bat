@@ -1,5 +1,6 @@
 @echo off
 REM Windows batch file for testing bindings
+REM This script works from any directory by changing to its own location first
 REM Usage:
 REM   test_bindings.bat              - Run all tests
 REM   test_bindings.bat alma         - Run only alma tests
@@ -7,6 +8,17 @@ REM   test_bindings.bat --python     - Run only Python tests
 REM   test_bindings.bat --wasm       - Run only WASM tests
 
 setlocal enabledelayedexpansion
+
+REM Get the directory where this batch file is located
+set SCRIPT_DIR=%~dp0
+
+REM Change to the script directory (removes trailing backslash)
+cd /d "%SCRIPT_DIR:~0,-1%"
+
+REM Store the project root directory name for display
+for %%I in ("%CD%") do set PROJECT_NAME=%%~nxI
+
+echo Working directory: %PROJECT_NAME% (%CD%)
 
 REM Colors don't work the same in Windows, so using simple text
 set "RUN_PYTHON=true"
@@ -70,7 +82,9 @@ if "%RUN_PYTHON%"=="true" (
     
     echo.
     echo Building Python bindings...
-    .venv\Scripts\python.exe -m maturin develop --features python,nightly-avx --release
+    REM Enable dylib-lto for Python builds
+    set "RUSTFLAGS=-Zdylib-lto"
+    maturin develop --features python,nightly-avx --release
     if !errorlevel! equ 0 (
         echo Python build successful
         
@@ -97,13 +111,15 @@ REM WASM tests
 if "%RUN_WASM%"=="true" (
     echo.
     echo Building WASM bindings...
+    REM Disable LTO for WASM builds
+    set "CARGO_PROFILE_RELEASE_LTO=off"
     wasm-pack build --target nodejs --features wasm
     if !errorlevel! equ 0 (
         echo WASM build successful
         
         echo.
         echo Running WASM tests...
-        cd tests\wasm
+        pushd tests\wasm
         call npm install
         if "%TEST_PATTERN%"=="" (
             call npm test
@@ -116,7 +132,7 @@ if "%RUN_WASM%"=="true" (
         ) else (
             echo WASM tests passed
         )
-        cd ..\..
+        popd
     ) else (
         echo WASM build failed
         set "FAILED=true"

@@ -66,19 +66,26 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-lto             = "thin"
-codegen-units   = 255
+codegen-units   = 1
 incremental = false
 panic           = "abort"
 overflow-checks = false
 debug = true
 strip = "none"
 split-debuginfo = "unpacked"
+# LTO is conditionally enabled based on target
+
+# Additional WASM-specific optimizations
+[profile.wasm]
+inherits = "release"
+opt-level = "z"  # Optimize for size which often improves performance in browsers
+lto = false      # Disable LTO for WASM
+strip = "symbols"
 
 [profile.bench]
 opt-level = 3
 lto = "thin"
-codegen-units = 255
+codegen-units = 1
 incremental = false
 # Don't inherit panic=abort from release
 panic = "unwind"
@@ -87,6 +94,14 @@ debug = true
 strip = "none"
 split-debuginfo = "unpacked"
 
+[profile.dev]
+# Development profile settings
+
+[profile.dev.build-override]
+# Ensure proc-macros don't use LTO in dev builds
+opt-level = 0
+codegen-units = 16
+
 [features]
 default = ["proptest"]
 nightly-avx = []
@@ -94,4 +109,21 @@ wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
 
 [package.metadata.wasm-pack]
-"wasm-opt" = false
+"wasm-opt" = ["-O4", "--enable-simd"]
+
+[profile.release.build-override]
+# Applies only to build-scripts & proc-macros, *not* to your library/bin code.
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1      # optional tidy-up; keeps small helper crates optimised
+
+[profile.bench.build-override]
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1
+
+
+# ────────────────────────────────────────────────────────────────
+# 2.  Custom WASM profile used by wasm-pack  (inherits release)
+# ────────────────────────────────────────────────────────────────
+[profile.wasm.build-override]
+# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+codegen-units = 1

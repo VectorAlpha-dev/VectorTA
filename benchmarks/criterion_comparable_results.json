@@ -6,35 +6,17 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "alma": 1.874685,
-    "alma_batch": 1.777125
+    "cwma": 1.76659,
+    "cwma_batch": 1.644165
   },
-  "rust_results": {
-    "alma": 1.1716001831501832,
-    "alma_batch": 125.9426
-  },
-  "comparisons": [
-    {
-      "indicator": "alma",
-      "python_ms": 1.874685,
-      "rust_ms": 1.1716001831501832,
-      "overhead_ms": 0.7030848168498167,
-      "overhead_pct": 60.010644156726876
-    },
-    {
-      "indicator": "alma_batch",
-      "python_ms": 1.777125,
-      "rust_ms": 125.9426,
-      "overhead_ms": -124.165475,
-      "overhead_pct": -98.58894051734678
-    }
-  ],
+  "rust_results": {},
+  "comparisons": [],
   "batch_comparisons": [
     {
-      "indicator": "alma",
-      "single_ms": 1.874685,
-      "batch_ms": 1.777125,
-      "overhead_pct": -5.204074284479788
+      "indicator": "cwma",
+      "single_ms": 1.76659,
+      "batch_ms": 1.644165,
+      "overhead_pct": -6.930017717750014
     }
   ]
 }

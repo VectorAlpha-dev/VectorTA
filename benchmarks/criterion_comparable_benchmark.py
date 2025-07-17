@@ -300,7 +300,7 @@ class CriterionComparableBenchmark:
         # Also run batch operations
         print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
-            ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 9, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
+            ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 240, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
             ('aroonosc_batch', lambda: my_project.aroonosc_batch(data['high'], data['low'], (14, 14, 1))),
             ('bollinger_bands_batch', lambda: my_project.bollinger_bands_batch(data['close'], (20, 20, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0), "sma", 0)),
             ('ao_batch', lambda: my_project.ao_batch(data['high'], data['low'], (5, 5, 1), (34, 34, 1))),

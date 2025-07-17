@@ -13,7 +13,16 @@ rustflags = [
 
 [target.x86_64-pc-windows-msvc]
 rustflags = [
+  "-Zdylib-lto",
   "-C", "target-cpu=native",
   "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
   "-C", "linker=lld-link",
 ]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+simd128",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=-zstack-size=32768",
+]
+

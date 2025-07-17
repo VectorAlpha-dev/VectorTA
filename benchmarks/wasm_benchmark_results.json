@@ -1,0 +1,161 @@
+{
+  "timestamp": "2025-07-17T17:45:39.181Z",
+  "config": {
+    "warmupTargetMs": 150,
+    "sampleCount": 10,
+    "minIterations": 10,
+    "disableGC": true
+  },
+  "results": {
+    "alma_10k": {
+      "name": "alma_10k",
+      "median": 0.037393911007025604,
+      "mean": 0.03572611241217801,
+      "min": 0.03017681498829035,
+      "max": 0.04207400468384087,
+      "samples": 10,
+      "warmupIterations": 4279,
+      "throughput": 0.267423217596073
+    },
+    "alma_100k": {
+      "name": "alma_100k",
+      "median": 0.3024603773584903,
+      "mean": 0.2791805660377357,
+      "min": 0.2374075471698105,
+      "max": 0.32362075471698026,
+      "samples": 10,
+      "warmupIterations": 534,
+      "throughput": 0.33062181854476524
+    },
+    "alma_1M": {
+      "name": "alma_1M",
+      "median": 2.67956999999999,
+      "mean": 2.6950909999999952,
+      "min": 2.60308,
+      "max": 2.856490000000008,
+      "samples": 10,
+      "warmupIterations": 57,
+      "throughput": 0.3731942065331392
+    },
+    "alma_zerocopy_10k": {
+      "name": "alma_zerocopy_10k",
+      "median": 0.0376438636363637,
+      "mean": 0.03528509090909097,
+      "min": 0.028198409090909267,
+      "max": 0.043942727272727466,
+      "samples": 10,
+      "warmupIterations": 4407,
+      "throughput": 0.26564754608079266
+    },
+    "alma_zerocopy_100k": {
+      "name": "alma_zerocopy_100k",
+      "median": 0.2945537037037032,
+      "mean": 0.27121962962962953,
+      "min": 0.22687222222222553,
+      "max": 0.30540000000000117,
+      "samples": 10,
+      "warmupIterations": 541,
+      "throughput": 0.33949666475961804
+    },
+    "alma_zerocopy_1M": {
+      "name": "alma_zerocopy_1M",
+      "median": 2.5027700000000097,
+      "mean": 2.505278000000007,
+      "min": 2.4832300000000034,
+      "max": 2.5629699999999955,
+      "samples": 10,
+      "warmupIterations": 60,
+      "throughput": 0.3995572905221
+    },
+    "alma_preallocated_10k": {
+      "name": "alma_preallocated_10k",
+      "median": 0.015656677181913534,
+      "mean": 0.015681808622502583,
+      "min": 0.015610620399579235,
+      "max": 0.015823659305993613,
+      "samples": 10,
+      "warmupIterations": 9516,
+      "throughput": 0.6387051277746161
+    },
+    "alma_preallocated_100k": {
+      "name": "alma_preallocated_100k",
+      "median": 0.15881063829787057,
+      "mean": 0.15919946808510593,
+      "min": 0.1585765957446846,
+      "max": 0.1609010638297856,
+      "samples": 10,
+      "warmupIterations": 942,
+      "throughput": 0.6296807384681413
+    },
+    "alma_preallocated_1M": {
+      "name": "alma_preallocated_1M",
+      "median": 1.7621499999999741,
+      "mean": 1.7603229999999985,
+      "min": 1.7519600000000082,
+      "max": 1.766800000000012,
+      "samples": 10,
+      "warmupIterations": 85,
+      "throughput": 0.5674885792923501
+    },
+    "alma_batch_small_batch": {
+      "name": "alma_batch_small_batch",
+      "median": 10.89973,
+      "mean": 10.841290999999998,
+      "min": 10.454979999999978,
+      "max": 11.782490000000053,
+      "samples": 10,
+      "warmupIterations": 13,
+      "throughput": 0
+    },
+    "alma_batch_medium_batch": {
+      "name": "alma_batch_medium_batch",
+      "median": 64.63905000000004,
+      "mean": 64.57032899999999,
+      "min": 63.88966999999993,
+      "max": 65.18647000000001,
+      "samples": 10,
+      "warmupIterations": 3,
+      "throughput": 0
+    },
+    "alma_batch_large_batch": {
+      "name": "alma_batch_large_batch",
+      "median": 1207.3666000000005,
+      "mean": 1208.634795,
+      "min": 1200.24595,
+      "max": 1222.3934699999998,
+      "samples": 10,
+      "warmupIterations": 1,
+      "throughput": 0
+    },
+    "alma_batch_unsafe_small_batch": {
+      "name": "alma_batch_unsafe_small_batch",
+      "median": 0.8661058823533548,
+      "mean": 0.8677394117649836,
+      "min": 0.8639705882352942,
+      "max": 0.87833529411685,
+      "samples": 10,
+      "warmupIterations": 173,
+      "throughput": 0
+    },
+    "alma_batch_unsafe_medium_batch": {
+      "name": "alma_batch_unsafe_medium_batch",
+      "median": 4.541049999999814,
+      "mean": 4.55222299999965,
+      "min": 4.5294300000008665,
+      "max": 4.592499999998836,
+      "samples": 10,
+      "warmupIterations": 34,
+      "throughput": 0
+    },
+    "alma_batch_unsafe_large_batch": {
+      "name": "alma_batch_unsafe_large_batch",
+      "median": 102.20990999999921,
+      "mean": 102.25827099999938,
+      "min": 102.03845999999903,
+      "max": 102.50627000000095,
+      "samples": 10,
+      "warmupIterations": 2,
+      "throughput": 0
+    }
+  }
+}

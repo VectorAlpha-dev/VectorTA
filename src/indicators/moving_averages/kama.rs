@@ -30,7 +30,7 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-use std::mem::MaybeUninit;
+use std::mem::{MaybeUninit, ManuallyDrop};
 
 #[derive(Debug, Clone)]
 pub enum KamaData<'a> {
@@ -698,9 +698,44 @@ fn kama_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    let mut values = vec![0.0; rows * cols];
     
-    kama_batch_inner_into(data, sweep, kern, parallel, &mut values)?;
+    if cols == 0 {
+        return Err(KamaError::NoData);
+    }
+    
+    // Step 1: Allocate uninitialized matrix
+    let mut buf_mu = make_uninit_matrix(rows, cols);
+    
+    // Step 2: Calculate warmup periods for each row
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(KamaError::AllValuesNaN)?;
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    
+    // Step 3: Initialize NaN prefixes for each row
+    init_matrix_prefixes(&mut buf_mu, cols, &warm);
+    
+    // Step 4: Convert to mutable slice for computation
+    let mut buf_guard = ManuallyDrop::new(buf_mu);
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+        )
+    };
+    
+    // Step 5: Compute into the buffer
+    kama_batch_inner_into(data, sweep, kern, parallel, out)?;
+    
+    // Step 6: Reclaim as Vec<f64>
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity()
+        )
+    };
     
     Ok(KamaBatchOutput {
         values,
@@ -731,28 +766,20 @@ fn kama_batch_inner_into(
     let cols = data.len();
 
     /* ---------------------------------------------------------------
-    * 1.  prepare warmup periods and initialize NaN prefixes
+    * 1.  warmup periods have already been initialized by kama_batch_inner
     * ------------------------------------------------------------- */
-    let warm: Vec<usize> = combos.iter()
-                                .map(|c| first + c.period.unwrap())
-                                .collect();
 
-    // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-    // init_matrix_prefixes function. This is safe because:
-    // 1. MaybeUninit<T> has the same layout as T
-    // 2. We ensure all values are written before the slice is used again
+    /* ---------------------------------------------------------------
+    * 2.  helper that fills a single row
+    * ------------------------------------------------------------- */
+    // We need to reinterpret the f64 slice as MaybeUninit for the row processing
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut MaybeUninit<f64>,
             out.len()
         )
     };
-
-    unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
-
-    /* ---------------------------------------------------------------
-    * 2.  helper that fills a single row
-    * ------------------------------------------------------------- */
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period  = combos[row].period.unwrap();
 
@@ -859,19 +886,16 @@ pub fn kama_py<'py>(
     };
     let kama_in = KamaInput::from_slice(slice_in, params);
     
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-    
     // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), KamaError> {
-        let (data, per, first, chosen) = kama_prepare(&kama_in, Kernel::Auto)?;
-        // Prefix initialize exactly once
-        slice_out[..first + per].fill(f64::NAN);
-        kama_compute_into(data, per, first, chosen, slice_out);
-        Ok(())
+    let output = py.allow_threads(|| -> Result<KamaOutput, KamaError> {
+        kama_with_kernel(&kama_in, Kernel::Auto)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    
+    // Convert the output Vec<f64> to NumPy array
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [output.values.len()], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    slice_out.copy_from_slice(&output.values);
     
     Ok(out_arr)
 }
