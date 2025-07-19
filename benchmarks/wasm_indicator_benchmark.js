@@ -808,7 +808,7 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'supersmoother_3_pole_batch_into'
         }
-    }
+    },
     ema: {
         name: 'EMA',
         safe: {
@@ -1036,8 +1036,37 @@ const INDICATORS = {
                 }
             }
         }
-    }
+    },
     */
+    trendflex: {
+        name: 'TrendFlex',
+        // Safe API
+        safe: {
+            fn: 'trendflex_js',
+            params: { period: 20 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'trendflex_alloc',
+            freeFn: 'trendflex_free',
+            computeFn: 'trendflex_into',
+            params: { period: 20 }
+        },
+        // Batch API
+        batch: {
+            fn: 'trendflex_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 40, 2]       // 16 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'trendflex_batch_into'
+        }
+    }
 };
 
 class WasmIndicatorBenchmark {
@@ -1342,10 +1371,13 @@ class WasmIndicatorBenchmark {
                     // PWMA and SuperSmoother have special batch APIs that take individual parameters
                     const [start, end, step] = batchConfig.period_range;
                     wasmFn.call(this.wasm, data, start, end, step);
+                } else if (indicatorKey === 'trendflex') {
+                    // TrendFlex uses the new ergonomic batch API with config object
+                    wasmFn.call(this.wasm, data, batchConfig);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                    wasmFn.apply(this.wasm, params);
                 }
-                wasmFn.apply(this.wasm, params);
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',

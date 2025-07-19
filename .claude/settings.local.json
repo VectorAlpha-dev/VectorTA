@@ -255,7 +255,10 @@
       "Bash(../../.venv/Scripts/python.exe test_supersmoother.py:*)",
       "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py -v)",
       "Bash(../.venv/Scripts/python.exe:*)",
-      "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py::TestSuperSmoother::test_batch_processing -v)"
+      "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py::TestSuperSmoother::test_batch_processing -v)",
+      "Bash(.run_python_benchmark.bat trendflex)",
+      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py trendflex)",
+      "Bash(.run_wasm_benchmark.bat trendflex)"
     ],
     "deny": []
   }

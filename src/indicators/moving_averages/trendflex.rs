@@ -22,6 +22,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, ConstAlign, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -56,6 +58,7 @@ pub struct TrendFlexOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TrendFlexParams {
 	pub period: Option<usize>,
 }
@@ -230,6 +233,16 @@ pub fn trendflex_with_kernel(input: &TrendFlexInput, kernel: Kernel) -> Result<T
 	}
 
 	Ok(TrendFlexOutput { values: out })
+}
+
+pub fn trendflex_into_slice(
+	out: &mut [f64],
+	input: &TrendFlexInput,
+	kernel: Kernel,
+) -> Result<(), TrendFlexError> {
+	let result = trendflex_with_kernel(input, kernel)?;
+	out.copy_from_slice(&result.values);
+	Ok(())
 }
 
 // Scalar solution, called by all AVX stubs too
@@ -498,6 +511,94 @@ impl TrendFlexStream {
 	}
 }
 
+// Batch functions for direct buffer writing
+#[inline(always)]
+pub fn trendflex_batch_inner_into(
+	data: &[f64],
+	sweep: &TrendFlexBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<TrendFlexParams>, TrendFlexError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(TrendFlexError::NoDataProvided);
+	}
+	
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(TrendFlexError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(TrendFlexError::TrendFlexPeriodExceedsData {
+			period: max_p,
+			data_len: data.len() - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Ensure output buffer is the right size
+	assert_eq!(out.len(), rows * cols, "Output buffer size mismatch");
+	
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+	
+	// Initialize output buffer with NaN prefixes
+	for (row, &warmup) in warm.iter().enumerate() {
+		let start = row * cols;
+		let end = start + warmup;
+		out[start..end].fill(f64::NAN);
+	}
+	
+	// Resolve Auto kernel to actual kernel
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	
+	// Helper that fills one row
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => trendflex_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_row_avx512(data, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => trendflex_row_scalar(data, first, period, out_row),
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
+		}
+	};
+	
+	// Run every row, writing directly into output buffer
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
 // Batch grid
 #[derive(Clone, Debug)]
 pub struct TrendFlexBatchRange {
@@ -662,6 +763,12 @@ fn trendflex_batch_inner(
 		init_matrix_prefixes(&mut raw, cols, &warm);
 	}
 
+	// Resolve Auto kernel to actual kernel
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+
 	// 3. helper that fills **one row**; receives &mut [MaybeUninit<f64>]
 	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -669,15 +776,15 @@ fn trendflex_batch_inner(
 		// Cast this single row to &mut [f64] so the existing row helpers work
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-		match kern {
-			Kernel::Scalar => trendflex_row_scalar(data, first, period, out_row),
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => trendflex_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => trendflex_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => trendflex_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => trendflex_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => trendflex_row_avx512(data, first, period, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => trendflex_row_scalar(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => trendflex_row_scalar(data, first, period, out_row),
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	};
 
@@ -1210,38 +1317,22 @@ pub fn trendflex_py<'py>(
 	period: Option<usize>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::Scalar,
-		Some("avx2") => Kernel::Avx2,
-		Some("avx512") => Kernel::Avx512,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = TrendFlexParams { period };
 	let trendflex_in = TrendFlexInput::from_slice(slice_in, params);
 
-	// Allocate NumPy output buffer
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| trendflex_with_kernel(&trendflex_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), TrendFlexError> {
-		// Get the TrendFlex output
-		let result = trendflex_with_kernel(&trendflex_in, kern)?;
-		// Copy results to the pre-allocated buffer
-		slice_out.copy_from_slice(&result.values);
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1296,37 +1387,47 @@ pub fn trendflex_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;  // true for batch operations
 
 	let sweep = TrendFlexBatchRange { period: period_range };
-
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::ScalarBatch,
-		Some("avx2") => Kernel::Avx2Batch,
-		Some("avx512") => Kernel::Avx512Batch,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
+	
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	// Pre-allocate NumPy array (like ALMA does)
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
 	// Heavy work without the GIL
-	let output = py
-		.allow_threads(|| -> Result<TrendFlexBatchOutput, TrendFlexError> {
-			trendflex_batch_with_kernel(slice_in, &sweep, kern)
+	let combos = py
+		.allow_threads(|| -> Result<Vec<TrendFlexParams>, TrendFlexError> {
+			// Handle kernel selection for batch operations
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			
+			// Use the new _batch_inner_into function
+			trendflex_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
 	// Build output dict
 	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-	// Convert values to NumPy array and reshape
-	let values_arr = output.values.into_pyarray(py);
-	dict.set_item("values", values_arr.reshape((output.rows, output.cols))?)?;
-
-	// Extract periods from combos
+	// Extract periods from combos using into_pyarray() for zero-copy
 	dict.set_item(
 		"periods",
-		output
-			.combos
+		combos
 			.iter()
 			.map(|p| p.period.unwrap_or(20) as u64)
 			.collect::<Vec<_>>()
@@ -1337,7 +1438,24 @@ pub fn trendflex_batch_py<'py>(
 }
 
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TrendFlexBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TrendFlexBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<TrendFlexParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1353,7 +1471,7 @@ pub fn trendflex_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let params = TrendFlexParams { period: Some(period) };
 	let input = TrendFlexInput::from_slice(data, params);
 
-	trendflex_with_kernel(&input, Kernel::Scalar)
+	trendflex_with_kernel(&input, Kernel::Auto)
 		.map(|o| o.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1379,7 +1497,7 @@ pub fn trendflex_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
-	trendflex_batch_inner(data, &sweep, Kernel::Scalar, false)
+	trendflex_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1406,4 +1524,112 @@ pub fn trendflex_batch_metadata_js(
 	let metadata: Vec<f64> = combos.iter().map(|combo| combo.period.unwrap_or(20) as f64).collect();
 
 	Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = trendflex_batch)]
+pub fn trendflex_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TrendFlexBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = TrendFlexBatchRange {
+		period: config.period_range,
+	};
+
+	let output = trendflex_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = TrendFlexBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trendflex_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trendflex_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trendflex_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to trendflex_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = TrendFlexParams {
+			period: Some(period),
+		};
+
+		let input = TrendFlexInput::from_slice(data, params);
+		let out_slice = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		trendflex_into_slice(out_slice, &input, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trendflex_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to trendflex_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		// Build the batch sweep
+		let sweep = TrendFlexBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		// Calculate the number of combinations
+		let combos = expand_grid(&sweep);
+		let n_combos = combos.len();
+		let total_size = n_combos * len;
+
+		// Get output slice
+		let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
+
+		// Use trendflex_batch_inner_into to write directly
+		trendflex_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(n_combos)
+	}
 }
