@@ -45,3 +45,6 @@ tests/wasm/node_modules/
 
 # Claude CLI
 .claude/
+
+# Benchmarks
+benchmarks/*.json
