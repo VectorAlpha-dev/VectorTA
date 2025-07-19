@@ -309,3 +309,123 @@ test('SMMA batch zero step', () => {
     assert.strictEqual(metadata.length, 1);
     assert.strictEqual(metadata[0], 7);
 });
+
+// ============ Fast API Tests ============
+
+test('SMMA fast API basic', () => {
+    // Test fast API matches safe API
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const period = 7;
+    
+    // Safe API result
+    const safeResult = wasm.smma(close, period);
+    
+    // Fast API
+    const inPtr = wasm.smma_alloc(close.length);
+    const outPtr = wasm.smma_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(close, inPtr / 8);
+        
+        // Compute
+        wasm.smma_into(inPtr, outPtr, close.length, period);
+        
+        // Get results
+        const fastResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length);
+        
+        // Compare results
+        assertArrayClose(fastResult, safeResult, 1e-10, "Fast API should match safe API");
+    } finally {
+        wasm.smma_free(inPtr, close.length);
+        wasm.smma_free(outPtr, close.length);
+    }
+});
+
+test('SMMA fast API aliasing', () => {
+    // Test fast API with aliasing (in-place computation)
+    const close = new Float64Array(testData.close.slice(0, 50));
+    const period = 7;
+    
+    // Get expected result
+    const expected = wasm.smma(close, period);
+    
+    // Fast API with aliasing
+    const ptr = wasm.smma_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(close, ptr / 8);
+        
+        // Compute in-place (input and output are the same)
+        wasm.smma_into(ptr, ptr, close.length, period);
+        
+        // Get results
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
+        
+        // Compare results
+        assertArrayClose(result, expected, 1e-10, "In-place computation should work correctly");
+    } finally {
+        wasm.smma_free(ptr, close.length);
+    }
+});
+
+test('SMMA fast API null pointer', () => {
+    // Test fast API with null pointers
+    assert.throws(() => {
+        wasm.smma_into(0, 0, 100, 7);
+    }, /null pointer/);
+});
+
+test('SMMA batch new API', () => {
+    // Test new batch API with config object
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const config = {
+        period_range: [5, 10, 1]  // 6 values: 5, 6, 7, 8, 9, 10
+    };
+    
+    const result = wasm.smma_batch_new(close, config);
+    
+    assert.strictEqual(result.rows, 6);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.values.length, 6 * 50);
+    assert.strictEqual(result.combos.length, 6);
+    
+    // Check combos have correct periods
+    for (let i = 0; i < 6; i++) {
+        assert.strictEqual(result.combos[i].period, 5 + i);
+    }
+});
+
+test('SMMA batch fast API', () => {
+    // Test fast batch API
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    const inPtr = wasm.smma_alloc(close.length);
+    const outPtr = wasm.smma_alloc(6 * close.length); // 6 periods
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(close, inPtr / 8);
+        
+        // Compute batch
+        const rows = wasm.smma_batch_into(inPtr, outPtr, close.length, 5, 10, 1);
+        
+        assert.strictEqual(rows, 6);
+        
+        // Get results
+        const batchResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, rows * close.length);
+        
+        // Verify first row matches individual calculation
+        const firstRow = batchResult.slice(0, close.length);
+        const singleResult = wasm.smma(close, 5);
+        assertArrayClose(firstRow, singleResult, 1e-10, "First batch row should match single calculation");
+    } finally {
+        wasm.smma_free(inPtr, close.length);
+        wasm.smma_free(outPtr, 6 * close.length);
+    }
+});

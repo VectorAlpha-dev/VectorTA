@@ -76,6 +76,7 @@ pub struct FramaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct FramaParams {
     pub window: Option<usize>,
     pub sc: Option<usize>,
@@ -2082,61 +2083,59 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(feature = "python")]
-use numpy;
+use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "frama")]
-#[pyo3(signature = (high, low, close, window=None, sc=None, fc=None))]
+#[pyo3(signature = (high, low, close, window=None, sc=None, fc=None, kernel=None))]
 pub fn frama_py<'py>(
     py: Python<'py>,
-    high: numpy::PyReadonlyArray1<'py, f64>,
-    low: numpy::PyReadonlyArray1<'py, f64>,
-    close: numpy::PyReadonlyArray1<'py, f64>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
     window: Option<usize>,
     sc: Option<usize>,
     fc: Option<usize>,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
+    
+    let params = FramaParams { window, sc, fc };
+    let input = FramaInput::from_slices(high_slice, low_slice, close_slice, params);
+    
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        frama_with_kernel(&input, kern)
+            .map(|o| o.values)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    
+    Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "frama_batch")]
+#[pyo3(signature = (high, low, close, window_range, sc_range, fc_range, kernel=None))]
+pub fn frama_batch_py<'py>(
+    py: Python<'py>,
+    high: PyReadonlyArray1<'py, f64>,
+    low: PyReadonlyArray1<'py, f64>,
+    close: PyReadonlyArray1<'py, f64>,
+    window_range: (usize, usize, usize),
+    sc_range: (usize, usize, usize),
+    fc_range: (usize, usize, usize),
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{PyArray1, PyArrayMethods};
     
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
-    
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Release GIL for computation
-    py.allow_threads(|| -> Result<(), FramaError> {
-        let params = FramaParams { window, sc, fc };
-        let input = FramaInput::from_slices(high_slice, low_slice, close_slice, params);
-        let ((high, low, close), window, sc, fc, first, len, warm, chosen) = frama_prepare(&input, Kernel::Auto)?;
-        slice_out[..warm].fill(f64::NAN);
-        frama_compute_into(high, low, close, window, sc, fc, first, len, warm, chosen, slice_out)?;
-        Ok(())
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok(out_arr)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction(name = "frama_batch")]
-#[pyo3(signature = (high, low, close, window_range, sc_range, fc_range))]
-pub fn frama_batch_py<'py>(
-    py: Python<'py>,
-    high: numpy::PyReadonlyArray1<'py, f64>,
-    low: numpy::PyReadonlyArray1<'py, f64>,
-    close: numpy::PyReadonlyArray1<'py, f64>,
-    window_range: (usize, usize, usize),
-    sc_range: (usize, usize, usize),
-    fc_range: (usize, usize, usize),
-) -> PyResult<Bound<'py, PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
-    
-    let high_slice = high.as_slice()?;
-    let low_slice = low.as_slice()?;
-    let close_slice = close.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let range = FramaBatchRange {
         window: window_range,
@@ -2155,7 +2154,7 @@ pub fn frama_batch_py<'py>(
     
     // Release GIL for computation
     let combos_result = py.allow_threads(|| -> Result<Vec<FramaParams>, FramaError> {
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
@@ -2171,9 +2170,14 @@ pub fn frama_batch_py<'py>(
         };
         
         // Find first valid index
-        let first = close_slice.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+        let first = close_slice.iter()
+            .enumerate()
+            .find(|(i, &v)| !v.is_nan() && !high_slice[*i].is_nan() && !low_slice[*i].is_nan())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         
         // Initialize NaN values for warmup periods in each row
+        // This is necessary because we're using a pre-allocated NumPy array
         for (row_idx, combo) in combos.iter().enumerate() {
             let window = combo.window.unwrap_or(10);
             let warmup_period = first + window - 1;
@@ -2234,6 +2238,32 @@ impl FramaStreamPy {
 // WASM bindings
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
+/// Write FRAMA directly to output slice - no allocations
+#[inline]
+pub fn frama_into_slice(dst: &mut [f64], input: &FramaInput, kern: Kernel) -> Result<(), FramaError> {
+    let ((high, low, close), window, sc, fc, first, len, warm, chosen) = frama_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != len {
+        return Err(FramaError::InvalidWindow {
+            window: dst.len(),
+            data_len: len,
+        });
+    }
+    
+    // Compute FRAMA directly into output slice
+    frama_compute_into(high, low, close, window, sc, fc, first, len, warm, chosen, dst)?;
+    
+    // Fill warmup with NaN (already done in frama_compute_into via alloc_with_nan_prefix)
+    for v in &mut dst[..warm] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
+}
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2248,10 +2278,14 @@ pub fn frama_js(
     let params = FramaParams { window, sc, fc };
     let input = FramaInput::from_slices(high, low, close, params);
     
-    match frama_with_kernel(&input, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
-    }
+    // Allocate output buffer once
+    let mut output = vec![0.0; high.len()];
+    
+    // Compute directly into output buffer - no allocations
+    frama_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -2311,4 +2345,175 @@ pub fn frama_batch_metadata_js(
     }
     
     metadata
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn frama_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn frama_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn frama_into(
+    high_ptr: *const f64,
+    low_ptr: *const f64,
+    close_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    window: Option<usize>,
+    sc: Option<usize>,
+    fc: Option<usize>,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        let high = std::slice::from_raw_parts(high_ptr, len);
+        let low = std::slice::from_raw_parts(low_ptr, len);
+        let close = std::slice::from_raw_parts(close_ptr, len);
+        let params = FramaParams { window, sc, fc };
+        let input = FramaInput::from_slices(high, low, close, params);
+        
+        // CRITICAL: Check aliasing for all input pointers
+        let needs_temp = high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr;
+        
+        if needs_temp {
+            // One of the inputs aliases with output - use temp buffer
+            let mut temp = vec![0.0; len];
+            frama_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing - compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            frama_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+// ================== Batch Processing with Serialization ==================
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FramaBatchConfig {
+    pub window_range: (usize, usize, usize),
+    pub sc_range: (usize, usize, usize),
+    pub fc_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FramaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<FramaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = frama_batch)]
+pub fn frama_batch_unified_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+) -> Result<JsValue, JsValue> {
+    let config: FramaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = FramaBatchRange {
+        window: config.window_range,
+        sc: config.sc_range,
+        fc: config.fc_range,
+    };
+
+    let output = frama_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let result = FramaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn frama_batch_into(
+    high_ptr: *const f64,
+    low_ptr: *const f64,
+    close_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    window_start: usize,
+    window_end: usize,
+    window_step: usize,
+    sc_start: usize,
+    sc_end: usize,
+    sc_step: usize,
+    fc_start: usize,
+    fc_end: usize,
+    fc_step: usize,
+) -> Result<usize, JsValue> {
+    if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to frama_batch_into"));
+    }
+    
+    unsafe {
+        let high = std::slice::from_raw_parts(high_ptr, len);
+        let low = std::slice::from_raw_parts(low_ptr, len);
+        let close = std::slice::from_raw_parts(close_ptr, len);
+        
+        let sweep = FramaBatchRange {
+            window: (window_start, window_end, window_step),
+            sc: (sc_start, sc_end, sc_step),
+            fc: (fc_start, fc_end, fc_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        // Check if output buffer is large enough
+        let required_size = rows * cols;
+        let out_slice = std::slice::from_raw_parts_mut(out_ptr, required_size);
+        
+        // Use manual kernel selection for WASM (no parallel processing)
+        let kernel = detect_best_kernel();
+        
+        // Process batch directly into output buffer
+        frama_batch_inner_into(high, low, close, &sweep, kernel, false, out_slice)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }
