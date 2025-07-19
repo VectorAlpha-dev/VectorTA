@@ -20,6 +20,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -56,6 +58,7 @@ pub struct SuperSmootherOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct SuperSmootherParams {
     pub period: Option<usize>,
 }
@@ -223,6 +226,72 @@ pub fn supersmoother_with_kernel(
 
     // ---------- 4. package and return ----------
     Ok(SuperSmootherOutput { values: out })
+}
+
+/// Write SuperSmoother values directly to output slice - no allocations
+pub fn supersmoother_into_slice(
+    dst: &mut [f64], 
+    input: &SuperSmootherInput, 
+    kernel: Kernel
+) -> Result<(), SuperSmootherError> {
+    // ---------- 0. validation ----------
+    let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(SuperSmootherError::EmptyData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SuperSmootherError::AllValuesNaN)?;
+
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(SuperSmootherError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(SuperSmootherError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(SuperSmootherError::InvalidPeriod { 
+            period: dst.len(), 
+            data_len: data.len() 
+        });
+    }
+
+    // ---------- 1. choose kernel ----------
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // ---------- 2. compute directly into dst ----------
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                supersmoother_row_scalar(data, first, period, dst);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                supersmoother_row_avx2(data, first, period, dst);
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                supersmoother_row_avx512(data, first, period, dst);
+            }
+            _ => unreachable!("Unsupported kernel"),
+        }
+    }
+
+    // Note: supersmoother_row_* functions already handle warmup by filling with NaN
+    Ok(())
 }
 
 #[inline]
@@ -546,6 +615,89 @@ fn supersmoother_batch_inner(
     // ---------- 4. all elements are now initialised – transmute ----------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(SuperSmootherBatchOutput { values, combos, rows, cols })
+}
+
+#[inline(always)]
+pub fn supersmoother_batch_inner_into(
+    data: &[f64],
+    sweep: &SuperSmootherBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<SuperSmootherParams>, SuperSmootherError> {
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        return Err(SuperSmootherError::InvalidPeriod { period: 0, data_len: 0 });
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SuperSmootherError::AllValuesNaN)?;
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(SuperSmootherError::NotEnoughValidData { needed: max_p, valid: data.len() - first });
+    }
+    
+    let rows = combos.len();
+    let cols = data.len();
+    
+    // Initialize NaN prefixes directly in the output buffer
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap() - 1)
+        .collect();
+    
+    for (row, &warmup) in warm.iter().enumerate() {
+        let row_start = row * cols;
+        for i in 0..warmup {
+            out[row_start + i] = f64::NAN;
+        }
+    }
+    
+    // Process each row directly into the output buffer
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            use rayon::prelude::*;
+            out.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, out_row)| unsafe {
+                    let period = combos[row].period.unwrap();
+                    match kern {
+                        Kernel::Scalar => supersmoother_row_scalar(data, first, period, out_row),
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        Kernel::Avx2   => supersmoother_row_avx2(data, first, period, out_row),
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        Kernel::Avx512 => supersmoother_row_avx512(data, first, period, out_row),
+                        _ => unreachable!(),
+                    }
+                });
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (row, out_row) in out.chunks_mut(cols).enumerate() {
+                unsafe {
+                    let period = combos[row].period.unwrap();
+                    match kern {
+                        Kernel::Scalar => supersmoother_row_scalar(data, first, period, out_row),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    } else {
+        for (row, out_row) in out.chunks_mut(cols).enumerate() {
+            unsafe {
+                let period = combos[row].period.unwrap();
+                match kern {
+                    Kernel::Scalar => supersmoother_row_scalar(data, first, period, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2   => supersmoother_row_avx2(data, first, period, out_row),
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512 => supersmoother_row_avx512(data, first, period, out_row),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+    
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -961,6 +1113,8 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "python")]
@@ -997,38 +1151,24 @@ pub fn supersmoother_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = data.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;  // false for single operations
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-
-    // ---------- build input struct -------------------------------------------------
     let params = SuperSmootherParams {
         period: Some(period),
     };
     let ss_in = SuperSmootherInput::from_slice(slice_in, params);
 
-    // ---------- allocate NumPy output buffer ---------------------------------------
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-
-    // ---------- heavy lifting without the GIL --------------------------------------
-    py.allow_threads(|| -> Result<(), SuperSmootherError> {
-        let result = supersmoother_with_kernel(&ss_in, kern)?;
-        slice_out.copy_from_slice(&result.values);
-        Ok(())
+    // Get Vec<f64> from Rust function and zero-copy transfer to NumPy
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        supersmoother_with_kernel(&ss_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr.into())
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1093,39 +1233,49 @@ pub fn supersmoother_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-
+    
     let sweep = SuperSmootherBatchRange {
         period: (period_start, period_end, period_step),
     };
+    
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    // Pre-allocate output array (correct for batch operations)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    let kern = validate_kernel(kernel, true)?;
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-
-    // Heavy work without the GIL
-    let result = py.allow_threads(|| {
-        supersmoother_batch_with_kernel(slice_in, &sweep, kern)
+    // Compute without GIL, writing directly to the NumPy array
+    let combos = py.allow_threads(|| {
+        // Handle kernel selection for batch operations
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        
+        // Map batch kernels to regular kernels
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => kernel,
+        };
+        
+        supersmoother_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build return dict with the GIL
+    // Build result dictionary
     let dict = PyDict::new(py);
-    let rows = result.rows;
-    let cols = result.cols;
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     
-    // Convert flat values to 2D numpy array
-    let values_arr = result.values.into_pyarray(py);
-    dict.set_item("values", values_arr.reshape((rows, cols))?)?;
-    
-    // Extract periods from combos
+    // For single-parameter indicators like SuperSmoother
     dict.set_item(
         "periods",
-        result.combos
+        combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
@@ -1136,20 +1286,67 @@ pub fn supersmoother_batch_py<'py>(
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SuperSmootherBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SuperSmootherBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<SuperSmootherParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn supersmoother_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SuperSmootherParams {
         period: Some(period),
     };
     let input = SuperSmootherInput::from_slice(data, params);
-
-    supersmoother_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    supersmoother_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = supersmoother_batch)]
+pub fn supersmoother_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: SuperSmootherBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = SuperSmootherBatchRange {
+        period: config.period_range,
+    };
+
+    let kernel = detect_best_batch_kernel();
+    let output = supersmoother_batch_inner(data, &sweep, kernel, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = SuperSmootherBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Keep the old function for backward compatibility but mark as deprecated
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
+#[deprecated(since = "1.0.0", note = "Use supersmoother_batch instead")]
 pub fn supersmoother_batch_js(
     data: &[f64],
     period_start: usize,
@@ -1184,4 +1381,108 @@ pub fn supersmoother_batch_metadata_js(
         .collect();
 
     Ok(metadata)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Create input
+        let params = SuperSmootherParams {
+            period: Some(period),
+        };
+        let input = SuperSmootherInput::from_slice(data, params);
+        
+        if in_ptr == out_ptr as *const f64 {
+            // CRITICAL: Aliasing check - in-place operation
+            let mut temp = vec![0.0; len];
+            supersmoother_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // Direct write to output buffer
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            supersmoother_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to supersmoother_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = SuperSmootherBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        
+        // Create mutable output slice
+        let out_slice = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+        
+        // Use batch_inner_into for direct writes
+        let kernel = detect_best_batch_kernel();
+        supersmoother_batch_inner_into(data, &sweep, kernel, false, out_slice)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

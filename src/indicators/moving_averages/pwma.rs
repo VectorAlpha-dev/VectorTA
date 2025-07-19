@@ -17,6 +17,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,9 +30,13 @@ use thiserror::Error;
 use std::mem::MaybeUninit;
 
 #[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -237,6 +243,32 @@ pub fn pwma_with_kernel(input: &PwmaInput, kernel: Kernel) -> Result<PwmaOutput,
     pwma_compute_into(data, &weights, period, first, chosen, &mut out);
     
     Ok(PwmaOutput { values: out })
+}
+
+/// Computes PWMA directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn pwma_into_slice(dst: &mut [f64], input: &PwmaInput, kern: Kernel) -> Result<(), PwmaError> {
+    let (data, weights, period, first, chosen) = pwma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(PwmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute PWMA values directly into dst
+    pwma_compute_into(data, &weights, period, first, chosen, dst);
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
 }
 
 #[inline]
@@ -1141,32 +1173,29 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pwma")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn pwma_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
-) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = arr_in.as_slice()?;
-
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
+    
     let params = PwmaParams {
         period: Some(period),
     };
     let pwma_in = PwmaInput::from_slice(slice_in, params);
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    py.allow_threads(|| -> Result<(), PwmaError> {
-        let (data, weights, per, first, chosen) = pwma_prepare(&pwma_in, Kernel::Auto)?;
-        slice_out[..first + per - 1].fill(f64::NAN);
-        pwma_compute_into(data, &weights, per, first, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        pwma_with_kernel(&pwma_in, kern).map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1195,15 +1224,18 @@ impl PwmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pwma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn pwma_batch_py<'py>(
     py: Python<'py>,
-    data: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = PwmaBatchRange {
         period: period_range,
@@ -1217,7 +1249,7 @@ pub fn pwma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py.allow_threads(|| {
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
@@ -1252,10 +1284,15 @@ pub fn pwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
         period: Some(period),
     };
     let input = PwmaInput::from_slice(data, params);
-
-    pwma_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    pwma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1312,4 +1349,108 @@ pub fn pwma_batch_rows_cols_js(
     let cols = data_len;
     
     vec![rows, cols]
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_alloc(len: usize) -> *mut f64 {
+    // Allocate aligned memory for performance
+    let mut buf = Vec::<f64>::with_capacity(len);
+    buf.resize(len, 0.0);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to pwma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate PWMA
+        let params = PwmaParams {
+            period: Some(period),
+        };
+        let input = PwmaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            pwma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            pwma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pwma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to pwma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = PwmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid_pwma(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        pwma_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

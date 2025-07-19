@@ -39,6 +39,8 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
@@ -63,6 +65,7 @@ pub enum HighPassData<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct HighPassParams {
     pub period: Option<usize>,
 }
@@ -188,7 +191,7 @@ pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, HighPassError> 
 }
 
 #[inline]
-fn highpass_into(
+fn highpass_into_internal(
     input: &HighPassInput,
     out: &mut [f64],
 ) -> Result<(), HighPassError> {
@@ -1247,75 +1250,63 @@ fn highpass_batch_inner_into(
 
 // Python bindings
 #[cfg(feature = "python")]
-#[pyfunction(name = "highpass", signature = (arr_in, period=48))]
+#[pyfunction(name = "highpass")]
+#[pyo3(signature = (data, period=48, kernel=None))]
 pub fn highpass_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
-    period: Option<usize>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
+    period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Build input struct with optional period (defaults to 48)
     let params = HighPassParams {
-        period: period,
+        period: Some(period),
     };
-    let hp_in = HighPassInput::from_slice(slice_in, params);
+    let hp_input = HighPassInput::from_slice(slice_in, params);
     
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), HighPassError> {
-        // Find first valid value and calculate warmup period
-        let data = hp_in.as_ref();
-        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-        let period = hp_in.get_period();
-        let warm = first + period;
-        
-        // Initialize NaN prefix (matching ALMA's approach)
-        if warm > 0 && warm <= slice_out.len() {
-            slice_out[..warm].fill(f64::NAN);
-        }
-        
-        highpass_into(&hp_in, slice_out)
+    // Get Vec<f64> from Rust function
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        highpass_with_kernel(&hp_input, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    // Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn highpass_batch_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = HighPassBatchRange {
         period: period_range,
     };
     
-    // Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Heavy work without the GIL
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
@@ -1323,14 +1314,12 @@ pub fn highpass_batch_py<'py>(
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
             Kernel::ScalarBatch => Kernel::Scalar,
-            _ => unreachable!(),
+            _ => kernel,
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
         highpass_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1348,29 +1337,60 @@ pub fn highpass_batch_py<'py>(
 #[cfg(feature = "python")]
 #[pyclass(name = "HighPassStream")]
 pub struct HighPassStreamPy {
-    inner: HighPassStream,
+    stream: HighPassStream,
 }
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl HighPassStreamPy {
     #[new]
-    pub fn new(period: usize) -> PyResult<Self> {
+    fn new(period: usize) -> PyResult<Self> {
         let params = HighPassParams {
             period: Some(period),
         };
-        match HighPassStream::try_new(params) {
-            Ok(stream) => Ok(Self { inner: stream }),
-            Err(e) => Err(PyValueError::new_err(format!("HighPassStream error: {}", e))),
-        }
+        let stream = HighPassStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(HighPassStreamPy { stream })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
-        Some(self.inner.update(value))
+    fn update(&mut self, value: f64) -> Option<f64> {
+        Some(self.stream.update(value))
     }
 }
 
-// WASM bindings
+// ================== WASM Helper Functions ==================
+
+/// Helper function to write directly to output slice - no allocations
+#[inline]
+pub fn highpass_into_slice(
+    dst: &mut [f64],
+    input: &HighPassInput,
+    kern: Kernel,
+) -> Result<(), HighPassError> {
+    // Validate input
+    let data = input.as_ref();
+    
+    if data.is_empty() {
+        return Err(HighPassError::EmptyInputData);
+    }
+    
+    if dst.len() != data.len() {
+        return Err(HighPassError::InvalidOutputBuffer {
+            expected: data.len(),
+            actual: dst.len(),
+        });
+    }
+    
+    // Use the existing _into function
+    // Note: highpass doesn't have a traditional warmup period - it starts computing from index 0
+    highpass_with_kernel_into(input, kern, dst)
+}
+
+// ================== WASM Bindings ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use serde::{Deserialize, Serialize};
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
@@ -1378,12 +1398,131 @@ pub fn highpass_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
         period: Some(period),
     };
     let input = HighPassInput::from_slice(data, params);
-    match highpass(&input) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("HighPass error: {}", e))),
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    highpass_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Create input
+        let params = HighPassParams {
+            period: Some(period),
+        };
+        let input = HighPassInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during computation
+            let mut temp = vec![0.0; len];
+            highpass_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            highpass_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Batch Processing ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+pub struct HighPassBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+pub struct HighPassBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<HighPassParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen(js_name = highpass_batch)]
+pub fn highpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: HighPassBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+    
+    let sweep = HighPassBatchRange {
+        period: config.period_range,
+    };
+    
+    let output = highpass_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    let js_output = HighPassBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+    
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Keep old batch API for compatibility
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_batch_js(
@@ -1398,6 +1537,43 @@ pub fn highpass_batch_js(
     match highpass_batch_with_kernel(data, &sweep, Kernel::Auto) {
         Ok(output) => Ok(output.values),
         Err(e) => Err(JsValue::from_str(&format!("HighPass batch error: {}", e))),
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn highpass_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to highpass_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = HighPassBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        highpass_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
     }
 }
 

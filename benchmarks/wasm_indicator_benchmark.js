@@ -42,6 +42,68 @@ const DATA_SIZES = {
  * Add new indicators here by following the pattern
  */
 const INDICATORS = {
+    frama: {
+        name: 'FRAMA',
+        // Safe API
+        safe: {
+            fn: 'frama_js',
+            params: { window: 10, sc: 300, fc: 1 }
+        },
+        needsMultipleInputs: true,
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'frama_alloc',
+            freeFn: 'frama_free',
+            computeFn: 'frama_into',
+            params: { window: 10, sc: 300, fc: 1 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'frama_batch',
+            fastFn: 'frama_batch_into',
+            config: {
+                small: {
+                    window_range: [8, 12, 2],      // 3 values
+                    sc_range: [200, 300, 100],     // 2 values
+                    fc_range: [1, 2, 1]            // 2 values = 12 combinations
+                },
+                medium: {
+                    window_range: [6, 14, 2],      // 5 values
+                    sc_range: [100, 400, 100],    // 4 values
+                    fc_range: [1, 3, 1]            // 3 values = 60 combinations
+                }
+            }
+        }
+    },
+    pwma: {
+        name: 'PWMA',
+        // Safe API
+        safe: {
+            fn: 'pwma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'pwma_alloc',
+            freeFn: 'pwma_free',
+            computeFn: 'pwma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'pwma_batch_js',
+            fastFn: 'pwma_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 2]       // 6 values
+                },
+                medium: {
+                    period_range: [5, 25, 2]       // 11 values
+                }
+            }
+        }
+    },
     alma: {
         name: 'ALMA',
         // Safe API
@@ -76,6 +138,181 @@ const INDICATORS = {
             },
             // Fast batch API (optional)
             fastFn: 'alma_batch_into'
+        }
+    },
+    edcf: {
+        name: 'EDCF',
+        // Safe API
+        safe: {
+            fn: 'edcf_js',
+            params: { period: 15 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'edcf_alloc',
+            freeFn: 'edcf_free',
+            computeFn: 'edcf_into',
+            params: { period: 15 }
+        },
+        // Batch API
+        batch: {
+            fn: 'edcf_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [15, 50, 5]  // 8 values: 15, 20, 25, ..., 50
+                }
+            }
+        }
+    },
+    highpass: {
+        name: 'HighPass',
+        // Safe API
+        safe: {
+            fn: 'highpass_js',
+            params: { period: 48 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'highpass_alloc',
+            freeFn: 'highpass_free',
+            computeFn: 'highpass_into',
+            params: { period: 48 }
+        },
+        // Batch API
+        batch: {
+            fn: 'highpass_batch',
+            config: {
+                small: {
+                    period_range: [30, 60, 10]  // 4 values: 30, 40, 50, 60
+                },
+                medium: {
+                    period_range: [20, 80, 10]  // 7 values: 20, 30, 40, ..., 80
+                }
+            },
+            // Fast batch API
+            fastFn: 'highpass_batch_into'
+        }
+    },
+    jsa: {
+        name: 'JSA',
+        // Safe API
+        safe: {
+            fn: 'jsa_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'jsa_alloc',
+            freeFn: 'jsa_free',
+            computeFn: 'jsa_fast',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'jsa_batch',
+            fastFn: 'jsa_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 40, 10]  // 4 values: 10, 20, 30, 40
+                },
+                medium: {
+                    period_range: [10, 50, 5]   // 9 values: 10, 15, 20, ..., 50
+                }
+            }
+        }
+    },
+    maaq: {
+        name: 'MAAQ',
+        // Safe API
+        safe: {
+            fn: 'maaq_js',
+            params: { period: 11, fast_period: 2, slow_period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'maaq_alloc',
+            freeFn: 'maaq_free',
+            computeFn: 'maaq_into',
+            params: { period: 11, fast_period: 2, slow_period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'maaq_batch_js',
+            fastFn: 'maaq_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],       // 3 values: 10, 15, 20
+                    fast_period_range: [2, 4, 1],    // 3 values: 2, 3, 4
+                    slow_period_range: [20, 40, 10]  // 3 values: 20, 30, 40
+                    // Total: 27 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],       // 5 values: 10, 15, 20, 25, 30
+                    fast_period_range: [2, 6, 2],    // 3 values: 2, 4, 6
+                    slow_period_range: [20, 50, 10]  // 4 values: 20, 30, 40, 50
+                    // Total: 60 combinations
+                }
+            }
+        }
+    },
+    smma: {
+        name: 'SMMA',
+        // Safe API
+        safe: {
+            fn: 'smma',
+            params: { period: 7 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'smma_alloc',
+            freeFn: 'smma_free',
+            computeFn: 'smma_into',
+            params: { period: 7 }
+        },
+        // Batch API
+        batch: {
+            fn: 'smma_batch_new',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]  // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]  // 5 values: 5, 10, 15, 20, 25
+                }
+            },
+            // Fast batch API
+            fastFn: 'smma_batch_into'
+        }
+    },
+    supersmoother: {
+        name: 'SuperSmoother',
+        // Safe API
+        safe: {
+            fn: 'supersmoother_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'supersmoother_alloc',
+            freeFn: 'supersmoother_free',
+            computeFn: 'supersmoother_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'supersmoother_batch_js',  // Use the old API for benchmarking
+            fastFn: 'supersmoother_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 2]       // 6 values
+                },
+                medium: {
+                    period_range: [5, 25, 2]       // 11 values
+                }
+            }
         }
     },
     // Example: Simple Moving Average (uncomment when SMA WASM bindings are added)
@@ -175,19 +412,48 @@ class WasmIndicatorBenchmark {
         // Skip header
         lines.shift();
         
-        // Parse close prices
+        // Parse OHLC data
+        const opens = [];
+        const highs = [];
+        const lows = [];
         const closes = [];
+        
         for (const line of lines) {
             const parts = line.split(',');
             if (parts.length >= 5) {
+                opens.push(parseFloat(parts[1]));
+                highs.push(parseFloat(parts[2]));
+                lows.push(parseFloat(parts[3]));
                 closes.push(parseFloat(parts[4]));
             }
         }
         
-        // Create different size datasets
+        // Create different size datasets with single close array and OHLC data
         this.data['10k'] = new Float64Array(closes.slice(0, 10_000));
         this.data['100k'] = new Float64Array(closes.slice(0, 100_000));
         this.data['1M'] = new Float64Array(closes);
+        
+        // Also store OHLC data for indicators that need it
+        this.ohlcData = {
+            '10k': {
+                open: new Float64Array(opens.slice(0, 10_000)),
+                high: new Float64Array(highs.slice(0, 10_000)),
+                low: new Float64Array(lows.slice(0, 10_000)),
+                close: new Float64Array(closes.slice(0, 10_000))
+            },
+            '100k': {
+                open: new Float64Array(opens.slice(0, 100_000)),
+                high: new Float64Array(highs.slice(0, 100_000)),
+                low: new Float64Array(lows.slice(0, 100_000)),
+                close: new Float64Array(closes.slice(0, 100_000))
+            },
+            '1M': {
+                open: new Float64Array(opens),
+                high: new Float64Array(highs),
+                low: new Float64Array(lows),
+                close: new Float64Array(closes)
+            }
+        };
         
         console.log(`Loaded data sizes: ${Object.keys(this.data).join(', ')}`);
     }
@@ -276,7 +542,7 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_safe_${sizeName}`;
             
             const result = this.benchmarkFunction(() => {
-                const paramArray = this.prepareParams(params, data);
+                const paramArray = this.prepareParams(params, data, indicatorConfig, sizeName);
                 wasmFn.apply(this.wasm, paramArray);
             }, benchName, {
                 dataSize: data.length,
@@ -306,29 +572,71 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_fast_${sizeName}`;
             const len = data.length;
             
-            // Pre-allocate buffers outside of benchmark
-            const inPtr = this.wasm[allocFn](len);
-            const outPtr = this.wasm[allocFn](len);
+            let inPtr, outPtr, highPtr, lowPtr, closePtr;
             
             try {
-                // Copy data once
-                const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, len);
-                inView.set(data);
-                
-                const result = this.benchmarkFunction(() => {
-                    const paramArray = this.prepareFastParams(params, inPtr, outPtr, len);
-                    this.wasm[computeFn].apply(this.wasm, paramArray);
-                }, benchName, {
-                    dataSize: len,
-                    api: 'fast',
-                    indicator: indicatorKey
-                });
+                // Handle multiple inputs if needed
+                if (indicatorConfig.fast.needsMultipleInputs) {
+                    const ohlc = this.ohlcData[sizeName];
+                    
+                    // Allocate buffers for high, low, close
+                    highPtr = this.wasm[allocFn](len);
+                    lowPtr = this.wasm[allocFn](len);
+                    closePtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);
+                    
+                    // Copy data
+                    const highView = new Float64Array(this.wasm.__wasm.memory.buffer, highPtr, len);
+                    const lowView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
+                    const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, closePtr, len);
+                    
+                    highView.set(ohlc.high);
+                    lowView.set(ohlc.low);
+                    closeView.set(ohlc.close);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = this.prepareFastParams(params, null, outPtr, len, indicatorConfig.fast, highPtr, lowPtr, closePtr);
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
 
-                this.results[benchName] = result;
-                this.printResult(result);
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                } else {
+                    // Pre-allocate buffers outside of benchmark
+                    inPtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);
+                    
+                    // Copy data once
+                    const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, len);
+                    inView.set(data);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = this.prepareFastParams(params, inPtr, outPtr, len, indicatorConfig.fast);
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
+
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                }
             } finally {
-                this.wasm[freeFn](inPtr, len);
-                this.wasm[freeFn](outPtr, len);
+                // Clean up allocated memory
+                if (indicatorConfig.fast.needsMultipleInputs) {
+                    if (highPtr) this.wasm[freeFn](highPtr, len);
+                    if (lowPtr) this.wasm[freeFn](lowPtr, len);
+                    if (closePtr) this.wasm[freeFn](closePtr, len);
+                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                } else {
+                    if (inPtr) this.wasm[freeFn](inPtr, len);
+                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                }
             }
         }
     }
@@ -351,12 +659,22 @@ class WasmIndicatorBenchmark {
 
         // Only test with 10k data for batch operations
         const data = this.data['10k'];
+        const sizeName = '10k';
         
         for (const [configName, batchConfig] of Object.entries(config)) {
             const benchName = `${indicatorKey}_batch_${configName}`;
             
             const result = this.benchmarkFunction(() => {
-                wasmFn.call(this.wasm, data, batchConfig);
+                if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
+                    const ohlc = this.ohlcData[sizeName];
+                    wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
+                } else if ((indicatorKey === 'pwma' || indicatorKey === 'supersmoother') && batchConfig.period_range) {
+                    // PWMA and SuperSmoother have special batch APIs that take individual parameters
+                    const [start, end, step] = batchConfig.period_range;
+                    wasmFn.call(this.wasm, data, start, end, step);
+                } else {
+                    wasmFn.call(this.wasm, data, batchConfig);
+                }
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',
@@ -370,9 +688,19 @@ class WasmIndicatorBenchmark {
             // Calculate total combinations for batch
             if (batchConfig.period_range) {
                 const periods = Math.floor((batchConfig.period_range[1] - batchConfig.period_range[0]) / batchConfig.period_range[2]) + 1;
-                const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
-                const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
-                console.log(`  Total combinations: ${periods * offsets * sigmas}`);
+                let total = periods;
+                
+                // Handle optional parameters
+                if (batchConfig.offset_range) {
+                    const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
+                    total *= offsets;
+                }
+                if (batchConfig.sigma_range) {
+                    const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
+                    total *= sigmas;
+                }
+                
+                console.log(`  Total combinations: ${total}`);
             }
         }
     }
@@ -380,8 +708,21 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for safe API call
      */
-    prepareParams(params, data) {
-        // Start with data array
+    prepareParams(params, data, indicatorConfig, sizeName) {
+        // Check if this indicator needs multiple inputs
+        if (indicatorConfig.needsMultipleInputs) {
+            const ohlc = this.ohlcData[sizeName];
+            const result = [ohlc.high, ohlc.low, ohlc.close];
+            
+            // Add parameters in order
+            for (const value of Object.values(params)) {
+                result.push(value);
+            }
+            
+            return result;
+        }
+        
+        // Standard single data array
         const result = [data];
         
         // Add parameters in order (assumes params object maintains order)
@@ -395,8 +736,21 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for fast API call
      */
-    prepareFastParams(params, inPtr, outPtr, len) {
-        // Fast API typically takes: in_ptr, out_ptr, len, ...params
+    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr) {
+        // Check if this indicator needs multiple inputs
+        if (indicatorConfig.needsMultipleInputs) {
+            // For FRAMA: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
+            const result = [highPtr, lowPtr, closePtr, outPtr, len];
+            
+            // Add indicator parameters
+            for (const value of Object.values(params)) {
+                result.push(value);
+            }
+            
+            return result;
+        }
+        
+        // Standard fast API: in_ptr, out_ptr, len, ...params
         const result = [inPtr, outPtr, len];
         
         // Add indicator parameters

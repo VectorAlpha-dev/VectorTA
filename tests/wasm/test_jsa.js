@@ -165,40 +165,41 @@ test('JSA NaN handling', () => {
 });
 
 test('JSA batch', () => {
-    // Test JSA batch computation
+    // Test JSA batch computation with new API
     const close = new Float64Array(testData.close);
     
     // Test period range 10-40 step 10
-    const period_start = 10;
-    const period_end = 40;
-    const period_step = 10;  // periods: 10, 20, 30, 40
+    const config = {
+        period_range: [10, 40, 10]  // [start, end, step]
+    };
     
-    const batch_result = wasm.jsa_batch_js(
-        close, 
-        period_start, period_end, period_step
-    );
-    const metadata = wasm.jsa_batch_metadata_js(
-        period_start, period_end, period_step
-    );
+    const batch_result = wasm.jsa_batch(close, config);
     
-    // Metadata should contain period values
-    assert.strictEqual(metadata.length, 4);  // 4 periods
-    assert.deepStrictEqual(Array.from(metadata), [10, 20, 30, 40]);
+    // Extract values and metadata from result
+    const values = new Float64Array(batch_result.values);
+    const periods = new Float64Array(batch_result.periods);
+    const rows = batch_result.rows;
+    const cols = batch_result.cols;
     
-    // Batch result should contain all individual results flattened
-    assert.strictEqual(batch_result.length, 4 * close.length);  // 4 periods
+    // Check metadata
+    assert.strictEqual(rows, 4);  // 4 periods: 10, 20, 30, 40
+    assert.strictEqual(cols, close.length);
+    assert.strictEqual(periods.length, 4);
+    assert.deepStrictEqual(Array.from(periods), [10, 20, 30, 40]);
+    
+    // Values should be a flattened 2D array
+    assert.strictEqual(values.length, rows * cols);
     
     // Verify each row matches individual calculation
-    let row_idx = 0;
-    for (const period of [10, 20, 30, 40]) {
+    for (let i = 0; i < rows; i++) {
+        const period = periods[i];
         const individual_result = wasm.jsa_js(close, period);
         
         // Extract row from batch result
-        const row_start = row_idx * close.length;
-        const row = batch_result.slice(row_start, row_start + close.length);
+        const row_start = i * cols;
+        const row = values.slice(row_start, row_start + cols);
         
         assertArrayClose(row, individual_result, 1e-9, `Period ${period}`);
-        row_idx++;
     }
 });
 
@@ -228,8 +229,12 @@ test('JSA batch performance', () => {
     const close = new Float64Array(testData.close.slice(0, 1000)); // Use first 1000 values
     
     // Test 5 periods
+    const config = {
+        period_range: [10, 50, 10]  // periods: 10, 20, 30, 40, 50
+    };
+    
     const startBatch = performance.now();
-    const batchResult = wasm.jsa_batch_js(close, 10, 50, 10);
+    const batchResult = wasm.jsa_batch(close, config);
     const batchTime = performance.now() - startBatch;
     
     const startSingle = performance.now();
@@ -242,8 +247,11 @@ test('JSA batch performance', () => {
     // Batch should be faster than multiple single calls
     console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
     
+    // Extract values from batch result
+    const batchValues = new Float64Array(batchResult.values);
+    
     // Verify results match
-    assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
+    assertArrayClose(batchValues, singleResults, 1e-9, 'Batch vs single results');
 });
 
 test('JSA edge cases', () => {
@@ -294,14 +302,30 @@ test('JSA two values', () => {
 });
 
 test('JSA batch metadata', () => {
-    // Test metadata function returns correct parameter combinations
-    const metadata = wasm.jsa_batch_metadata_js(15, 45, 15);
+    // Test that batch API returns correct metadata
+    // Create data with enough points for period=45
+    const data = new Float64Array(50);
+    for (let i = 0; i < 50; i++) {
+        data[i] = i + 1;
+    }
     
-    // Should have 3 periods: 15, 30, 45
-    assert.strictEqual(metadata.length, 3);
-    assert.strictEqual(metadata[0], 15);
-    assert.strictEqual(metadata[1], 30);
-    assert.strictEqual(metadata[2], 45);
+    const config = {
+        period_range: [15, 45, 15]  // periods: 15, 30, 45
+    };
+    
+    // Run batch to get metadata
+    const result = wasm.jsa_batch(data, config);
+    
+    // Check periods array
+    const periods = new Float64Array(result.periods);
+    assert.strictEqual(periods.length, 3);
+    assert.strictEqual(periods[0], 15);
+    assert.strictEqual(periods[1], 30);
+    assert.strictEqual(periods[2], 45);
+    
+    // Check dimensions
+    assert.strictEqual(result.rows, 3);
+    assert.strictEqual(result.cols, data.length);
 });
 
 test('JSA warmup period calculation', () => {
@@ -345,14 +369,21 @@ test('JSA parameter step precision', () => {
     // Test batch with very small step sizes
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     
-    const batch_result = wasm.jsa_batch_js(data, 2, 4, 1);  // periods: 2, 3, 4
+    const config = {
+        period_range: [2, 4, 1]  // periods: 2, 3, 4
+    };
+    
+    const batch_result = wasm.jsa_batch(data, config);
+    const values = new Float64Array(batch_result.values);
+    const periods = new Float64Array(batch_result.periods);
     
     // Should have 3 periods
-    assert.strictEqual(batch_result.length, 3 * data.length);
+    assert.strictEqual(batch_result.rows, 3);
+    assert.strictEqual(batch_result.cols, data.length);
+    assert.strictEqual(values.length, 3 * data.length);
     
-    // Verify metadata
-    const metadata = wasm.jsa_batch_metadata_js(2, 4, 1);
-    assert.deepStrictEqual(Array.from(metadata), [2, 3, 4]);
+    // Verify periods
+    assert.deepStrictEqual(Array.from(periods), [2, 3, 4]);
 });
 
 test('JSA streaming', () => {
@@ -398,4 +429,158 @@ test('JSA large period', () => {
     // Last value should be average of first and last
     const expected = (data[99] + data[0]) * 0.5;
     assertClose(result[99], expected, 1e-9, "Last value mismatch");
+});
+
+// ================== Zero-Copy API Tests ==================
+
+test('JSA zero-copy API', () => {
+    // Test the fast zero-copy API
+    const data = new Float64Array(testData.close.slice(0, 100));
+    const period = 30;
+    
+    // Allocate buffer
+    const ptr = wasm.jsa_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute JSA in-place
+    try {
+        wasm.jsa_fast(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.jsa_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.jsa_free(ptr, data.length);
+    }
+});
+
+test('JSA zero-copy with separate buffers', () => {
+    // Test zero-copy API with separate input/output buffers
+    const data = new Float64Array(testData.close.slice(0, 50));
+    const period = 10;
+    
+    // Allocate separate buffers
+    const inPtr = wasm.jsa_alloc(data.length);
+    const outPtr = wasm.jsa_alloc(data.length);
+    
+    assert(inPtr !== 0, 'Failed to allocate input buffer');
+    assert(outPtr !== 0, 'Failed to allocate output buffer');
+    assert(inPtr !== outPtr, 'Buffers should be different');
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+        inView.set(data);
+        
+        // Compute JSA
+        wasm.jsa_fast(inPtr, outPtr, data.length, period);
+        
+        // Get output view
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
+        
+        // Verify results
+        const regularResult = wasm.jsa_js(data, period);
+        assertArrayClose(outView, regularResult, 1e-10, 'Zero-copy separate buffers');
+    } finally {
+        wasm.jsa_free(inPtr, data.length);
+        wasm.jsa_free(outPtr, data.length);
+    }
+});
+
+test('JSA batch fast API', () => {
+    // Test batch processing with fast API
+    const data = new Float64Array(testData.close.slice(0, 100));
+    
+    const inPtr = wasm.jsa_alloc(data.length);
+    const rows = 3; // 3 periods
+    const outPtr = wasm.jsa_alloc(data.length * rows);
+    
+    try {
+        // Copy data
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+        inView.set(data);
+        
+        // Compute batch: periods 10, 20, 30
+        const resultRows = wasm.jsa_batch_into(inPtr, outPtr, data.length, 10, 30, 10);
+        assert.strictEqual(resultRows, rows, 'Batch should return correct row count');
+        
+        // Get output view
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length * rows);
+        
+        // Verify each row
+        for (let i = 0; i < rows; i++) {
+            const period = 10 + i * 10;
+            const expected = wasm.jsa_js(data, period);
+            const rowStart = i * data.length;
+            const row = outView.slice(rowStart, rowStart + data.length);
+            assertArrayClose(row, expected, 1e-10, `Batch row ${i} (period ${period})`);
+        }
+    } finally {
+        wasm.jsa_free(inPtr, data.length);
+        wasm.jsa_free(outPtr, data.length * rows);
+    }
+});
+
+test('JSA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.jsa_fast(0, 0, 10, 5);
+    }, /null pointer|Null pointer/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.jsa_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.jsa_fast(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+        
+        // Period exceeds length
+        assert.throws(() => {
+            wasm.jsa_fast(ptr, ptr, 10, 20);
+        }, /Invalid period/);
+    } finally {
+        wasm.jsa_free(ptr, 10);
+    }
+});
+
+test('JSA memory management', () => {
+    // Test allocating and freeing multiple times
+    const sizes = [10, 100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.jsa_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 2.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 2.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.jsa_free(ptr, size);
+    }
 });

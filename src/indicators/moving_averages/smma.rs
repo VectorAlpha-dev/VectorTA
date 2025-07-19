@@ -26,11 +26,15 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -64,6 +68,7 @@ pub struct SmmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct SmmaParams {
     pub period: Option<usize>,
 }
@@ -208,7 +213,7 @@ pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput,
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 smma_avx512(data, period, first, &mut out)
             }
-            _ => unreachable!(),
+            _ => smma_scalar(data, period, first, &mut out), // Default to scalar
         }
     }
     Ok(SmmaOutput { values: out })
@@ -222,6 +227,29 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     out[end - 1] = prev;
     for i in end..data.len() {
         prev = (prev * (period as f64 - 1.0) + data[i]) / (period as f64);
+        out[i] = prev;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn smma_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    // Calculate initial average
+    let end = first + period;
+    let sum: f64 = data[first..end].iter().sum();
+    let mut prev = sum / period as f64;
+    out[end - 1] = prev;
+    
+    // SIMD constants
+    let period_f64 = period as f64;
+    let period_minus_1 = period_f64 - 1.0;
+    let inv_period = 1.0 / period_f64;
+    
+    // Process scalar loop - SMMA is inherently sequential
+    // SIMD doesn't provide much benefit due to the dependency chain
+    // Each value depends on the previous one
+    for i in end..data.len() {
+        prev = (prev * period_minus_1 + data[i]) * inv_period;
         out[i] = prev;
     }
 }
@@ -298,6 +326,15 @@ fn smma_compute_into(
     out: &mut [f64],
 ) {
     unsafe {
+        // For WASM, use SIMD128 when available instead of scalar
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+                smma_simd128(data, period, first, out);
+                return;
+            }
+        }
+        
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 smma_scalar(data, period, first, out)
@@ -310,7 +347,7 @@ fn smma_compute_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 smma_avx512(data, period, first, out)
             }
-            _ => unreachable!(),
+            _ => smma_scalar(data, period, first, out), // Default to scalar
         }
     }
 }
@@ -429,7 +466,7 @@ pub fn smma_batch_with_kernel(data: &[f64], sweep: &SmmaBatchRange, k: Kernel) -
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
+        _ => Kernel::Scalar, // Default to scalar for any other case
     };
     smma_batch_par_slice(data, sweep, simd)
 }
@@ -509,12 +546,12 @@ fn smma_batch_inner(data: &[f64], sweep: &SmmaBatchRange, kern: Kernel, parallel
         );
 
         match kern {
-            Kernel::Scalar => smma_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::ScalarBatch => smma_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2   => smma_row_avx2  (data, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx2Batch => smma_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => smma_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+            Kernel::Avx512 | Kernel::Avx512Batch => smma_row_avx512(data, first, period, out_row),
+            _ => smma_row_scalar(data, first, period, out_row), // Default to scalar
         }
     };
 
@@ -619,7 +656,7 @@ fn smma_batch_inner_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 smma_row_avx512(data, first, period, dst)
             }
-            _ => unreachable!(),
+            _ => smma_row_scalar(data, first, period, dst), // Default to scalar
         }
     };
     
@@ -1143,37 +1180,23 @@ pub fn smma_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
+    
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;  // Validate before allow_threads
     
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-    
-    // Build input struct
     let params = SmmaParams { period: Some(period) };
     let smma_in = SmmaInput::from_slice(slice_in, params);
     
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), SmmaError> {
-        let (data, period, first, chosen) = smma_prepare(&smma_in, kern)?;
-        // Initialize entire output with NaN first
-        slice_out.fill(f64::NAN);
-        // Compute SMMA starting from the appropriate index
-        smma_compute_into(data, period, first, chosen, slice_out);
-        Ok(())
+    // Get Vec<f64> from Rust function
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        smma_with_kernel(&smma_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr.into())
+    // Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1225,31 +1248,25 @@ pub fn smma_batch_py<'py>(
     period_range: (usize, usize, usize),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    let slice_in = data.as_slice()?;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
     
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;  // true for batch operations
     let sweep = SmmaBatchRange { period: period_range };
     
-    // Expand grid to know rows*cols
+    // Calculate dimensions
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate NumPy array
+    // Pre-allocate output array (OK for batch operations)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-    
-    // Heavy work without the GIL
+    // Compute without GIL
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
+        // Handle kernel selection for batch operations
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1260,12 +1277,12 @@ pub fn smma_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
+        
         smma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Build dict with the GIL
+    // Build result dictionary
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1280,22 +1297,89 @@ pub fn smma_batch_py<'py>(
     Ok(dict.into())
 }
 
+/// Write SMMA values directly to output slice - no allocations
+#[inline]
+pub fn smma_into_slice(dst: &mut [f64], input: &SmmaInput, kern: Kernel) -> Result<(), SmmaError> {
+    let (data, period, first, chosen) = smma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(SmmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute SMMA values directly into dst
+    smma_compute_into(data, period, first, chosen, dst);
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smma")]
-/// Compute the Smoothed Moving Average (SMMA) of the input data.
 pub fn smma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SmmaParams { period: Some(period) };
     let input = SmmaInput::from_slice(data, params);
     
-    match smma(&input) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
-    }
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    smma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SmmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SmmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<SmmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "smma_batch_new")]
+pub fn smma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: SmmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = SmmaBatchRange {
+        period: config.period_range,
+    };
+
+    let output = smma_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = SmmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Legacy wrapper for backward compatibility
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smma_batch")]
-/// Compute SMMA for multiple period values in a single pass.
 pub fn smma_batch_js(
     data: &[f64],
     period_start: usize,
@@ -1340,5 +1424,110 @@ pub fn smma_batch_rows_cols_js(
     };
     let combos = expand_grid(&range);
     vec![combos.len(), data_len]
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn smma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn smma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn smma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to smma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate SMMA
+        let params = SmmaParams { period: Some(period) };
+        let input = SmmaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr as *const f64 {
+            // Aliasing detected - use temporary buffer
+            let mut temp = vec![0.0; len];
+            smma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            smma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn smma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to smma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = SmmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        smma_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }
 

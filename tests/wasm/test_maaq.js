@@ -195,9 +195,11 @@ test('MAAQ batch', () => {
     // Test period range 11-50 step 10, static fast/slow
     const batch_result = wasm.maaq_batch_js(
         close, 
-        11, 41, 10,      // period range: 11, 21, 31, 41
-        2, 2, 0,         // fast_period static
-        30, 30, 0        // slow_period static
+        {
+            period_range: [11, 41, 10],      // period range: 11, 21, 31, 41
+            fast_period_range: [2, 2, 0],    // fast_period static
+            slow_period_range: [30, 30, 0]   // slow_period static
+        }
     );
     const metadata = wasm.maaq_batch_metadata_js(
         11, 41, 10,
@@ -264,9 +266,11 @@ test('MAAQ batch performance', () => {
     const startBatch = performance.now();
     const batchResult = wasm.maaq_batch_js(
         close,
-        10, 30, 10,      // periods: 10, 20, 30
-        2, 2, 0,         // fast_period fixed at 2
-        25, 35, 5        // slow_periods: 25, 30, 35
+        {
+            period_range: [10, 30, 10],      // periods: 10, 20, 30
+            fast_period_range: [2, 2, 0],    // fast_period fixed at 2
+            slow_period_range: [25, 35, 5]   // slow_periods: 25, 30, 35
+        }
     );
     const batchTime = performance.now() - startBatch;
     
@@ -376,9 +380,11 @@ test('MAAQ parameter step precision', () => {
     
     const batch_result = wasm.maaq_batch_js(
         data,
-        5, 7, 1,         // periods: 5, 6, 7
-        2, 3, 1,         // fast_periods: 2, 3
-        10, 10, 0        // slow_period: 10
+        {
+            period_range: [5, 7, 1],         // periods: 5, 6, 7
+            fast_period_range: [2, 3, 1],    // fast_periods: 2, 3
+            slow_period_range: [10, 10, 0]   // slow_period: 10
+        }
     );
     
     // Should have 3 * 2 * 1 = 6 combinations
