@@ -227,3 +227,32 @@ class TestGaussian:
             assert len(result) == len(close)
             # Check that after warmup we have valid non-NaN values
             assert not np.isnan(result[period:]).any()
+    
+    def test_gaussian_kernel_parameter(self, test_data):
+        """Test that kernel parameter works correctly"""
+        close = test_data['close']
+        period = 14
+        poles = 4
+        
+        # Test with different kernel types
+        result_auto = ta_indicators.gaussian(close, period, poles)  # Default (auto)
+        result_scalar = ta_indicators.gaussian(close, period, poles, kernel='scalar')
+        
+        # Results should be very close (within floating point tolerance)
+        valid_idx = ~np.isnan(result_auto)
+        np.testing.assert_allclose(result_auto[valid_idx], result_scalar[valid_idx], rtol=1e-10)
+        
+        # Test invalid kernel
+        with pytest.raises(ValueError):
+            ta_indicators.gaussian(close, period, poles, kernel='invalid')
+        
+        # Test batch with kernel
+        batch_result = ta_indicators.gaussian_batch(
+            close, 
+            period_range=(10, 20, 5),
+            poles_range=(2, 4, 1),
+            kernel='scalar'
+        )
+        assert 'values' in batch_result
+        assert 'periods' in batch_result
+        assert 'poles' in batch_result

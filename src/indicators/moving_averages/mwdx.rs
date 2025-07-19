@@ -23,6 +23,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -66,6 +70,7 @@ pub struct MwdxOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MwdxParams {
     pub factor: Option<f64>,
 }
@@ -176,6 +181,8 @@ pub enum MwdxError {
     InvalidFactor { factor: f64 },
     #[error("mwdx: Factor leads to invalid denominator, factor: {factor}")]
     InvalidDenominator { factor: f64 },
+    #[error("mwdx: Invalid length - expected {expected}, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -246,6 +253,30 @@ pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput,
     let mut out = alloc_with_nan_prefix(data.len(), warm);
     mwdx_compute_into(data, fac, chosen, &mut out);
     Ok(MwdxOutput { values: out })
+}
+
+/// Computes MWDX directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn mwdx_into_slice(dst: &mut [f64], input: &MwdxInput, kern: Kernel) -> Result<(), MwdxError> {
+    let (data, fac, warmup_period, chosen) = mwdx_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(MwdxError::InvalidLength {
+            expected: data.len(),
+            actual: dst.len(),
+        });
+    }
+    
+    // Compute MWDX values directly into dst
+    mwdx_compute_into(data, fac, chosen, dst);
+    
+    // MWDX doesn't have a true warmup period - it starts computing from the first value
+    // The warmup_period here only represents initial NaN values in the input data
+    // So we don't need to fill with NaN - the computation already handles this correctly
+    
+    Ok(())
 }
 
 #[inline]
@@ -1118,32 +1149,32 @@ mod tests {
 // Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "mwdx")]
+#[pyo3(signature = (data, factor, kernel=None))]
 pub fn mwdx_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     factor: f64,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
+    
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
+    
     let params = MwdxParams {
         factor: Some(factor),
     };
     let mwdx_in = MwdxInput::from_slice(slice_in, params);
 
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), MwdxError> {
-        let (data, fac, warm, chosen) = mwdx_prepare(&mwdx_in, Kernel::Auto)?;
-        // Initialize prefix with NaN
-        slice_out[..warm].fill(f64::NAN);
-        mwdx_compute_into(data, fac, chosen, slice_out);
-        Ok(())
+    // GOOD: Get Vec<f64> from Rust function
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        mwdx_with_kernel(&mwdx_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    // GOOD: Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1173,14 +1204,17 @@ impl MwdxStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "mwdx_batch")]
+#[pyo3(signature = (data, factor_range, kernel=None))]
 pub fn mwdx_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     factor_range: (f64, f64, f64),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;  // true for batch operations
     let sweep = MwdxBatchRange {
         factor: factor_range,
     };
@@ -1197,7 +1231,7 @@ pub fn mwdx_batch_py<'py>(
     // Heavy work without the GIL
     let combos = py
         .allow_threads(|| {
-            let kernel = match Kernel::Auto {
+            let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
@@ -1234,10 +1268,55 @@ pub fn mwdx_js(data: &[f64], factor: f64) -> Result<Vec<f64>, JsValue> {
         factor: Some(factor),
     };
     let input = MwdxInput::from_slice(data, params);
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    // Use Scalar kernel for WASM as SIMD instructions are not available
+    mwdx_into_slice(&mut output, &input, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
 
-    mwdx_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MwdxBatchConfig {
+    pub factor_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MwdxBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<MwdxParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = mwdx_batch)]
+pub fn mwdx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: MwdxBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = MwdxBatchRange {
+        factor: config.factor_range,
+    };
+
+    let output = mwdx_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = MwdxBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1288,4 +1367,118 @@ pub fn mwdx_batch_rows_cols_js(
     };
     let combos = expand_grid(&sweep);
     vec![combos.len(), data_len]
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    factor: f64,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to mwdx_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if len == 0 {
+            return Err(JsValue::from_str("Empty data"));
+        }
+        
+        // Create input
+        let params = MwdxParams {
+            factor: Some(factor),
+        };
+        let input = MwdxInput::from_slice(data, params);
+        
+        if in_ptr == out_ptr as *const f64 {
+            // CRITICAL: Aliasing check - same pointer
+            let mut temp = vec![0.0; len];
+            mwdx_into_slice(&mut temp, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // Different pointers - compute directly
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            mwdx_into_slice(out, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mwdx_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    factor_start: f64,
+    factor_end: f64,
+    factor_step: f64,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to mwdx_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = MwdxBatchRange {
+            factor: (factor_start, factor_end, factor_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let total_len = rows * len;
+        
+        // Create mutable slice for output
+        let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_len);
+        
+        // Compute batch results directly into output buffer
+        for (i, params) in combos.iter().enumerate() {
+            let row_start = i * len;
+            let row_end = row_start + len;
+            let out_row = &mut out_slice[row_start..row_end];
+            
+            let input = MwdxInput::from_slice(data, params.clone());
+            mwdx_into_slice(out_row, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(rows)
+    }
 }

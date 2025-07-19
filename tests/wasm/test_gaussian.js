@@ -31,6 +31,14 @@ test.before(async () => {
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
+        
+        // Check if memory is accessible
+        if (!wasm.__wasm || !wasm.__wasm.memory) {
+            console.error('WASM memory not accessible. Available properties:', Object.keys(wasm));
+            if (wasm.__wasm) {
+                console.error('__wasm properties:', Object.keys(wasm.__wasm));
+            }
+        }
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -270,4 +278,169 @@ test('Gaussian batch performance', () => {
     
     // Verify results match
     assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
+});
+
+// Tests for new optimized WASM APIs
+
+test('Gaussian fast API (gaussian_into)', () => {
+    const close = new Float64Array(testData.close);
+    const period = 14;
+    const poles = 4;
+    
+    // Get result from safe API for comparison
+    const safeResult = wasm.gaussian_js(close, period, poles);
+    
+    // Allocate memory for fast API
+    const ptr = wasm.gaussian_alloc(close.length);
+    const outPtr = wasm.gaussian_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
+        wasmMemory.set(close);
+        
+        // Call fast API
+        wasm.gaussian_into(ptr, outPtr, close.length, period, poles);
+        
+        // Read result
+        const fastResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length);
+        
+        // Results should match
+        assertArrayClose(Array.from(fastResult), safeResult, 1e-10, 'Fast API vs Safe API');
+    } finally {
+        // Clean up
+        wasm.gaussian_free(ptr, close.length);
+        wasm.gaussian_free(outPtr, close.length);
+    }
+});
+
+test('Gaussian fast API with aliasing (in-place)', () => {
+    const close = new Float64Array(testData.close);
+    const period = 14;
+    const poles = 4;
+    
+    // Get expected result
+    const expectedResult = wasm.gaussian_js(close, period, poles);
+    
+    // Allocate single buffer for in-place operation
+    const ptr = wasm.gaussian_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const wasmMemory = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
+        wasmMemory.set(close);
+        
+        // Call fast API with same input and output pointers (aliasing)
+        wasm.gaussian_into(ptr, ptr, close.length, period, poles);
+        
+        // Read result (should be computed correctly despite aliasing)
+        const result = Array.from(new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length));
+        
+        // Results should match
+        assertArrayClose(result, expectedResult, 1e-10, 'In-place operation result');
+    } finally {
+        wasm.gaussian_free(ptr, close.length);
+    }
+});
+
+test('Gaussian unified batch API', () => {
+    const close = new Float64Array(testData.close.slice(0, 10000)); // Use smaller dataset
+    
+    // Configure batch parameters
+    const config = {
+        period_range: [10, 20, 5],  // 10, 15, 20
+        poles_range: [2, 4, 1]      // 2, 3, 4
+    };
+    
+    // Call unified batch API
+    const result = wasm.gaussian_batch(close, config);
+    
+    // Verify structure
+    assert(result.values, 'Result should have values');
+    assert(result.combos, 'Result should have combos');
+    assert.strictEqual(result.rows, 9, 'Should have 9 combinations (3 periods × 3 poles)');
+    assert.strictEqual(result.cols, close.length, 'Should have same length as input');
+    
+    // Verify combos
+    assert.strictEqual(result.combos.length, 9, 'Should have 9 parameter combinations');
+    
+    // Verify first combo
+    assert.strictEqual(result.combos[0].period, 10);
+    assert.strictEqual(result.combos[0].poles, 2);
+    
+    // Verify values shape
+    assert.strictEqual(result.values.length, 9 * close.length, 'Values should be flattened matrix');
+    
+    // Verify first row matches individual computation
+    const firstRow = result.values.slice(0, close.length);
+    const expected = wasm.gaussian_js(close, 10, 2);
+    assertArrayClose(firstRow, expected, 1e-10, 'First row should match individual computation');
+});
+
+test('Gaussian fast batch API (gaussian_batch_into)', () => {
+    const close = new Float64Array(testData.close.slice(0, 1000)); // Small dataset
+    
+    // Batch parameters
+    const periodStart = 10, periodEnd = 15, periodStep = 5;  // 2 periods
+    const polesStart = 3, polesEnd = 4, polesStep = 1;       // 2 poles
+    const expectedRows = 4; // 2 × 2
+    
+    // Allocate memory
+    const inPtr = wasm.gaussian_alloc(close.length);
+    const outPtr = wasm.gaussian_alloc(close.length * expectedRows);
+    
+    try {
+        // Copy data to WASM memory
+        const wasmInput = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
+        wasmInput.set(close);
+        
+        // Call fast batch API
+        const rows = wasm.gaussian_batch_into(
+            inPtr, outPtr, close.length,
+            periodStart, periodEnd, periodStep,
+            polesStart, polesEnd, polesStep
+        );
+        
+        assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
+        
+        // Read results
+        const results = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length * rows);
+        
+        // Verify first row matches individual computation
+        const firstRow = Array.from(results.slice(0, close.length));
+        const expected = wasm.gaussian_js(close, periodStart, polesStart);
+        assertArrayClose(firstRow, expected, 1e-10, 'First batch row should match individual');
+    } finally {
+        wasm.gaussian_free(inPtr, close.length);
+        wasm.gaussian_free(outPtr, close.length * expectedRows);
+    }
+});
+
+test('Gaussian memory management', () => {
+    const size = 1000;
+    
+    // Test allocation
+    const ptr1 = wasm.gaussian_alloc(size);
+    assert(ptr1 !== 0, 'Should allocate non-null pointer');
+    
+    const ptr2 = wasm.gaussian_alloc(size);
+    assert(ptr2 !== 0, 'Should allocate second non-null pointer');
+    assert(ptr2 !== ptr1, 'Should allocate different memory regions');
+    
+    // Test we can write to allocated memory
+    const mem1 = new Float64Array(wasm.__wasm.memory.buffer, ptr1, size);
+    const mem2 = new Float64Array(wasm.__wasm.memory.buffer, ptr2, size);
+    
+    mem1[0] = 42.0;
+    mem2[0] = 84.0;
+    
+    assert.strictEqual(mem1[0], 42.0, 'Should write to first allocation');
+    assert.strictEqual(mem2[0], 84.0, 'Should write to second allocation');
+    
+    // Free memory
+    wasm.gaussian_free(ptr1, size);
+    wasm.gaussian_free(ptr2, size);
+    
+    // Test freeing null pointer (should not crash)
+    wasm.gaussian_free(0, size);
 });

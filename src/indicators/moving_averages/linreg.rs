@@ -18,6 +18,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, alloc_with_nan_prefix, init_matrix_prefixes};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,6 +28,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 use std::mem::MaybeUninit;  
 
 // --- DATA, PARAMS, INPUT/OUTPUT STRUCTS ---
@@ -45,6 +49,7 @@ pub struct LinRegOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct LinRegParams {
     pub period: Option<usize>,
 }
@@ -366,6 +371,7 @@ impl LinRegBatchBuilder {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct LinRegBatchOutput {
     pub values: Vec<f64>,
     pub combos: Vec<LinRegParams>,
@@ -1123,83 +1129,77 @@ use numpy::IntoPyArray;
 
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(name = "linreg")]
+#[pyo3(name = "linreg", signature = (data, period, kernel=None))]
 pub fn linreg_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice_in = data.as_slice()?;  // zero-copy read
+    use numpy::{IntoPyArray, PyArrayMethods};
+    
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     let params = LinRegParams {
         period: Some(period),
     };
     let input = LinRegInput::from_slice(slice_in, params);
     
-    // Pre-allocate output array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Compute directly into pre-allocated array (zero-copy)
-    py.allow_threads(|| -> Result<(), LinRegError> {
-        let (data, period, first, chosen) = linreg_prepare(&input, Kernel::Auto)?;
-        let warm = first + period;
-        slice_out[..warm].fill(f64::NAN);
-        
-        unsafe {
-            match chosen {
-                Kernel::Scalar | Kernel::ScalarBatch => linreg_scalar(data, period, first, slice_out),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 | Kernel::Avx2Batch => linreg_avx2(data, period, first, slice_out),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => linreg_avx512(data, period, first, slice_out),
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        linreg_with_kernel(&input, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(name = "linreg_batch")]
+#[pyo3(name = "linreg_batch", signature = (data, period_range, kernel=None))]
 pub fn linreg_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let slice_in = data.as_slice()?;  // zero-copy read
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     let sweep = LinRegBatchRange {
         period: period_range,
     };
     
-    // Expand grid to get combinations
+    // Calculate dimensions
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate output array
+    // Pre-allocate output array (OK for batch operations)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Use the best available kernel
-    let kernel = detect_best_batch_kernel();
-    let simd_kernel = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar,
-    };
-    
-    // Compute directly into pre-allocated array (zero-copy)
-    let combos = py.allow_threads(|| -> Result<Vec<LinRegParams>, LinRegError> {
-        linreg_batch_inner_into(slice_in, &sweep, simd_kernel, true, slice_out)
+    // Compute without GIL
+    let combos = py.allow_threads(|| {
+        // Handle kernel selection for batch operations
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => kernel,
+        };
+        
+        linreg_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Build dict with the GIL
+    // Build result dictionary
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1239,56 +1239,176 @@ impl LinRegStreamPy {
     }
 }
 
+/// Computes LinReg directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn linreg_into_slice(dst: &mut [f64], input: &LinRegInput, kern: Kernel) -> Result<(), LinRegError> {
+    let data: &[f64] = input.as_ref();
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(LinRegError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Use the existing compute_into function
+    linreg_compute_into(input, kern, dst)
+}
+
 // WASM bindings
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn linreg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = LinRegParams {
         period: Some(period),
     };
     let input = LinRegInput::from_slice(data, params);
-    match linreg_with_kernel(&input, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("LINREG error: {}", e))),
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-#[wasm_bindgen]
-pub fn linreg_batch_js(
-    data: &[f64],
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> Result<Vec<f64>, JsValue> {
-    let sweep = LinRegBatchRange {
-        period: (period_start, period_end, period_step),
-    };
-    match linreg_batch_slice(data, &sweep, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("LINREG batch error: {}", e))),
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-#[wasm_bindgen]
-pub fn linreg_batch_metadata_js(
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> Vec<f64> {
-    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
-        vec![period_start]
-    } else {
-        (period_start..=period_end).step_by(period_step).collect()
-    };
     
-    let mut result = Vec::new();
-    for &period in &periods {
-        result.push(period as f64);
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    linreg_into_slice(&mut output, &input, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct LinRegBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = linreg_batch)]
+pub fn linreg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: LinRegBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = LinRegBatchRange {
+        period: config.period_range,
+    };
+
+    // For WASM, we need to use Kernel::Scalar instead of Auto
+    // since WASM doesn't support AVX instructions
+    let output = linreg_batch_slice(data, &sweep, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    serde_wasm_bindgen::to_value(&output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linreg_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linreg_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
-    result
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linreg_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to linreg_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate LinReg
+        let params = LinRegParams {
+            period: Some(period),
+        };
+        let input = LinRegInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            linreg_into_slice(&mut temp, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            linreg_into_slice(out, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linreg_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to linreg_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = LinRegBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing with Scalar kernel for WASM
+        linreg_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

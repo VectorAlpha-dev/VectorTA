@@ -41,9 +41,13 @@ use pyo3::exceptions::PyValueError;
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyArray2};
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 impl<'a> AsRef<[f64]> for SinWmaInput<'a> {
     #[inline(always)]
@@ -199,6 +203,32 @@ pub fn sinwma_with_kernel(input: &SinWmaInput, kernel: Kernel) -> Result<SinWmaO
     sinwma_compute_into(data, &weights, period, first, chosen, &mut out);
     
     Ok(SinWmaOutput { values: out })
+}
+
+/// Write SINWMA values directly to output slice - no allocations.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn sinwma_into_slice(dst: &mut [f64], input: &SinWmaInput, kern: Kernel) -> Result<(), SinWmaError> {
+    let (data, weights, period, first, chosen) = sinwma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(SinWmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute SINWMA values directly into dst
+    sinwma_compute_into(data, &weights, period, first, chosen, dst);
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
 }
 
 #[inline(always)]
@@ -1359,38 +1389,23 @@ pub fn sinwma_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-    
-    // Build input struct
     let params = SinWmaParams {
         period: Some(period),
     };
-    let sinwma_in = SinWmaInput::from_slice(slice_in, params);
-    
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), SinWmaError> {
-        let (data, weights, per, first, chosen) = sinwma_prepare(&sinwma_in, kern)?;
-        // Initialize with NaN exactly once
-        slice_out[..first + per - 1].fill(f64::NAN);
-        sinwma_compute_into(data, &weights, per, first, chosen, slice_out);
-        Ok(())
+    let input = SinWmaInput::from_slice(slice_in, params);
+
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        sinwma_with_kernel(&input, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    Ok(out_arr.into())
+
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1463,33 +1478,25 @@ pub fn sinwma_batch_py<'py>(
     period_range: (usize, usize, usize),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+
     let slice_in = data.as_slice()?;
-    
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
     
     let sweep = SinWmaBatchRange {
         period: period_range,
     };
-    
-    // 1. Expand grid once to know rows*cols
+
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
-    
-    // 2. Pre-allocate NumPy array (1-D, will reshape later)
+
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // 3. Heavy work without the GIL
+
+    let kern = validate_kernel(kernel, true)?;
+
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1500,12 +1507,10 @@ pub fn sinwma_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
         sinwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    
-    // 4. Build dict with the GIL
+
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1517,7 +1522,7 @@ pub fn sinwma_batch_py<'py>(
             .into_pyarray(py),
     )?;
     
-    Ok(dict.into())
+    Ok(dict)
 }
 
 #[cfg(feature = "wasm")]
@@ -1528,11 +1533,129 @@ pub fn sinwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = SinWmaInput::from_slice(data, params);
     
-    sinwma_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    sinwma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sinwma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to sinwma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        let params = SinWmaParams {
+            period: Some(period),
+        };
+        let input = SinWmaInput::from_slice(data, params);
+        
+        // Check for aliasing (same memory location)
+        if in_ptr == out_ptr {
+            // Need temporary buffer for in-place operation
+            let mut temp = vec![0.0; len];
+            sinwma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy result back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // Direct computation into output buffer
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            sinwma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SinWmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SinWmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub periods: Vec<usize>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = sinwma_batch)]
+pub fn sinwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: SinWmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = SinWmaBatchRange {
+        period: config.period_range,
+    };
+
+    let output = sinwma_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let periods: Vec<usize> = output.combos.iter()
+        .map(|c| c.period.unwrap())
+        .collect();
+
+    let js_output = SinWmaBatchJsOutput {
+        values: output.values,
+        periods,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Keep the old API for backward compatibility
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sinwma_batch_js(
@@ -1546,7 +1669,7 @@ pub fn sinwma_batch_js(
     };
     
     // Use the existing batch function with parallel=false for WASM
-    sinwma_batch_inner(data, &sweep, Kernel::Scalar, false)
+    sinwma_batch_with_kernel(data, &sweep, Kernel::Auto)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

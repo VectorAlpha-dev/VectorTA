@@ -63,6 +63,7 @@ pub struct GaussianOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct GaussianParams {
     pub period: Option<usize>,
     pub poles: Option<usize>,
@@ -743,12 +744,25 @@ pub fn gaussian_batch_par_slice(
     gaussian_batch_inner(data, sweep, kern, true)
 }
 
-#[inline(always)]
-fn gaussian_into(
+/// Computes Gaussian directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn gaussian_into_slice(
+    dst: &mut [f64],
     input: &GaussianInput,
-    out: &mut [f64],
+    kern: Kernel,
 ) -> Result<(), GaussianError> {
-    gaussian_with_kernel_into(input, Kernel::Auto, out)
+    let data = input.as_ref();
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(GaussianError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    gaussian_with_kernel_into(input, kern, dst)
 }
 
 #[inline(always)]
@@ -1920,15 +1934,21 @@ mod tests {
 
 // Python bindings
 #[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy;
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 // WASM bindings
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 // Helper function for batch operations with output buffer
 #[inline(always)]
@@ -2042,34 +2062,32 @@ fn gaussian_batch_inner_into(
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "gaussian")]
+#[pyo3(signature = (data, period, poles, kernel=None))]
 pub fn gaussian_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
     poles: usize,
-) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Build input struct
     let params = GaussianParams {
         period: Some(period),
         poles: Some(poles),
     };
     let gaussian_in = GaussianInput::from_slice(slice_in, params);
     
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), GaussianError> {
-        gaussian_into(&gaussian_in, slice_out)
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        gaussian_with_kernel(&gaussian_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -2099,16 +2117,19 @@ impl GaussianStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "gaussian_batch")]
+#[pyo3(signature = (data, period_range, poles_range, kernel=None))]
 pub fn gaussian_batch_py<'py>(
     py: Python<'py>,
-    data: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     poles_range: (usize, usize, usize),
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
     
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = GaussianBatchRange {
         period: period_range,
@@ -2125,8 +2146,7 @@ pub fn gaussian_batch_py<'py>(
     
     // Heavy work without the GIL
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
@@ -2136,19 +2156,17 @@ pub fn gaussian_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
         gaussian_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
     let dict = PyDict::new(py);
-    // Build dict with the GIL
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
         combos
             .iter()
-            .map(|p| p.period.unwrap_or(14) as u64)
+            .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
@@ -2173,9 +2191,90 @@ pub fn gaussian_js(data: &[f64], period: usize, poles: usize) -> Result<Vec<f64>
     };
     let input = GaussianInput::from_slice(data, params);
     
-    gaussian_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    gaussian_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+    poles: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to gaussian_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        if !(1..=4).contains(&poles) {
+            return Err(JsValue::from_str("Invalid poles (must be 1-4)"));
+        }
+        
+        // Calculate Gaussian
+        let params = GaussianParams {
+            period: Some(period),
+            poles: Some(poles),
+        };
+        let input = GaussianInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            gaussian_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            gaussian_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -2194,7 +2293,7 @@ pub fn gaussian_batch_js(
         poles: (poles_start, poles_end, poles_step),
     };
     
-    gaussian_batch_inner(data, &sweep, Kernel::Scalar, false)
+    gaussian_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -2224,4 +2323,84 @@ pub fn gaussian_batch_metadata_js(
         .collect();
     
     Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct GaussianBatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub poles_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct GaussianBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<GaussianParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = gaussian_batch)]
+pub fn gaussian_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: GaussianBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = GaussianBatchRange {
+        period: config.period_range,
+        poles: config.poles_range,
+    };
+
+    let output = gaussian_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = GaussianBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn gaussian_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    poles_start: usize,
+    poles_end: usize,
+    poles_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to gaussian_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = GaussianBatchRange {
+            period: (period_start, period_end, period_step),
+            poles: (poles_start, poles_end, poles_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        gaussian_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

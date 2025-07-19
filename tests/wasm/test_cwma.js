@@ -328,6 +328,171 @@ test('CWMA batch performance test', () => {
 
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
+// ================== Fast/Unsafe API Tests ==================
+
+test('CWMA memory allocation and deallocation', () => {
+    // Test memory management functions
+    const len = 100;
+    
+    // Allocate memory
+    const ptr = wasm.cwma_alloc(len);
+    assert(ptr !== 0, 'Memory allocation should return non-zero pointer');
+    
+    // Free memory
+    assert.doesNotThrow(() => {
+        wasm.cwma_free(ptr, len);
+    }, 'Memory deallocation should not throw');
+    
+    // Don't test double free as it's undefined behavior
+});
+
+test('CWMA fast API basic functionality', () => {
+    // Test fast/unsafe API produces same results as safe API
+    const close = new Float64Array(testData.close.slice(0, 1000));
+    const period = 14;
+    
+    // Safe API result
+    const safeResult = wasm.cwma_js(close, period);
+    
+    // Fast API
+    const inPtr = wasm.cwma_alloc(close.length);
+    const outPtr = wasm.cwma_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
+        memView.set(close);
+        
+        // Compute using fast API
+        wasm.cwma_into(inPtr, outPtr, close.length, period);
+        
+        // Read results
+        const fastResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length);
+        
+        // Compare results
+        assertArrayClose(
+            Array.from(fastResult),
+            safeResult,
+            1e-10,
+            "Fast API should produce same results as safe API"
+        );
+    } finally {
+        // Clean up
+        wasm.cwma_free(inPtr, close.length);
+        wasm.cwma_free(outPtr, close.length);
+    }
+});
+
+test('CWMA fast API with aliasing (in-place)', () => {
+    // Test in-place computation (input and output buffers are the same)
+    const close = new Float64Array(testData.close.slice(0, 500));
+    const period = 20;
+    
+    // Expected result from safe API
+    const expected = wasm.cwma_js(close, period);
+    
+    // Allocate single buffer for in-place operation
+    const ptr = wasm.cwma_alloc(close.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
+        memView.set(close);
+        
+        // Compute in-place (same pointer for input and output)
+        wasm.cwma_into(ptr, ptr, close.length, period);
+        
+        // Read results
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
+        
+        // Compare results
+        assertArrayClose(
+            Array.from(result),
+            expected,
+            1e-10,
+            "In-place computation should produce correct results"
+        );
+    } finally {
+        wasm.cwma_free(ptr, close.length);
+    }
+});
+
+test('CWMA fast API error handling', () => {
+    const len = 100;
+    const inPtr = wasm.cwma_alloc(len);
+    const outPtr = wasm.cwma_alloc(len);
+    
+    try {
+        // Test null pointer handling
+        assert.throws(() => {
+            wasm.cwma_into(0, outPtr, len, 14);
+        }, /null pointer/, 'Should error on null input pointer');
+        
+        assert.throws(() => {
+            wasm.cwma_into(inPtr, 0, len, 14);
+        }, /null pointer/, 'Should error on null output pointer');
+        
+        // Test invalid period
+        assert.throws(() => {
+            wasm.cwma_into(inPtr, outPtr, len, 0);
+        }, /Invalid period/, 'Should error on zero period');
+        
+        assert.throws(() => {
+            wasm.cwma_into(inPtr, outPtr, len, 200);
+        }, /Invalid period/, 'Should error when period exceeds length');
+    } finally {
+        wasm.cwma_free(inPtr, len);
+        wasm.cwma_free(outPtr, len);
+    }
+});
+
+test('CWMA batch into performance', () => {
+    // Test that batch_into is more efficient than multiple cwma_into calls
+    const close = new Float64Array(testData.close.slice(0, 200));
+    const periods = [10, 15, 20, 25, 30];
+    
+    // Allocate memory for batch operation
+    const inPtr = wasm.cwma_alloc(close.length);
+    const outPtr = wasm.cwma_alloc(close.length * periods.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
+        memView.set(close);
+        
+        // Batch computation
+        const startBatch = Date.now();
+        const rows = wasm.cwma_batch_into(
+            inPtr, 
+            outPtr, 
+            close.length,
+            10,   // period_start
+            30,   // period_end
+            5     // period_step
+        );
+        const batchTime = Date.now() - startBatch;
+        
+        assert.strictEqual(rows, periods.length, 'Should return correct number of rows');
+        
+        // Compare with multiple single calls
+        const startSingle = Date.now();
+        for (let i = 0; i < periods.length; i++) {
+            const singleOutPtr = wasm.cwma_alloc(close.length);
+            try {
+                wasm.cwma_into(inPtr, singleOutPtr, close.length, periods[i]);
+            } finally {
+                wasm.cwma_free(singleOutPtr, close.length);
+            }
+        }
+        const singleTime = Date.now() - startSingle;
+        
+        console.log(`  CWMA Batch into time: ${batchTime}ms, Multiple into calls: ${singleTime}ms`);
+    } finally {
+        wasm.cwma_free(inPtr, close.length);
+        wasm.cwma_free(outPtr, close.length * periods.length);
+    }
+});
+
 test.after(() => {
     console.log('CWMA WASM tests completed');
 });

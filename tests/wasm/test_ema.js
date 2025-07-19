@@ -123,23 +123,248 @@ test('EMA batch', () => {
     // Test EMA batch computation
     const close = new Float64Array(testData.close);
     
-    // Test batch with period range
-    const result = wasm.ema_batch_js(
-        close,
-        5,    // period_start
-        20,   // period_end  
-        5     // period_step
-    );
+    // Test batch with period range using the new API
+    const config = {
+        period_range: [5, 20, 5]
+    };
     
-    // Batch result is a flat array of all results concatenated
+    const result = wasm.ema_batch(close, config);
+    
+    // New API returns an object with structured output
     const expectedPeriods = [5, 10, 15, 20];
-    const expectedLength = expectedPeriods.length * close.length;
-    assert.strictEqual(result.length, expectedLength);
+    assert.strictEqual(result.rows, expectedPeriods.length);
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.values.length, result.rows * result.cols);
     
-    // Get metadata to verify periods
+    // Check combos to verify periods
+    assert.strictEqual(result.combos.length, expectedPeriods.length);
+    for (let i = 0; i < expectedPeriods.length; i++) {
+        assert.strictEqual(result.combos[i].period, expectedPeriods[i]);
+    }
+    
+    // Test that we can also still use the metadata function
     const metadata = wasm.ema_batch_metadata_js(5, 20, 5);
     assert.strictEqual(metadata.length, expectedPeriods.length);
     for (let i = 0; i < expectedPeriods.length; i++) {
         assert.strictEqual(metadata[i], expectedPeriods[i]);
+    }
+});
+
+test('EMA fast API (ema_into)', () => {
+    // Test the zero-copy fast API
+    const close = new Float64Array(testData.close);
+    const period = 9;
+    
+    // Allocate memory using ema_alloc
+    const len = close.length;
+    const inPtr = wasm.ema_alloc(len);
+    const outPtr = wasm.ema_alloc(len);
+    
+    try {
+        // Create a view of WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        
+        // Copy input data to WASM memory
+        const inOffset = inPtr / 8; // Convert byte offset to f64 offset
+        for (let i = 0; i < len; i++) {
+            memory[inOffset + i] = close[i];
+        }
+        
+        // Call the fast API
+        wasm.ema_into(inPtr, outPtr, len, period);
+        
+        // Read results from WASM memory
+        const outOffset = outPtr / 8;
+        const result = new Float64Array(len);
+        for (let i = 0; i < len; i++) {
+            result[i] = memory[outOffset + i];
+        }
+        
+        // Compare with safe API results
+        const expected = wasm.ema_js(close, period);
+        assertArrayClose(result, expected, 1e-10, "Fast API results should match safe API");
+        
+    } finally {
+        // Always free allocated memory
+        wasm.ema_free(inPtr, len);
+        wasm.ema_free(outPtr, len);
+    }
+});
+
+test('EMA fast API with aliasing', () => {
+    // Test in-place operation (input and output use same buffer)
+    const close = new Float64Array(testData.close);
+    const period = 9;
+    
+    // Allocate single buffer for both input and output
+    const len = close.length;
+    const ptr = wasm.ema_alloc(len);
+    
+    try {
+        // Create a view of WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        
+        // Copy input data to WASM memory
+        const offset = ptr / 8;
+        for (let i = 0; i < len; i++) {
+            memory[offset + i] = close[i];
+        }
+        
+        // Call fast API with same pointer for input and output (aliasing)
+        wasm.ema_into(ptr, ptr, len, period);
+        
+        // Read results from same buffer
+        const result = new Float64Array(len);
+        for (let i = 0; i < len; i++) {
+            result[i] = memory[offset + i];
+        }
+        
+        // Compare with safe API results
+        const expected = wasm.ema_js(close, period);
+        assertArrayClose(result, expected, 1e-10, "In-place operation should produce correct results");
+        
+    } finally {
+        wasm.ema_free(ptr, len);
+    }
+});
+
+test('EMA batch fast API', () => {
+    // Test batch fast API
+    const close = new Float64Array(testData.close);
+    
+    // Batch parameters
+    const periodStart = 5;
+    const periodEnd = 20;
+    const periodStep = 5;
+    const expectedPeriods = [5, 10, 15, 20];
+    const rows = expectedPeriods.length;
+    const cols = close.length;
+    
+    // Allocate memory
+    const inPtr = wasm.ema_alloc(cols);
+    const outPtr = wasm.ema_alloc(rows * cols);
+    
+    try {
+        // Create a view of WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        
+        // Copy input data to WASM memory
+        const inOffset = inPtr / 8;
+        for (let i = 0; i < cols; i++) {
+            memory[inOffset + i] = close[i];
+        }
+        
+        // Call batch fast API
+        const resultRows = wasm.ema_batch_into(inPtr, outPtr, cols, periodStart, periodEnd, periodStep);
+        assert.strictEqual(resultRows, rows);
+        
+        // Read results from WASM memory
+        const outOffset = outPtr / 8;
+        const result = new Float64Array(rows * cols);
+        for (let i = 0; i < result.length; i++) {
+            result[i] = memory[outOffset + i];
+        }
+        
+        // Verify some values are computed (not all NaN)
+        let hasValidValues = false;
+        for (let i = 0; i < result.length; i++) {
+            if (!isNaN(result[i])) {
+                hasValidValues = true;
+                break;
+            }
+        }
+        assert.ok(hasValidValues, "Batch results should contain valid values");
+        
+    } finally {
+        wasm.ema_free(inPtr, cols);
+        wasm.ema_free(outPtr, rows * cols);
+    }
+});
+
+test('EMA batch edge cases', () => {
+    // Test edge cases for batch processing
+    const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    
+    // Single value sweep
+    const singleBatch = wasm.ema_batch(close, {
+        period_range: [5, 5, 1]
+    });
+    assert.strictEqual(singleBatch.rows, 1);
+    assert.strictEqual(singleBatch.combos.length, 1);
+    assert.strictEqual(singleBatch.combos[0].period, 5);
+    
+    // Edge case: step larger than range
+    const largeSweep = wasm.ema_batch(close, {
+        period_range: [3, 5, 10]
+    });
+    assert.strictEqual(largeSweep.rows, 1); // Should only have start value
+    assert.strictEqual(largeSweep.combos[0].period, 3);
+});
+
+test('EMA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.ema_into(0, 0, 10, 9);
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.ema_alloc(10);
+    try {
+        // Invalid period (0)
+        assert.throws(() => {
+            wasm.ema_into(ptr, ptr, 10, 0);
+        }, /Invalid period/i);
+        
+        // Invalid period (exceeds length)
+        assert.throws(() => {
+            wasm.ema_into(ptr, ptr, 10, 20);
+        }, /Invalid period/i);
+    } finally {
+        wasm.ema_free(ptr, 10);
+    }
+});
+
+test('EMA memory allocation edge cases', () => {
+    // Test allocation and free of various sizes
+    const sizes = [0, 1, 10, 100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.ema_alloc(size);
+        assert(ptr !== 0 || size === 0, `Failed to allocate ${size} elements`);
+        
+        if (size > 0) {
+            // Write pattern to verify memory
+            const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+            for (let i = 0; i < Math.min(10, size); i++) {
+                memView[i] = i * 1.5;
+            }
+            
+            // Verify pattern
+            for (let i = 0; i < Math.min(10, size); i++) {
+                assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+            }
+        }
+        
+        wasm.ema_free(ptr, size);
+    }
+});
+
+test('EMA batch fast API error handling', () => {
+    // Test null pointers
+    assert.throws(() => {
+        wasm.ema_batch_into(0, 0, 10, 5, 20, 5);
+    }, /null pointer/i);
+    
+    // Test with valid pointers but invalid parameters
+    const inPtr = wasm.ema_alloc(10);
+    const outPtr = wasm.ema_alloc(100); // Enough for multiple results
+    
+    try {
+        // This should succeed
+        const rows = wasm.ema_batch_into(inPtr, outPtr, 10, 5, 10, 5);
+        assert.strictEqual(rows, 2); // periods 5 and 10
+    } finally {
+        wasm.ema_free(inPtr, 10);
+        wasm.ema_free(outPtr, 100);
     }
 });

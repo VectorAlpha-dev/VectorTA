@@ -1,0 +1,12 @@
+MWDX WASM Baseline Performance (Before Optimization)
+Date: 2025-07-18
+
+Safe API Performance:
+- 10k:   0.034 ms median (0.3 M elem/s)
+- 100k:  0.250 ms median (0.4 M elem/s)
+- 1M:    2.225 ms median (0.5 M elem/s)
+
+Notes:
+- Only Safe API implemented (mwdx_js)
+- Fast API not yet implemented
+- Batch API has input validation issue

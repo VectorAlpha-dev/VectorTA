@@ -78,6 +78,35 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
+    cwma: {
+        name: 'CWMA',
+        // Safe API
+        safe: {
+            fn: 'cwma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'cwma_alloc',
+            freeFn: 'cwma_free',
+            computeFn: 'cwma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'cwma_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'cwma_batch_into'
+        }
+    },
     // Example: Simple Moving Average (uncomment when SMA WASM bindings are added)
     /*
     sma: {
@@ -94,8 +123,6 @@ const INDICATORS = {
         }
     },
     */
-    // Example: Exponential Moving Average (uncomment when EMA WASM bindings are added)
-    /*
     ema: {
         name: 'EMA',
         safe: {
@@ -107,9 +134,197 @@ const INDICATORS = {
             freeFn: 'ema_free',
             computeFn: 'ema_into',
             params: { period: 20 }
+        },
+        batch: {
+            fn: 'ema_batch',
+            config: {
+                small: {
+                    period_range: [5, 20, 5]      // 4 values
+                },
+                medium: {
+                    period_range: [5, 50, 5]      // 10 values  
+                }
+            },
+            fastFn: 'ema_batch_into'
         }
     },
-    */
+    gaussian: {
+        name: 'Gaussian',
+        safe: {
+            fn: 'gaussian_js',
+            params: { period: 14, poles: 4 }
+        },
+        fast: {
+            allocFn: 'gaussian_alloc',
+            freeFn: 'gaussian_free',
+            computeFn: 'gaussian_into',
+            params: { period: 14, poles: 4 }
+        },
+        batch: {
+            fn: 'gaussian_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],    // 3 values: 10, 15, 20
+                    poles_range: [2, 4, 1]        // 3 values: 2, 3, 4
+                },
+                medium: {
+                    period_range: [10, 50, 5],    // 9 values
+                    poles_range: [1, 4, 1]        // 4 values  
+                }
+            },
+            fastFn: 'gaussian_batch_into'
+        }
+    },
+    hwma: {
+        name: 'HWMA',
+        // Safe API
+        safe: {
+            fn: 'hwma_js',
+            params: { na: 0.2, nb: 0.1, nc: 0.1 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'hwma_alloc',
+            freeFn: 'hwma_free',
+            computeFn: 'hwma_into',
+            params: { na: 0.2, nb: 0.1, nc: 0.1 }
+        },
+        // Batch API
+        batch: {
+            fn: 'hwma_batch',
+            config: {
+                small: {
+                    na_range: [0.1, 0.3, 0.1],      // 3 values
+                    nb_range: [0.1, 0.2, 0.1],      // 2 values
+                    nc_range: [0.1, 0.2, 0.1]       // 2 values
+                    // Total: 12 combinations
+                },
+                medium: {
+                    na_range: [0.1, 0.5, 0.1],      // 5 values
+                    nb_range: [0.1, 0.3, 0.1],      // 3 values
+                    nc_range: [0.1, 0.3, 0.1]       // 3 values
+                    // Total: 45 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'hwma_batch_into'
+        }
+    },
+    mwdx: {
+        name: 'MWDX',
+        // Safe API
+        safe: {
+            fn: 'mwdx_js',
+            params: { factor: 0.2 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'mwdx_alloc',
+            freeFn: 'mwdx_free',
+            computeFn: 'mwdx_into',
+            params: { factor: 0.2 }
+        },
+        // Batch API
+        batch: {
+            fn: 'mwdx_batch',  // Updated to use new structured API
+            config: {
+                small: {
+                    factor_range: [0.1, 0.3, 0.1]      // 3 values: 0.1, 0.2, 0.3
+                },
+                medium: {
+                    factor_range: [0.1, 0.5, 0.1]      // 5 values: 0.1, 0.2, 0.3, 0.4, 0.5
+                }
+            },
+            // Fast batch API
+            fastFn: 'mwdx_batch_into'
+        }
+    },
+    srwma: {
+        name: 'SRWMA',
+        // Safe API
+        safe: {
+            fn: 'srwma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'srwma_alloc',
+            freeFn: 'srwma_free',
+            computeFn: 'srwma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'srwma_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'srwma_batch_into'
+        }
+    },
+    linreg: {
+        name: 'LinReg',
+        // Safe API
+        safe: {
+            fn: 'linreg_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'linreg_alloc',
+            freeFn: 'linreg_free',
+            computeFn: 'linreg_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'linreg_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'linreg_batch_into'
+        }
+    },
+    sinwma: {
+        name: 'SINWMA',
+        // Safe API
+        safe: {
+            fn: 'sinwma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'sinwma_alloc',
+            freeFn: 'sinwma_free',
+            computeFn: 'sinwma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'sinwma_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values
+                }
+            }
+            // No fast batch API yet for sinwma
+        }
+    },
     // Example: RSI with batch support (uncomment when RSI WASM bindings are added)
     /*
     rsi: {
@@ -176,11 +391,13 @@ class WasmIndicatorBenchmark {
         lines.shift();
         
         // Parse close prices
+        // Note: CSV format is timestamp,open,close,high,low,volume
+        // So close is at index 2, not 4!
         const closes = [];
         for (const line of lines) {
             const parts = line.split(',');
             if (parts.length >= 5) {
-                closes.push(parseFloat(parts[4]));
+                closes.push(parseFloat(parts[2])); // Close is column 2
             }
         }
         
@@ -370,9 +587,19 @@ class WasmIndicatorBenchmark {
             // Calculate total combinations for batch
             if (batchConfig.period_range) {
                 const periods = Math.floor((batchConfig.period_range[1] - batchConfig.period_range[0]) / batchConfig.period_range[2]) + 1;
-                const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
-                const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
-                console.log(`  Total combinations: ${periods * offsets * sigmas}`);
+                let totalCombos = periods;
+                
+                if (batchConfig.offset_range) {
+                    const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
+                    totalCombos *= offsets;
+                }
+                
+                if (batchConfig.sigma_range) {
+                    const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
+                    totalCombos *= sigmas;
+                }
+                
+                console.log(`  Total combinations: ${totalCombos}`);
             }
         }
     }

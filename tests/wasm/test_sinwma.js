@@ -461,6 +461,159 @@ test('SINWMA batch error conditions', () => {
     });
 });
 
+// Fast API (Zero-copy) tests
+test('SINWMA zero-copy in-place operation', () => {
+    // Test in-place computation (aliasing)
+    const data = new Float64Array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]);
+    const period = 5;
+    
+    // Allocate buffer
+    const ptr = wasm.sinwma_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute SINWMA in-place
+    try {
+        wasm.sinwma_into(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.sinwma_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.sinwma_free(ptr, data.length);
+    }
+});
+
+test('SINWMA zero-copy with large dataset', () => {
+    const size = 100000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.sinwma_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.sinwma_into(ptr, ptr, size, 14);
+        
+        // Recreate view in case memory grew
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        
+        // Check warmup period has NaN
+        for (let i = 0; i < 13; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 13; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.sinwma_free(ptr, size);
+    }
+});
+
+test('SINWMA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.sinwma_into(0, 0, 10, 14);
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.sinwma_alloc(10);
+    try {
+        // Invalid period
+        assert.throws(() => {
+            wasm.sinwma_into(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+        
+        // Period exceeds length
+        assert.throws(() => {
+            wasm.sinwma_into(ptr, ptr, 10, 20);
+        }, /Invalid period/);
+    } finally {
+        wasm.sinwma_free(ptr, 10);
+    }
+});
+
+test('SINWMA zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000, 100000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.sinwma_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.sinwma_free(ptr, size);
+    }
+});
+
+test('SINWMA batch new API', () => {
+    // Test the new unified batch API that returns structured data
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    const config = {
+        period_range: [10, 20, 5]  // 10, 15, 20
+    };
+    
+    const result = wasm.sinwma_batch(close, config);
+    
+    // Check that result has the expected structure
+    assert(result.values, 'Result should have values array');
+    assert(result.periods, 'Result should have periods array');
+    assert(result.rows, 'Result should have rows count');
+    assert(result.cols, 'Result should have cols count');
+    
+    // Check dimensions
+    assert.strictEqual(result.rows, 3, 'Should have 3 parameter combinations');
+    assert.strictEqual(result.cols, close.length, 'Cols should match input length');
+    assert.strictEqual(result.values.length, result.rows * result.cols, 'Values array size mismatch');
+    
+    // Check periods
+    assert.deepStrictEqual(result.periods, [10, 15, 20], 'Periods mismatch');
+    
+    // Verify first row matches individual calculation
+    const individual = wasm.sinwma_js(close, 10);
+    const firstRow = result.values.slice(0, close.length);
+    
+    for (let i = 9; i < close.length; i++) {  // After warmup
+        assertClose(firstRow[i], individual[i], 1e-9, 
+            `Batch result mismatch at index ${i}`);
+    }
+});
+
 test('SINWMA constant input normalization', () => {
     // Test with constant input to verify normalization
     const data = new Float64Array(20).fill(1.0);

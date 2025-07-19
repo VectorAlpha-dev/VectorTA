@@ -176,36 +176,38 @@ test('LinReg batch', () => {
     const close = new Float64Array(testData.close);
     
     // Test period range 10-40 step 10
-    const period_start = 10;
-    const period_end = 40;
-    const period_step = 10;  // periods: 10, 20, 30, 40
+    const batchResult = wasm.linreg_batch(close, {
+        period_range: [10, 40, 10]  // periods: 10, 20, 30, 40
+    });
     
-    const batch_result = wasm.linreg_batch_js(
-        close, 
-        period_start, period_end, period_step
-    );
-    const metadata = wasm.linreg_batch_metadata_js(
-        period_start, period_end, period_step
-    );
+    // Should have correct structure
+    assert(batchResult.values, 'Should have values array');
+    assert(batchResult.combos, 'Should have combos array');
+    assert(typeof batchResult.rows === 'number', 'Should have rows count');
+    assert(typeof batchResult.cols === 'number', 'Should have cols count');
     
-    // Metadata should contain period values
-    assert.strictEqual(metadata.length, 4);  // 4 periods
-    assert.deepStrictEqual(Array.from(metadata), [10, 20, 30, 40]);
+    // Should have 4 periods
+    assert.strictEqual(batchResult.rows, 4);
+    assert.strictEqual(batchResult.cols, close.length);
+    assert.strictEqual(batchResult.combos.length, 4);
+    assert.strictEqual(batchResult.values.length, 4 * close.length);
     
-    // Batch result should contain all individual results flattened
-    assert.strictEqual(batch_result.length, 4 * close.length);  // 4 periods
+    // Check combos contain correct periods
+    const expectedPeriods = [10, 20, 30, 40];
+    for (let i = 0; i < 4; i++) {
+        assert.strictEqual(batchResult.combos[i].period, expectedPeriods[i]);
+    }
     
     // Verify each row matches individual calculation
-    let row_idx = 0;
-    for (const period of [10, 20, 30, 40]) {
+    for (let i = 0; i < 4; i++) {
+        const period = expectedPeriods[i];
         const individual_result = wasm.linreg_js(close, period);
         
         // Extract row from batch result
-        const row_start = row_idx * close.length;
-        const row = batch_result.slice(row_start, row_start + close.length);
+        const row_start = i * close.length;
+        const row = batchResult.values.slice(row_start, row_start + close.length);
         
         assertArrayClose(row, individual_result, 1e-9, `Period ${period}`);
-        row_idx++;
     }
 });
 
@@ -237,7 +239,9 @@ test('LinReg batch performance', () => {
     
     // Test 5 periods
     const startBatch = performance.now();
-    const batchResult = wasm.linreg_batch_js(close, 10, 50, 10);
+    const batchResult = wasm.linreg_batch(close, {
+        period_range: [10, 50, 10]  // periods: 10, 20, 30, 40, 50
+    });
     const batchTime = performance.now() - startBatch;
     
     const startSingle = performance.now();
@@ -251,7 +255,7 @@ test('LinReg batch performance', () => {
     console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
     
     // Verify results match
-    assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
+    assertArrayClose(batchResult.values, singleResults, 1e-9, 'Batch vs single results');
 });
 
 test('LinReg edge cases', () => {
@@ -306,14 +310,19 @@ test('LinReg two values', () => {
 });
 
 test('LinReg batch metadata', () => {
-    // Test metadata function returns correct parameter combinations
-    const metadata = wasm.linreg_batch_metadata_js(15, 45, 15);
+    // Test batch result includes correct parameter combinations
+    const close = new Float64Array(50); // Need enough data
+    close.fill(100);
     
-    // Should have 3 periods: 15, 30, 45
-    assert.strictEqual(metadata.length, 3);
-    assert.strictEqual(metadata[0], 15);
-    assert.strictEqual(metadata[1], 30);
-    assert.strictEqual(metadata[2], 45);
+    const result = wasm.linreg_batch(close, {
+        period_range: [15, 45, 15]  // periods: 15, 30, 45
+    });
+    
+    // Should have 3 periods
+    assert.strictEqual(result.combos.length, 3);
+    assert.strictEqual(result.combos[0].period, 15);
+    assert.strictEqual(result.combos[1].period, 30);
+    assert.strictEqual(result.combos[2].period, 45);
 });
 
 test('LinReg warmup period calculation', () => {
@@ -358,14 +367,19 @@ test('LinReg parameter step precision', () => {
     // Test batch with very small step sizes
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     
-    const batch_result = wasm.linreg_batch_js(data, 2, 4, 1);  // periods: 2, 3, 4
+    const batchResult = wasm.linreg_batch(data, {
+        period_range: [2, 4, 1]  // periods: 2, 3, 4
+    });
     
     // Should have 3 periods
-    assert.strictEqual(batch_result.length, 3 * data.length);
+    assert.strictEqual(batchResult.rows, 3);
+    assert.strictEqual(batchResult.combos.length, 3);
+    assert.strictEqual(batchResult.values.length, 3 * data.length);
     
-    // Verify metadata
-    const metadata = wasm.linreg_batch_metadata_js(2, 4, 1);
-    assert.deepStrictEqual(Array.from(metadata), [2, 3, 4]);
+    // Verify combos
+    assert.strictEqual(batchResult.combos[0].period, 2);
+    assert.strictEqual(batchResult.combos[1].period, 3);
+    assert.strictEqual(batchResult.combos[2].period, 4);
 });
 
 test('LinReg slope calculation', () => {

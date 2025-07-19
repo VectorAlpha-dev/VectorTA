@@ -35,6 +35,8 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use numpy;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 impl<'a> AsRef<[f64]> for EmaInput<'a> {
     #[inline(always)]
@@ -61,6 +63,7 @@ pub struct EmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct EmaParams {
     pub period: Option<usize>,
 }
@@ -270,6 +273,31 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
     ema_compute_into(data, period, first, alpha, beta, chosen, &mut out);
     
     Ok(EmaOutput { values: out })
+}
+
+/// Computes EMA directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn ema_into_slice(dst: &mut [f64], input: &EmaInput, kern: Kernel) -> Result<(), EmaError> {
+    let (data, period, first, alpha, beta, chosen) = ema_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(EmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute EMA values directly into dst
+    ema_compute_into(data, period, first, alpha, beta, chosen, dst);
+    
+    // Fill warmup period with NaN
+    for v in &mut dst[..first] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
 }
 
 #[inline(always)]
@@ -1257,42 +1285,40 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ema")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn ema_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
 
     let params = EmaParams {
         period: Some(period),
     };
     let ema_in = EmaInput::from_slice(slice_in, params);
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    py.allow_threads(|| -> Result<(), EmaError> {
-        let (data, period, first, alpha, beta, chosen) = ema_prepare(&ema_in, Kernel::Auto)?;
-        // Initialize NaN prefix
-        slice_out[..first].fill(f64::NAN);
-        // Compute directly into output buffer
-        ema_compute_into(data, period, first, alpha, beta, chosen, slice_out);
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        ema_with_kernel(&ema_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ema_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn ema_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
@@ -1310,29 +1336,29 @@ pub fn ema_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    let returned_combos = py.allow_threads(|| {
-        let kernel = match Kernel::Auto {
-            Kernel::Auto => detect_best_batch_kernel(),
-            k => k,
-        };
-        
-        // Map batch kernel to single-row kernel
-        let simd = match kernel {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => kernel,
-        };
-        
-        ema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let kern = validate_kernel(kernel, true)?;
+
+    let combos = py
+        .allow_threads(|| {
+            let kernel = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            let simd = match kernel {
+                Kernel::Avx512Batch => Kernel::Avx512,
+                Kernel::Avx2Batch => Kernel::Avx2,
+                Kernel::ScalarBatch => Kernel::Scalar,
+                _ => unreachable!(),
+            };
+            ema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
-        returned_combos
+        combos
             .iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
@@ -1369,6 +1395,8 @@ impl EmaStreamPy {
 // ====== WASM BINDINGS ======
 
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "wasm")]
@@ -1378,28 +1406,54 @@ pub fn ema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
         period: Some(period),
     };
     let input = EmaInput::from_slice(data, params);
-
-    ema_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    ema_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn ema_batch_js(
-    data: &[f64],
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-) -> Result<Vec<f64>, JsValue> {
+#[derive(Serialize, Deserialize)]
+pub struct EmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<EmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ema_batch)]
+pub fn ema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: EmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
     let sweep = EmaBatchRange {
-        period: (period_start, period_end, period_step),
+        period: config.period_range,
     };
 
-    // Use the existing batch function with parallel=false for WASM
-    ema_batch_inner(data, &sweep, Kernel::Scalar, false)
-        .map(|output| output.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    let output = ema_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = EmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1421,4 +1475,111 @@ pub fn ema_batch_metadata_js(
     }
 
     Ok(metadata)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to ema_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate EMA
+        let params = EmaParams {
+            period: Some(period),
+        };
+        let input = EmaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            ema_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            ema_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ema_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to ema_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = EmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        ema_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

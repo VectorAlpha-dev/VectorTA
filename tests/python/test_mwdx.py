@@ -374,6 +374,40 @@ def test_mwdx_formula_verification():
     assert_close(result, expected, atol=1e-12, msg="Formula verification failed")
 
 
+def test_mwdx_kernel_parameter():
+    """Test MWDX with kernel parameter"""
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # Test different kernel options
+    for kernel in [None, 'scalar']:
+        result = mwdx(close, 0.2, kernel=kernel)
+        assert len(result) == len(close)
+        assert np.all(np.isfinite(result)), f"NaN values with kernel={kernel}"
+    
+    # Test batch with kernel
+    batch_result = mwdx_batch(close, (0.1, 0.3, 0.1), kernel='scalar')
+    assert batch_result['values'].shape == (3, len(close))
+    
+    # Test invalid kernel
+    with pytest.raises(ValueError, match="Unknown kernel"):
+        mwdx(close, 0.2, kernel='invalid')
+
+
+def test_mwdx_kernel_consistency():
+    """Test that different kernels produce consistent results"""
+    data = load_test_data()
+    close = np.array(data['close'][:1000], dtype=np.float64)
+    
+    # Get results with different kernels
+    result_auto = mwdx(close, 0.2, kernel=None)  # Auto-detect
+    result_scalar = mwdx(close, 0.2, kernel='scalar')
+    
+    # Results should be very close (within floating point precision)
+    assert_close(result_auto, result_scalar, rtol=1e-14, 
+                msg="Kernel results differ significantly")
+
+
 if __name__ == "__main__":
     # Run a simple test to verify the module loads correctly
     print("Testing MWDX module...")

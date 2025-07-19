@@ -232,7 +232,23 @@
       "Bash(test_bindings.bat cwma)",
       "Bash(.venv\\Scripts\\python.exe tests/python/test_cwma.py:*)",
       "Bash(..\\.venv\\Scripts\\python.exe criterion_comparable_benchmark.py --indicator alma)",
-      "Bash(../.venv/Scripts/python.exe criterion_comparable_benchmark.py:*)"
+      "Bash(../.venv/Scripts/python.exe criterion_comparable_benchmark.py:*)",
+      "Bash(run_python_benchmark:*)",
+      "Bash(\"C:\\Rust Projects\\my_project-bindings-1\\run_python_benchmark.bat\" ema)",
+      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py ema)",
+      "Bash(.venv/Scripts/maturin.exe develop --features python --release)",
+      "Bash(C:Python313python.exe -m maturin develop --features python --release)",
+      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py gaussian)",
+      "Bash(run_wasm_benchmark:*)",
+      "Bash(.venv\\Scripts\\python.exe:*)",
+      "Bash(./run_wasm_benchmark.bat hwma)",
+      "Bash(C:Rust Projectsmy_project-bindings-1run_python_benchmark.bat linreg)",
+      "Bash(powershell:*)",
+      "Bash(C:Rust Projectsmy_project-bindings-1run_python_benchmark.bat mwdx)",
+      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py --indicator sinwma)",
+      "Bash(tail:*)",
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py srwma)",
+      "Bash(set PYTHONIOENCODING=utf-8)"
     ],
     "deny": []
   }
