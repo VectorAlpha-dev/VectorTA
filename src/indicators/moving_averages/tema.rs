@@ -32,13 +32,17 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -94,6 +98,7 @@ impl<'a> AsRef<[f64]> for TemaInput<'a> {
 // ========== Parameter Structs ==========
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TemaParams {
 	pub period: Option<usize>,
 }
@@ -223,7 +228,9 @@ pub fn tema_with_kernel(input: &TemaInput, kernel: Kernel) -> Result<TemaOutput,
 			Kernel::Avx2 | Kernel::Avx2Batch => tema_avx2(data, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => tema_avx512(data, period, first, &mut out),
-			_ => unreachable!(),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_scalar(data, period, first, &mut out),
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	}
 
@@ -437,7 +444,10 @@ pub fn tema_batch_with_kernel(data: &[f64], sweep: &TemaBatchRange, k: Kernel) -
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		Kernel::Avx512 => Kernel::Avx512,
+		Kernel::Avx2 => Kernel::Avx2,
+		Kernel::Scalar => Kernel::Scalar,
+		Kernel::Auto => detect_best_kernel(),
 	};
 	tema_batch_par_slice(data, sweep, simd)
 }
@@ -514,6 +524,12 @@ fn tema_batch_inner(
 	// ---------- 1. matrix dimensions ----------
 	let rows = combos.len();
 	let cols = data.len();
+	
+	// Resolve the kernel if it's Auto
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
 
 	// ---------- 2. build per-row warm-up lengths ----------
 	let warm: Vec<usize> = combos
@@ -532,13 +548,15 @@ fn tema_batch_inner(
 		// cast this row to &mut [f64] so the row-kernel can write normally
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-		match kern {
-			Kernel::Scalar => tema_row_scalar(data, first, period, out_row),
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => tema_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tema_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => tema_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tema_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => tema_row_avx512(data, first, period, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_row_scalar(data, first, period, out_row),
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	};
 
@@ -1114,6 +1132,12 @@ fn tema_batch_inner_into(
 	// ---------- 1. matrix dimensions ----------
 	let rows = combos.len();
 	let cols = data.len();
+	
+	// Resolve the kernel if it's Auto
+	let actual_kern = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
 
 	// ---------- 2. build per-row warm-up lengths ----------
 	let warm: Vec<usize> = combos
@@ -1133,15 +1157,15 @@ fn tema_batch_inner_into(
 		// cast this row to &mut [f64] so the row-kernel can write normally
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-		match kern {
-			Kernel::Scalar => tema_row_scalar(data, first, period, out_row),
+		match actual_kern {
+			Kernel::Scalar | Kernel::ScalarBatch => tema_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => tema_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => tema_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => tema_row_avx512(data, first, period, out_row),
+			Kernel::Avx512 | Kernel::Avx512Batch => tema_row_avx512(data, first, period, out_row),
 			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-			Kernel::Avx2 | Kernel::Avx512 => tema_row_scalar(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_row_scalar(data, first, period, out_row),
+			Kernel::Auto => unreachable!("Auto kernel should have been resolved"),
 		}
 	};
 
@@ -1204,41 +1228,23 @@ pub fn tema_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::Scalar,
-		Some("avx2") => Kernel::Avx2,
-		Some("avx512") => Kernel::Avx512,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
-
-	// ---------- build input struct -------------------------------------------------
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;  // Validate before allow_threads
+	
 	let params = TemaParams { period: Some(period) };
 	let tema_in = TemaInput::from_slice(slice_in, params);
 
-	// ---------- allocate NumPy output buffer ---------------------------------------
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-
-	// ---------- heavy lifting without the GIL --------------------------------------
-	py.allow_threads(|| -> Result<(), TemaError> {
-		let (data, period, first, _len, chosen) = tema_prepare(&tema_in, kern)?;
-		// Initialize NaN prefix
-		let lookback = (period - 1) * 3;
-		let warm = (first + lookback).min(slice_out.len());
-		slice_out[..warm].fill(f64::NAN);
-		// Compute TEMA
-		tema_compute_into(data, period, first, chosen, slice_out);
-		Ok(())
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		tema_with_kernel(&tema_in, kern)
+			.map(|o| o.values)
 	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1293,56 +1299,48 @@ pub fn tema_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
-
+	let kern = validate_kernel(kernel, true)?;  // true for batch operations
+	
 	let sweep = TemaBatchRange { period: period_range };
 
-	// 1. Expand grid once to know rows*cols
+	// Calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	// 2. Pre-allocate NumPy array (1-D, will reshape later)
+	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::ScalarBatch,
-		Some("avx2") => Kernel::Avx2Batch,
-		Some("avx512") => Kernel::Avx512Batch,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
+	// Compute without GIL
+	let combos = py.allow_threads(|| {
+		// Handle kernel selection for batch operations
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Map batch kernels to regular kernels
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		tema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 3. Heavy work without the GIL
-	let combos = py
-		.allow_threads(|| {
-			// Resolve Kernel::Auto to a specific kernel
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
-			};
-			// Use the _into variant that writes directly to our pre-allocated buffer
-			tema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-		})
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// 4. Build dict with the GIL
+	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
+		combos.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
-			.into_pyarray(py),
+			.into_pyarray(py)
 	)?;
 
 	Ok(dict)
@@ -1350,19 +1348,156 @@ pub fn tema_batch_py<'py>(
 
 // ========== WASM Bindings ==========
 
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn tema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-	let params = TemaParams { period: Some(period) };
-	let input = TemaInput::from_slice(data, params);
+#[inline]
+pub fn tema_into_slice(dst: &mut [f64], input: &TemaInput, kern: Kernel) -> Result<(), TemaError> {
+	let data: &[f64] = match &input.data {
+		TemaData::Candles { candles, source } => source_type(candles, source),
+		TemaData::Slice(sl) => sl,
+	};
 
-	tema_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	if data.is_empty() {
+		return Err(TemaError::EmptyInputData);
+	}
+
+	if dst.len() != data.len() {
+		return Err(TemaError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TemaError::AllValuesNaN)?;
+	let len = data.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(TemaError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(TemaError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	let lookback = (period - 1) * 3;
+	let warm = first + lookback;
+
+	// Initialize warmup period with NaN
+	for i in 0..warm {
+		dst[i] = f64::NAN;
+	}
+
+	// Compute TEMA directly into dst
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => tema_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => tema_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => tema_avx512(data, period, first, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tema_scalar(data, period, first, dst),
+			Kernel::Auto => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
+pub fn tema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	// Validate inputs first
+	if data.is_empty() {
+		return Err(JsValue::from_str("Input data slice is empty"));
+	}
+	if period == 0 || period > data.len() {
+		return Err(JsValue::from_str(&format!("Invalid period: {} (data length: {})", period, data.len())));
+	}
+	
+	// Check if all values are NaN
+	if data.iter().all(|&x| x.is_nan()) {
+		return Err(JsValue::from_str("All values are NaN"));
+	}
+	
+	// Check if there's enough valid data after NaN values
+	let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let valid_count = data.len() - first_valid;
+	if valid_count < period {
+		return Err(JsValue::from_str(&format!(
+			"Not enough valid data: need {} but only {} valid values after NaN values",
+			period, valid_count
+		)));
+	}
+	
+	// Special case for WASM: when the warmup period equals or exceeds data length
+	// from the first valid index, return all NaN values instead of hitting
+	// an unreachable panic in the kernel selection code
+	if period > 1 {
+		let lookback = (period - 1) * 3;
+		if first_valid + lookback >= data.len() {
+			// Return all NaN values
+			return Ok(vec![f64::NAN; data.len()]);
+		}
+	}
+
+	let params = TemaParams { period: Some(period) };
+	let input = TemaInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()];
+
+	tema_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TemaBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TemaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<TemaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tema_batch)]
+pub fn tema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TemaBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = TemaBatchRange {
+		period: config.period_range,
+	};
+
+	let output = tema_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = TemaBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(since = "1.0.0", note = "Use tema_batch instead")]
 pub fn tema_batch_js(
 	data: &[f64],
 	period_start: usize,
@@ -1381,13 +1516,108 @@ pub fn tema_batch_js(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn tema_batch_metadata_js(period_start: usize, period_end: usize, period_step: usize) -> Result<Vec<f64>, JsValue> {
+pub fn tema_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tema_into"));
+	}
+
+	// Validate inputs
+	if len == 0 {
+		return Err(JsValue::from_str("Input data slice is empty"));
+	}
+	if period == 0 || period > len {
+		return Err(JsValue::from_str(&format!("Invalid period: {} (data length: {})", period, len)));
+	}
+
+	let data = unsafe { std::slice::from_raw_parts(in_ptr, len) };
+	
+	// Special case for WASM: when the warmup period equals or exceeds data length
+	// AND there are valid data points, fill with NaN values instead of hitting
+	// an unreachable panic in the kernel selection code
+	if period > 1 && !data.iter().all(|&x| x.is_nan()) {
+		let lookback = (period - 1) * 3;
+		if lookback >= len {
+			// Fill output with NaN values
+			let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, len) };
+			out.fill(f64::NAN);
+			return Ok(());
+		}
+	}
+
+	let params = TemaParams { period: Some(period) };
+	let input = TemaInput::from_slice(data, params);
+
+	if in_ptr == out_ptr {
+		// In-place computation: need temporary buffer
+		let mut temp = vec![0.0; len];
+		tema_into_slice(&mut temp, &input, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, len) };
+		out.copy_from_slice(&temp);
+	} else {
+		// Direct computation into output buffer
+		let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, len) };
+		tema_into_slice(out, &input, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tema_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tema_batch_into"));
+	}
+
+	let data = unsafe { std::slice::from_raw_parts(in_ptr, len) };
 	let sweep = TemaBatchRange {
 		period: (period_start, period_end, period_step),
 	};
 
+	// Get the number of parameter combinations
 	let combos = expand_grid(&sweep);
-	let metadata: Vec<f64> = combos.iter().map(|c| c.period.unwrap() as f64).collect();
+	let rows = combos.len();
+	let cols = data.len();
+	let total_size = rows * cols;
 
-	Ok(metadata)
+	// Safety check
+	let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_size) };
+
+	// Call the inner function directly with the output slice
+	tema_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// Return the number of rows (parameter combinations)
+	Ok(rows)
 }

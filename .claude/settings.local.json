@@ -256,7 +256,10 @@
       "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py -v)",
       "Bash(../.venv/Scripts/python.exe:*)",
       "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py::TestSuperSmoother::test_batch_processing -v)",
-      "WebFetch(domain:www.intel.com)"
+      "WebFetch(domain:www.intel.com)",
+      "Bash(.venvScriptspython.exe tests/python/test_tema.py)",
+      "Bash(where run_wasm_benchmark)",
+      "Bash(set INDICATORS=tema)"
     ],
     "deny": []
   }

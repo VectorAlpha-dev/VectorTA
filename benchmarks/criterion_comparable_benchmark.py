@@ -326,7 +326,7 @@ class CriterionComparableBenchmark:
             ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
             ('edcf_batch', lambda: my_project.edcf_batch(data['close'], (15, 50, 1))),
             ('ehlers_itrend_batch', lambda: my_project.ehlers_itrend_batch(data['close'], (12, 20, 4), (40, 50, 5))),
-            ('tema_batch', lambda: my_project.tema_batch(data['close'], (14, 14, 1))),
+            ('tema_batch', lambda: my_project.tema_batch(data['close'], (9, 240, 1))),
             ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
             ('adxr_batch', lambda: my_project.adxr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),

@@ -808,7 +808,7 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'supersmoother_3_pole_batch_into'
         }
-    }
+    },
     ema: {
         name: 'EMA',
         safe: {
@@ -832,6 +832,34 @@ const INDICATORS = {
                 }
             },
             fastFn: 'ema_batch_into'
+        }
+    },
+    tema: {
+        name: 'TEMA',
+        // Safe API
+        safe: {
+            fn: 'tema_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'tema_alloc',
+            freeFn: 'tema_free',
+            computeFn: 'tema_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'tema_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 30, 5]       // 6 values
+                }
+            },
+            fastFn: 'tema_batch_into'
         }
     },
     gaussian: {
@@ -1344,8 +1372,8 @@ class WasmIndicatorBenchmark {
                     wasmFn.call(this.wasm, data, start, end, step);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                    wasmFn.apply(this.wasm, params);
                 }
-                wasmFn.apply(this.wasm, params);
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',
@@ -1420,9 +1448,9 @@ class WasmIndicatorBenchmark {
             // These indicators expect: data, period_start, period_end, period_step
             const period = batchConfig.period_range;
             return [data, period[0], period[1], period[2]];
-        } else if (indicatorKey === 'swma') {
-            // SWMA uses the new unified batch API with serde config
-            return [data, { period_range: batchConfig.period_range }];
+        } else if (indicatorKey === 'swma' || indicatorKey === 'tema' || indicatorKey === 'alma') {
+            // These indicators use the new unified batch API with serde config
+            return [data, batchConfig];
         } else if (batchConfig.period_range) {
             // Most indicators with period ranges
             const period = batchConfig.period_range;
