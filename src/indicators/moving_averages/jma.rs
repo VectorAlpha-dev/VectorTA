@@ -57,6 +57,7 @@ pub struct JmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), derive(serde::Serialize, serde::Deserialize))]
 pub struct JmaParams {
     pub period: Option<usize>,
     pub phase: Option<f64>,
@@ -216,10 +217,6 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
     Ok(JmaOutput { values: out })
 }
 
-#[inline]
-pub fn jma_into(input: &JmaInput, out: &mut [f64]) -> Result<(), JmaError> {
-    jma_with_kernel_into(input, Kernel::Auto, out)
-}
 
 pub fn jma_with_kernel_into(
     input: &JmaInput,
@@ -1354,58 +1351,58 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray};
+use numpy::{PyArray1, PyReadonlyArray1, IntoPyArray, PyArrayMethods};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "jma")]
-#[pyo3(signature = (arr_in, period, phase=50.0, power=2))]
+#[pyo3(signature = (data, period, phase=50.0, power=2, kernel=None))]
 pub fn jma_py<'py>(
     py: Python<'py>,
-    arr_in: PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
     phase: f64,
     power: u32,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    use numpy::PyArrayMethods;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
-    
-    // Pre-allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-    
-    // Prepare JMA input
-    let jma_in = JmaInput::from_slice(slice_in, JmaParams {
+    let params = JmaParams {
         period: Some(period),
         phase: Some(phase),
         power: Some(power),
-    });
+    };
+    let jma_in = JmaInput::from_slice(slice_in, params);
     
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), JmaError> {
-        jma_into(&jma_in, slice_out)
+    // Get Vec<f64> from Rust function - zero-copy pattern
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        jma_with_kernel(&jma_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(format!("JMA error: {}", e)))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    // Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
-#[cfg(feature = "python")]
-use ndarray::{Array2, Array1};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "jma_batch")]
-#[pyo3(signature = (arr_in, period_range, phase_range=(50.0, 50.0, 0.0), power_range=(2, 2, 0)))]
+#[pyo3(signature = (data, period_range, phase_range=(50.0, 50.0, 0.0), power_range=(2, 2, 0), kernel=None))]
 pub fn jma_batch_py<'py>(
     py: Python<'py>,
-    arr_in: PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     phase_range: (f64, f64, f64),
     power_range: (u32, u32, u32),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    use numpy::{PyArray2, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
+    
     let sweep = JmaBatchRange {
         period: period_range,
         phase: phase_range,
@@ -1421,50 +1418,56 @@ pub fn jma_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate NumPy array (1-D, will reshape later)
+    // Pre-allocate output array (OK for batch operations)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Heavy work without the GIL
-    let (_, final_rows, final_cols) = py.allow_threads(|| -> Result<(Vec<JmaParams>, usize, usize), JmaError> {
-        // Detect best kernel
-        let kernel = match detect_best_batch_kernel() {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            _ => Kernel::Scalar,
+    // Compute without GIL
+    let (combos_result, _, _) = py.allow_threads(|| {
+        // Handle kernel selection for batch operations
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
         };
         
-        // Use the new _into function with parallel=true
-        jma_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+        // Map batch kernels to regular kernels
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => kernel,
+        };
+        
+        jma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
-    .map_err(|e| PyValueError::new_err(format!("JMA batch error: {}", e)))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Extract metadata and convert to NumPy arrays for zero-copy
-    let periods = combos
-        .iter()
-        .map(|c| c.period.unwrap())
-        .collect::<Vec<_>>()
-        .into_pyarray(py);
-    let phases = combos
-        .iter()
-        .map(|c| c.phase.unwrap())
-        .collect::<Vec<_>>()
-        .into_pyarray(py);
-    let powers = combos
-        .iter()
-        .map(|c| c.power.unwrap())
-        .collect::<Vec<_>>()
-        .into_pyarray(py);
-    
-    // Reshape to 2D
-    let out_2d = out_arr.reshape((final_rows, final_cols))?;
-    
-    // Create dictionary output
+    // Build result dictionary with zero-copy parameter arrays
     let dict = PyDict::new(py);
-    dict.set_item("values", out_2d)?;
-    dict.set_item("periods", periods)?;
-    dict.set_item("phases", phases)?;
-    dict.set_item("powers", powers)?;
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    
+    // Zero-copy transfer for parameter arrays
+    dict.set_item(
+        "periods",
+        combos_result.iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
+    dict.set_item(
+        "phases",
+        combos_result.iter()
+            .map(|p| p.phase.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
+    dict.set_item(
+        "powers",
+        combos_result.iter()
+            .map(|p| p.power.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
     
     Ok(dict)
 }
@@ -1498,9 +1501,34 @@ impl JmaStreamPy {
     }
 }
 
+// ================== Zero-Copy Helper for WASM ==================
+/// Write JMA values directly to output slice - no allocations
+/// This helper is the core optimization that enables zero-allocation writes.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn jma_into_slice(dst: &mut [f64], input: &JmaInput, kern: Kernel) -> Result<(), JmaError> {
+    let data: &[f64] = match &input.data {
+        JmaData::Candles { candles, source } => source_type(candles, source),
+        JmaData::Slice(sl) => sl,
+    };
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(JmaError::InvalidOutputBuffer {
+            expected: data.len(),
+            actual: dst.len(),
+        });
+    }
+    
+    // Use existing jma_with_kernel_into which already writes directly to dst
+    jma_with_kernel_into(input, kern, dst)
+}
+
 // WASM bindings
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use serde::{Deserialize, Serialize};
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
@@ -1510,17 +1538,142 @@ pub fn jma_js(data: &[f64], period: usize, phase: f64, power: u32) -> Result<Vec
         phase: Some(phase),
         power: Some(power),
     };
-    
     let input = JmaInput::from_slice(data, params);
     
-    match jma_with_kernel(&input, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    jma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
+pub fn jma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+    phase: f64,
+    power: u32,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to jma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate JMA
+        let params = JmaParams {
+            period: Some(period),
+            phase: Some(phase),
+            power: Some(power),
+        };
+        let input = JmaInput::from_slice(data, params);
+        
+        // Handle aliasing (in_ptr == out_ptr)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            jma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            jma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Batch Processing Structures ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+pub struct JmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub phase_range: (f64, f64, f64),
+    pub power_range: (u32, u32, u32),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+pub struct JmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<JmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen(js_name = jma_batch)]
+pub fn jma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: JmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = JmaBatchRange {
+        period: config.period_range,
+        phase: config.phase_range,
+        power: config.power_range,
+    };
+
+    let output = jma_batch_inner(data, &sweep, Kernel::Scalar, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = JmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+#[deprecated(since = "1.0.0", note = "Use jma_batch instead")]
 pub fn jma_batch_js(
     data: &[f64],
     period_start: usize,
@@ -1581,4 +1734,49 @@ pub fn jma_batch_metadata_js(
     }
     
     metadata
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    phase_start: f64,
+    phase_end: f64,
+    phase_step: f64,
+    power_start: u32,
+    power_end: u32,
+    power_step: u32,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to jma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = JmaBatchRange {
+            period: (period_start, period_end, period_step),
+            phase: (phase_start, phase_end, phase_step),
+            power: (power_start, power_end, power_step),
+        };
+        
+        let combos = expand_grid_jma(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        jma_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

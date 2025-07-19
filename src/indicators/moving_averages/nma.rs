@@ -59,6 +59,7 @@ pub struct NmaOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct NmaParams {
     pub period: Option<usize>,
 }
@@ -265,6 +266,10 @@ fn nma_compute_into(
             unsafe { nma_avx512(data, period, first, ln_values, &mut diff, out) }
         }
 
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
+        }
         _ => unreachable!(),
     }
 }
@@ -495,7 +500,7 @@ pub fn nma_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
+        _ => Kernel::Scalar, // Default to Scalar for any other kernel
     };
     nma_batch_par_slice(data, sweep, simd)
 }
@@ -667,7 +672,9 @@ fn nma_batch_inner(
             Kernel::Avx2 => nma_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => nma_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => nma_row_scalar(data, first, period, out_row),
+            _ => nma_row_scalar(data, first, period, out_row),
         }
     };
 
@@ -759,7 +766,9 @@ fn nma_batch_inner_into(
             Kernel::Avx2 => nma_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => nma_row_avx512(data, first, period, out_row),
-            _ => unreachable!(),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => nma_row_scalar(data, first, period, out_row),
+            _ => nma_row_scalar(data, first, period, out_row),
         }
     };
 
@@ -919,45 +928,34 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "nma")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn nma_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
+    
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     let params = NmaParams {
         period: Some(period),
     };
     let nma_in = NmaInput::from_slice(slice_in, params);
 
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), NmaError> {
-        let (data, period, first, mut ln_values, mut sqrt_diffs, chosen) =
-            nma_prepare(&nma_in, Kernel::Auto)?;
-        // Initialize prefix with NaN
-        let warm = first + period;
-        slice_out[..warm].fill(f64::NAN);
-        nma_compute_into(
-            data,
-            period,
-            first,
-            &mut ln_values,
-            &mut sqrt_diffs,
-            chosen,
-            slice_out,
-        );
-        Ok(())
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        nma_with_kernel(&nma_in, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -988,12 +986,19 @@ impl NmaStreamPy {
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "nma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn nma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
+    
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
+    
     let sweep = NmaBatchRange {
         period: period_range,
     };
@@ -1010,7 +1015,7 @@ pub fn nma_batch_py<'py>(
     // Heavy work without the GIL
     let combos = py
         .allow_threads(|| {
-            let kernel = match Kernel::Auto {
+            let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
@@ -1018,7 +1023,7 @@ pub fn nma_batch_py<'py>(
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => unreachable!(),
+                _ => kernel,
             };
             // Use the _into variant
             nma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -1040,7 +1045,41 @@ pub fn nma_batch_py<'py>(
     Ok(dict)
 }
 
+/// Write NMA directly to output slice - no allocations
+pub fn nma_into_slice(dst: &mut [f64], input: &NmaInput, kern: Kernel) -> Result<(), NmaError> {
+    let (data, period, first, mut ln_values, mut sqrt_diffs, chosen) = nma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(NmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute NMA values directly into dst
+    nma_compute_into(
+        data,
+        period,
+        first,
+        &mut ln_values,
+        &mut sqrt_diffs,
+        chosen,
+        dst,
+    );
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
+}
+
 // WASM bindings
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -1051,10 +1090,55 @@ pub fn nma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
         period: Some(period),
     };
     let input = NmaInput::from_slice(data, params);
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer (use Scalar for WASM)
+    nma_into_slice(&mut output, &input, Kernel::Scalar)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
 
-    nma_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct NmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct NmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<NmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = nma_batch)]
+pub fn nma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: NmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = NmaBatchRange {
+        period: config.period_range,
+    };
+
+    // For WASM, use ScalarBatch explicitly to avoid kernel detection issues
+    let output = nma_batch_inner(data, &sweep, Kernel::ScalarBatch, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = NmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
@@ -1108,6 +1192,113 @@ pub fn nma_batch_rows_cols_js(
     };
     let combos = expand_grid(&sweep);
     vec![combos.len(), data_len]
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to nma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate NMA
+        let params = NmaParams {
+            period: Some(period),
+        };
+        let input = NmaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            nma_into_slice(&mut temp, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            nma_into_slice(out, &input, Kernel::Scalar)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to nma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = NmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing with ScalarBatch for WASM
+        nma_batch_inner_into(data, &sweep, Kernel::ScalarBatch, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

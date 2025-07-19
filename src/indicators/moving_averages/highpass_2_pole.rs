@@ -33,15 +33,19 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
-use numpy::ndarray::{Array1, Array2};
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,7 @@ pub struct HighPass2Output {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct HighPass2Params {
     pub period: Option<usize>,
     pub k: Option<f64>,
@@ -214,7 +219,7 @@ pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPa
 /// # Errors
 /// Returns [`HighPass2Error`] when parameters are invalid.
 #[inline]
-fn highpass_2_pole_into(
+pub fn highpass_2_pole_into(
     input: &HighPass2Input,
     out: &mut [f64],
 ) -> Result<(), HighPass2Error> {
@@ -1354,67 +1359,63 @@ fn highpass_2_pole_batch_inner_into(
 // Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass_2_pole")]
+#[pyo3(signature = (data, period, k, kernel=None))]
 pub fn highpass_2_pole_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period: usize,
     k: f64,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Build input struct
     let params = HighPass2Params {
         period: Some(period),
         k: Some(k),
     };
     let hp2_in = HighPass2Input::from_slice(slice_in, params);
     
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), HighPass2Error> {
-        highpass_2_pole_into(&hp2_in, slice_out)
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        highpass_2_pole_with_kernel(&hp2_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass_2_pole_batch")]
+#[pyo3(signature = (data, period_range, k_range, kernel=None))]
 pub fn highpass_2_pole_batch_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: numpy::PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     k_range: (f64, f64, f64),
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    use numpy::{PyArray1, PyArrayMethods, IntoPyArray};
-    use pyo3::types::PyDict;
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?;
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = HighPass2BatchRange {
         period: period_range,
         k: k_range,
     };
     
-    // Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Heavy work without the GIL
     let combos = py.allow_threads(|| {
-        // Resolve Kernel::Auto to a specific kernel
-        let kernel = match Kernel::Auto {
+        let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
@@ -1424,12 +1425,10 @@ pub fn highpass_2_pole_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
-        // Use the _into variant that writes directly to our pre-allocated buffer
         highpass_2_pole_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1478,8 +1477,8 @@ impl HighPass2StreamPy {
     }
 }
 
-// WASM bindings
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+// ================== WASM bindings ==================
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64>, JsValue> {
     let params = HighPass2Params {
@@ -1487,66 +1486,177 @@ pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64
         k: Some(k),
     };
     let input = HighPass2Input::from_slice(data, params);
-    match highpass_2_pole(&input) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("HighPass2 error: {}", e))),
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-#[wasm_bindgen]
-pub fn highpass_2_pole_batch_js(
-    data: &[f64],
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    k_start: f64,
-    k_end: f64,
-    k_step: f64,
-) -> Result<Vec<f64>, JsValue> {
-    let sweep = HighPass2BatchRange {
-        period: (period_start, period_end, period_step),
-        k: (k_start, k_end, k_step),
-    };
-    match highpass_2_pole_batch_with_kernel(data, &sweep, Kernel::Auto) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("HighPass2 batch error: {}", e))),
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-#[wasm_bindgen]
-pub fn highpass_2_pole_batch_metadata_js(
-    period_start: usize,
-    period_end: usize,
-    period_step: usize,
-    k_start: f64,
-    k_end: f64,
-    k_step: f64,
-) -> Vec<f64> {
-    let periods: Vec<usize> = if period_step == 0 || period_start == period_end {
-        vec![period_start]
-    } else {
-        (period_start..=period_end).step_by(period_step).collect()
-    };
-    let ks: Vec<f64> = if k_step.abs() < 1e-12 || (k_start - k_end).abs() < 1e-12 {
-        vec![k_start]
-    } else {
-        let mut v = Vec::new();
-        let mut x = k_start;
-        while x <= k_end + 1e-12 {
-            v.push(x);
-            x += k_step;
-        }
-        v
-    };
     
-    let mut result = Vec::new();
-    for &period in &periods {
-        for &k in &ks {
-            result.push(period as f64);
-            result.push(k);
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    highpass_2_pole_into(&input, &mut output)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn highpass_2_pole_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn highpass_2_pole_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
         }
     }
-    result
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = highpass_2_pole_into)]
+pub fn highpass_2_pole_into_wasm(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+    k: f64,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let params = HighPass2Params {
+            period: Some(period),
+            k: Some(k),
+        };
+        let input = HighPass2Input::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            highpass_2_pole_into(&input, &mut temp)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            highpass_2_pole_into(&input, out)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct HighPass2BatchConfig {
+    pub period_range: (usize, usize, usize),
+    pub k_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct HighPass2BatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<HighPass2Params>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = highpass_2_pole_batch)]
+pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: HighPass2BatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = HighPass2BatchRange {
+        period: config.period_range,
+        k: config.k_range,
+    };
+
+    let output = highpass_2_pole_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = HighPass2BatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn highpass_2_pole_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    k_start: f64,
+    k_end: f64,
+    k_step: f64,
+) -> Result<(), JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let sweep = HighPass2BatchRange {
+            period: (period_start, period_end, period_step),
+            k: (k_start, k_end, k_step),
+        };
+
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+
+        if rows * cols == 0 {
+            return Err(JsValue::from_str("Invalid dimensions"));
+        }
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+        // Detect best batch kernel
+        let kernel = detect_best_batch_kernel();
+        
+        // Map batch kernel to regular kernel for computation
+        let compute_kernel = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => Kernel::Scalar,
+        };
+        
+        // Batch computation directly into output buffer
+        highpass_2_pole_batch_inner_into(data, &sweep, compute_kernel, true, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(())
+    }
 }

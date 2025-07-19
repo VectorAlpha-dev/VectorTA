@@ -6,18 +6,18 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "srwma": 3.197185
+    "supersmoother_3_pole": 2.513955
   },
   "rust_results": {
-    "srwma": 5.714855555555556
+    "supersmoother_3_pole": 2.505487857142857
   },
   "comparisons": [
     {
-      "indicator": "srwma",
-      "python_ms": 3.197185,
-      "rust_ms": 5.714855555555556,
-      "overhead_ms": -2.517670555555556,
-      "overhead_pct": -44.05484147553064
+      "indicator": "supersmoother_3_pole",
+      "python_ms": 2.513955,
+      "rust_ms": 2.505487857142857,
+      "overhead_ms": 0.008467142857143006,
+      "overhead_pct": 0.33794387919319213
     }
   ],
   "batch_comparisons": []

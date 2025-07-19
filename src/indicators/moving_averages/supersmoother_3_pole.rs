@@ -620,6 +620,70 @@ fn supersmoother_3_pole_batch_inner(
 }
 
 #[inline(always)]
+pub fn supersmoother_3_pole_batch_inner_into(
+    data: &[f64],
+    combos: &[SuperSmoother3PoleParams],
+    first: usize,
+    warm: &[usize],
+    cols: usize,
+    kern: Kernel,
+    parallel: bool,
+    output: &mut [f64],
+) {
+    // Write directly to output slice - no validation needed
+    let mut raw = unsafe {
+        std::slice::from_raw_parts_mut(
+            output.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
+            output.len(),
+        )
+    };
+    unsafe { init_matrix_prefixes(&mut raw, cols, warm) };
+
+    // ---------- 2.  Row-level closure (accepts &mut [MaybeUninit<f64>]) ----
+    let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
+        let period = combos[row].period.unwrap();
+
+        // transmute just this row to &mut [f64]
+        let out_row = core::slice::from_raw_parts_mut(
+            dst_mu.as_mut_ptr() as *mut f64,
+            dst_mu.len(),
+        );
+
+        match kern {
+            Kernel::Scalar => supersmoother_3_pole_row_scalar(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2   => supersmoother_3_pole_row_avx2(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => supersmoother_3_pole_row_avx512(
+                data, first, period, 0, std::ptr::null(), 0.0, out_row),
+            _ => unreachable!(),
+        }
+    };
+
+    // ---------- 3.  Run rows in serial / parallel --------------------------
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))] {
+            raw.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+        #[cfg(target_arch = "wasm32")] {
+            for (row, slice) in raw.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in raw.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    // No return value needed - everything is written to output
+}
+
+#[inline(always)]
 fn expand_grid_supersmoother(r: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {
@@ -996,7 +1060,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy;
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "supersmoother_3_pole")]
@@ -1027,40 +1095,27 @@ use numpy;
 ///     If inputs are invalid (period <= 0, period > data length, all NaN data).
 pub fn supersmoother_3_pole_py<'py>(
     py: Python<'py>,
-    data: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
     kernel: Option<&str>,
-) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = data.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;  // Validate before allow_threads
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-
-    // Build input struct
     let params = SuperSmoother3PoleParams { period: Some(period) };
-    let ss3p_in = SuperSmoother3PoleInput::from_slice(slice_in, params);
+    let input = SuperSmoother3PoleInput::from_slice(slice_in, params);
 
-    // Allocate NumPy output buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
-
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), SuperSmoother3PoleError> {
-        let result = supersmoother_3_pole_with_kernel(&ss3p_in, kern)?;
-        slice_out.copy_from_slice(&result.values);
-        Ok(())
+    // GOOD: Get Vec<f64> from Rust function
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        supersmoother_3_pole_with_kernel(&input, kern)
+            .map(|o| o.values)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(out_arr.into())
+    // GOOD: Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1107,52 +1162,137 @@ impl SuperSmoother3PoleStreamPy {
 ///     Dictionary with 'values' (2D array) and 'periods' array.
 pub fn supersmoother_3_pole_batch_py<'py>(
     py: Python<'py>,
-    data: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
     kernel: Option<&str>,
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = SuperSmoother3PoleBatchRange {
         period: period_range,
     };
 
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
-
-    // Run batch computation without GIL
-    let output = py
-        .allow_threads(|| supersmoother_3_pole_batch_with_kernel(slice_in, &sweep, kern))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    // Create return dictionary
-    let dict = PyDict::new(py);
-
-    // Values as 2D array
-    let values_array = output
-        .values
-        .into_pyarray(py)
-        .reshape([output.rows, output.cols])?;
-    dict.set_item("values", values_array)?;
-
-    // Periods array
-    let periods: Vec<f64> = output
-        .combos
-        .iter()
-        .map(|c| c.period.unwrap() as f64)
+    // Pre-calculate everything outside allow_threads
+    let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("Invalid period range"));
+    }
+    
+    let first = slice_in.iter().position(|x| !x.is_nan())
+        .ok_or_else(|| PyValueError::new_err("All input values are NaN"))?;
+    
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if slice_in.len() - first < max_p {
+        return Err(PyValueError::new_err(format!(
+            "Not enough valid data: needed = {}, valid = {}", 
+            max_p, slice_in.len() - first
+        )));
+    }
+    
+    let rows = combos.len();
+    let cols = slice_in.len();
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + c.period.unwrap())
         .collect();
-    dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok(dict.into())
+    // Pre-allocate output array (OK for batch operations)
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+    // Compute without GIL - no validation needed
+    py.allow_threads(|| {
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => kernel,
+        };
+        supersmoother_3_pole_batch_inner_into(
+            slice_in, &combos, first, &warm, cols, simd, true, slice_out
+        );
+    });
+
+    // Build result dictionary
+    let dict = PyDict::new(py);
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    
+    // Periods array with zero-copy transfer
+    dict.set_item(
+        "periods",
+        combos.iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
+
+    Ok(dict)
+}
+
+/// Computes SuperSmoother 3-Pole directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn supersmoother_3_pole_into_slice(
+    dst: &mut [f64], 
+    input: &SuperSmoother3PoleInput, 
+    kern: Kernel
+) -> Result<(), SuperSmoother3PoleError> {
+    let data: &[f64] = input.as_ref();
+    let first = data.iter().position(|x| !x.is_nan()).ok_or(SuperSmoother3PoleError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+    }
+    if (len - first) < period {
+        return Err(SuperSmoother3PoleError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(SuperSmoother3PoleError::InvalidPeriod {
+            period: dst.len(),
+        });
+    }
+
+    let chosen = match kern {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    
+    // Fill warmup period with NaN first
+    let warmup_end = first + period;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    // Compute SuperSmoother values directly into dst
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                supersmoother_3_pole_scalar(data, period, first, dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                supersmoother_3_pole_avx2(data, period, first, dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                supersmoother_3_pole_avx512(data, period, first, dst)
+            }
+            _ => unreachable!(),
+        }
+    }
+    
+    Ok(())
 }
 
 // WASM bindings
@@ -1160,14 +1300,108 @@ pub fn supersmoother_3_pole_batch_py<'py>(
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "wasm")]
+use js_sys::{Object, Reflect};
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SuperSmoother3PoleParams { period: Some(period) };
     let input = SuperSmoother3PoleInput::from_slice(data, params);
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    supersmoother_3_pole_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
 
-    supersmoother_3_pole_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SuperSmoother3PoleBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_batch(
+    data: &[f64],
+    config: JsValue,
+) -> Result<JsValue, JsValue> {
+    use serde_wasm_bindgen::{from_value, to_value};
+    
+    let config: SuperSmoother3PoleBatchConfig = from_value(config)?;
+    let sweep = SuperSmoother3PoleBatchRange {
+        period: config.period_range,
+    };
+    
+    // Pre-calculate everything
+    let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(JsValue::from_str("Invalid period range"));
+    }
+    
+    let first = data.iter().position(|x| !x.is_nan())
+        .ok_or_else(|| JsValue::from_str("All input values are NaN"))?;
+    
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if data.len() - first < max_p {
+        return Err(JsValue::from_str(&format!(
+            "Not enough valid data: needed = {}, valid = {}", 
+            max_p, data.len() - first
+        )));
+    }
+    
+    let rows = combos.len();
+    let cols = data.len();
+    let mut output = vec![0.0; rows * cols];
+    
+    // Compute batch
+    let chosen = detect_best_batch_kernel();
+    let simd = match chosen {
+        Kernel::Avx512Batch => Kernel::Avx512,
+        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::ScalarBatch => Kernel::Scalar,
+        _ => chosen,
+    };
+    
+    let warm: Vec<usize> = combos.iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    
+    supersmoother_3_pole_batch_inner_into(
+        data, &combos, first, &warm, cols, simd, false, &mut output
+    );
+    
+    // Return result with metadata
+    let result = Object::new();
+    Reflect::set(
+        &result,
+        &JsValue::from_str("values"),
+        &to_value(&output)?,
+    )?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("rows"),
+        &JsValue::from_f64(rows as f64),
+    )?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("cols"),
+        &JsValue::from_f64(cols as f64),
+    )?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("periods"),
+        &to_value(&combos.iter().map(|c| c.period.unwrap()).collect::<Vec<_>>())?,
+    )?;
+    
+    Ok(JsValue::from(result))
 }
 
 #[cfg(feature = "wasm")]
@@ -1207,4 +1441,135 @@ pub fn supersmoother_3_pole_batch_metadata_js(
     }
 
     Ok(metadata)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        let params = SuperSmoother3PoleParams { period: Some(period) };
+        let input = SuperSmoother3PoleInput::from_slice(data, params);
+        
+        // Handle aliasing - if input and output pointers are the same
+        if in_ptr == out_ptr {
+            // Need temporary buffer to avoid corruption
+            let mut temp = vec![0.0; len];
+            supersmoother_3_pole_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy result back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // Direct computation into output buffer
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            supersmoother_3_pole_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided to batch function"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = SuperSmoother3PoleBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        // Pre-calculate everything
+        let combos = expand_grid(&sweep);
+        if combos.is_empty() {
+            return Err(JsValue::from_str("Invalid period range"));
+        }
+        
+        let first = data.iter().position(|x| !x.is_nan())
+            .ok_or_else(|| JsValue::from_str("All input values are NaN"))?;
+        
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if data.len() - first < max_p {
+            return Err(JsValue::from_str(&format!(
+                "Not enough valid data: needed = {}, valid = {}", 
+                max_p, data.len() - first
+            )));
+        }
+        
+        let rows = combos.len();
+        let cols = data.len();
+        let total_size = rows * cols;
+        
+        // Create output slice
+        let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+        
+        // Compute batch
+        let chosen = detect_best_batch_kernel();
+        let simd = match chosen {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => chosen,
+        };
+        
+        let warm: Vec<usize> = combos.iter()
+            .map(|c| first + c.period.unwrap())
+            .collect();
+        
+        supersmoother_3_pole_batch_inner_into(
+            data, &combos, first, &warm, cols, simd, false, out
+        );
+        
+        Ok(rows)
+    }
 }
