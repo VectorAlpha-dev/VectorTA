@@ -23,6 +23,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -41,6 +43,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -66,6 +70,7 @@ pub struct TilsonOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TilsonParams {
 	pub period: Option<usize>,
 	pub volume_factor: Option<f64>,
@@ -390,6 +395,22 @@ pub fn tilson_scalar(
 	}
 
 	Ok(())
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn tilson_simd128(
+	data: &[f64],
+	period: usize,
+	v_factor: f64,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), TilsonError> {
+	use core::arch::wasm32::*;
+	
+	// For now, fall back to scalar implementation
+	// TODO: Implement optimized SIMD128 version
+	tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1333,6 +1354,14 @@ fn tilson_compute_into(
 	out: &mut [f64],
 ) -> Result<(), TilsonError> {
 	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+				tilson_simd128(data, period, v_factor, first, out)?;
+				return Ok(());
+			}
+		}
+		
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => tilson_scalar(data, period, v_factor, first, out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1479,46 +1508,22 @@ pub fn tilson_py<'py>(
 	volume_factor: Option<f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
 
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::Scalar,
-		Some("avx2") => Kernel::Avx2,
-		Some("avx512") => Kernel::Avx512,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
-
-	// ---------- build input struct -------------------------------------------------
 	let params = TilsonParams {
 		period: Some(period),
 		volume_factor: volume_factor.or(Some(0.0)),
 	};
 	let tilson_in = TilsonInput::from_slice(slice_in, params);
 
-	// ---------- allocate NumPy output buffer ---------------------------------------
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| tilson_with_kernel(&tilson_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// ---------- heavy lifting without the GIL --------------------------------------
-	py.allow_threads(|| -> Result<(), TilsonError> {
-		let (data, period, v_factor, first, _len, chosen) = tilson_prepare(&tilson_in, kern)?;
-
-		// Initialize NaN prefix
-		let lookback = 6 * (period - 1);
-		let warm = (first + lookback).min(slice_out.len());
-		slice_out[..warm].fill(f64::NAN);
-
-		// Compute Tilson
-		tilson_compute_into(data, period, v_factor, first, chosen, slice_out)?;
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
-
-	Ok(out_arr.into())
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1579,64 +1584,83 @@ pub fn tilson_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;  // true for batch operations
 
 	let sweep = TilsonBatchRange {
 		period: period_range,
 		volume_factor: volume_factor_range.unwrap_or((0.0, 0.0, 0.0)),
 	};
 
-	// 1. Expand grid once to know rows*cols
+	// Calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	// 2. Pre-allocate NumPy array (1-D, will reshape later)
+	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Parse kernel string to enum
-	let kern = match kernel {
-		None | Some("auto") => Kernel::Auto,
-		Some("scalar") => Kernel::ScalarBatch,
-		Some("avx2") => Kernel::Avx2Batch,
-		Some("avx512") => Kernel::Avx512Batch,
-		Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-	};
-
-	// 3. Heavy work without the GIL
+	// Compute without GIL
 	let combos = py
 		.allow_threads(|| {
-			// Resolve Kernel::Auto to a specific kernel
+			// Handle kernel selection for batch operations
 			let kernel = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
 			};
 
-			// Determine if we should use parallel processing
-			let parallel = !cfg!(target_arch = "wasm32") && rows > 1 && cols > 1000;
+			// Map batch kernels to regular kernels
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
 
-			tilson_batch_inner_into(slice_in, &sweep, kernel, parallel, slice_out)?;
-			Ok::<Vec<TilsonParams>, TilsonError>(combos)
+			tilson_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 4. Reshape the flat output array to 2D
-	let reshaped = out_arr.reshape([rows, cols])?;
-
-	// 5. Extract periods and volume_factors as separate arrays
-	let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-	let v_factors: Vec<f64> = combos.iter().map(|c| c.volume_factor.unwrap()).collect();
-
-	// 6. Create output dictionary
+	// Build result dictionary
 	let dict = PyDict::new(py);
-	dict.set_item("values", reshaped)?;
-	dict.set_item("periods", periods.into_pyarray(py))?;
-	dict.set_item("volume_factors", v_factors.into_pyarray(py))?;
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"volume_factors",
+		combos
+			.iter()
+			.map(|p| p.volume_factor.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
 
 	Ok(dict.into())
 }
 
 // ========== WASM Bindings ==========
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TilsonBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub volume_factor_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TilsonBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<TilsonParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = tilson_js)]
@@ -1656,7 +1680,8 @@ pub fn tilson_js(data: &[f64], period: usize, volume_factor: Option<f64>) -> Res
 	};
 	let input = TilsonInput::from_slice(data, params);
 
-	tilson(&input)
+	// Use Scalar kernel which will auto-upgrade to SIMD128 if available
+	tilson_with_kernel(&input, Kernel::Scalar)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1686,7 +1711,8 @@ pub fn tilson_batch_js(
 		volume_factor: (v_factor_start, v_factor_end, v_factor_step),
 	};
 
-	let output = tilson_batch_with_kernel(data, &sweep, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Use ScalarBatch kernel for WASM batch operations
+	let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(output.values)
 }
@@ -1727,4 +1753,254 @@ pub fn tilson_batch_metadata_js(
 	}
 
 	result
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tilson_batch)]
+pub fn tilson_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TilsonBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = TilsonBatchRange {
+		period: config.period_range,
+		volume_factor: config.volume_factor_range,
+	};
+
+	// Use ScalarBatch kernel for WASM batch operations
+	let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = TilsonBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tilson_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tilson_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tilson_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	volume_factor: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tilson_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = TilsonParams {
+			period: Some(period),
+			volume_factor: Some(volume_factor),
+		};
+		let input = TilsonInput::from_slice(data, params);
+
+		// Find first non-NaN value
+		let first = data.iter().position(|&x| !x.is_nan()).ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+		
+		// Calculate warmup period
+		let warmup = first + 6 * (period - 1);
+		
+		if in_ptr == out_ptr {
+			let mut temp = vec![f64::NAN; len];
+			tilson_compute_into(data, period, volume_factor, first, Kernel::Scalar, &mut temp).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			std::ptr::copy_nonoverlapping(temp.as_ptr(), out_ptr, len);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			// Initialize warmup period with NaN
+			for i in 0..warmup.min(len) {
+				out[i] = f64::NAN;
+			}
+			tilson_compute_into(data, period, volume_factor, first, Kernel::Scalar, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tilson_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	v_factor_start: f64,
+	v_factor_end: f64,
+	v_factor_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tilson_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = TilsonBatchRange {
+			period: (period_start, period_end, period_step),
+			volume_factor: (v_factor_start, v_factor_end, v_factor_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let total = rows * cols;
+
+		if total == 0 {
+			return Err(JsValue::from_str("Invalid batch configuration"));
+		}
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, total);
+
+		tilson_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(
+	since = "1.0.0",
+	note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers"
+)]
+pub struct TilsonContext {
+	period: usize,
+	c1: f64,
+	c2: f64,
+	c3: f64,
+	c4: f64,
+	kernel: Kernel,
+	// State for the 6 EMAs
+	ema1: f64,
+	ema2: f64,
+	ema3: f64,
+	ema4: f64,
+	ema5: f64,
+	ema6: f64,
+	initialized: bool,
+	warmup_count: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[allow(deprecated)]
+impl TilsonContext {
+	#[wasm_bindgen(constructor)]
+	#[deprecated(
+		since = "1.0.0",
+		note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers"
+	)]
+	pub fn new(period: usize, volume_factor: f64) -> Result<TilsonContext, JsValue> {
+		if period == 0 {
+			return Err(JsValue::from_str("Invalid period: 0"));
+		}
+		if volume_factor.is_nan() || volume_factor.is_infinite() {
+			return Err(JsValue::from_str(&format!("Invalid volume factor: {}", volume_factor)));
+		}
+
+		let c1 = -volume_factor.powi(3);
+		let c2 = 3.0 * volume_factor.powi(2) + 3.0 * volume_factor.powi(3);
+		let c3 = -6.0 * volume_factor.powi(2) - 3.0 * volume_factor - 3.0 * volume_factor.powi(3);
+		let c4 = 1.0 + 3.0 * volume_factor + volume_factor.powi(3) + 3.0 * volume_factor.powi(2);
+
+		Ok(TilsonContext {
+			period,
+			c1,
+			c2,
+			c3,
+			c4,
+			kernel: Kernel::Scalar,  // Use Scalar for WASM
+			ema1: 0.0,
+			ema2: 0.0,
+			ema3: 0.0,
+			ema4: 0.0,
+			ema5: 0.0,
+			ema6: 0.0,
+			initialized: false,
+			warmup_count: 0,
+		})
+	}
+
+	#[wasm_bindgen]
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		if value.is_nan() {
+			return None;
+		}
+
+		let alpha = 2.0 / (self.period as f64 + 1.0);
+
+		if !self.initialized {
+			self.ema1 = value;
+			self.ema2 = value;
+			self.ema3 = value;
+			self.ema4 = value;
+			self.ema5 = value;
+			self.ema6 = value;
+			self.initialized = true;
+		} else {
+			self.ema1 = alpha * value + (1.0 - alpha) * self.ema1;
+			self.ema2 = alpha * self.ema1 + (1.0 - alpha) * self.ema2;
+			self.ema3 = alpha * self.ema2 + (1.0 - alpha) * self.ema3;
+			self.ema4 = alpha * self.ema3 + (1.0 - alpha) * self.ema4;
+			self.ema5 = alpha * self.ema4 + (1.0 - alpha) * self.ema5;
+			self.ema6 = alpha * self.ema5 + (1.0 - alpha) * self.ema6;
+		}
+
+		self.warmup_count += 1;
+
+		// Tilson warmup is 6 * (period - 1)
+		if self.warmup_count <= 6 * (self.period - 1) {
+			None
+		} else {
+			Some(self.c1 * self.ema6 + self.c2 * self.ema5 + self.c3 * self.ema4 + self.c4 * self.ema3)
+		}
+	}
+
+	#[wasm_bindgen]
+	pub fn reset(&mut self) {
+		self.ema1 = 0.0;
+		self.ema2 = 0.0;
+		self.ema3 = 0.0;
+		self.ema4 = 0.0;
+		self.ema5 = 0.0;
+		self.ema6 = 0.0;
+		self.initialized = false;
+		self.warmup_count = 0;
+	}
+
+	#[wasm_bindgen]
+	pub fn get_warmup_period(&self) -> usize {
+		6 * (self.period - 1)
+	}
 }

@@ -808,7 +808,7 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'supersmoother_3_pole_batch_into'
         }
-    }
+    },
     ema: {
         name: 'EMA',
         safe: {
@@ -1011,33 +1011,32 @@ const INDICATORS = {
             // No fast batch API yet for sinwma
         }
     },
-    // Example: RSI with batch support (uncomment when RSI WASM bindings are added)
-    /*
-    rsi: {
-        name: 'RSI',
+    tilson: {
+        name: 'Tilson T3',
         safe: {
-            fn: 'rsi_js',
-            params: { period: 14 }
+            fn: 'tilson_js',
+            params: { period: 14, volume_factor: 0.7 }
         },
         fast: {
-            allocFn: 'rsi_alloc',
-            freeFn: 'rsi_free',
-            computeFn: 'rsi_into',
-            params: { period: 14 }
+            allocFn: 'tilson_alloc',
+            freeFn: 'tilson_free',
+            computeFn: 'tilson_into',
+            params: { period: 14, volume_factor: 0.7 }
         },
         batch: {
-            fn: 'rsi_batch',
+            fn: 'tilson_batch',
             config: {
                 small: {
-                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
+                    period_range: [5, 15, 5],         // 3 values: 5, 10, 15
+                    volume_factor_range: [0.0, 0.7, 0.35]  // 3 values: 0.0, 0.35, 0.7
                 },
                 medium: {
-                    period_range: [10, 30, 2]  // 11 values: 10, 12, 14, ..., 30
+                    period_range: [5, 25, 5],         // 5 values: 5, 10, 15, 20, 25
+                    volume_factor_range: [0.0, 0.8, 0.2]   // 5 values: 0.0, 0.2, 0.4, 0.6, 0.8
                 }
             }
         }
     }
-    */
 };
 
 class WasmIndicatorBenchmark {
@@ -1344,8 +1343,8 @@ class WasmIndicatorBenchmark {
                     wasmFn.call(this.wasm, data, start, end, step);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                    wasmFn.apply(this.wasm, params);
                 }
-                wasmFn.apply(this.wasm, params);
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',
@@ -1360,19 +1359,23 @@ class WasmIndicatorBenchmark {
             let totalCombinations = 1;
             if (batchConfig.period_range) {
                 const periods = Math.floor((batchConfig.period_range[1] - batchConfig.period_range[0]) / batchConfig.period_range[2]) + 1;
-                let total = periods;
+                totalCombinations = periods;
                 
                 // Handle optional parameters
                 if (batchConfig.offset_range) {
                     const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
-                    total *= offsets;
+                    totalCombinations *= offsets;
                 }
                 if (batchConfig.sigma_range) {
                     const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
-                    total *= sigmas;
+                    totalCombinations *= sigmas;
                 }
                 
-                console.log(`  Total combinations: ${total}`);
+                // Handle volume_factor_range for tilson
+                if (batchConfig.volume_factor_range) {
+                    const vFactors = Math.floor((batchConfig.volume_factor_range[1] - batchConfig.volume_factor_range[0]) / batchConfig.volume_factor_range[2]) + 1;
+                    totalCombinations *= vFactors;
+                }
             }
             console.log(`  Total combinations: ${totalCombinations}`);
         }
@@ -1423,6 +1426,12 @@ class WasmIndicatorBenchmark {
         } else if (indicatorKey === 'swma') {
             // SWMA uses the new unified batch API with serde config
             return [data, { period_range: batchConfig.period_range }];
+        } else if (indicatorKey === 'tilson') {
+            // Tilson uses the new unified batch API with serde config
+            return [data, { 
+                period_range: batchConfig.period_range,
+                volume_factor_range: batchConfig.volume_factor_range || [0.0, 0.0, 0.0]
+            }];
         } else if (batchConfig.period_range) {
             // Most indicators with period ranges
             const period = batchConfig.period_range;
