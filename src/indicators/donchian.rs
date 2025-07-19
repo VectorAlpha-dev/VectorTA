@@ -17,11 +17,10 @@
 //! ## Returns
 //! - **`Ok(DonchianOutput)`** on success, containing `upperband`, `middleband`, and `lowerband` vectors matching the input.
 //! - **`Err(DonchianError)`** otherwise.
-//!
 
-use crate::utilities::data_loader::{Candles, source_type};
+use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -31,634 +30,748 @@ use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum DonchianData<'a> {
-    Candles { candles: &'a Candles },
-    Slices { high: &'a [f64], low: &'a [f64] },
+	Candles { candles: &'a Candles },
+	Slices { high: &'a [f64], low: &'a [f64] },
 }
 
 #[derive(Debug, Clone)]
 pub struct DonchianOutput {
-    pub upperband: Vec<f64>,
-    pub middleband: Vec<f64>,
-    pub lowerband: Vec<f64>,
+	pub upperband: Vec<f64>,
+	pub middleband: Vec<f64>,
+	pub lowerband: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DonchianParams {
-    pub period: Option<usize>,
+	pub period: Option<usize>,
 }
 
 impl Default for DonchianParams {
-    fn default() -> Self {
-        Self { period: Some(20) }
-    }
+	fn default() -> Self {
+		Self { period: Some(20) }
+	}
 }
 
 #[derive(Debug, Clone)]
 pub struct DonchianInput<'a> {
-    pub data: DonchianData<'a>,
-    pub params: DonchianParams,
+	pub data: DonchianData<'a>,
+	pub params: DonchianParams,
 }
 
 impl<'a> DonchianInput<'a> {
-    #[inline]
-    pub fn from_candles(candles: &'a Candles, params: DonchianParams) -> Self {
-        Self { data: DonchianData::Candles { candles }, params }
-    }
-    #[inline]
-    pub fn from_slices(high: &'a [f64], low: &'a [f64], params: DonchianParams) -> Self {
-        Self { data: DonchianData::Slices { high, low }, params }
-    }
-    #[inline]
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self::from_candles(candles, DonchianParams::default())
-    }
-    #[inline]
-    pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(20)
-    }
+	#[inline]
+	pub fn from_candles(candles: &'a Candles, params: DonchianParams) -> Self {
+		Self {
+			data: DonchianData::Candles { candles },
+			params,
+		}
+	}
+	#[inline]
+	pub fn from_slices(high: &'a [f64], low: &'a [f64], params: DonchianParams) -> Self {
+		Self {
+			data: DonchianData::Slices { high, low },
+			params,
+		}
+	}
+	#[inline]
+	pub fn with_default_candles(candles: &'a Candles) -> Self {
+		Self::from_candles(candles, DonchianParams::default())
+	}
+	#[inline]
+	pub fn get_period(&self) -> usize {
+		self.params.period.unwrap_or(20)
+	}
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct DonchianBuilder {
-    period: Option<usize>,
-    kernel: Kernel,
+	period: Option<usize>,
+	kernel: Kernel,
 }
 
 impl Default for DonchianBuilder {
-    fn default() -> Self {
-        Self { period: None, kernel: Kernel::Auto }
-    }
+	fn default() -> Self {
+		Self {
+			period: None,
+			kernel: Kernel::Auto,
+		}
+	}
 }
 
 impl DonchianBuilder {
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-    #[inline(always)]
-    pub fn period(mut self, n: usize) -> Self {
-        self.period = Some(n);
-        self
-    }
-    #[inline(always)]
-    pub fn kernel(mut self, k: Kernel) -> Self {
-        self.kernel = k;
-        self
-    }
-    #[inline(always)]
-    pub fn apply(self, c: &Candles) -> Result<DonchianOutput, DonchianError> {
-        let p = DonchianParams { period: self.period };
-        let i = DonchianInput::from_candles(c, p);
-        donchian_with_kernel(&i, self.kernel)
-    }
-    #[inline(always)]
-    pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<DonchianOutput, DonchianError> {
-        let p = DonchianParams { period: self.period };
-        let i = DonchianInput::from_slices(high, low, p);
-        donchian_with_kernel(&i, self.kernel)
-    }
-    #[inline(always)]
-    pub fn into_stream(self) -> Result<DonchianStream, DonchianError> {
-        let p = DonchianParams { period: self.period };
-        DonchianStream::try_new(p)
-    }
+	#[inline(always)]
+	pub fn new() -> Self {
+		Self::default()
+	}
+	#[inline(always)]
+	pub fn period(mut self, n: usize) -> Self {
+		self.period = Some(n);
+		self
+	}
+	#[inline(always)]
+	pub fn kernel(mut self, k: Kernel) -> Self {
+		self.kernel = k;
+		self
+	}
+	#[inline(always)]
+	pub fn apply(self, c: &Candles) -> Result<DonchianOutput, DonchianError> {
+		let p = DonchianParams { period: self.period };
+		let i = DonchianInput::from_candles(c, p);
+		donchian_with_kernel(&i, self.kernel)
+	}
+	#[inline(always)]
+	pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<DonchianOutput, DonchianError> {
+		let p = DonchianParams { period: self.period };
+		let i = DonchianInput::from_slices(high, low, p);
+		donchian_with_kernel(&i, self.kernel)
+	}
+	#[inline(always)]
+	pub fn into_stream(self) -> Result<DonchianStream, DonchianError> {
+		let p = DonchianParams { period: self.period };
+		DonchianStream::try_new(p)
+	}
 }
 
 #[derive(Debug, Error)]
 pub enum DonchianError {
-    #[error("donchian: Empty data provided.")]
-    EmptyData,
-    #[error("donchian: Invalid period: period = {period}, data length = {data_len}")]
-    InvalidPeriod { period: usize, data_len: usize },
-    #[error("donchian: Not enough valid data: needed = {needed}, valid = {valid}")]
-    NotEnoughValidData { needed: usize, valid: usize },
-    #[error("donchian: All values are NaN.")]
-    AllValuesNaN,
-    #[error("donchian: High/Low data slices have different lengths.")]
-    MismatchedLength,
+	#[error("donchian: Empty data provided.")]
+	EmptyData,
+	#[error("donchian: Invalid period: period = {period}, data length = {data_len}")]
+	InvalidPeriod { period: usize, data_len: usize },
+	#[error("donchian: Not enough valid data: needed = {needed}, valid = {valid}")]
+	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("donchian: All values are NaN.")]
+	AllValuesNaN,
+	#[error("donchian: High/Low data slices have different lengths.")]
+	MismatchedLength,
 }
 
 #[inline]
 pub fn donchian(input: &DonchianInput) -> Result<DonchianOutput, DonchianError> {
-    donchian_with_kernel(input, Kernel::Auto)
+	donchian_with_kernel(input, Kernel::Auto)
 }
 
 pub fn donchian_with_kernel(input: &DonchianInput, kernel: Kernel) -> Result<DonchianOutput, DonchianError> {
-    let (high, low): (&[f64], &[f64]) = match &input.data {
-        DonchianData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            (high, low)
-        }
-        DonchianData::Slices { high, low } => (high, low),
-    };
+	let (high, low): (&[f64], &[f64]) = match &input.data {
+		DonchianData::Candles { candles } => {
+			let high = source_type(candles, "high");
+			let low = source_type(candles, "low");
+			(high, low)
+		}
+		DonchianData::Slices { high, low } => (high, low),
+	};
 
-    if high.is_empty() || low.is_empty() {
-        return Err(DonchianError::EmptyData);
-    }
-    if high.len() != low.len() {
-        return Err(DonchianError::MismatchedLength);
-    }
+	if high.is_empty() || low.is_empty() {
+		return Err(DonchianError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(DonchianError::MismatchedLength);
+	}
 
-    let first_valid_high = high.iter().position(|&x| !x.is_nan());
-    let first_valid_low = low.iter().position(|&x| !x.is_nan());
-    let first_valid_idx = match (first_valid_high, first_valid_low) {
-        (Some(h), Some(l)) => h.min(l),
-        _ => return Err(DonchianError::AllValuesNaN),
-    };
+	let first_valid_high = high.iter().position(|&x| !x.is_nan());
+	let first_valid_low = low.iter().position(|&x| !x.is_nan());
+	let first_valid_idx = match (first_valid_high, first_valid_low) {
+		(Some(h), Some(l)) => h.min(l),
+		_ => return Err(DonchianError::AllValuesNaN),
+	};
 
-    let len = high.len();
-    let period = input.get_period();
+	let len = high.len();
+	let period = input.get_period();
 
-    if period == 0 || period > len {
-        return Err(DonchianError::InvalidPeriod { period, data_len: len });
-    }
-    if (len - first_valid_idx) < period {
-        return Err(DonchianError::NotEnoughValidData { needed: period, valid: len - first_valid_idx });
-    }
+	if period == 0 || period > len {
+		return Err(DonchianError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first_valid_idx) < period {
+		return Err(DonchianError::NotEnoughValidData {
+			needed: period,
+			valid: len - first_valid_idx,
+		});
+	}
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
-    };
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
 
-    let mut upperband = vec![f64::NAN; len];
-    let mut middleband = vec![f64::NAN; len];
-    let mut lowerband = vec![f64::NAN; len];
+	let mut upperband = vec![f64::NAN; len];
+	let mut middleband = vec![f64::NAN; len];
+	let mut lowerband = vec![f64::NAN; len];
 
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                donchian_scalar(high, low, period, first_valid_idx, &mut upperband, &mut middleband, &mut lowerband)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                donchian_avx2(high, low, period, first_valid_idx, &mut upperband, &mut middleband, &mut lowerband)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                donchian_avx512(high, low, period, first_valid_idx, &mut upperband, &mut middleband, &mut lowerband)
-            }
-            _ => unreachable!(),
-        }
-    }
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => donchian_scalar(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				&mut upperband,
+				&mut middleband,
+				&mut lowerband,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => donchian_avx2(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				&mut upperband,
+				&mut middleband,
+				&mut lowerband,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => donchian_avx512(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				&mut upperband,
+				&mut middleband,
+				&mut lowerband,
+			),
+			_ => unreachable!(),
+		}
+	}
 
-    Ok(DonchianOutput { upperband, middleband, lowerband })
+	Ok(DonchianOutput {
+		upperband,
+		middleband,
+		lowerband,
+	})
 }
 
 #[inline]
 pub fn donchian_scalar(
-    high: &[f64], low: &[f64], period: usize, first_valid: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first_valid: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    for i in (first_valid + period - 1)..high.len() {
-        let start = i + 1 - period;
-        let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
-        for k in 0..period {
-            let h = high[start + k];
-            let l = low[start + k];
-            if h > maxv { maxv = h; }
-            if l < minv { minv = l; }
-        }
-        upper[i] = maxv;
-        lower[i] = minv;
-        middle[i] = 0.5 * (maxv + minv);
-    }
+	for i in (first_valid + period - 1)..high.len() {
+		let start = i + 1 - period;
+		let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
+		for k in 0..period {
+			let h = high[start + k];
+			let l = low[start + k];
+			if h > maxv {
+				maxv = h;
+			}
+			if l < minv {
+				minv = l;
+			}
+		}
+		upper[i] = maxv;
+		lower[i] = minv;
+		middle[i] = 0.5 * (maxv + minv);
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn donchian_avx512(
-    high: &[f64], low: &[f64], period: usize, first_valid: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first_valid: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    donchian_scalar(high, low, period, first_valid, upper, middle, lower)
+	donchian_scalar(high, low, period, first_valid, upper, middle, lower)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn donchian_avx2(
-    high: &[f64], low: &[f64], period: usize, first_valid: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first_valid: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    donchian_scalar(high, low, period, first_valid, upper, middle, lower)
+	donchian_scalar(high, low, period, first_valid, upper, middle, lower)
 }
 
 #[inline(always)]
 pub fn donchian_batch_with_kernel(
-    high: &[f64], low: &[f64], sweep: &DonchianBatchRange, k: Kernel
+	high: &[f64],
+	low: &[f64],
+	sweep: &DonchianBatchRange,
+	k: Kernel,
 ) -> Result<DonchianBatchOutput, DonchianError> {
-    let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 }),
-    };
-    let simd = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
-    };
-    donchian_batch_par_slice(high, low, sweep, simd)
+	let kernel = match k {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		_ => return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 }),
+	};
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+	donchian_batch_par_slice(high, low, sweep, simd)
 }
 
 #[derive(Clone, Debug)]
 pub struct DonchianBatchRange {
-    pub period: (usize, usize, usize),
+	pub period: (usize, usize, usize),
 }
 
 impl Default for DonchianBatchRange {
-    fn default() -> Self {
-        Self { period: (20, 60, 1) }
-    }
+	fn default() -> Self {
+		Self { period: (20, 60, 1) }
+	}
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct DonchianBatchBuilder {
-    range: DonchianBatchRange,
-    kernel: Kernel,
+	range: DonchianBatchRange,
+	kernel: Kernel,
 }
 
 impl DonchianBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.period = (start, end, step); self
-    }
-    pub fn period_static(mut self, p: usize) -> Self {
-        self.range.period = (p, p, 0); self
-    }
-    pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<DonchianBatchOutput, DonchianError> {
-        donchian_batch_with_kernel(high, low, &self.range, self.kernel)
-    }
-    pub fn with_default_slices(high: &[f64], low: &[f64], k: Kernel) -> Result<DonchianBatchOutput, DonchianError> {
-        DonchianBatchBuilder::new().kernel(k).apply_slices(high, low)
-    }
-    pub fn apply_candles(self, c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        self.apply_slices(high, low)
-    }
-    pub fn with_default_candles(c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
-        DonchianBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)
-    }
+	pub fn new() -> Self {
+		Self::default()
+	}
+	pub fn kernel(mut self, k: Kernel) -> Self {
+		self.kernel = k;
+		self
+	}
+	pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+		self.range.period = (start, end, step);
+		self
+	}
+	pub fn period_static(mut self, p: usize) -> Self {
+		self.range.period = (p, p, 0);
+		self
+	}
+	pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<DonchianBatchOutput, DonchianError> {
+		donchian_batch_with_kernel(high, low, &self.range, self.kernel)
+	}
+	pub fn with_default_slices(high: &[f64], low: &[f64], k: Kernel) -> Result<DonchianBatchOutput, DonchianError> {
+		DonchianBatchBuilder::new().kernel(k).apply_slices(high, low)
+	}
+	pub fn apply_candles(self, c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
+		let high = source_type(c, "high");
+		let low = source_type(c, "low");
+		self.apply_slices(high, low)
+	}
+	pub fn with_default_candles(c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
+		DonchianBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)
+	}
 }
 
 #[derive(Clone, Debug)]
 pub struct DonchianBatchOutput {
-    pub upper: Vec<f64>,
-    pub middle: Vec<f64>,
-    pub lower: Vec<f64>,
-    pub combos: Vec<DonchianParams>,
-    pub rows: usize,
-    pub cols: usize,
+	pub upper: Vec<f64>,
+	pub middle: Vec<f64>,
+	pub lower: Vec<f64>,
+	pub combos: Vec<DonchianParams>,
+	pub rows: usize,
+	pub cols: usize,
 }
 
 impl DonchianBatchOutput {
-    pub fn row_for_params(&self, p: &DonchianParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(20) == p.period.unwrap_or(20))
-    }
-    pub fn upper_for(&self, p: &DonchianParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| &self.upper[row * self.cols..][..self.cols])
-    }
-    pub fn middle_for(&self, p: &DonchianParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| &self.middle[row * self.cols..][..self.cols])
-    }
-    pub fn lower_for(&self, p: &DonchianParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| &self.lower[row * self.cols..][..self.cols])
-    }
+	pub fn row_for_params(&self, p: &DonchianParams) -> Option<usize> {
+		self.combos
+			.iter()
+			.position(|c| c.period.unwrap_or(20) == p.period.unwrap_or(20))
+	}
+	pub fn upper_for(&self, p: &DonchianParams) -> Option<&[f64]> {
+		self.row_for_params(p)
+			.map(|row| &self.upper[row * self.cols..][..self.cols])
+	}
+	pub fn middle_for(&self, p: &DonchianParams) -> Option<&[f64]> {
+		self.row_for_params(p)
+			.map(|row| &self.middle[row * self.cols..][..self.cols])
+	}
+	pub fn lower_for(&self, p: &DonchianParams) -> Option<&[f64]> {
+		self.row_for_params(p)
+			.map(|row| &self.lower[row * self.cols..][..self.cols])
+	}
 }
 
 #[inline(always)]
 pub fn expand_grid(r: &DonchianBatchRange) -> Vec<DonchianParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
-        (start..=end).step_by(step).collect()
-    }
-    let periods = axis_usize(r.period);
-    periods.into_iter().map(|p| DonchianParams { period: Some(p) }).collect()
+	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+		if step == 0 || start == end {
+			return vec![start];
+		}
+		(start..=end).step_by(step).collect()
+	}
+	let periods = axis_usize(r.period);
+	periods
+		.into_iter()
+		.map(|p| DonchianParams { period: Some(p) })
+		.collect()
 }
 
 #[inline(always)]
 pub fn donchian_batch_slice(
-    high: &[f64], low: &[f64], sweep: &DonchianBatchRange, kern: Kernel
+	high: &[f64],
+	low: &[f64],
+	sweep: &DonchianBatchRange,
+	kern: Kernel,
 ) -> Result<DonchianBatchOutput, DonchianError> {
-    donchian_batch_inner(high, low, sweep, kern, false)
+	donchian_batch_inner(high, low, sweep, kern, false)
 }
 
 #[inline(always)]
 pub fn donchian_batch_par_slice(
-    high: &[f64], low: &[f64], sweep: &DonchianBatchRange, kern: Kernel
+	high: &[f64],
+	low: &[f64],
+	sweep: &DonchianBatchRange,
+	kern: Kernel,
 ) -> Result<DonchianBatchOutput, DonchianError> {
-    donchian_batch_inner(high, low, sweep, kern, true)
+	donchian_batch_inner(high, low, sweep, kern, true)
 }
 
 #[inline(always)]
 fn donchian_batch_inner(
-    high: &[f64], low: &[f64], sweep: &DonchianBatchRange, kern: Kernel, parallel: bool
+	high: &[f64],
+	low: &[f64],
+	sweep: &DonchianBatchRange,
+	kern: Kernel,
+	parallel: bool,
 ) -> Result<DonchianBatchOutput, DonchianError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 });
-    }
-    if high.len() != low.len() { return Err(DonchianError::MismatchedLength); }
-    let first = high.iter().position(|x| !x.is_nan()).zip(low.iter().position(|x| !x.is_nan())).map(|(a,b)| a.min(b));
-    let first = match first { Some(idx) => idx, None => return Err(DonchianError::AllValuesNaN) };
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    if high.len() - first < max_p {
-        return Err(DonchianError::NotEnoughValidData { needed: max_p, valid: high.len() - first });
-    }
-    let rows = combos.len();
-    let cols = high.len();
-    let mut upper = vec![f64::NAN; rows * cols];
-    let mut middle = vec![f64::NAN; rows * cols];
-    let mut lower = vec![f64::NAN; rows * cols];
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	if high.len() != low.len() {
+		return Err(DonchianError::MismatchedLength);
+	}
+	let first = high
+		.iter()
+		.position(|x| !x.is_nan())
+		.zip(low.iter().position(|x| !x.is_nan()))
+		.map(|(a, b)| a.min(b));
+	let first = match first {
+		Some(idx) => idx,
+		None => return Err(DonchianError::AllValuesNaN),
+	};
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if high.len() - first < max_p {
+		return Err(DonchianError::NotEnoughValidData {
+			needed: max_p,
+			valid: high.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = high.len();
+	let mut upper = vec![f64::NAN; rows * cols];
+	let mut middle = vec![f64::NAN; rows * cols];
+	let mut lower = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_upper: &mut [f64], out_middle: &mut [f64], out_lower: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => donchian_row_scalar(high, low, first, period, out_upper, out_middle, out_lower),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => donchian_row_avx2(high, low, first, period, out_upper, out_middle, out_lower),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => donchian_row_avx512(high, low, first, period, out_upper, out_middle, out_lower),
-            _ => unreachable!(),
-        }
-    };
+	let do_row = |row: usize, out_upper: &mut [f64], out_middle: &mut [f64], out_lower: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => donchian_row_scalar(high, low, first, period, out_upper, out_middle, out_lower),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => donchian_row_avx2(high, low, first, period, out_upper, out_middle, out_lower),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => donchian_row_avx512(high, low, first, period, out_upper, out_middle, out_lower),
+			_ => unreachable!(),
+		}
+	};
 
-    if parallel {
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			upper
+				.par_chunks_mut(cols)
+				.zip(middle.par_chunks_mut(cols))
+				.zip(lower.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, ((upper, middle), lower))| do_row(row, upper, middle, lower));
+		}
 
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (((upper, middle), lower), row) in upper
+				.chunks_mut(cols)
+				.zip(middle.chunks_mut(cols))
+				.zip(lower.chunks_mut(cols))
+				.zip(0..)
+			{
+				do_row(row, upper, middle, lower);
+			}
+		}
+	} else {
+		for (((upper, middle), lower), row) in upper
+			.chunks_mut(cols)
+			.zip(middle.chunks_mut(cols))
+			.zip(lower.chunks_mut(cols))
+			.zip(0..)
+		{
+			do_row(row, upper, middle, lower);
+		}
+	}
 
-        #[cfg(not(target_arch = "wasm32"))] {
-
-
-        upper.par_chunks_mut(cols)
-
-
-                    .zip(middle.par_chunks_mut(cols))
-
-
-                    .zip(lower.par_chunks_mut(cols))
-
-
-                    .enumerate()
-
-
-                    .for_each(|(row, ((upper, middle), lower))| do_row(row, upper, middle, lower));
-
-
-        }
-
-
-        #[cfg(target_arch = "wasm32")] {
-
-
-        for (((upper, middle), lower), row) in upper.chunks_mut(cols)
-
-
-                    .zip(middle.chunks_mut(cols))
-
-
-                    .zip(lower.chunks_mut(cols))
-
-
-                    .zip(0..) {
-
-
-                    do_row(row, upper, middle, lower);
-
-
-        }
-
-
-        }
-    } else {
-        for (((upper, middle), lower), row) in upper.chunks_mut(cols)
-            .zip(middle.chunks_mut(cols))
-            .zip(lower.chunks_mut(cols))
-            .zip(0..) {
-            do_row(row, upper, middle, lower);
-        }
-    }
-
-    Ok(DonchianBatchOutput { upper, middle, lower, combos, rows, cols })
+	Ok(DonchianBatchOutput {
+		upper,
+		middle,
+		lower,
+		combos,
+		rows,
+		cols,
+	})
 }
 
 #[inline(always)]
 unsafe fn donchian_row_scalar(
-    high: &[f64], low: &[f64], first: usize, period: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    for i in (first + period - 1)..high.len() {
-        let start = i + 1 - period;
-        let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
-        for k in 0..period {
-            let h = high[start + k];
-            let l = low[start + k];
-            if h > maxv { maxv = h; }
-            if l < minv { minv = l; }
-        }
-        upper[i] = maxv;
-        lower[i] = minv;
-        middle[i] = 0.5 * (maxv + minv);
-    }
+	for i in (first + period - 1)..high.len() {
+		let start = i + 1 - period;
+		let (mut maxv, mut minv) = (f64::NEG_INFINITY, f64::INFINITY);
+		for k in 0..period {
+			let h = high[start + k];
+			let l = low[start + k];
+			if h > maxv {
+				maxv = h;
+			}
+			if l < minv {
+				minv = l;
+			}
+		}
+		upper[i] = maxv;
+		lower[i] = minv;
+		middle[i] = 0.5 * (maxv + minv);
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn donchian_row_avx2(
-    high: &[f64], low: &[f64], first: usize, period: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    donchian_row_scalar(high, low, first, period, upper, middle, lower)
+	donchian_row_scalar(high, low, first, period, upper, middle, lower)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn donchian_row_avx512(
-    high: &[f64], low: &[f64], first: usize, period: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    if period <= 32 {
-        donchian_row_avx512_short(high, low, first, period, upper, middle, lower)
-    
-        } else {
-        donchian_row_avx512_long(high, low, first, period, upper, middle, lower)
-    }
+	if period <= 32 {
+		donchian_row_avx512_short(high, low, first, period, upper, middle, lower)
+	} else {
+		donchian_row_avx512_long(high, low, first, period, upper, middle, lower)
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn donchian_row_avx512_short(
-    high: &[f64], low: &[f64], first: usize, period: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    donchian_row_scalar(high, low, first, period, upper, middle, lower)
+	donchian_row_scalar(high, low, first, period, upper, middle, lower)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn donchian_row_avx512_long(
-    high: &[f64], low: &[f64], first: usize, period: usize,
-    upper: &mut [f64], middle: &mut [f64], lower: &mut [f64]
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	upper: &mut [f64],
+	middle: &mut [f64],
+	lower: &mut [f64],
 ) {
-    donchian_row_scalar(high, low, first, period, upper, middle, lower)
+	donchian_row_scalar(high, low, first, period, upper, middle, lower)
 }
 
 #[derive(Debug, Clone)]
 pub struct DonchianStream {
-    period: usize,
-    high_buf: Vec<f64>,
-    low_buf: Vec<f64>,
-    head: usize,
-    filled: bool,
+	period: usize,
+	high_buf: Vec<f64>,
+	low_buf: Vec<f64>,
+	head: usize,
+	filled: bool,
 }
 
 impl DonchianStream {
-    pub fn try_new(params: DonchianParams) -> Result<Self, DonchianError> {
-        let period = params.period.unwrap_or(20);
-        if period == 0 {
-            return Err(DonchianError::InvalidPeriod { period, data_len: 0 });
-        }
-        Ok(Self {
-            period,
-            high_buf: vec![f64::NAN; period],
-            low_buf: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-        })
-    }
+	pub fn try_new(params: DonchianParams) -> Result<Self, DonchianError> {
+		let period = params.period.unwrap_or(20);
+		if period == 0 {
+			return Err(DonchianError::InvalidPeriod { period, data_len: 0 });
+		}
+		Ok(Self {
+			period,
+			high_buf: vec![f64::NAN; period],
+			low_buf: vec![f64::NAN; period],
+			head: 0,
+			filled: false,
+		})
+	}
 
-    #[inline(always)]
-    pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
-        self.high_buf[self.head] = high;
-        self.low_buf[self.head] = low;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-        if !self.filled { return None; }
-        let mut maxv = f64::NEG_INFINITY;
-        let mut minv = f64::INFINITY;
-        let mut idx = self.head;
-        for _ in 0..self.period {
-            let h = self.high_buf[idx];
-            let l = self.low_buf[idx];
-            if h > maxv { maxv = h; }
-            if l < minv { minv = l; }
-            idx = (idx + 1) % self.period;
-        }
-        Some((maxv, 0.5 * (maxv + minv), minv))
-    }
+	#[inline(always)]
+	pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
+		self.high_buf[self.head] = high;
+		self.low_buf[self.head] = low;
+		self.head = (self.head + 1) % self.period;
+		if !self.filled && self.head == 0 {
+			self.filled = true;
+		}
+		if !self.filled {
+			return None;
+		}
+		let mut maxv = f64::NEG_INFINITY;
+		let mut minv = f64::INFINITY;
+		let mut idx = self.head;
+		for _ in 0..self.period {
+			let h = self.high_buf[idx];
+			let l = self.low_buf[idx];
+			if h > maxv {
+				maxv = h;
+			}
+			if l < minv {
+				minv = l;
+			}
+			idx = (idx + 1) % self.period;
+		}
+		Some((maxv, 0.5 * (maxv + minv), minv))
+	}
 }
 
 // --- TESTS ---
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::skip_if_unsupported;
+	use super::*;
+	use crate::skip_if_unsupported;
+	use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_donchian_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path)?;
-        let default_params = DonchianParams { period: None };
-        let input = DonchianInput::from_candles(&candles, default_params);
-        let output = donchian_with_kernel(&input, kernel)?;
-        assert_eq!(output.upperband.len(), candles.close.len());
-        Ok(())
-    }
+	fn check_donchian_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let default_params = DonchianParams { period: None };
+		let input = DonchianInput::from_candles(&candles, default_params);
+		let output = donchian_with_kernel(&input, kernel)?;
+		assert_eq!(output.upperband.len(), candles.close.len());
+		Ok(())
+	}
 
-    fn check_donchian_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path)?;
-        let params = DonchianParams { period: Some(20) };
-        let input = DonchianInput::from_candles(&candles, params);
-        let result = donchian_with_kernel(&input, kernel)?;
-        let expected_last_five_upper = [61290.0, 61290.0, 61290.0, 61290.0, 61290.0];
-        let expected_last_five_middle = [59583.0, 59583.0, 59583.0, 59583.0, 59583.0];
-        let expected_last_five_lower = [57876.0, 57876.0, 57876.0, 57876.0, 57876.0];
-        let start = result.upperband.len().saturating_sub(5);
-        for i in 0..5 {
-            assert!((result.upperband[start + i] - expected_last_five_upper[i]).abs() < 1e-1);
-            assert!((result.middleband[start + i] - expected_last_five_middle[i]).abs() < 1e-1);
-            assert!((result.lowerband[start + i] - expected_last_five_lower[i]).abs() < 1e-1);
-        }
-        Ok(())
-    }
+	fn check_donchian_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let params = DonchianParams { period: Some(20) };
+		let input = DonchianInput::from_candles(&candles, params);
+		let result = donchian_with_kernel(&input, kernel)?;
+		let expected_last_five_upper = [61290.0, 61290.0, 61290.0, 61290.0, 61290.0];
+		let expected_last_five_middle = [59583.0, 59583.0, 59583.0, 59583.0, 59583.0];
+		let expected_last_five_lower = [57876.0, 57876.0, 57876.0, 57876.0, 57876.0];
+		let start = result.upperband.len().saturating_sub(5);
+		for i in 0..5 {
+			assert!((result.upperband[start + i] - expected_last_five_upper[i]).abs() < 1e-1);
+			assert!((result.middleband[start + i] - expected_last_five_middle[i]).abs() < 1e-1);
+			assert!((result.lowerband[start + i] - expected_last_five_lower[i]).abs() < 1e-1);
+		}
+		Ok(())
+	}
 
-    fn check_donchian_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [10.0, 20.0, 30.0];
-        let low = [5.0, 3.0, 2.0];
-        let params = DonchianParams { period: Some(0) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let res = donchian_with_kernel(&input, kernel);
-        assert!(res.is_err());
-        Ok(())
-    }
+	fn check_donchian_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 20.0, 30.0];
+		let low = [5.0, 3.0, 2.0];
+		let params = DonchianParams { period: Some(0) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let res = donchian_with_kernel(&input, kernel);
+		assert!(res.is_err());
+		Ok(())
+	}
 
-    fn check_donchian_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [10.0, 20.0, 30.0];
-        let low = [5.0, 3.0, 2.0];
-        let params = DonchianParams { period: Some(10) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let res = donchian_with_kernel(&input, kernel);
-        assert!(res.is_err());
-        Ok(())
-    }
+	fn check_donchian_period_exceeds_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 20.0, 30.0];
+		let low = [5.0, 3.0, 2.0];
+		let params = DonchianParams { period: Some(10) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let res = donchian_with_kernel(&input, kernel);
+		assert!(res.is_err());
+		Ok(())
+	}
 
-    fn check_donchian_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [100.0];
-        let low = [90.0];
-        let params = DonchianParams { period: Some(20) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let res = donchian_with_kernel(&input, kernel);
-        assert!(res.is_err());
-        Ok(())
-    }
+	fn check_donchian_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [100.0];
+		let low = [90.0];
+		let params = DonchianParams { period: Some(20) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let res = donchian_with_kernel(&input, kernel);
+		assert!(res.is_err());
+		Ok(())
+	}
 
-    fn check_donchian_mismatched_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [10.0, 20.0, 30.0];
-        let low = [5.0, 3.0];
-        let params = DonchianParams { period: Some(2) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let res = donchian_with_kernel(&input, kernel);
-        assert!(res.is_err());
-        Ok(())
-    }
+	fn check_donchian_mismatched_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 20.0, 30.0];
+		let low = [5.0, 3.0];
+		let params = DonchianParams { period: Some(2) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let res = donchian_with_kernel(&input, kernel);
+		assert!(res.is_err());
+		Ok(())
+	}
 
-    fn check_donchian_all_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [f64::NAN, f64::NAN];
-        let low = [f64::NAN, f64::NAN];
-        let params = DonchianParams { period: Some(2) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let res = donchian_with_kernel(&input, kernel);
-        assert!(res.is_err());
-        Ok(())
-    }
+	fn check_donchian_all_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [f64::NAN, f64::NAN];
+		let low = [f64::NAN, f64::NAN];
+		let params = DonchianParams { period: Some(2) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let res = donchian_with_kernel(&input, kernel);
+		assert!(res.is_err());
+		Ok(())
+	}
 
-    fn check_donchian_partial_computation(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [f64::NAN, 3.0, 5.0, 8.0, 8.5, 9.0, 2.0, 1.0];
-        let low = [f64::NAN, 2.0, 1.0, 4.0, 4.5, 1.0, 1.0, 0.5];
-        let params = DonchianParams { period: Some(3) };
-        let input = DonchianInput::from_slices(&high, &low, params);
-        let output = donchian_with_kernel(&input, kernel)?;
-        assert_eq!(output.upperband.len(), high.len());
-        assert!(output.upperband[2].is_nan());
-        assert!(!output.upperband[3].is_nan());
-        Ok(())
-    }
+	fn check_donchian_partial_computation(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [f64::NAN, 3.0, 5.0, 8.0, 8.5, 9.0, 2.0, 1.0];
+		let low = [f64::NAN, 2.0, 1.0, 4.0, 4.5, 1.0, 1.0, 0.5];
+		let params = DonchianParams { period: Some(3) };
+		let input = DonchianInput::from_slices(&high, &low, params);
+		let output = donchian_with_kernel(&input, kernel)?;
+		assert_eq!(output.upperband.len(), high.len());
+		assert!(output.upperband[2].is_nan());
+		assert!(!output.upperband[3].is_nan());
+		Ok(())
+	}
 
-    macro_rules! generate_all_donchian_tests {
+	macro_rules! generate_all_donchian_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
@@ -682,47 +795,47 @@ mod tests {
         }
     }
 
-    generate_all_donchian_tests!(
-        check_donchian_partial_params,
-        check_donchian_accuracy,
-        check_donchian_zero_period,
-        check_donchian_period_exceeds_length,
-        check_donchian_very_small_dataset,
-        check_donchian_mismatched_length,
-        check_donchian_all_nan_data,
-        check_donchian_partial_computation
-    );
+	generate_all_donchian_tests!(
+		check_donchian_partial_params,
+		check_donchian_accuracy,
+		check_donchian_zero_period,
+		check_donchian_period_exceeds_length,
+		check_donchian_very_small_dataset,
+		check_donchian_mismatched_length,
+		check_donchian_all_nan_data,
+		check_donchian_partial_computation
+	);
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c = read_candles_from_csv(file)?;
-        let output = DonchianBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
-        let def = DonchianParams::default();
-        let row = output.upper_for(&def).expect("default row missing");
-        assert_eq!(row.len(), c.close.len());
-        Ok(())
-    }
+	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let output = DonchianBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+		let def = DonchianParams::default();
+		let row = output.upper_for(&def).expect("default row missing");
+		assert_eq!(row.len(), c.close.len());
+		Ok(())
+	}
 
-    macro_rules! gen_batch_tests {
-        ($fn_name:ident) => {
-            paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx2>]()        {
-                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx512>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-                }
-                #[test] fn [<$fn_name _auto_detect>]() {
-                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
-                }
-            }
-        };
-    }
-    gen_batch_tests!(check_batch_default_row);
+	macro_rules! gen_batch_tests {
+		($fn_name:ident) => {
+			paste::paste! {
+				#[test] fn [<$fn_name _scalar>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx2>]()        {
+					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx512>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+				}
+				#[test] fn [<$fn_name _auto_detect>]() {
+					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+				}
+			}
+		};
+	}
+	gen_batch_tests!(check_batch_default_row);
 }

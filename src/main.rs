@@ -8,8 +8,6 @@
 #![allow(warnings)]
 #![allow(non_snake_case)]
 
-
-
 mod indicators;
 mod utilities;
 use csv::ReaderBuilder;
@@ -18,5 +16,5 @@ use std::error::Error;
 use std::fs::File;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    Ok(())
+	Ok(())
 }

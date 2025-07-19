@@ -22,701 +22,662 @@
 //!   valid data point).
 //! - **`Err(CviError)`** otherwise.
 
-use crate::utilities::data_loader::{Candles, source_type};
+use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_kernel, detect_best_batch_kernel};
+use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use thiserror::Error;
 use std::convert::AsRef;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum CviData<'a> {
-    Candles { candles: &'a Candles },
-    Slices { high: &'a [f64], low: &'a [f64] },
+	Candles { candles: &'a Candles },
+	Slices { high: &'a [f64], low: &'a [f64] },
 }
 
 #[derive(Debug, Clone)]
 pub struct CviOutput {
-    pub values: Vec<f64>,
+	pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CviParams {
-    pub period: Option<usize>,
+	pub period: Option<usize>,
 }
 
 impl Default for CviParams {
-    fn default() -> Self {
-        Self { period: Some(10) }
-    }
+	fn default() -> Self {
+		Self { period: Some(10) }
+	}
 }
 
 #[derive(Debug, Clone)]
 pub struct CviInput<'a> {
-    pub data: CviData<'a>,
-    pub params: CviParams,
+	pub data: CviData<'a>,
+	pub params: CviParams,
 }
 
 impl<'a> CviInput<'a> {
-    #[inline]
-    pub fn from_candles(candles: &'a Candles, params: CviParams) -> Self {
-        Self { data: CviData::Candles { candles }, params }
-    }
+	#[inline]
+	pub fn from_candles(candles: &'a Candles, params: CviParams) -> Self {
+		Self {
+			data: CviData::Candles { candles },
+			params,
+		}
+	}
 
-    #[inline]
-    pub fn from_slices(high: &'a [f64], low: &'a [f64], params: CviParams) -> Self {
-        Self { data: CviData::Slices { high, low }, params }
-    }
+	#[inline]
+	pub fn from_slices(high: &'a [f64], low: &'a [f64], params: CviParams) -> Self {
+		Self {
+			data: CviData::Slices { high, low },
+			params,
+		}
+	}
 
-    #[inline]
-    pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self { data: CviData::Candles { candles }, params: CviParams::default() }
-    }
+	#[inline]
+	pub fn with_default_candles(candles: &'a Candles) -> Self {
+		Self {
+			data: CviData::Candles { candles },
+			params: CviParams::default(),
+		}
+	}
 
-    #[inline]
-    pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(10)
-    }
+	#[inline]
+	pub fn get_period(&self) -> usize {
+		self.params.period.unwrap_or(10)
+	}
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct CviBuilder {
-    period: Option<usize>,
-    kernel: Kernel,
+	period: Option<usize>,
+	kernel: Kernel,
 }
 
 impl Default for CviBuilder {
-    fn default() -> Self {
-        Self { period: None, kernel: Kernel::Auto }
-    }
+	fn default() -> Self {
+		Self {
+			period: None,
+			kernel: Kernel::Auto,
+		}
+	}
 }
 
 impl CviBuilder {
-    #[inline]
-    pub fn new() -> Self { Self::default() }
-    #[inline]
-    pub fn period(mut self, n: usize) -> Self { self.period = Some(n); self }
-    #[inline]
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
+	#[inline]
+	pub fn new() -> Self {
+		Self::default()
+	}
+	#[inline]
+	pub fn period(mut self, n: usize) -> Self {
+		self.period = Some(n);
+		self
+	}
+	#[inline]
+	pub fn kernel(mut self, k: Kernel) -> Self {
+		self.kernel = k;
+		self
+	}
 
-    #[inline]
-    pub fn apply(self, candles: &Candles) -> Result<CviOutput, CviError> {
-        let params = CviParams { period: self.period };
-        let input = CviInput::from_candles(candles, params);
-        cvi_with_kernel(&input, self.kernel)
-    }
+	#[inline]
+	pub fn apply(self, candles: &Candles) -> Result<CviOutput, CviError> {
+		let params = CviParams { period: self.period };
+		let input = CviInput::from_candles(candles, params);
+		cvi_with_kernel(&input, self.kernel)
+	}
 
-    #[inline]
-    pub fn apply_slice(self, high: &[f64], low: &[f64]) -> Result<CviOutput, CviError> {
-        let params = CviParams { period: self.period };
-        let input = CviInput::from_slices(high, low, params);
-        cvi_with_kernel(&input, self.kernel)
-    }
+	#[inline]
+	pub fn apply_slice(self, high: &[f64], low: &[f64]) -> Result<CviOutput, CviError> {
+		let params = CviParams { period: self.period };
+		let input = CviInput::from_slices(high, low, params);
+		cvi_with_kernel(&input, self.kernel)
+	}
 }
 
 #[derive(Debug, Error)]
 pub enum CviError {
-    #[error("cvi: Empty data provided for CVI.")]
-    EmptyData,
-    #[error("cvi: Invalid period: period = {period}, data length = {data_len}")]
-    InvalidPeriod { period: usize, data_len: usize },
-    #[error("cvi: Not enough valid data: needed = {needed}, valid = {valid}")]
-    NotEnoughValidData { needed: usize, valid: usize },
-    #[error("cvi: All values are NaN.")]
-    AllValuesNaN,
+	#[error("cvi: Empty data provided for CVI.")]
+	EmptyData,
+	#[error("cvi: Invalid period: period = {period}, data length = {data_len}")]
+	InvalidPeriod { period: usize, data_len: usize },
+	#[error("cvi: Not enough valid data: needed = {needed}, valid = {valid}")]
+	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("cvi: All values are NaN.")]
+	AllValuesNaN,
 }
 
 #[inline]
 pub fn cvi(input: &CviInput) -> Result<CviOutput, CviError> {
-    cvi_with_kernel(input, Kernel::Auto)
+	cvi_with_kernel(input, Kernel::Auto)
 }
 
 pub fn cvi_with_kernel(input: &CviInput, kernel: Kernel) -> Result<CviOutput, CviError> {
-    let (high, low) = match &input.data {
-        CviData::Candles { candles } => {
-            if candles.high.is_empty() || candles.low.is_empty() {
-                return Err(CviError::EmptyData);
-            }
-            (&candles.high[..], &candles.low[..])
-        }
-        CviData::Slices { high, low } => {
-            if high.is_empty() || low.is_empty() {
-                return Err(CviError::EmptyData);
-            }
-            (*high, *low)
-        }
-    };
+	let (high, low) = match &input.data {
+		CviData::Candles { candles } => {
+			if candles.high.is_empty() || candles.low.is_empty() {
+				return Err(CviError::EmptyData);
+			}
+			(&candles.high[..], &candles.low[..])
+		}
+		CviData::Slices { high, low } => {
+			if high.is_empty() || low.is_empty() {
+				return Err(CviError::EmptyData);
+			}
+			(*high, *low)
+		}
+	};
 
-    if high.len() != low.len() {
-        return Err(CviError::EmptyData);
-    }
+	if high.len() != low.len() {
+		return Err(CviError::EmptyData);
+	}
 
-    let period = input.get_period();
-    if period == 0 || period > high.len() {
-        return Err(CviError::InvalidPeriod {
-            period,
-            data_len: high.len(),
-        });
-    }
+	let period = input.get_period();
+	if period == 0 || period > high.len() {
+		return Err(CviError::InvalidPeriod {
+			period,
+			data_len: high.len(),
+		});
+	}
 
-    let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-        Some(idx) => idx,
-        None => return Err(CviError::AllValuesNaN),
-    };
+	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(CviError::AllValuesNaN),
+	};
 
-    let needed = 2 * period - 1;
-    if (high.len() - first_valid_idx) < needed {
-        return Err(CviError::NotEnoughValidData {
-            needed,
-            valid: high.len() - first_valid_idx,
-        });
-    }
+	let needed = 2 * period - 1;
+	if (high.len() - first_valid_idx) < needed {
+		return Err(CviError::NotEnoughValidData {
+			needed,
+			valid: high.len() - first_valid_idx,
+		});
+	}
 
-    let mut cvi_values = vec![f64::NAN; high.len()];
+	let mut cvi_values = vec![f64::NAN; high.len()];
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
 
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                cvi_scalar(high, low, period, first_valid_idx, &mut cvi_values)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                cvi_avx2(high, low, period, first_valid_idx, &mut cvi_values)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                cvi_avx512(high, low, period, first_valid_idx, &mut cvi_values)
-            }
-            _ => unreachable!(),
-        }
-    }
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => cvi_scalar(high, low, period, first_valid_idx, &mut cvi_values),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => cvi_avx2(high, low, period, first_valid_idx, &mut cvi_values),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => cvi_avx512(high, low, period, first_valid_idx, &mut cvi_values),
+			_ => unreachable!(),
+		}
+	}
 
-    Ok(CviOutput { values: cvi_values })
+	Ok(CviOutput { values: cvi_values })
 }
 
 #[inline]
-pub fn cvi_scalar(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    let alpha = 2.0 / (period as f64 + 1.0);
-    let mut val = high[first_valid_idx] - low[first_valid_idx];
-    let mut lag_buffer = Vec::with_capacity(period);
-    lag_buffer.push(val);
+pub fn cvi_scalar(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let mut val = high[first_valid_idx] - low[first_valid_idx];
+	let mut lag_buffer = Vec::with_capacity(period);
+	lag_buffer.push(val);
 
-    let needed = 2 * period - 1;
-    for i in (first_valid_idx + 1)..(first_valid_idx + needed) {
-        let range = high[i] - low[i];
-        val += (range - val) * alpha;
-        if lag_buffer.len() < period {
-            lag_buffer.push(val);
-        
-            } else {
-            lag_buffer.remove(0);
-            lag_buffer.push(val);
-        }
-    }
-    for i in (first_valid_idx + needed)..high.len() {
-        let range = high[i] - low[i];
-        val += (range - val) * alpha;
-        let old = lag_buffer.remove(0);
-        out[i] = 100.0 * (val - old) / old;
-        lag_buffer.push(val);
-    }
+	let needed = 2 * period - 1;
+	for i in (first_valid_idx + 1)..(first_valid_idx + needed) {
+		let range = high[i] - low[i];
+		val += (range - val) * alpha;
+		if lag_buffer.len() < period {
+			lag_buffer.push(val);
+		} else {
+			lag_buffer.remove(0);
+			lag_buffer.push(val);
+		}
+	}
+	for i in (first_valid_idx + needed)..high.len() {
+		let range = high[i] - low[i];
+		val += (range - val) * alpha;
+		let old = lag_buffer.remove(0);
+		out[i] = 100.0 * (val - old) / old;
+		lag_buffer.push(val);
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cvi_avx2(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_scalar(high, low, period, first_valid_idx, out)
+pub fn cvi_avx2(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_scalar(high, low, period, first_valid_idx, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn cvi_avx512(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    if period <= 32 {
-        unsafe { cvi_avx512_short(high, low, period, first_valid_idx, out) }
-    } else {
-        unsafe { cvi_avx512_long(high, low, period, first_valid_idx, out) }
-    }
+pub fn cvi_avx512(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	if period <= 32 {
+		unsafe { cvi_avx512_short(high, low, period, first_valid_idx, out) }
+	} else {
+		unsafe { cvi_avx512_long(high, low, period, first_valid_idx, out) }
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cvi_avx512_short(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_scalar(high, low, period, first_valid_idx, out)
+pub unsafe fn cvi_avx512_short(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_scalar(high, low, period, first_valid_idx, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn cvi_avx512_long(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_scalar(high, low, period, first_valid_idx, out)
+pub unsafe fn cvi_avx512_long(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_scalar(high, low, period, first_valid_idx, out)
 }
 
 #[inline(always)]
-pub fn cvi_row_scalar(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_scalar(high, low, period, first_valid_idx, out)
+pub fn cvi_row_scalar(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_scalar(high, low, period, first_valid_idx, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn cvi_row_avx2(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_avx2(high, low, period, first_valid_idx, out)
+pub fn cvi_row_avx2(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_avx2(high, low, period, first_valid_idx, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn cvi_row_avx512(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    cvi_avx512(high, low, period, first_valid_idx, out)
+pub fn cvi_row_avx512(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	cvi_avx512(high, low, period, first_valid_idx, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn cvi_row_avx512_short(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    unsafe { cvi_avx512_short(high, low, period, first_valid_idx, out) }
+pub fn cvi_row_avx512_short(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	unsafe { cvi_avx512_short(high, low, period, first_valid_idx, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn cvi_row_avx512_long(
-    high: &[f64],
-    low: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
-    unsafe { cvi_avx512_long(high, low, period, first_valid_idx, out) }
+pub fn cvi_row_avx512_long(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
+	unsafe { cvi_avx512_long(high, low, period, first_valid_idx, out) }
 }
 
 #[derive(Clone, Debug)]
 pub struct CviBatchRange {
-    pub period: (usize, usize, usize),
+	pub period: (usize, usize, usize),
 }
 
 impl Default for CviBatchRange {
-    fn default() -> Self {
-        Self { period: (10, 20, 1) }
-    }
+	fn default() -> Self {
+		Self { period: (10, 20, 1) }
+	}
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct CviBatchBuilder {
-    range: CviBatchRange,
-    kernel: Kernel,
+	range: CviBatchRange,
+	kernel: Kernel,
 }
 
 impl CviBatchBuilder {
-    pub fn new() -> Self { Self::default() }
-    pub fn kernel(mut self, k: Kernel) -> Self { self.kernel = k; self }
-    #[inline]
-    pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
-        self.range.period = (start, end, step); self
-    }
-    #[inline]
-    pub fn period_static(mut self, p: usize) -> Self {
-        self.range.period = (p, p, 0); self
-    }
-    pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<CviBatchOutput, CviError> {
-        cvi_batch_with_kernel(high, low, &self.range, self.kernel)
-    }
-    pub fn apply_candles(self, candles: &Candles) -> Result<CviBatchOutput, CviError> {
-        self.apply_slices(&candles.high, &candles.low)
-    }
+	pub fn new() -> Self {
+		Self::default()
+	}
+	pub fn kernel(mut self, k: Kernel) -> Self {
+		self.kernel = k;
+		self
+	}
+	#[inline]
+	pub fn period_range(mut self, start: usize, end: usize, step: usize) -> Self {
+		self.range.period = (start, end, step);
+		self
+	}
+	#[inline]
+	pub fn period_static(mut self, p: usize) -> Self {
+		self.range.period = (p, p, 0);
+		self
+	}
+	pub fn apply_slices(self, high: &[f64], low: &[f64]) -> Result<CviBatchOutput, CviError> {
+		cvi_batch_with_kernel(high, low, &self.range, self.kernel)
+	}
+	pub fn apply_candles(self, candles: &Candles) -> Result<CviBatchOutput, CviError> {
+		self.apply_slices(&candles.high, &candles.low)
+	}
 }
 
 pub fn cvi_batch_with_kernel(
-    high: &[f64],
-    low: &[f64],
-    sweep: &CviBatchRange,
-    k: Kernel,
+	high: &[f64],
+	low: &[f64],
+	sweep: &CviBatchRange,
+	k: Kernel,
 ) -> Result<CviBatchOutput, CviError> {
-    let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other if other.is_batch() => other,
-        _ => return Err(CviError::InvalidPeriod { period: 0, data_len: 0 }),
-    };
+	let kernel = match k {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		_ => return Err(CviError::InvalidPeriod { period: 0, data_len: 0 }),
+	};
 
-    let simd = match kernel {
-        Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
-    };
-    cvi_batch_par_slice(high, low, sweep, simd)
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+	cvi_batch_par_slice(high, low, sweep, simd)
 }
 
 #[derive(Clone, Debug)]
 pub struct CviBatchOutput {
-    pub values: Vec<f64>,
-    pub combos: Vec<CviParams>,
-    pub rows: usize,
-    pub cols: usize,
+	pub values: Vec<f64>,
+	pub combos: Vec<CviParams>,
+	pub rows: usize,
+	pub cols: usize,
 }
 impl CviBatchOutput {
-    pub fn row_for_params(&self, p: &CviParams) -> Option<usize> {
-        self.combos.iter().position(|c| c.period.unwrap_or(10) == p.period.unwrap_or(10))
-    }
+	pub fn row_for_params(&self, p: &CviParams) -> Option<usize> {
+		self.combos
+			.iter()
+			.position(|c| c.period.unwrap_or(10) == p.period.unwrap_or(10))
+	}
 
-    pub fn values_for(&self, p: &CviParams) -> Option<&[f64]> {
-        self.row_for_params(p).map(|row| {
-            let start = row * self.cols;
-            &self.values[start..start + self.cols]
-        })
-    }
+	pub fn values_for(&self, p: &CviParams) -> Option<&[f64]> {
+		self.row_for_params(p).map(|row| {
+			let start = row * self.cols;
+			&self.values[start..start + self.cols]
+		})
+	}
 }
 
 #[inline(always)]
 fn expand_grid(r: &CviBatchRange) -> Vec<CviParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    let periods = axis_usize(r.period);
+	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+		if step == 0 || start == end {
+			return vec![start];
+		}
+		(start..=end).step_by(step).collect()
+	}
+	let periods = axis_usize(r.period);
 
-    let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
-        out.push(CviParams { period: Some(p) });
-    }
-    out
+	let mut out = Vec::with_capacity(periods.len());
+	for &p in &periods {
+		out.push(CviParams { period: Some(p) });
+	}
+	out
 }
 
 #[inline(always)]
 pub fn cvi_batch_slice(
-    high: &[f64],
-    low: &[f64],
-    sweep: &CviBatchRange,
-    kern: Kernel,
+	high: &[f64],
+	low: &[f64],
+	sweep: &CviBatchRange,
+	kern: Kernel,
 ) -> Result<CviBatchOutput, CviError> {
-    cvi_batch_inner(high, low, sweep, kern, false)
+	cvi_batch_inner(high, low, sweep, kern, false)
 }
 
 #[inline(always)]
 pub fn cvi_batch_par_slice(
-    high: &[f64],
-    low: &[f64],
-    sweep: &CviBatchRange,
-    kern: Kernel,
+	high: &[f64],
+	low: &[f64],
+	sweep: &CviBatchRange,
+	kern: Kernel,
 ) -> Result<CviBatchOutput, CviError> {
-    cvi_batch_inner(high, low, sweep, kern, true)
+	cvi_batch_inner(high, low, sweep, kern, true)
 }
 
 #[inline(always)]
 fn cvi_batch_inner(
-    high: &[f64],
-    low: &[f64],
-    sweep: &CviBatchRange,
-    kern: Kernel,
-    parallel: bool,
+	high: &[f64],
+	low: &[f64],
+	sweep: &CviBatchRange,
+	kern: Kernel,
+	parallel: bool,
 ) -> Result<CviBatchOutput, CviError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(CviError::InvalidPeriod { period: 0, data_len: 0 });
-    }
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(CviError::InvalidPeriod { period: 0, data_len: 0 });
+	}
 
-    let first_valid_idx = (0..high.len())
-        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
-        .ok_or(CviError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = 2 * max_p - 1;
-    if high.len() - first_valid_idx < needed {
-        return Err(CviError::NotEnoughValidData {
-            needed,
-            valid: high.len() - first_valid_idx,
-        });
-    }
+	let first_valid_idx = (0..high.len())
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(CviError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let needed = 2 * max_p - 1;
+	if high.len() - first_valid_idx < needed {
+		return Err(CviError::NotEnoughValidData {
+			needed,
+			valid: high.len() - first_valid_idx,
+		});
+	}
 
-    let rows = combos.len();
-    let cols = high.len();
+	let rows = combos.len();
+	let cols = high.len();
 
-    let mut values = vec![f64::NAN; rows * cols];
+	let mut values = vec![f64::NAN; rows * cols];
 
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let period = combos[row].period.unwrap();
-        match kern {
-            Kernel::Scalar => cvi_row_scalar(high, low, period, first_valid_idx, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => cvi_row_avx2(high, low, period, first_valid_idx, out_row),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => cvi_row_avx512(high, low, period, first_valid_idx, out_row),
-            _ => unreachable!(),
-        }
-    };
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => cvi_row_scalar(high, low, period, first_valid_idx, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => cvi_row_avx2(high, low, period, first_valid_idx, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => cvi_row_avx512(high, low, period, first_valid_idx, out_row),
+			_ => unreachable!(),
+		}
+	};
 
-    if parallel {
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			values
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
 
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in values.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in values.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
 
-        #[cfg(not(target_arch = "wasm32"))] {
-
-
-        values.par_chunks_mut(cols)
-
-
-                    .enumerate()
-
-
-                    .for_each(|(row, slice)| do_row(row, slice));
-
-
-        }
-
-
-        #[cfg(target_arch = "wasm32")] {
-
-
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-
-
-                    do_row(row, slice);
-
-
-        }
-
-
-        }
-    } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
-        }
-    }
-
-    Ok(CviBatchOutput { values, combos, rows, cols })
+	Ok(CviBatchOutput {
+		values,
+		combos,
+		rows,
+		cols,
+	})
 }
 
 // For streaming: not a natural fit for CVI, but provide parity.
 #[derive(Debug, Clone)]
 pub struct CviStream {
-    period: usize,
-    buffer: Vec<f64>,
-    alpha: f64,
-    lag_buffer: Vec<f64>,
-    filled: usize,
-    state_val: f64,
+	period: usize,
+	buffer: Vec<f64>,
+	alpha: f64,
+	lag_buffer: Vec<f64>,
+	filled: usize,
+	state_val: f64,
 }
 
 impl CviStream {
-    pub fn try_new(params: CviParams, initial_high: f64, initial_low: f64) -> Result<Self, CviError> {
-        let period = params.period.unwrap_or(10);
-        if period == 0 {
-            return Err(CviError::InvalidPeriod { period, data_len: 0 });
-        }
-        let alpha = 2.0 / (period as f64 + 1.0);
-        let val = initial_high - initial_low;
-        let mut lag_buffer = Vec::with_capacity(period);
-        lag_buffer.push(val);
-        Ok(Self {
-            period,
-            buffer: vec![],
-            alpha,
-            lag_buffer,
-            filled: 1,
-            state_val: val,
-        })
-    }
-    #[inline(always)]
-    pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        let range = high - low;
-        self.state_val += (range - self.state_val) * self.alpha;
-        if self.lag_buffer.len() < self.period {
-            self.lag_buffer.push(self.state_val);
-            self.filled += 1;
-            return None;
-        }
-        let old = self.lag_buffer.remove(0);
-        let out = 100.0 * (self.state_val - old) / old;
-        self.lag_buffer.push(self.state_val);
-        Some(out)
-    }
+	pub fn try_new(params: CviParams, initial_high: f64, initial_low: f64) -> Result<Self, CviError> {
+		let period = params.period.unwrap_or(10);
+		if period == 0 {
+			return Err(CviError::InvalidPeriod { period, data_len: 0 });
+		}
+		let alpha = 2.0 / (period as f64 + 1.0);
+		let val = initial_high - initial_low;
+		let mut lag_buffer = Vec::with_capacity(period);
+		lag_buffer.push(val);
+		Ok(Self {
+			period,
+			buffer: vec![],
+			alpha,
+			lag_buffer,
+			filled: 1,
+			state_val: val,
+		})
+	}
+	#[inline(always)]
+	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		let range = high - low;
+		self.state_val += (range - self.state_val) * self.alpha;
+		if self.lag_buffer.len() < self.period {
+			self.lag_buffer.push(self.state_val);
+			self.filled += 1;
+			return None;
+		}
+		let old = self.lag_buffer.remove(0);
+		let out = 100.0 * (self.state_val - old) / old;
+		self.lag_buffer.push(self.state_val);
+		Some(out)
+	}
 }
 
 #[inline(always)]
 pub fn expand_grid_cvi(r: &CviBatchRange) -> Vec<CviParams> {
-    expand_grid(r)
+	expand_grid(r)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::utilities::data_loader::read_candles_from_csv;
-    use crate::skip_if_unsupported;
+	use super::*;
+	use crate::skip_if_unsupported;
+	use crate::utilities::data_loader::read_candles_from_csv;
 
-    fn check_cvi_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path)?;
-        let default_params = CviParams { period: None };
-        let input_default = CviInput::from_candles(&candles, default_params);
-        let output_default = cvi_with_kernel(&input_default, kernel)?;
-        assert_eq!(output_default.values.len(), candles.close.len());
-        Ok(())
-    }
+	fn check_cvi_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let default_params = CviParams { period: None };
+		let input_default = CviInput::from_candles(&candles, default_params);
+		let output_default = cvi_with_kernel(&input_default, kernel)?;
+		assert_eq!(output_default.values.len(), candles.close.len());
+		Ok(())
+	}
 
-    fn check_cvi_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path)?;
-        let params = CviParams { period: Some(5) };
-        let input = CviInput::from_candles(&candles, params);
-        let cvi_result = cvi_with_kernel(&input, kernel)?;
+	fn check_cvi_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let params = CviParams { period: Some(5) };
+		let input = CviInput::from_candles(&candles, params);
+		let cvi_result = cvi_with_kernel(&input, kernel)?;
 
-        let expected_last_five_cvi = [
-            -52.96320026271643,
-            -64.39616778235792,
-            -59.4830094380472,
-            -52.4690724045071,
-            -11.858704179539174,
-        ];
-        assert!(cvi_result.values.len() >= 5);
-        let start_index = cvi_result.values.len() - 5;
-        let result_last_five = &cvi_result.values[start_index..];
-        for (i, &val) in result_last_five.iter().enumerate() {
-            let expected = expected_last_five_cvi[i];
-            assert!(
-                (val - expected).abs() < 1e-6,
-                "[{}] CVI mismatch at index {}: expected {}, got {}",
-                test_name, i, expected, val
-            );
-        }
-        Ok(())
-    }
+		let expected_last_five_cvi = [
+			-52.96320026271643,
+			-64.39616778235792,
+			-59.4830094380472,
+			-52.4690724045071,
+			-11.858704179539174,
+		];
+		assert!(cvi_result.values.len() >= 5);
+		let start_index = cvi_result.values.len() - 5;
+		let result_last_five = &cvi_result.values[start_index..];
+		for (i, &val) in result_last_five.iter().enumerate() {
+			let expected = expected_last_five_cvi[i];
+			assert!(
+				(val - expected).abs() < 1e-6,
+				"[{}] CVI mismatch at index {}: expected {}, got {}",
+				test_name,
+				i,
+				expected,
+				val
+			);
+		}
+		Ok(())
+	}
 
-    fn check_cvi_input_with_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let candles = read_candles_from_csv(file_path)?;
-        let input = CviInput::with_default_candles(&candles);
-        match input.data {
-            CviData::Candles { .. } => {}
-            _ => panic!("Expected CviData::Candles variant"),
-        }
-        Ok(())
-    }
+	fn check_cvi_input_with_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let input = CviInput::with_default_candles(&candles);
+		match input.data {
+			CviData::Candles { .. } => {}
+			_ => panic!("Expected CviData::Candles variant"),
+		}
+		Ok(())
+	}
 
-    fn check_cvi_with_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [10.0, 20.0, 30.0];
-        let low = [5.0, 15.0, 25.0];
-        let params = CviParams { period: Some(0) };
-        let input = CviInput::from_slices(&high, &low, params);
+	fn check_cvi_with_zero_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 20.0, 30.0];
+		let low = [5.0, 15.0, 25.0];
+		let params = CviParams { period: Some(0) };
+		let input = CviInput::from_slices(&high, &low, params);
 
-        let result = cvi_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected an error for zero period", test_name);
-        Ok(())
-    }
+		let result = cvi_with_kernel(&input, kernel);
+		assert!(result.is_err(), "[{}] Expected an error for zero period", test_name);
+		Ok(())
+	}
 
-    fn check_cvi_with_period_exceeding_data_length(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [10.0, 20.0, 30.0];
-        let low = [5.0, 15.0, 25.0];
-        let params = CviParams { period: Some(10) };
-        let input = CviInput::from_slices(&high, &low, params);
+	fn check_cvi_with_period_exceeding_data_length(
+		test_name: &str,
+		kernel: Kernel,
+	) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 20.0, 30.0];
+		let low = [5.0, 15.0, 25.0];
+		let params = CviParams { period: Some(10) };
+		let input = CviInput::from_slices(&high, &low, params);
 
-        let result = cvi_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected an error for period > data.len()", test_name);
-        Ok(())
-    }
+		let result = cvi_with_kernel(&input, kernel);
+		assert!(
+			result.is_err(),
+			"[{}] Expected an error for period > data.len()",
+			test_name
+		);
+		Ok(())
+	}
 
-    fn check_cvi_very_small_data_set(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [5.0];
-        let low = [2.0];
-        let params = CviParams { period: Some(10) };
-        let input = CviInput::from_slices(&high, &low, params);
+	fn check_cvi_very_small_data_set(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [5.0];
+		let low = [2.0];
+		let params = CviParams { period: Some(10) };
+		let input = CviInput::from_slices(&high, &low, params);
 
-        let result = cvi_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected error for data smaller than period", test_name);
-        Ok(())
-    }
+		let result = cvi_with_kernel(&input, kernel);
+		assert!(
+			result.is_err(),
+			"[{}] Expected error for data smaller than period",
+			test_name
+		);
+		Ok(())
+	}
 
-    fn check_cvi_with_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [f64::NAN, 20.0, 30.0];
-        let low = [5.0, 15.0, f64::NAN];
-        let input = CviInput::from_slices(&high, &low, CviParams { period: Some(2) });
+	fn check_cvi_with_nan_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [f64::NAN, 20.0, 30.0];
+		let low = [5.0, 15.0, f64::NAN];
+		let input = CviInput::from_slices(&high, &low, CviParams { period: Some(2) });
 
-        let result = cvi_with_kernel(&input, kernel);
-        assert!(result.is_err(), "[{}] Expected an error due to trailing NaN", test_name);
-        Ok(())
-    }
+		let result = cvi_with_kernel(&input, kernel);
+		assert!(result.is_err(), "[{}] Expected an error due to trailing NaN", test_name);
+		Ok(())
+	}
 
-    fn check_cvi_slice_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test_name);
-        let high = [
-            10.0, 12.0, 12.5, 12.2, 13.0, 14.0, 15.0, 16.0, 16.5, 17.0, 17.5, 18.0,
-        ];
-        let low = [
-            9.0, 10.0, 11.5, 11.0, 12.0, 13.5, 14.0, 14.5, 15.5, 16.0, 16.5, 17.0,
-        ];
-        let first_input = CviInput::from_slices(&high, &low, CviParams { period: Some(3) });
-        let first_result = cvi_with_kernel(&first_input, kernel)?;
-        let second_input = CviInput::from_slices(&first_result.values, &low, CviParams { period: Some(3) });
-        let second_result = cvi_with_kernel(&second_input, kernel)?;
-        assert_eq!(second_result.values.len(), low.len());
-        Ok(())
-    }
+	fn check_cvi_slice_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let high = [10.0, 12.0, 12.5, 12.2, 13.0, 14.0, 15.0, 16.0, 16.5, 17.0, 17.5, 18.0];
+		let low = [9.0, 10.0, 11.5, 11.0, 12.0, 13.5, 14.0, 14.5, 15.5, 16.0, 16.5, 17.0];
+		let first_input = CviInput::from_slices(&high, &low, CviParams { period: Some(3) });
+		let first_result = cvi_with_kernel(&first_input, kernel)?;
+		let second_input = CviInput::from_slices(&first_result.values, &low, CviParams { period: Some(3) });
+		let second_result = cvi_with_kernel(&second_input, kernel)?;
+		assert_eq!(second_result.values.len(), low.len());
+		Ok(())
+	}
 
-    macro_rules! generate_all_cvi_tests {
+	macro_rules! generate_all_cvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
                 $(
@@ -740,49 +701,47 @@ mod tests {
         }
     }
 
-    generate_all_cvi_tests!(
-        check_cvi_partial_params,
-        check_cvi_accuracy,
-        check_cvi_input_with_default_candles,
-        check_cvi_with_zero_period,
-        check_cvi_with_period_exceeding_data_length,
-        check_cvi_very_small_data_set,
-        check_cvi_with_nan_data,
-        check_cvi_slice_reinput
-    );
+	generate_all_cvi_tests!(
+		check_cvi_partial_params,
+		check_cvi_accuracy,
+		check_cvi_input_with_default_candles,
+		check_cvi_with_zero_period,
+		check_cvi_with_period_exceeding_data_length,
+		check_cvi_very_small_data_set,
+		check_cvi_with_nan_data,
+		check_cvi_slice_reinput
+	);
 
-    fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
-        skip_if_unsupported!(kernel, test);
-        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
-        let c = read_candles_from_csv(file)?;
-        let output = CviBatchBuilder::new()
-            .kernel(kernel)
-            .apply_candles(&c)?;
-        let def = CviParams::default();
-        let row = output.values_for(&def).expect("default row missing");
-        assert_eq!(row.len(), c.close.len());
-        Ok(())
-    }
+	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let output = CviBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+		let def = CviParams::default();
+		let row = output.values_for(&def).expect("default row missing");
+		assert_eq!(row.len(), c.close.len());
+		Ok(())
+	}
 
-    macro_rules! gen_batch_tests {
-        ($fn_name:ident) => {
-            paste::paste! {
-                #[test] fn [<$fn_name _scalar>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx2>]()        {
-                    let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
-                }
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                #[test] fn [<$fn_name _avx512>]()      {
-                    let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
-                }
-                #[test] fn [<$fn_name _auto_detect>]() {
-                    let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
-                }
-            }
-        };
-    }
-    gen_batch_tests!(check_batch_default_row);
+	macro_rules! gen_batch_tests {
+		($fn_name:ident) => {
+			paste::paste! {
+				#[test] fn [<$fn_name _scalar>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx2>]()        {
+					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx512>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+				}
+				#[test] fn [<$fn_name _auto_detect>]() {
+					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+				}
+			}
+		};
+	}
+	gen_batch_tests!(check_batch_default_row);
 }

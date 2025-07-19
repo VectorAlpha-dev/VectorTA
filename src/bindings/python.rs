@@ -28,12 +28,10 @@ use crate::indicators::atr::{atr_batch_py, atr_py, AtrStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::bandpass::{bandpass_batch_py, bandpass_py, BandPassStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::bollinger_bands::{
-    bollinger_bands_batch_py, bollinger_bands_py, BollingerBandsStreamPy,
-};
+use crate::indicators::bollinger_bands::{bollinger_bands_batch_py, bollinger_bands_py, BollingerBandsStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::bollinger_bands_width::{
-    bollinger_bands_width_batch_py, bollinger_bands_width_py, BollingerBandsWidthStreamPy,
+	bollinger_bands_width_batch_py, bollinger_bands_width_py, BollingerBandsWidthStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
@@ -44,7 +42,9 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::correlation_cycle::{correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy};
+use crate::indicators::correlation_cycle::{
+	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
@@ -55,7 +55,7 @@ use crate::indicators::moving_averages::dema::{dema_batch_py, dema_py, DemaStrea
 use crate::indicators::moving_averages::edcf::{edcf_batch_py, edcf_py, EdcfStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ehlers_itrend::{
-    ehlers_itrend_batch_py, ehlers_itrend_py, EhlersITrendStreamPy,
+	ehlers_itrend_batch_py, ehlers_itrend_py, EhlersITrendStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ema::{ema_batch_py, ema_py, EmaStreamPy};
@@ -66,16 +66,12 @@ use crate::indicators::moving_averages::frama::{frama_batch_py, frama_py, FramaS
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::fwma::{fwma_batch_py, fwma_py, FwmaStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::moving_averages::gaussian::{
-    gaussian_batch_py, gaussian_py, GaussianStreamPy,
-};
+use crate::indicators::moving_averages::gaussian::{gaussian_batch_py, gaussian_py, GaussianStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::moving_averages::highpass::{
-    highpass_batch_py, highpass_py, HighPassStreamPy,
-};
+use crate::indicators::moving_averages::highpass::{highpass_batch_py, highpass_py, HighPassStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::highpass_2_pole::{
-    highpass_2_pole_batch_py, highpass_2_pole_py, HighPass2StreamPy,
+	highpass_2_pole_batch_py, highpass_2_pole_py, HighPass2StreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::hma::{hma_batch_py, hma_py, HmaStreamPy};
@@ -115,11 +111,11 @@ use crate::indicators::moving_averages::sqwma::{sqwma_batch_py, sqwma_py, SqwmaS
 use crate::indicators::moving_averages::srwma::{srwma_batch_py, srwma_py, SrwmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::supersmoother::{
-    supersmoother_batch_py, supersmoother_py, SuperSmootherStreamPy,
+	supersmoother_batch_py, supersmoother_py, SuperSmootherStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::supersmoother_3_pole::{
-    supersmoother_3_pole_batch_py, supersmoother_3_pole_py, SuperSmoother3PoleStreamPy,
+	supersmoother_3_pole_batch_py, supersmoother_3_pole_py, SuperSmoother3PoleStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::swma::{swma_batch_py, swma_py, SwmaStreamPy};
@@ -128,9 +124,7 @@ use crate::indicators::moving_averages::tema::{tema_batch_py, tema_py, TemaStrea
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::tilson::{tilson_batch_py, tilson_py, TilsonStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::moving_averages::trendflex::{
-    trendflex_batch_py, trendflex_py, TrendFlexStreamPy,
-};
+use crate::indicators::moving_averages::trendflex::{trendflex_batch_py, trendflex_py, TrendFlexStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::trima::{trima_batch_py, trima_py, TrimaStreamPy};
 #[cfg(feature = "python")]
@@ -148,316 +142,316 @@ use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaS
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Register AD functions with their user-facing names
-    m.add_function(wrap_pyfunction!(ad_py, m)?)?;
-    m.add_function(wrap_pyfunction!(ad_batch_py, m)?)?;
-    m.add_class::<AdStreamPy>()?;
+	// Register AD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ad_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ad_batch_py, m)?)?;
+	m.add_class::<AdStreamPy>()?;
 
-    // Register ADX functions with their user-facing names
-    m.add_function(wrap_pyfunction!(adx_py, m)?)?;
-    m.add_function(wrap_pyfunction!(adx_batch_py, m)?)?;
-    m.add_class::<AdxStreamPy>()?;
+	// Register ADX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(adx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(adx_batch_py, m)?)?;
+	m.add_class::<AdxStreamPy>()?;
 
-    // Register ADOSC functions with their user-facing names
-    m.add_function(wrap_pyfunction!(adosc_py, m)?)?;
-    m.add_function(wrap_pyfunction!(adosc_batch_py, m)?)?;
-    m.add_class::<AdoscStreamPy>()?;
+	// Register ADOSC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(adosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(adosc_batch_py, m)?)?;
+	m.add_class::<AdoscStreamPy>()?;
 
-    // Register ADXR functions with their user-facing names
-    m.add_function(wrap_pyfunction!(adxr_py, m)?)?;
-    m.add_function(wrap_pyfunction!(adxr_batch_py, m)?)?;
-    m.add_class::<AdxrStreamPy>()?;
+	// Register ADXR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(adxr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(adxr_batch_py, m)?)?;
+	m.add_class::<AdxrStreamPy>()?;
 
-    // Register ACOSC functions with their user-facing names
-    m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
-    m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
-    m.add_class::<AcoscStreamPy>()?;
+	// Register ACOSC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
+	m.add_class::<AcoscStreamPy>()?;
 
-    // Register APO functions with their user-facing names
-    m.add_function(wrap_pyfunction!(apo_py, m)?)?;
-    m.add_function(wrap_pyfunction!(apo_batch_py, m)?)?;
-    m.add_class::<ApoStreamPy>()?;
+	// Register APO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(apo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(apo_batch_py, m)?)?;
+	m.add_class::<ApoStreamPy>()?;
 
-    // Register Band-Pass functions with their user-facing names
-    m.add_function(wrap_pyfunction!(bandpass_py, m)?)?;
-    m.add_function(wrap_pyfunction!(bandpass_batch_py, m)?)?;
-    m.add_class::<BandPassStreamPy>()?;
+	// Register Band-Pass functions with their user-facing names
+	m.add_function(wrap_pyfunction!(bandpass_py, m)?)?;
+	m.add_function(wrap_pyfunction!(bandpass_batch_py, m)?)?;
+	m.add_class::<BandPassStreamPy>()?;
 
-    // Register Alligator functions with their user-facing names
-    m.add_function(wrap_pyfunction!(alligator_py, m)?)?;
-    m.add_function(wrap_pyfunction!(alligator_batch_py, m)?)?;
-    m.add_class::<AlligatorStreamPy>()?;
+	// Register Alligator functions with their user-facing names
+	m.add_function(wrap_pyfunction!(alligator_py, m)?)?;
+	m.add_function(wrap_pyfunction!(alligator_batch_py, m)?)?;
+	m.add_class::<AlligatorStreamPy>()?;
 
-    // Register ALMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(alma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
-    m.add_class::<AlmaStreamPy>()?;
+	// Register ALMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(alma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
+	m.add_class::<AlmaStreamPy>()?;
 
-    // Register AroonOsc functions with their user-facing names
-    m.add_function(wrap_pyfunction!(aroon_osc_py, m)?)?;
-    m.add_function(wrap_pyfunction!(aroon_osc_batch_py, m)?)?;
-    m.add_class::<AroonOscStreamPy>()?;
+	// Register AroonOsc functions with their user-facing names
+	m.add_function(wrap_pyfunction!(aroon_osc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(aroon_osc_batch_py, m)?)?;
+	m.add_class::<AroonOscStreamPy>()?;
 
-    // Register Bollinger Bands functions with their user-facing names
-    m.add_function(wrap_pyfunction!(bollinger_bands_py, m)?)?;
-    m.add_function(wrap_pyfunction!(bollinger_bands_batch_py, m)?)?;
-    m.add_class::<BollingerBandsStreamPy>()?;
+	// Register Bollinger Bands functions with their user-facing names
+	m.add_function(wrap_pyfunction!(bollinger_bands_py, m)?)?;
+	m.add_function(wrap_pyfunction!(bollinger_bands_batch_py, m)?)?;
+	m.add_class::<BollingerBandsStreamPy>()?;
 
-    // Register CWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
-    m.add_class::<CwmaStreamPy>()?;
+	// Register CWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
+	m.add_class::<CwmaStreamPy>()?;
 
-    // Register DEMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(dema_py, m)?)?;
-    m.add_function(wrap_pyfunction!(dema_batch_py, m)?)?;
-    m.add_class::<DemaStreamPy>()?;
+	// Register DEMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dema_batch_py, m)?)?;
+	m.add_class::<DemaStreamPy>()?;
 
-    // Register EDCF functions with their user-facing names
-    m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
-    m.add_function(wrap_pyfunction!(edcf_batch_py, m)?)?;
-    m.add_class::<EdcfStreamPy>()?;
+	// Register EDCF functions with their user-facing names
+	m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
+	m.add_function(wrap_pyfunction!(edcf_batch_py, m)?)?;
+	m.add_class::<EdcfStreamPy>()?;
 
-    // Register EMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(ema_py, m)?)?;
-    m.add_function(wrap_pyfunction!(ema_batch_py, m)?)?;
-    m.add_class::<EmaStreamPy>()?;
+	// Register EMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ema_batch_py, m)?)?;
+	m.add_class::<EmaStreamPy>()?;
 
-    // Register Ehlers ITrend functions with their user-facing names
-    m.add_function(wrap_pyfunction!(ehlers_itrend_py, m)?)?;
-    m.add_function(wrap_pyfunction!(ehlers_itrend_batch_py, m)?)?;
-    m.add_class::<EhlersITrendStreamPy>()?;
+	// Register Ehlers ITrend functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ehlers_itrend_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ehlers_itrend_batch_py, m)?)?;
+	m.add_class::<EhlersITrendStreamPy>()?;
 
-    // Register EPMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(epma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(epma_batch_py, m)?)?;
-    m.add_class::<EpmaStreamPy>()?;
+	// Register EPMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(epma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(epma_batch_py, m)?)?;
+	m.add_class::<EpmaStreamPy>()?;
 
-    // Register FRAMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(frama_py, m)?)?;
-    m.add_function(wrap_pyfunction!(frama_batch_py, m)?)?;
-    m.add_class::<FramaStreamPy>()?;
+	// Register FRAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(frama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(frama_batch_py, m)?)?;
+	m.add_class::<FramaStreamPy>()?;
 
-    // Register FWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(fwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(fwma_batch_py, m)?)?;
-    m.add_class::<FwmaStreamPy>()?;
+	// Register FWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(fwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(fwma_batch_py, m)?)?;
+	m.add_class::<FwmaStreamPy>()?;
 
-    // Register Gaussian functions with their user-facing names
-    m.add_function(wrap_pyfunction!(gaussian_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gaussian_batch_py, m)?)?;
-    m.add_class::<GaussianStreamPy>()?;
+	// Register Gaussian functions with their user-facing names
+	m.add_function(wrap_pyfunction!(gaussian_py, m)?)?;
+	m.add_function(wrap_pyfunction!(gaussian_batch_py, m)?)?;
+	m.add_class::<GaussianStreamPy>()?;
 
-    // Register HighPass2 functions with their user-facing names
-    m.add_function(wrap_pyfunction!(highpass_2_pole_py, m)?)?;
-    m.add_function(wrap_pyfunction!(highpass_2_pole_batch_py, m)?)?;
-    m.add_class::<HighPass2StreamPy>()?;
+	// Register HighPass2 functions with their user-facing names
+	m.add_function(wrap_pyfunction!(highpass_2_pole_py, m)?)?;
+	m.add_function(wrap_pyfunction!(highpass_2_pole_batch_py, m)?)?;
+	m.add_class::<HighPass2StreamPy>()?;
 
-    // Register HighPass functions with their user-facing names
-    m.add_function(wrap_pyfunction!(highpass_py, m)?)?;
-    m.add_function(wrap_pyfunction!(highpass_batch_py, m)?)?;
-    m.add_class::<HighPassStreamPy>()?;
+	// Register HighPass functions with their user-facing names
+	m.add_function(wrap_pyfunction!(highpass_py, m)?)?;
+	m.add_function(wrap_pyfunction!(highpass_batch_py, m)?)?;
+	m.add_class::<HighPassStreamPy>()?;
 
-    // Register HMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(hma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(hma_batch_py, m)?)?;
-    m.add_class::<HmaStreamPy>()?;
+	// Register HMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(hma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(hma_batch_py, m)?)?;
+	m.add_class::<HmaStreamPy>()?;
 
-    // Register HWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(hwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(hwma_batch_py, m)?)?;
-    m.add_class::<HwmaStreamPy>()?;
+	// Register HWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(hwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(hwma_batch_py, m)?)?;
+	m.add_class::<HwmaStreamPy>()?;
 
-    // Register JMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(jma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(jma_batch_py, m)?)?;
-    m.add_class::<JmaStreamPy>()?;
+	// Register JMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(jma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(jma_batch_py, m)?)?;
+	m.add_class::<JmaStreamPy>()?;
 
-    // Register JSA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
-    m.add_function(wrap_pyfunction!(jsa_batch_py, m)?)?;
-    m.add_class::<JsaStreamPy>()?;
+	// Register JSA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
+	m.add_function(wrap_pyfunction!(jsa_batch_py, m)?)?;
+	m.add_class::<JsaStreamPy>()?;
 
-    // Register KAMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(kama_py, m)?)?;
-    m.add_function(wrap_pyfunction!(kama_batch_py, m)?)?;
-    m.add_class::<KamaStreamPy>()?;
+	// Register KAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kama_batch_py, m)?)?;
+	m.add_class::<KamaStreamPy>()?;
 
-    // Register LinReg functions with their user-facing names
-    m.add_function(wrap_pyfunction!(linreg_py, m)?)?;
-    m.add_function(wrap_pyfunction!(linreg_batch_py, m)?)?;
-    m.add_class::<LinRegStreamPy>()?;
+	// Register LinReg functions with their user-facing names
+	m.add_function(wrap_pyfunction!(linreg_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linreg_batch_py, m)?)?;
+	m.add_class::<LinRegStreamPy>()?;
 
-    // Register MAAQ functions with their user-facing names
-    m.add_function(wrap_pyfunction!(maaq_py, m)?)?;
-    m.add_function(wrap_pyfunction!(maaq_batch_py, m)?)?;
-    m.add_class::<MaaqStreamPy>()?;
+	// Register MAAQ functions with their user-facing names
+	m.add_function(wrap_pyfunction!(maaq_py, m)?)?;
+	m.add_function(wrap_pyfunction!(maaq_batch_py, m)?)?;
+	m.add_class::<MaaqStreamPy>()?;
 
-    // Register MAMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(mama_py, m)?)?;
-    m.add_function(wrap_pyfunction!(mama_batch_py, m)?)?;
-    m.add_class::<MamaStreamPy>()?;
+	// Register MAMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mama_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mama_batch_py, m)?)?;
+	m.add_class::<MamaStreamPy>()?;
 
-    // Register MWDX functions with their user-facing names
-    m.add_function(wrap_pyfunction!(mwdx_py, m)?)?;
-    m.add_function(wrap_pyfunction!(mwdx_batch_py, m)?)?;
-    m.add_class::<MwdxStreamPy>()?;
+	// Register MWDX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mwdx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mwdx_batch_py, m)?)?;
+	m.add_class::<MwdxStreamPy>()?;
 
-    // Register NMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(nma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(nma_batch_py, m)?)?;
-    m.add_class::<NmaStreamPy>()?;
+	// Register NMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(nma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(nma_batch_py, m)?)?;
+	m.add_class::<NmaStreamPy>()?;
 
-    // Register PWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(pwma_batch_py, m)?)?;
-    m.add_class::<PwmaStreamPy>()?;
+	// Register PWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(pwma_batch_py, m)?)?;
+	m.add_class::<PwmaStreamPy>()?;
 
-    // Register Reflex functions with their user-facing names
-    m.add_function(wrap_pyfunction!(reflex_py, m)?)?;
-    m.add_function(wrap_pyfunction!(reflex_batch_py, m)?)?;
-    m.add_class::<ReflexStreamPy>()?;
+	// Register Reflex functions with their user-facing names
+	m.add_function(wrap_pyfunction!(reflex_py, m)?)?;
+	m.add_function(wrap_pyfunction!(reflex_batch_py, m)?)?;
+	m.add_class::<ReflexStreamPy>()?;
 
-    // Register SINWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(sinwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(sinwma_batch_py, m)?)?;
-    m.add_class::<SinWmaStreamPy>()?;
+	// Register SINWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(sinwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(sinwma_batch_py, m)?)?;
+	m.add_class::<SinWmaStreamPy>()?;
 
-    // Register SMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(sma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(sma_batch_py, m)?)?;
-    m.add_class::<SmaStreamPy>()?;
+	// Register SMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(sma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(sma_batch_py, m)?)?;
+	m.add_class::<SmaStreamPy>()?;
 
-    // Register SMMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(smma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(smma_batch_py, m)?)?;
-    m.add_class::<SmmaStreamPy>()?;
+	// Register SMMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(smma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(smma_batch_py, m)?)?;
+	m.add_class::<SmmaStreamPy>()?;
 
-    // Register SQWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(sqwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(sqwma_batch_py, m)?)?;
-    m.add_class::<SqwmaStreamPy>()?;
+	// Register SQWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(sqwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(sqwma_batch_py, m)?)?;
+	m.add_class::<SqwmaStreamPy>()?;
 
-    // Register SRWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(srwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(srwma_batch_py, m)?)?;
-    m.add_class::<SrwmaStreamPy>()?;
+	// Register SRWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(srwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(srwma_batch_py, m)?)?;
+	m.add_class::<SrwmaStreamPy>()?;
 
-    // Register SuperSmoother3Pole functions with their user-facing names
-    m.add_function(wrap_pyfunction!(supersmoother_3_pole_py, m)?)?;
-    m.add_function(wrap_pyfunction!(supersmoother_3_pole_batch_py, m)?)?;
-    m.add_class::<SuperSmoother3PoleStreamPy>()?;
+	// Register SuperSmoother3Pole functions with their user-facing names
+	m.add_function(wrap_pyfunction!(supersmoother_3_pole_py, m)?)?;
+	m.add_function(wrap_pyfunction!(supersmoother_3_pole_batch_py, m)?)?;
+	m.add_class::<SuperSmoother3PoleStreamPy>()?;
 
-    // Register SuperSmoother functions with their user-facing names
-    m.add_function(wrap_pyfunction!(supersmoother_py, m)?)?;
-    m.add_function(wrap_pyfunction!(supersmoother_batch_py, m)?)?;
-    m.add_class::<SuperSmootherStreamPy>()?;
+	// Register SuperSmoother functions with their user-facing names
+	m.add_function(wrap_pyfunction!(supersmoother_py, m)?)?;
+	m.add_function(wrap_pyfunction!(supersmoother_batch_py, m)?)?;
+	m.add_class::<SuperSmootherStreamPy>()?;
 
-    // Register SWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(swma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(swma_batch_py, m)?)?;
-    m.add_class::<SwmaStreamPy>()?;
+	// Register SWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(swma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(swma_batch_py, m)?)?;
+	m.add_class::<SwmaStreamPy>()?;
 
-    // Register TEMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(tema_py, m)?)?;
-    m.add_function(wrap_pyfunction!(tema_batch_py, m)?)?;
+	// Register TEMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tema_batch_py, m)?)?;
 
-    // Register TRIMA functions
-    m.add_function(wrap_pyfunction!(trima_py, m)?)?;
-    m.add_function(wrap_pyfunction!(trima_batch_py, m)?)?;
-    m.add_class::<TrimaStreamPy>()?;
-    m.add_class::<TemaStreamPy>()?;
+	// Register TRIMA functions
+	m.add_function(wrap_pyfunction!(trima_py, m)?)?;
+	m.add_function(wrap_pyfunction!(trima_batch_py, m)?)?;
+	m.add_class::<TrimaStreamPy>()?;
+	m.add_class::<TemaStreamPy>()?;
 
-    // Register Tilson functions with their user-facing names
-    m.add_function(wrap_pyfunction!(tilson_py, m)?)?;
-    m.add_function(wrap_pyfunction!(tilson_batch_py, m)?)?;
-    m.add_class::<TilsonStreamPy>()?;
+	// Register Tilson functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tilson_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tilson_batch_py, m)?)?;
+	m.add_class::<TilsonStreamPy>()?;
 
-    // Register TrendFlex functions with their user-facing names
-    m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
-    m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
-    m.add_class::<TrendFlexStreamPy>()?;
+	// Register TrendFlex functions with their user-facing names
+	m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
+	m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
+	m.add_class::<TrendFlexStreamPy>()?;
 
-    // Register Wilders functions with their user-facing names
-    m.add_function(wrap_pyfunction!(wilders_py, m)?)?;
-    m.add_function(wrap_pyfunction!(wilders_batch_py, m)?)?;
-    m.add_class::<WildersStreamPy>()?;
+	// Register Wilders functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wilders_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wilders_batch_py, m)?)?;
+	m.add_class::<WildersStreamPy>()?;
 
-    // Register VWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
-    m.add_class::<VwmaStreamPy>()?;
+	// Register VWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
+	m.add_class::<VwmaStreamPy>()?;
 
-    // Register VWAP functions with their user-facing names
-    m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
-    m.add_function(wrap_pyfunction!(vwap_batch_py, m)?)?;
-    m.add_class::<VwapStreamPy>()?;
+	// Register VWAP functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vwap_batch_py, m)?)?;
+	m.add_class::<VwapStreamPy>()?;
 
-    // Register ZLEMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
-    m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
-    m.add_class::<ZlemaStreamPy>()?;
+	// Register ZLEMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
+	m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
+	m.add_class::<ZlemaStreamPy>()?;
 
-    // Register VPWMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(vpwma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(vpwma_batch_py, m)?)?;
-    m.add_class::<VpwmaStreamPy>()?;
+	// Register VPWMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vpwma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vpwma_batch_py, m)?)?;
+	m.add_class::<VpwmaStreamPy>()?;
 
-    // Register WMA functions with their user-facing names
-    m.add_function(wrap_pyfunction!(wma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
-    m.add_class::<WmaStreamPy>()?;
+	// Register WMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
+	m.add_class::<WmaStreamPy>()?;
 
-    // Register MA dispatcher function
-    m.add_function(wrap_pyfunction!(ma_py, m)?)?;
+	// Register MA dispatcher function
+	m.add_function(wrap_pyfunction!(ma_py, m)?)?;
 
-    // Register Aroon functions with their user-facing names
-    m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
-    m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
-    m.add_class::<AroonStreamPy>()?;
+	// Register Aroon functions with their user-facing names
+	m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
+	m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
+	m.add_class::<AroonStreamPy>()?;
 
-    // Register Bollinger Bands Width functions with their user-facing names
-    m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
-    m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
-    m.add_class::<BollingerBandsWidthStreamPy>()?;
+	// Register Bollinger Bands Width functions with their user-facing names
+	m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
+	m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
+	m.add_class::<BollingerBandsWidthStreamPy>()?;
 
-    // Register CG functions with their user-facing names
-    m.add_function(wrap_pyfunction!(cg_py, m)?)?;
-    m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
-    m.add_class::<CgStreamPy>()?;
+	// Register CG functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cg_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
+	m.add_class::<CgStreamPy>()?;
 
-    // Register Correlation Cycle functions with their user-facing names
-    m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
-    m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
-    m.add_class::<CorrelationCycleStreamPy>()?;
+	// Register Correlation Cycle functions with their user-facing names
+	m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
+	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
+	m.add_class::<CorrelationCycleStreamPy>()?;
 
-    // Register AO functions with their user-facing names
-    m.add_function(wrap_pyfunction!(ao_py, m)?)?;
-    m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
-    m.add_class::<AoStreamPy>()?;
+	// Register AO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ao_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
+	m.add_class::<AoStreamPy>()?;
 
-    // Register ATR functions with their user-facing names
-    m.add_function(wrap_pyfunction!(atr_py, m)?)?;
-    m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
-    m.add_class::<AtrStreamPy>()?;
+	// Register ATR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(atr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
+	m.add_class::<AtrStreamPy>()?;
 
-    // Register CCI functions with their user-facing names
-    m.add_function(wrap_pyfunction!(cci_py, m)?)?;
-    m.add_function(wrap_pyfunction!(cci_batch_py, m)?)?;
-    m.add_class::<CciStreamPy>()?;
+	// Register CCI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cci_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cci_batch_py, m)?)?;
+	m.add_class::<CciStreamPy>()?;
 
-    // Register CFO functions with their user-facing names
-    m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
-    m.add_function(wrap_pyfunction!(cfo_batch_py, m)?)?;
-    m.add_class::<CfoStreamPy>()?;
-    m.add_class::<CfoBatchResult>()?;
+	// Register CFO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cfo_batch_py, m)?)?;
+	m.add_class::<CfoStreamPy>()?;
+	m.add_class::<CfoBatchResult>()?;
 
-    // Register BOP functions with their user-facing names
-    m.add_function(wrap_pyfunction!(bop_py, m)?)?;
-    m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
-    m.add_class::<BopStreamPy>()?;
+	// Register BOP functions with their user-facing names
+	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
+	m.add_class::<BopStreamPy>()?;
 
-    // Add other indicators here as you implement their Python bindings
+	// Add other indicators here as you implement their Python bindings
 
-    Ok(())
+	Ok(())
 }
