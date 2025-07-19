@@ -78,6 +78,256 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
+    ehlers_itrend: {
+        name: 'Ehlers Instantaneous Trendline',
+        // Safe API
+        safe: {
+            fn: 'ehlers_itrend_js',
+            params: { warmup_bars: 20, max_dc_period: 48 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ehlers_itrend_alloc',
+            freeFn: 'ehlers_itrend_free',
+            computeFn: 'ehlers_itrend_into',
+            params: { warmup_bars: 20, max_dc_period: 48 }
+        },
+        // Batch API (optional)
+        batch: {
+            fn: 'ehlers_itrend_batch',
+            config: {
+                // Reduced combinations for faster execution
+                small: {
+                    warmup_bars_range: [10, 20, 5],      // 3 values
+                    max_dc_period_range: [40, 50, 5]     // 3 values
+                    // Total: 9 combinations
+                },
+                medium: {
+                    warmup_bars_range: [10, 30, 5],      // 5 values
+                    max_dc_period_range: [30, 60, 10]    // 4 values
+                    // Total: 20 combinations
+                }
+            }
+        }
+    },
+    fwma: {
+        name: 'FWMA',
+        // Safe API
+        safe: {
+            fn: 'fwma_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'fwma_alloc',
+            freeFn: 'fwma_free',
+            computeFn: 'fwma_into',
+            params: { period: 5 }
+        },
+        // Batch API (optional)
+        batch: {
+            fn: 'fwma_batch',
+            config: {
+                // Reduced combinations for faster execution
+                small: {
+                    period_range: [3, 15, 3]       // 5 values
+                    // Total: 5 combinations
+                },
+                medium: {
+                    period_range: [3, 30, 3]       // 10 values
+                    // Total: 10 combinations
+                }
+            },
+            // Fast batch API (optional)
+            fastFn: 'fwma_batch_into'
+        }
+    },
+    hma: {
+        name: 'Hull Moving Average (HMA)',
+        // Safe API
+        safe: {
+            fn: 'hma_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'hma_alloc',
+            freeFn: 'hma_free',
+            computeFn: 'hma_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'hma_batch',  // This calls hma_batch_unified_js
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]       // 5 values: 5, 10, 15, 20, 25
+                }
+            },
+            // Fast batch API
+            fastFn: 'hma_batch_into'
+        }
+    },
+    kama: {
+        name: 'KAMA',
+        // Safe API
+        safe: {
+            fn: 'kama_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'kama_alloc',
+            freeFn: 'kama_free',
+            computeFn: 'kama_into',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'kama_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]  // 3 values: 10, 20, 30
+                },
+                medium: {
+                    period_range: [10, 50, 5]   // 9 values: 10, 15, 20, ..., 50
+                }
+            },
+            fastFn: 'kama_batch_into'
+        }
+    },
+    sqwma: {
+        name: 'SQWMA (Square Weighted Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'sqwma_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'sqwma_alloc',
+            freeFn: 'sqwma_free',
+            computeFn: 'sqwma_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'sqwma_batch_js',
+            config: {
+                small: {
+                    period_range: [5, 20, 5]    // 4 values: 5, 10, 15, 20
+                },
+                medium: {
+                    period_range: [5, 30, 5]    // 6 values: 5, 10, 15, 20, 25, 30
+                }
+            },
+            fastFn: 'sqwma_batch_into'
+        }
+    },
+    mama: {
+        name: 'MAMA (MESA Adaptive Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'mama_js',
+            params: { fast_limit: 0.5, slow_limit: 0.05 }
+        },
+        // Fast/Unsafe API  
+        fast: {
+            allocFn: 'mama_alloc',
+            freeFn: 'mama_free',
+            computeFn: 'mama_into',
+            params: { fast_limit: 0.5, slow_limit: 0.05 },
+            // MAMA has dual outputs
+            dualOutput: true
+        },
+        // Batch API
+        batch: {
+            fn: 'mama_batch_js',
+            config: {
+                small: {
+                    fast_limit_range: [0.3, 0.7, 0.2],  // 3 values: 0.3, 0.5, 0.7
+                    slow_limit_range: [0.03, 0.07, 0.02] // 3 values: 0.03, 0.05, 0.07
+                    // Total: 9 combinations
+                },
+                medium: {
+                    fast_limit_range: [0.2, 0.8, 0.1],  // 7 values
+                    slow_limit_range: [0.02, 0.08, 0.01] // 7 values
+                    // Total: 49 combinations
+                }
+            },
+            // Batch metadata functions
+            metadataFn: 'mama_batch_metadata_js',
+            rowsColsFn: 'mama_batch_rows_cols_js',
+            // Fast batch API
+            fastFn: 'mama_batch_into',
+            dualOutput: true
+        }
+    },
+    reflex: {
+        name: 'Reflex',
+        // Safe API
+        safe: {
+            fn: 'reflex_js',
+            params: { period: 20 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'reflex_alloc',
+            freeFn: 'reflex_free',
+            computeFn: 'reflex_into',
+            params: { period: 20 }
+        },
+        // Batch API
+        batch: {
+            fn: 'reflex_batch_js',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]  // 3 values: 10, 20, 30
+                },
+                medium: {
+                    period_range: [10, 50, 5]   // 9 values: 10, 15, 20, ..., 50
+                }
+            },
+            // Batch metadata functions
+            metadataFn: 'reflex_batch_metadata_js',
+            rowsColsFn: 'reflex_batch_rows_cols_js'
+            // Note: No fastFn for reflex batch as it doesn't have batch_into
+        }
+    },
+    swma: {
+        name: 'SWMA (Symmetric Weighted Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'swma_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'swma_alloc',
+            freeFn: 'swma_free',
+            computeFn: 'swma_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'swma_batch',  // This uses the new unified function name swma_batch_unified_js
+            config: {
+                small: {
+                    period_range: [3, 15, 3]       // 5 values: 3, 6, 9, 12, 15
+                    // Total: 5 combinations
+                },
+                medium: {
+                    period_range: [3, 30, 3]       // 10 values: 3, 6, 9, ..., 30
+                    // Total: 10 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'swma_batch_into'
+        }
+    },
     cwma: {
         name: 'CWMA',
         // Safe API
@@ -711,7 +961,7 @@ class WasmIndicatorBenchmark {
     benchmarkFastAPI(indicatorKey, indicatorConfig) {
         console.log(`\n--- ${indicatorConfig.name} Fast/Unsafe API ---`);
         
-        const { allocFn, freeFn, computeFn, params } = indicatorConfig.fast;
+        const { allocFn, freeFn, computeFn, params, dualOutput } = indicatorConfig.fast;
         
         if (!this.wasm[allocFn] || !this.wasm[freeFn] || !this.wasm[computeFn]) {
             console.log(`  Fast API functions not found, skipping...`);
@@ -725,6 +975,7 @@ class WasmIndicatorBenchmark {
             // Pre-allocate buffers outside of benchmark
             const inPtr = this.wasm[allocFn](len);
             const outPtr = this.wasm[allocFn](len);
+            const outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
             
             try {
                 // Copy data once
@@ -732,7 +983,7 @@ class WasmIndicatorBenchmark {
                 inView.set(data);
                 
                 const result = this.benchmarkFunction(() => {
-                    const paramArray = this.prepareFastParams(params, inPtr, outPtr, len);
+                    const paramArray = this.prepareFastParams(params, inPtr, outPtr, len, dualOutput, outPtr2);
                     this.wasm[computeFn].apply(this.wasm, paramArray);
                 }, benchName, {
                     dataSize: len,
@@ -745,6 +996,9 @@ class WasmIndicatorBenchmark {
             } finally {
                 this.wasm[freeFn](inPtr, len);
                 this.wasm[freeFn](outPtr, len);
+                if (dualOutput && outPtr2) {
+                    this.wasm[freeFn](outPtr2, len);
+                }
             }
         }
     }
@@ -772,7 +1026,8 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_batch_${configName}`;
             
             const result = this.benchmarkFunction(() => {
-                wasmFn.call(this.wasm, data, batchConfig);
+                const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                wasmFn.apply(this.wasm, params);
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',
@@ -784,22 +1039,28 @@ class WasmIndicatorBenchmark {
             this.printResult(result);
             
             // Calculate total combinations for batch
+            let totalCombinations = 1;
             if (batchConfig.period_range) {
                 const periods = Math.floor((batchConfig.period_range[1] - batchConfig.period_range[0]) / batchConfig.period_range[2]) + 1;
-                let totalCombos = periods;
-                
-                if (batchConfig.offset_range) {
-                    const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
-                    totalCombos *= offsets;
-                }
-                
-                if (batchConfig.sigma_range) {
-                    const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
-                    totalCombos *= sigmas;
-                }
-                
-                console.log(`  Total combinations: ${totalCombos}`);
+                totalCombinations *= periods;
             }
+            if (batchConfig.offset_range) {
+                const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
+                totalCombinations *= offsets;
+            }
+            if (batchConfig.sigma_range) {
+                const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
+                totalCombinations *= sigmas;
+            }
+            if (batchConfig.fast_limit_range) {
+                const fast_limits = Math.floor((batchConfig.fast_limit_range[1] - batchConfig.fast_limit_range[0]) / batchConfig.fast_limit_range[2]) + 1;
+                totalCombinations *= fast_limits;
+            }
+            if (batchConfig.slow_limit_range) {
+                const slow_limits = Math.floor((batchConfig.slow_limit_range[1] - batchConfig.slow_limit_range[0]) / batchConfig.slow_limit_range[2]) + 1;
+                totalCombinations *= slow_limits;
+            }
+            console.log(`  Total combinations: ${totalCombinations}`);
         }
     }
 
@@ -819,11 +1080,53 @@ class WasmIndicatorBenchmark {
     }
 
     /**
+     * Prepare parameters for batch API call
+     */
+    prepareBatchParams(indicatorKey, data, batchConfig) {
+        // Special handling for different indicators
+        if (indicatorKey === 'mama') {
+            // MAMA expects: data, fast_limit_start, fast_limit_end, fast_limit_step, slow_limit_start, slow_limit_end, slow_limit_step
+            const fast = batchConfig.fast_limit_range || [0.5, 0.5, 0];
+            const slow = batchConfig.slow_limit_range || [0.05, 0.05, 0];
+            return [data, fast[0], fast[1], fast[2], slow[0], slow[1], slow[2]];
+        } else if (indicatorKey === 'sqwma' || indicatorKey === 'fwma' || indicatorKey === 'hma' || indicatorKey === 'kama') {
+            // These indicators expect: data, period_start, period_end, period_step
+            const period = batchConfig.period_range;
+            return [data, period[0], period[1], period[2]];
+        } else if (indicatorKey === 'swma') {
+            // SWMA uses the new unified batch API with serde config
+            return [data, { period_range: batchConfig.period_range }];
+        } else if (batchConfig.period_range) {
+            // Most indicators with period ranges
+            const period = batchConfig.period_range;
+            const result = [data, [period[0], period[1], period[2]]];
+            
+            // Add additional ranges if present
+            if (batchConfig.offset_range) {
+                const offset = batchConfig.offset_range;
+                result.push([offset[0], offset[1], offset[2]]);
+            }
+            if (batchConfig.sigma_range) {
+                const sigma = batchConfig.sigma_range;
+                result.push([sigma[0], sigma[1], sigma[2]]);
+            }
+            
+            return result;
+        } else {
+            // Default: pass data and config as-is
+            return [data, batchConfig];
+        }
+    }
+
+    /**
      * Prepare parameters for fast API call
      */
-    prepareFastParams(params, inPtr, outPtr, len) {
+    prepareFastParams(params, inPtr, outPtr, len, dualOutput = false, outPtr2 = null) {
         // Fast API typically takes: in_ptr, out_ptr, len, ...params
-        const result = [inPtr, outPtr, len];
+        // For dual output indicators like MAMA: in_ptr, out_mama_ptr, out_fama_ptr, len, ...params
+        const result = dualOutput 
+            ? [inPtr, outPtr, outPtr2, len]
+            : [inPtr, outPtr, len];
         
         // Add indicator parameters
         for (const value of Object.values(params)) {

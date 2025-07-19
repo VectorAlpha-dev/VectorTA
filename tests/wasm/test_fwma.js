@@ -31,6 +31,18 @@ test.before(async () => {
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
+        
+        // Log what's actually exported to debug
+        console.log('WASM exports:', Object.keys(wasm).filter(k => !k.startsWith('__')));
+        
+        // Check if memory is accessible
+        if (wasm.__wasm && wasm.__wasm.memory) {
+            console.log('Memory found at wasm.__wasm.memory');
+        } else if (wasm.memory) {
+            console.log('Memory found at wasm.memory');
+        } else {
+            console.log('Memory not directly accessible - fast API tests will be skipped');
+        }
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -216,4 +228,218 @@ test('FWMA batch performance', () => {
     
     // Verify results match
     assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
+});
+
+// ===== Fast API Tests =====
+
+// Helper to check if we can access WASM memory
+function hasWasmMemory() {
+    if (!wasm) return false;
+    return (wasm.__wasm && wasm.__wasm.memory) || wasm.memory;
+}
+
+// Helper to get memory buffer
+function getMemoryBuffer() {
+    if (wasm.__wasm && wasm.__wasm.memory) {
+        return getMemoryBuffer();
+    } else if (wasm.memory) {
+        return wasm.memory.buffer;
+    }
+    throw new Error('WASM memory not accessible');
+}
+
+test('FWMA memory allocation and deallocation', { skip: !hasWasmMemory() }, () => {
+    const len = 100;
+    
+    // Test allocation
+    const ptr = wasm.fwma_alloc(len);
+    assert(ptr !== 0, 'Allocated pointer should not be null');
+    
+    // Test using the allocated memory
+    const data = new Float64Array(wasm.__getMemoryBuffer(), ptr, len);
+    for (let i = 0; i < len; i++) {
+        data[i] = i + 1;
+    }
+    
+    // Verify data was written
+    assert.strictEqual(data[0], 1);
+    assert.strictEqual(data[len - 1], len);
+    
+    // Test deallocation
+    wasm.fwma_free(ptr, len);
+    // Note: We can't directly test if memory was freed, but we ensure no crash
+});
+
+test('FWMA fast API (fwma_into) without aliasing', { skip: !hasWasmMemory() }, () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const len = close.length;
+    const period = 5;
+    
+    // Allocate input and output buffers
+    const inPtr = wasm.fwma_alloc(len);
+    const outPtr = wasm.fwma_alloc(len);
+    
+    try {
+        // Copy data to input buffer
+        const inBuf = new Float64Array(getMemoryBuffer(), inPtr, len);
+        inBuf.set(close);
+        
+        // Compute FWMA using fast API
+        wasm.fwma_into(inPtr, outPtr, len, period);
+        
+        // Get results
+        const results = new Float64Array(getMemoryBuffer(), outPtr, len);
+        const resultsCopy = new Float64Array(results); // Copy before comparing
+        
+        // Compare with safe API
+        const safeResults = wasm.fwma_js(close, period);
+        assertArrayClose(resultsCopy, safeResults, 1e-9, 'Fast vs safe API');
+    } finally {
+        wasm.fwma_free(inPtr, len);
+        wasm.fwma_free(outPtr, len);
+    }
+});
+
+test('FWMA fast API (fwma_into) with aliasing', { skip: !hasWasmMemory() }, () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const len = close.length;
+    const period = 5;
+    
+    // Allocate single buffer for in-place operation
+    const ptr = wasm.fwma_alloc(len);
+    
+    try {
+        // Copy data to buffer
+        const buf = new Float64Array(getMemoryBuffer(), ptr, len);
+        buf.set(close);
+        
+        // Compute FWMA in-place (input and output are the same)
+        wasm.fwma_into(ptr, ptr, len, period);
+        
+        // Get results (need to recreate view after WASM call)
+        const results = new Float64Array(getMemoryBuffer(), ptr, len);
+        const resultsCopy = new Float64Array(results); // Copy before comparing
+        
+        // Compare with safe API
+        const safeResults = wasm.fwma_js(close, period);
+        assertArrayClose(resultsCopy, safeResults, 1e-9, 'In-place vs safe API');
+    } finally {
+        wasm.fwma_free(ptr, len);
+    }
+});
+
+test('FWMA unified batch API', () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Test new unified batch API with config object
+    const config = {
+        period_range: [3, 9, 2] // periods: 3, 5, 7, 9
+    };
+    
+    const result = wasm.fwma_batch(close, config);
+    
+    // Check result structure
+    assert(result.values, 'Result should have values array');
+    assert(result.combos, 'Result should have combos array');
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows');
+    assert.strictEqual(result.cols, close.length, 'Should have cols equal to input length');
+    
+    // Check combos structure
+    assert.strictEqual(result.combos.length, 4);
+    assert.deepStrictEqual(
+        result.combos.map(c => c.period),
+        [3, 5, 7, 9],
+        'Combo periods should match'
+    );
+    
+    // Verify results match individual calculations
+    for (let i = 0; i < result.combos.length; i++) {
+        const period = result.combos[i].period;
+        const rowStart = i * close.length;
+        const row = result.values.slice(rowStart, rowStart + close.length);
+        
+        const individual = wasm.fwma_js(close, period);
+        assertArrayClose(row, individual, 1e-9, `Batch row ${i} (period ${period})`);
+    }
+});
+
+test('FWMA batch_into fast API', { skip: !hasWasmMemory() }, () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const len = close.length;
+    const periodStart = 3;
+    const periodEnd = 9;
+    const periodStep = 2; // periods: 3, 5, 7, 9
+    const numPeriods = Math.floor((periodEnd - periodStart) / periodStep) + 1;
+    
+    // Allocate buffers
+    const inPtr = wasm.fwma_alloc(len);
+    const outPtr = wasm.fwma_alloc(len * numPeriods);
+    
+    try {
+        // Copy data to input buffer
+        const inBuf = new Float64Array(getMemoryBuffer(), inPtr, len);
+        inBuf.set(close);
+        
+        // Compute batch using fast API
+        const rows = wasm.fwma_batch_into(inPtr, outPtr, len, periodStart, periodEnd, periodStep);
+        assert.strictEqual(rows, numPeriods, 'Should return correct number of rows');
+        
+        // Get results
+        const results = new Float64Array(getMemoryBuffer(), outPtr, len * rows);
+        
+        // Compare with safe batch API
+        const safeBatch = wasm.fwma_batch_js(close, periodStart, periodEnd, periodStep);
+        assertArrayClose(results, safeBatch, 1e-9, 'Batch fast vs safe API');
+    } finally {
+        wasm.fwma_free(inPtr, len);
+        wasm.fwma_free(outPtr, len * numPeriods);
+    }
+});
+
+test('FWMA fast API null pointer handling', () => {
+    // Test null pointer errors
+    assert.throws(() => {
+        wasm.fwma_into(0, 0, 100, 5); // null pointers
+    }, 'Should throw on null pointers');
+});
+
+test('FWMA fast API performance comparison', { skip: !hasWasmMemory() }, () => {
+    const close = new Float64Array(testData.close);
+    const len = close.length;
+    const period = 20;
+    const iterations = 10;
+    
+    // Warm up
+    wasm.fwma_js(close, period);
+    
+    // Time safe API
+    const safeStart = performance.now();
+    for (let i = 0; i < iterations; i++) {
+        wasm.fwma_js(close, period);
+    }
+    const safeTime = performance.now() - safeStart;
+    
+    // Time fast API
+    const inPtr = wasm.fwma_alloc(len);
+    const outPtr = wasm.fwma_alloc(len);
+    
+    try {
+        const inBuf = new Float64Array(getMemoryBuffer(), inPtr, len);
+        inBuf.set(close);
+        
+        const fastStart = performance.now();
+        for (let i = 0; i < iterations; i++) {
+            wasm.fwma_into(inPtr, outPtr, len, period);
+        }
+        const fastTime = performance.now() - fastStart;
+        
+        console.log(`Safe API: ${safeTime.toFixed(2)}ms, Fast API: ${fastTime.toFixed(2)}ms`);
+        console.log(`Fast API is ${(safeTime / fastTime).toFixed(2)}x faster`);
+        
+        // Fast API should be at least somewhat faster (allowing for variance)
+        assert(fastTime <= safeTime * 1.1, 'Fast API should not be significantly slower');
+    } finally {
+        wasm.fwma_free(inPtr, len);
+        wasm.fwma_free(outPtr, len);
+    }
 });

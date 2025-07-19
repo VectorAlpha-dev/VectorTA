@@ -61,6 +61,7 @@ pub struct HmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct HmaParams {
     pub period: Option<usize>,
 }
@@ -188,7 +189,7 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
 }
 
 #[inline]
-fn hma_into(
+fn hma_into_internal(
     input: &HmaInput,
     out: &mut [f64],
 ) -> Result<(), HmaError> {
@@ -1034,11 +1035,11 @@ fn hma_batch_inner(
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            Kernel::Scalar => hma_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::ScalarBatch => hma_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => hma_row_avx2(data, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx2Batch => hma_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => hma_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 | Kernel::Avx512Batch => hma_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
@@ -1142,11 +1143,11 @@ fn hma_batch_inner_into(
         let period = combos[row].period.unwrap();
 
         match kern {
-            Kernel::Scalar => hma_row_scalar(data, first, period, out_row),
+            Kernel::Scalar | Kernel::ScalarBatch => hma_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => hma_row_avx2(data, first, period, out_row),
+            Kernel::Avx2 | Kernel::Avx2Batch => hma_row_avx2(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => hma_row_avx512(data, first, period, out_row),
+            Kernel::Avx512 | Kernel::Avx512Batch => hma_row_avx512(data, first, period, out_row),
             _ => unreachable!(),
         }
     };
@@ -1200,94 +1201,94 @@ fn expand_grid_hma(r: &HmaBatchRange) -> Vec<HmaParams> {
 
 // Python bindings
 #[cfg(feature = "python")]
-use numpy::ndarray::{Array1, Array2};
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "hma")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn hma_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
-) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::PyArrayMethods;
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Pre-allocate NumPy output buffer  
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    let params = HmaParams {
+        period: Some(period),
+    };
+    let hma_in = HmaInput::from_slice(slice_in, params);
     
-    // Prepare HMA input
-    let hma_in = HmaInput::from_slice(slice_in, HmaParams { period: Some(period) });
-    
-    // Heavy lifting without the GIL
-    py.allow_threads(|| -> Result<(), HmaError> {
-        hma_into(&hma_in, slice_out)
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        hma_with_kernel(&hma_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(format!("HMA error: {}", e)))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "hma_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn hma_batch_py<'py>(
     py: Python<'py>,
-    arr_in: numpy::PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    use numpy::PyArrayMethods;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     let sweep = HmaBatchRange {
         period: period_range,
     };
     
-    // Expand grid to get all combinations
     let combos = expand_grid(&sweep);
-    if combos.is_empty() {
-        return Err(PyValueError::new_err("Invalid period range"));
-    }
-    
     let rows = combos.len();
     let cols = slice_in.len();
     
-    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
     
-    // Heavy work without the GIL
-    let (_, final_rows, final_cols) = py.allow_threads(|| -> Result<(Vec<HmaParams>, usize, usize), HmaError> {
-        // Detect best kernel
-        let kernel = match detect_best_batch_kernel() {
+    let combos = py.allow_threads(|| {
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
-            _ => Kernel::Scalar,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => unreachable!(),
         };
-        
-        // Use the new _into function
-        hma_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
+        hma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+            .map(|(combos, _, _)| combos)
     })
-    .map_err(|e| PyValueError::new_err(format!("HMA batch error: {}", e)))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Extract periods for metadata
-    let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
-    
-    // Reshape to 2D
-    let out_2d = out_arr.reshape((final_rows, final_cols))?;
-    
-    // Create dictionary output
     let dict = PyDict::new(py);
-    dict.set_item("values", out_2d)?;
-    dict.set_item("periods", periods)?;
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+    dict.set_item(
+        "periods",
+        combos.iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+    )?;
     
     Ok(dict)
 }
@@ -1302,39 +1303,111 @@ pub struct HmaStreamPy {
 #[pymethods]
 impl HmaStreamPy {
     #[new]
-    pub fn new(period: usize) -> PyResult<Self> {
+    fn new(period: usize) -> PyResult<Self> {
         let params = HmaParams {
             period: Some(period),
         };
-        match HmaStream::try_new(params) {
-            Ok(stream) => Ok(Self { inner: stream }),
-            Err(e) => Err(PyValueError::new_err(format!("HmaStream error: {}", e))),
-        }
+        let stream = HmaStream::try_new(params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(HmaStreamPy { inner: stream })
     }
 
-    pub fn update(&mut self, value: f64) -> Option<f64> {
+    fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
     }
 }
 
 // WASM bindings
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+// Core helper function for zero-copy operations
+#[inline]
+pub fn hma_into_slice(
+    dst: &mut [f64],
+    input: &HmaInput,
+    kern: Kernel,
+) -> Result<(), HmaError> {
+    let data: &[f64] = input.as_ref();
+    
+    if dst.len() != data.len() {
+        return Err(HmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    hma_with_kernel_into(input, kern, dst)
+}
+
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = HmaParams {
         period: Some(period),
     };
     let input = HmaInput::from_slice(data, params);
-    match hma_with_kernel(&input, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("HMA error: {}", e))),
-    }
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    hma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct HmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct HmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<HmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = hma_batch)]
+pub fn hma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: HmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = HmaBatchRange {
+        period: config.period_range,
+    };
+
+    // Force scalar kernel for WASM since it doesn't support SIMD
+    let kernel = if cfg!(target_arch = "wasm32") {
+        Kernel::ScalarBatch
+    } else {
+        Kernel::Auto
+    };
+
+    let output = hma_batch_inner(data, &sweep, kernel, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = HmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Legacy batch API for backward compatibility
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_batch_js(
     data: &[f64],
@@ -1345,13 +1418,21 @@ pub fn hma_batch_js(
     let sweep = HmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    match hma_batch_inner(data, &sweep, Kernel::Scalar, false) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("HMA batch error: {}", e))),
-    }
+    
+    // Force scalar kernel for WASM since it doesn't support SIMD
+    let kernel = if cfg!(target_arch = "wasm32") {
+        Kernel::ScalarBatch
+    } else {
+        Kernel::Auto
+    };
+    
+    let output = hma_batch_inner(data, &sweep, kernel, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output.values)
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_batch_metadata_js(
     period_start: usize,
@@ -1364,11 +1445,121 @@ pub fn hma_batch_metadata_js(
         (period_start..=period_end).step_by(period_step).collect()
     };
     
-    let mut result = Vec::new();
-    for &period in &periods {
-        result.push(period as f64);
+    periods.iter().map(|&p| p as f64).collect()
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn hma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn hma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
-    result
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn hma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to hma_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Calculate HMA
+        let params = HmaParams {
+            period: Some(period),
+        };
+        let input = HmaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            hma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            hma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn hma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to hma_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = HmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Force scalar kernel for WASM since it doesn't support SIMD
+        let kernel = if cfg!(target_arch = "wasm32") {
+            Kernel::ScalarBatch
+        } else {
+            Kernel::Auto
+        };
+        
+        // Use optimized batch processing
+        hma_batch_inner_into(data, &sweep, kernel, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }
 
 // --- tests ---

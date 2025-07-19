@@ -47,6 +47,7 @@ pub struct KamaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct KamaParams {
     pub period: Option<usize>,
 }
@@ -215,7 +216,7 @@ fn kama_compute_into(
             Kernel::Avx2 | Kernel::Avx2Batch => kama_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kama_avx512(data, period, first, out),
-            _ => unreachable!(),
+            _ => kama_scalar(data, period, first, out), // Fallback to scalar
         }
     }
 }
@@ -229,6 +230,32 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
     kama_compute_into(data, period, first, chosen, &mut out);
     
     Ok(KamaOutput { values: out })
+}
+
+/// Compute KAMA directly into the provided output slice.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Result<(), KamaError> {
+    let (data, period, first, chosen) = kama_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(KamaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Compute KAMA values directly into dst
+    kama_compute_into(data, period, first, chosen, dst);
+    
+    // Fill warmup period with NaN
+    let warmup_end = first + period;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
 }
 
 #[inline]
@@ -633,7 +660,9 @@ pub fn kama_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => unreachable!(),
+        // In WASM, detect_best_batch_kernel might return Scalar instead of ScalarBatch
+        Kernel::Scalar => Kernel::Scalar,
+        _ => Kernel::Scalar, // Fallback to scalar for safety
     };
     kama_batch_par_slice(data, sweep, simd)
 }
@@ -799,7 +828,7 @@ fn kama_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch => kama_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kama_row_avx512(data, first, period, dst),
-            _ => unreachable!(),
+            _ => kama_row_scalar(data, first, period, dst), // Fallback to scalar
         }
     };
 
@@ -873,78 +902,108 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "kama")]
+#[pyfunction(name = "kama")]
+#[pyo3(signature = (data, period, kernel=None))]
 pub fn kama_py<'py>(
     py: Python<'py>,
-    arr_in: PyReadonlyArray1<'py, f64>,
+    data: PyReadonlyArray1<'py, f64>,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    use numpy::{PyArray1, PyArrayMethods};
+    use numpy::{IntoPyArray, PyArrayMethods};
     
-    let slice_in = arr_in.as_slice()?; // zero-copy, read-only view
+    let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Build input struct
     let params = KamaParams {
         period: Some(period),
     };
     let kama_in = KamaInput::from_slice(slice_in, params);
     
-    // Heavy lifting without the GIL
-    let output = py.allow_threads(|| -> Result<KamaOutput, KamaError> {
-        kama_with_kernel(&kama_in, Kernel::Auto)
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        kama_with_kernel(&kama_in, kern)
+            .map(|o| o.values)
     })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?; // unify error type
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Convert the output Vec<f64> to NumPy array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [output.values.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    slice_out.copy_from_slice(&output.values);
-    
-    Ok(out_arr)
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(name = "kama_batch")]
+#[pyfunction(name = "kama_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
 pub fn kama_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
     period_range: (usize, usize, usize),
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
     
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
     
     let sweep = KamaBatchRange {
         period: period_range,
     };
     
-    // Call the full batch function which properly initializes NaN values
-    let output = py.allow_threads(|| {
-        kama_batch_with_kernel(slice_in, &sweep, Kernel::Auto)
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = slice_in.len();
+    
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let slice_out = unsafe { out_arr.as_slice_mut()? };
+    
+    // Initialize NaN prefixes before computation
+    let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
+    let warm: Vec<usize> = combos
+        .iter()
+        .map(|c| first + c.period.unwrap())
+        .collect();
+    
+    // Initialize NaN values for warmup periods
+    for (row, &warmup) in warm.iter().enumerate() {
+        let row_start = row * cols;
+        let row_warmup = row_start + warmup;
+        for i in row_start..row_warmup.min(row_start + cols) {
+            slice_out[i] = f64::NAN;
+        }
+    }
+    
+    let combos = py.allow_threads(|| {
+        let kernel = match kern {
+            Kernel::Auto => detect_best_batch_kernel(),
+            k => k,
+        };
+        let simd = match kernel {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            // Handle non-batch kernels that might be returned
+            Kernel::Scalar => Kernel::Scalar,
+            Kernel::Avx2 => Kernel::Avx2,
+            Kernel::Avx512 => Kernel::Avx512,
+            _ => Kernel::Scalar, // Fallback
+        };
+        
+        kama_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Create NumPy array and copy the results
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [output.values.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    slice_out.copy_from_slice(&output.values);
-    
-    // Build dict with the GIL
     let dict = PyDict::new(py);
-    dict.set_item("values", out_arr.reshape((output.rows, output.cols))?)?;
+    dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
-        output.combos
-            .iter()
+        combos.iter()
             .map(|p| p.period.unwrap() as u64)
             .collect::<Vec<_>>()
-            .into_pyarray(py),
+            .into_pyarray(py)
     )?;
     
     Ok(dict)
@@ -976,24 +1035,180 @@ impl KamaStreamPy {
     }
 }
 
-// WASM bindings
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+// ================== WASM Bindings ==================
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = KamaParams {
         period: Some(period),
     };
     let input = KamaInput::from_slice(data, params);
-    match kama_with_kernel(&input, Kernel::Scalar) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&format!("KAMA error: {}", e))),
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    kama_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn kama_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn kama_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn kama_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to kama_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        // Create KAMA input
+        let params = KamaParams {
+            period: Some(period),
+        };
+        let input = KamaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during sliding window computation
+            let mut temp = vec![0.0; len];
+            kama_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            kama_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct KamaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct KamaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<KamaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = kama_batch)]
+pub fn kama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: KamaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = KamaBatchRange {
+        period: config.period_range,
+    };
+
+    let output = kama_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = KamaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn kama_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to kama_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = KamaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        kama_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
+}
+
+// Keep legacy batch function for backwards compatibility
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn kama_batch_js(
     data: &[f64],
@@ -1004,13 +1219,13 @@ pub fn kama_batch_js(
     let sweep = KamaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    match kama_batch_slice(data, &sweep, Kernel::Scalar) {
+    match kama_batch_slice(data, &sweep, Kernel::Auto) {
         Ok(output) => Ok(output.values),
         Err(e) => Err(JsValue::from_str(&format!("KAMA batch error: {}", e))),
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn kama_batch_metadata_js(
     period_start: usize,

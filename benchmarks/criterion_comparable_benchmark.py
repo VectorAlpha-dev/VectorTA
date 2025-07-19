@@ -116,7 +116,7 @@ class CriterionComparableBenchmark:
         
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
-                           'sma_batch', 'ema_batch', 'dema_batch', 'tema_batch', 
+                           'sma_batch', 'ema_batch', 'dema_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch']
         all_indicators = indicators_to_find + batch_indicators
@@ -324,6 +324,7 @@ class CriterionComparableBenchmark:
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
             ('ema_batch', lambda: my_project.ema_batch(data['close'], (14, 14, 1))),
             ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
+            ('ehlers_itrend_batch', lambda: my_project.ehlers_itrend_batch(data['close'], (12, 20, 4), (40, 50, 5))),
             ('tema_batch', lambda: my_project.tema_batch(data['close'], (14, 14, 1))),
             ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),

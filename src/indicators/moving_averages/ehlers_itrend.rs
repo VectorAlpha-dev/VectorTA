@@ -45,6 +45,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for EhlersITrendInput<'a> {
@@ -71,6 +73,7 @@ pub struct EhlersITrendOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct EhlersITrendParams {
     pub warmup_bars: Option<usize>,
     pub max_dc_period: Option<usize>,
@@ -222,6 +225,33 @@ pub fn ehlers_itrend_with_kernel(
     let mut out = alloc_with_nan_prefix(len, warm);
     ehlers_itrend_compute_into(data, warmup_bars, max_dc, first, chosen, &mut out);
     Ok(EhlersITrendOutput { values: out })
+}
+
+/// Write directly to output slice - no allocations
+pub fn ehlers_itrend_into_slice(
+    dst: &mut [f64],
+    input: &EhlersITrendInput,
+    kern: Kernel,
+) -> Result<(), EhlersITrendError> {
+    let (data, warmup_bars, max_dc, first, warm, chosen) = ehlers_itrend_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(EhlersITrendError::NotEnoughDataForWarmup {
+            warmup_bars: dst.len(),
+            length: data.len(),
+        });
+    }
+    
+    // Compute directly into dst
+    ehlers_itrend_compute_into(data, warmup_bars, max_dc, first, chosen, dst);
+    
+    // Fill warmup period with NaN (already done by compute_into, but ensure consistency)
+    for v in &mut dst[..warm] {
+        *v = f64::NAN;
+    }
+    
+    Ok(())
 }
 
 #[inline]
@@ -1923,11 +1953,58 @@ pub fn ehlers_itrend_js(
     };
     let input = EhlersITrendInput::from_slice(data, params);
     
-    ehlers_itrend_with_kernel(&input, Kernel::Scalar)
-        .map(|o| o.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    ehlers_itrend_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EhlersITrendBatchConfig {
+    pub warmup_bars_range: (usize, usize, usize),
+    pub max_dc_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EhlersITrendBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<EhlersITrendParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ehlers_itrend_batch)]
+pub fn ehlers_itrend_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: EhlersITrendBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = EhlersITrendBatchRange {
+        warmup_bars: config.warmup_bars_range,
+        max_dc_period: config.max_dc_period_range,
+    };
+
+    let output = ehlers_itrend_batch_inner(data, &sweep, Kernel::Auto, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = EhlersITrendBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Keep backward compatibility
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn ehlers_itrend_batch_js(
@@ -1977,4 +2054,125 @@ pub fn ehlers_itrend_batch_metadata_js(
         .collect();
     
     Ok(metadata)
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ehlers_itrend_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ehlers_itrend_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ehlers_itrend_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    warmup_bars: Option<usize>,
+    max_dc_period: Option<usize>,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to ehlers_itrend_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        let warmup_bars = warmup_bars.unwrap_or(12);
+        let max_dc_period = max_dc_period.unwrap_or(50);
+        
+        if warmup_bars == 0 || warmup_bars > len {
+            return Err(JsValue::from_str("Invalid warmup_bars"));
+        }
+        if max_dc_period == 0 {
+            return Err(JsValue::from_str("Invalid max_dc_period"));
+        }
+        
+        // Create params and input
+        let params = EhlersITrendParams {
+            warmup_bars: Some(warmup_bars),
+            max_dc_period: Some(max_dc_period),
+        };
+        let input = EhlersITrendInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers are the same)
+        if in_ptr == out_ptr {
+            // Use temporary buffer to avoid corruption during computation
+            let mut temp = vec![0.0; len];
+            ehlers_itrend_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            ehlers_itrend_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ehlers_itrend_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    warmup_bars_start: usize,
+    warmup_bars_end: usize,
+    warmup_bars_step: usize,
+    max_dc_period_start: usize,
+    max_dc_period_end: usize,
+    max_dc_period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to ehlers_itrend_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = EhlersITrendBatchRange {
+            warmup_bars: (warmup_bars_start, warmup_bars_end, warmup_bars_step),
+            max_dc_period: (max_dc_period_start, max_dc_period_end, max_dc_period_step),
+        };
+        
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len();
+        let cols = len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        
+        // Use optimized batch processing
+        ehlers_itrend_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }

@@ -43,6 +43,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -206,6 +208,38 @@ pub fn reflex_with_kernel(
     }
 
     Ok(ReflexOutput { values: out })
+}
+
+/// Computes Reflex directly into a provided output slice, avoiding allocation.
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn reflex_into_slice(dst: &mut [f64], input: &ReflexInput, kern: Kernel) -> Result<(), ReflexError> {
+    let (data, period, first, chosen) = reflex_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(ReflexError::NotEnoughData {
+            needed: data.len(),
+            found: dst.len(),
+        });
+    }
+    
+    // Fill buffer with NaN for warmup period  
+    let warmup = first + period;
+    for i in 0..warmup.min(dst.len()) {
+        dst[i] = f64::NAN;
+    }
+    
+    // Compute Reflex values directly into dst
+    reflex_compute_into(data, period, first, chosen, dst);
+    
+    // Reflex fills zeros for the first period values
+    let end = period.min(dst.len());
+    for x in &mut dst[..end] {
+        *x = 0.0;
+    }
+    
+    Ok(())
 }
 
 #[inline]
@@ -887,39 +921,25 @@ pub fn reflex_py<'py>(
         Reflex values
     "#;
 
+    use numpy::{IntoPyArray, PyArrayMethods};
+
     let data_slice = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
+    
     let params = ReflexParams {
         period: Some(period),
     };
     let input = ReflexInput::from_slice(data_slice, params);
 
-    let kernel_enum = match kernel {
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some("auto") | None => Kernel::Auto,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    // Get Vec<f64> from Rust function for zero-copy transfer
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        reflex_with_kernel(&input, kern)
+            .map(|o| o.values)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Use prepare/compute_into pattern
-    let (data, period, first, chosen) = reflex_prepare(&input, kernel_enum)
-        .map_err(|e| PyValueError::new_err(format!("reflex error: {}", e)))?;
-
-    let len = data.len();
-    let warm = first + period;
-
-    // Release GIL during computation
-    let mut output = alloc_with_nan_prefix(len, warm);
-    py.allow_threads(|| {
-        reflex_compute_into(data, period, first, chosen, &mut output);
-    });
-
-    // Reflex fills zeros for the first period values
-    for x in &mut output[..period.min(len)] {
-        *x = 0.0;
-    }
-
-    Ok(output.into_pyarray(py).into())
+    // Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -948,15 +968,11 @@ pub fn reflex_batch_py<'py>(
         Dictionary with 'values' (2D array) and 'periods' (list)
     "#;
 
-    let data_slice = data.as_slice()?;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+    use pyo3::types::PyDict;
 
-    let kernel_enum = match kernel {
-        Some("scalar") => Kernel::ScalarBatch,
-        Some("avx2") => Kernel::Avx2Batch,
-        Some("avx512") => Kernel::Avx512Batch,
-        Some("auto") | None => Kernel::Auto,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    let data_slice = data.as_slice()?;
+    let kern = validate_kernel(kernel, true)?;
 
     let range = ReflexBatchRange { period: periods };
 
@@ -975,16 +991,15 @@ pub fn reflex_batch_py<'py>(
     // Release GIL during computation
     let metadata = py
         .allow_threads(|| {
-            let simd = match kernel_enum {
+            let kernel = match kern {
+                Kernel::Auto => detect_best_batch_kernel(),
+                k => k,
+            };
+            let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                Kernel::Auto => match detect_best_batch_kernel() {
-                    Kernel::Avx512Batch => Kernel::Avx512,
-                    Kernel::Avx2Batch => Kernel::Avx2,
-                    _ => Kernel::Scalar,
-                },
-                _ => Kernel::Scalar,
+                _ => unreachable!(),
             };
 
             reflex_batch_inner_into(data_slice, &range, simd, true, slice_out)
@@ -1046,10 +1061,15 @@ pub fn reflex_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
         period: Some(period),
     };
     let input = ReflexInput::from_slice(data, params);
-
-    let output = reflex(&input).map_err(|e| JsValue::from_str(&format!("reflex error: {}", e)))?;
-
-    Ok(output.values)
+    
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    reflex_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1097,6 +1117,71 @@ pub fn reflex_batch_rows_cols_js(
     };
     let combos = expand_grid(&range);
     vec![combos.len(), data_len]
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn reflex_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if period == 0 || period > len {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        
+        let params = ReflexParams {
+            period: Some(period),
+        };
+        let input = ReflexInput::from_slice(data, params);
+        
+        if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+            // In-place operation: use temporary buffer
+            let mut temp = vec![0.0; len];
+            reflex_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing: compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            reflex_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 // -- Test coverage macros: ALMA parity --
