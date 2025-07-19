@@ -229,7 +229,17 @@
       "Bash(if exist:*)",
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_kama.py -v)",
       "Bash(.venvScriptspython.exe tests/python/test_ehlers_itrend.py)",
-      "Bash(test_bindings.bat dema --python)"
+      "Bash(test_bindings.bat dema --python)",
+      "Bash(echo:*)",
+      "Bash(del test_epma_perf.py)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(run_wasm_benchmark:*)",
+      "Bash(run_python_benchmark:*)",
+      "Bash(wc:*)",
+      "Bash(where run_python_benchmark)",
+      "Bash(.venv\\Scripts\\python.exe test_ma_benchmark.py:*)",
+      "Bash(.venvScriptspython.exe -OO benchmarkscriterion_comparable_benchmark.py nma)",
+      "Bash(.venv\\Scripts\\python.exe -OO:*)"
     ],
     "deny": []
   }

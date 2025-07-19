@@ -6,9 +6,19 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "ehlers_itrend": 8.30354
+    "supersmoother_3_pole": 2.513955
   },
-  "rust_results": {},
-  "comparisons": [],
+  "rust_results": {
+    "supersmoother_3_pole": 2.505487857142857
+  },
+  "comparisons": [
+    {
+      "indicator": "supersmoother_3_pole",
+      "python_ms": 2.513955,
+      "rust_ms": 2.505487857142857,
+      "overhead_ms": 0.008467142857143006,
+      "overhead_pct": 0.33794387919319213
+    }
+  ],
   "batch_comparisons": []
 }

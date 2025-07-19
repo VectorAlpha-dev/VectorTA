@@ -19,6 +19,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -39,6 +41,8 @@ use pyo3::types::PyDict;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 impl<'a> AsRef<[f64]> for SmaInput<'a> {
     #[inline(always)]
@@ -65,6 +69,7 @@ pub struct SmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct SmaParams {
     pub period: Option<usize>,
 }
@@ -215,6 +220,33 @@ pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, Sm
     }
 
     Ok(SmaOutput { values: out })
+}
+
+/// Write SMA directly to output slice - zero allocation pattern for WASM
+/// The output slice must be the same length as the input data.
+#[inline]
+pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result<(), SmaError> {
+    let data: &[f64] = input.as_ref();
+    let (period, first, chosen) = sma_prepare(input, kern)?;
+    
+    // Verify output buffer size matches input
+    if dst.len() != data.len() {
+        return Err(SmaError::InvalidPeriod {
+            period: dst.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Fill warmup with NaN
+    let warmup = first + period - 1;
+    for v in &mut dst[..warmup] {
+        *v = f64::NAN;
+    }
+    
+    // Compute directly into output buffer
+    sma_compute_into(data, period, first, chosen, dst);
+    
+    Ok(())
 }
 
 /// Prepare SMA computation by validating inputs and returning intermediate values for zero-copy operations
@@ -745,41 +777,24 @@ pub fn sma_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    // Parse kernel string to enum
-    let kern = match kernel {
-        None | Some("auto") => Kernel::Auto,
-        Some("scalar") => Kernel::Scalar,
-        Some("avx2") => Kernel::Avx2,
-        Some("avx512") => Kernel::Avx512,
-        Some(k) => return Err(PyValueError::new_err(format!("Unknown kernel: {}", k))),
-    };
+    use numpy::IntoPyArray;
+    
+    // Validate kernel with CPU feature detection
+    let kern = validate_kernel(kernel, false)?;
 
     let data_slice = data.as_slice()?;
     let params = SmaParams { period: Some(period) };
     let input = SmaInput::from_slice(data_slice, params);
 
-    // Use prepare/compute pattern for zero-copy
-    let (period, first, chosen_kernel) = sma_prepare(&input, kern)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Compute SMA using the standard function with zero-copy
+    let result_vec: Vec<f64> = py.allow_threads(|| {
+        sma_with_kernel(&input, kern)
+            .map(|o| o.values)
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let len = data_slice.len();
-    let warm = first + period - 1;
-
-    // Allocate output array
-    let out_array = unsafe { PyArray1::<f64>::new(py, [data_slice.len()], false) };
-    let out_slice = unsafe { out_array.as_slice_mut()? };
-
-    // Initialize with NaN up to warmup
-    for i in 0..warm {
-        out_slice[i] = f64::NAN;
-    }
-
-    // Compute SMA values
-    py.allow_threads(|| {
-        sma_compute_into(data_slice, period, first, chosen_kernel, out_slice);
-    });
-
-    Ok(out_array.into())
+    // Use zero-copy transfer to Python
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -806,15 +821,11 @@ pub fn sma_batch_py<'py>(
     period_range: (usize, usize, usize),
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let kern = kernel.map(|k| {
-        match k {
-            "auto" => Ok(Kernel::Auto),
-            "scalar" => Ok(Kernel::ScalarBatch),
-            "avx2" => Ok(Kernel::Avx2Batch),
-            "avx512" => Ok(Kernel::Avx512Batch),
-            _ => Err(PyValueError::new_err(format!("Unknown kernel: {}", k)))
-        }
-    }).transpose()?.unwrap_or(Kernel::Auto);
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+    
+    // Validate kernel with CPU feature detection
+    let kern = validate_kernel(kernel, true)?;
 
     let data_slice = data.as_slice()?;
     let range = SmaBatchRange { period: period_range };
@@ -835,15 +846,7 @@ pub fn sma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Convert to MaybeUninit slice for batch computation
-    let out_uninit = unsafe {
-        std::slice::from_raw_parts_mut(
-            slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
-            slice_out.len()
-        )
-    };
-
-    // Perform batch computation with zero-copy
+    // Perform batch computation with zero-copy directly into NumPy array
     let combos = py.allow_threads(|| -> Result<Vec<SmaParams>, SmaError> {
         // Resolve Kernel::Auto to a specific kernel
         let kernel = match kern {
@@ -856,6 +859,15 @@ pub fn sma_batch_py<'py>(
             Kernel::ScalarBatch => Kernel::Scalar,
             _ => unreachable!(),
         };
+        
+        // Convert to MaybeUninit slice for batch computation
+        let out_uninit = unsafe {
+            std::slice::from_raw_parts_mut(
+                slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
+                slice_out.len()
+            )
+        };
+        
         sma_batch_inner_into(
             data_slice,
             &range,
@@ -944,14 +956,59 @@ pub fn sma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SmaParams { period: Some(period) };
     let input = SmaInput::from_slice(data, params);
     
-    sma(&input)
-        .map(|output| output.values)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    // Allocate output buffer once
+    let mut output = vec![0.0; data.len()];
+    
+    // Compute directly into output buffer
+    sma_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SmaBatchConfig {
+    pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SmaBatchJsOutput {
+    pub values: Vec<f64>,
+    pub combos: Vec<SmaParams>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "sma_batch")]
+pub fn sma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+    let config: SmaBatchConfig = serde_wasm_bindgen::from_value(config)
+        .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+    let sweep = SmaBatchRange {
+        period: config.period_range,
+    };
+
+    let output = sma_batch_with_kernel(data, &sweep, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let js_output = SmaBatchJsOutput {
+        values: output.values,
+        combos: output.combos,
+        rows: output.rows,
+        cols: output.cols,
+    };
+
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// Keep old functions for backward compatibility but mark as deprecated
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smaBatch")]
-/// Compute SMA for multiple periods in a single pass
+#[deprecated(since = "1.0.0", note = "Use sma_batch instead")]
 pub fn sma_batch_js(
     data: &[f64], 
     period_start: usize,
@@ -969,7 +1026,7 @@ pub fn sma_batch_js(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smaBatchMetadata")]
-/// Get metadata about the batch computation (periods used)
+#[deprecated(since = "1.0.0", note = "Use sma_batch which returns metadata")]
 pub fn sma_batch_metadata_js(
     period_start: usize,
     period_end: usize,
@@ -984,7 +1041,7 @@ pub fn sma_batch_metadata_js(
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smaBatchRowsCols")]
-/// Get the dimensions of the batch output
+#[deprecated(since = "1.0.0", note = "Use sma_batch which returns rows and cols")]
 pub fn sma_batch_rows_cols_js(
     period_start: usize,
     period_end: usize,
@@ -996,6 +1053,118 @@ pub fn sma_batch_rows_cols_js(
     };
     let combos = expand_grid(&range);
     vec![combos.len(), data_len]
+}
+
+// ================== Zero-Copy WASM Functions ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sma_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sma_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sma_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period: usize,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let params = SmaParams { period: Some(period) };
+        let input = SmaInput::from_slice(data, params);
+        
+        // Check if pointers are the same (aliasing)
+        if in_ptr == out_ptr as *const f64 {
+            // Use temporary buffer to avoid corruption
+            let mut temp = vec![0.0; len];
+            sma_into_slice(&mut temp, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            out.copy_from_slice(&temp);
+        } else {
+            // No aliasing, compute directly into output
+            let out = std::slice::from_raw_parts_mut(out_ptr, len);
+            sma_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+// ================== Optimized Batch Processing ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sma_batch_into(
+    in_ptr: *const f64,
+    out_ptr: *mut f64,
+    len: usize,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("Null pointer provided"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let sweep = SmaBatchRange {
+            period: (period_start, period_end, period_step),
+        };
+        
+        let combos = expand_grid(&sweep);
+        let rows = combos.len();
+        let total_size = rows * len;
+        
+        let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+        
+        // Convert output slice to MaybeUninit for the existing function
+        let out_uninit = std::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut MaybeUninit<f64>,
+            out.len()
+        );
+        
+        // Use the existing batch inner computation function
+        sma_batch_inner_into(
+            data,
+            &sweep,
+            Kernel::Auto,
+            false, // No parallel on WASM
+            out_uninit
+        ).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        Ok(rows)
+    }
 }
 
 

@@ -73,7 +73,51 @@ use crate::indicators::wilders::{wilders, WildersData, WildersInput, WildersPara
 use crate::indicators::wma::{wma, WmaData, WmaInput, WmaParams};
 use crate::indicators::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
 use crate::utilities::data_loader::Candles;
+use crate::utilities::enums::Kernel;
 use std::error::Error;
+
+// Import _with_kernel functions
+use crate::indicators::alma::alma_with_kernel;
+use crate::indicators::cwma::cwma_with_kernel;
+use crate::indicators::dema::dema_with_kernel;
+use crate::indicators::edcf::edcf_with_kernel;
+use crate::indicators::ehlers_itrend::ehlers_itrend_with_kernel;
+use crate::indicators::ema::ema_with_kernel;
+use crate::indicators::epma::epma_with_kernel;
+use crate::indicators::fwma::fwma_with_kernel;
+use crate::indicators::gaussian::gaussian_with_kernel;
+use crate::indicators::highpass::highpass_with_kernel;
+use crate::indicators::highpass_2_pole::highpass_2_pole_with_kernel;
+use crate::indicators::hma::hma_with_kernel;
+use crate::indicators::hwma::hwma_with_kernel;
+use crate::indicators::jma::jma_with_kernel;
+use crate::indicators::jsa::jsa_with_kernel;
+use crate::indicators::kama::kama_with_kernel;
+use crate::indicators::linreg::linreg_with_kernel;
+use crate::indicators::maaq::maaq_with_kernel;
+use crate::indicators::mama::mama_with_kernel;
+use crate::indicators::mwdx::mwdx_with_kernel;
+use crate::indicators::nma::nma_with_kernel;
+use crate::indicators::pwma::pwma_with_kernel;
+use crate::indicators::reflex::reflex_with_kernel;
+use crate::indicators::sinwma::sinwma_with_kernel;
+use crate::indicators::sma::sma_with_kernel;
+use crate::indicators::smma::smma_with_kernel;
+use crate::indicators::sqwma::sqwma_with_kernel;
+use crate::indicators::srwma::srwma_with_kernel;
+use crate::indicators::supersmoother::supersmoother_with_kernel;
+use crate::indicators::supersmoother_3_pole::supersmoother_3_pole_with_kernel;
+use crate::indicators::swma::swma_with_kernel;
+use crate::indicators::tema::tema_with_kernel;
+use crate::indicators::tilson::tilson_with_kernel;
+use crate::indicators::trendflex::trendflex_with_kernel;
+use crate::indicators::trima::trima_with_kernel;
+use crate::indicators::vpwma::vpwma_with_kernel;
+use crate::indicators::vwap::vwap_with_kernel;
+use crate::indicators::vwma::vwma_with_kernel;
+use crate::indicators::wilders::wilders_with_kernel;
+use crate::indicators::wma::wma_with_kernel;
+use crate::indicators::zlema::zlema_with_kernel;
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
@@ -81,6 +125,8 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use numpy::{PyReadonlyArray1, PyArray1};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -967,38 +1013,836 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
     }
 }
 
+#[inline]
+pub fn ma_with_kernel<'a>(ma_type: &str, data: MaData<'a>, period: usize, kernel: Kernel) -> Result<Vec<f64>, Box<dyn Error>> {
+    match ma_type.to_lowercase().as_str() {
+        "sma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SmaInput {
+                    data: SmaData::Candles { candles, source },
+                    params: SmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SmaInput {
+                    data: SmaData::Slice(slice),
+                    params: SmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = sma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "alma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => AlmaInput {
+                    data: AlmaData::Candles { candles, source },
+                    params: AlmaParams {
+                        period: Some(period),
+                        offset: None,
+                        sigma: None,
+                    },
+                },
+                MaData::Slice(slice) => AlmaInput {
+                    data: AlmaData::Slice(slice),
+                    params: AlmaParams {
+                        period: Some(period),
+                        offset: None,
+                        sigma: None,
+                    },
+                },
+            };
+            let output = alma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "cwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CwmaInput {
+                    data: CwmaData::Candles { candles, source },
+                    params: CwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => CwmaInput {
+                    data: CwmaData::Slice(slice),
+                    params: CwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = cwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "dema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => DemaInput {
+                    data: DemaData::Candles { candles, source },
+                    params: DemaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => DemaInput {
+                    data: DemaData::Slice(slice),
+                    params: DemaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = dema_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "edcf" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EdcfInput {
+                    data: EdcfData::Candles { candles, source },
+                    params: EdcfParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => EdcfInput {
+                    data: EdcfData::Slice(slice),
+                    params: EdcfParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = edcf_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "ema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EmaInput {
+                    data: EmaData::Candles { candles, source },
+                    params: EmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => EmaInput {
+                    data: EmaData::Slice(slice),
+                    params: EmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = ema_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "epma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EpmaInput {
+                    data: EpmaData::Candles { candles, source },
+                    params: EpmaParams {
+                        period: Some(period),
+                        offset: None,
+                    },
+                },
+                MaData::Slice(slice) => EpmaInput {
+                    data: EpmaData::Slice(slice),
+                    params: EpmaParams {
+                        period: Some(period),
+                        offset: None,
+                    },
+                },
+            };
+            let output = epma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "fwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => FwmaInput {
+                    data: FwmaData::Candles { candles, source },
+                    params: FwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => FwmaInput {
+                    data: FwmaData::Slice(slice),
+                    params: FwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = fwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "gaussian" => {
+            let input = match data {
+                MaData::Candles { candles, source } => GaussianInput {
+                    data: GaussianData::Candles { candles, source },
+                    params: GaussianParams {
+                        period: Some(period),
+                        poles: None,
+                    },
+                },
+                MaData::Slice(slice) => GaussianInput {
+                    data: GaussianData::Slice(slice),
+                    params: GaussianParams {
+                        period: Some(period),
+                        poles: None,
+                    },
+                },
+            };
+            let output = gaussian_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "highpass" => {
+            let input = match data {
+                MaData::Candles { candles, source } => HighPassInput {
+                    data: HighPassData::Candles { candles, source },
+                    params: HighPassParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => HighPassInput {
+                    data: HighPassData::Slice(slice),
+                    params: HighPassParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = highpass_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "highpass2" => {
+            let input = match data {
+                MaData::Candles { candles, source } => HighPass2Input {
+                    data: HighPass2Data::Candles { candles, source },
+                    params: HighPass2Params {
+                        period: Some(period),
+                        k: Some(0.707),
+                    },
+                },
+                MaData::Slice(slice) => HighPass2Input {
+                    data: HighPass2Data::Slice(slice),
+                    params: HighPass2Params {
+                        period: Some(period),
+                        k: Some(0.707),
+                    },
+                },
+            };
+            let output = highpass_2_pole_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "hma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => HmaInput {
+                    data: HmaData::Candles { candles, source },
+                    params: HmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => HmaInput {
+                    data: HmaData::Slice(slice),
+                    params: HmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = hma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "ehlers_itrend" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EhlersITrendInput {
+                    data: EhlersITrendData::Candles { candles, source },
+                    params: EhlersITrendParams {
+                        warmup_bars: Some(12),
+                        max_dc_period: Some(50),
+                    },
+                },
+                MaData::Slice(slice) => EhlersITrendInput {
+                    data: EhlersITrendData::Slice(slice),
+                    params: EhlersITrendParams {
+                        warmup_bars: Some(12),
+                        max_dc_period: Some(50),
+                    },
+                },
+            };
+            let output = ehlers_itrend_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "hwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => HwmaInput {
+                    data: HwmaData::Candles { candles, source },
+                    params: HwmaParams {
+                        na: None,
+                        nb: None,
+                        nc: None,
+                    },
+                },
+                MaData::Slice(slice) => HwmaInput {
+                    data: HwmaData::Slice(slice),
+                    params: HwmaParams {
+                        na: None,
+                        nb: None,
+                        nc: None,
+                    },
+                },
+            };
+            let output = hwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "jma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => JmaInput {
+                    data: JmaData::Candles { candles, source },
+                    params: JmaParams {
+                        period: Some(period),
+                        phase: None,
+                        power: None,
+                    },
+                },
+                MaData::Slice(slice) => JmaInput {
+                    data: JmaData::Slice(slice),
+                    params: JmaParams {
+                        period: Some(period),
+                        phase: None,
+                        power: None,
+                    },
+                },
+            };
+            let output = jma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "jsa" => {
+            let input = match data {
+                MaData::Candles { candles, source } => JsaInput {
+                    data: JsaData::Candles { candles, source },
+                    params: JsaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => JsaInput {
+                    data: JsaData::Slice(slice),
+                    params: JsaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = jsa_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "kama" => {
+            let input = match data {
+                MaData::Candles { candles, source } => KamaInput {
+                    data: KamaData::Candles { candles, source },
+                    params: KamaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => KamaInput {
+                    data: KamaData::Slice(slice),
+                    params: KamaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = kama_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "linreg" => {
+            let input = match data {
+                MaData::Candles { candles, source } => LinRegInput {
+                    data: LinRegData::Candles { candles, source },
+                    params: LinRegParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => LinRegInput {
+                    data: LinRegData::Slice(slice),
+                    params: LinRegParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = linreg_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "maaq" => {
+            let input = match data {
+                MaData::Candles { candles, source } => MaaqInput {
+                    data: MaaqData::Candles { candles, source },
+                    params: MaaqParams {
+                        period: Some(period),
+                        fast_period: None,
+                        slow_period: None,
+                    },
+                },
+                MaData::Slice(slice) => MaaqInput {
+                    data: MaaqData::Slice(slice),
+                    params: MaaqParams {
+                        period: Some(period),
+                        fast_period: None,
+                        slow_period: None,
+                    },
+                },
+            };
+            let output = maaq_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "mama" => {
+            let input = match data {
+                MaData::Candles { candles, source } => {
+                    MamaInput::from_candles(candles, source, MamaParams::default())
+                }
+                MaData::Slice(slice) => MamaInput::from_slice(slice, MamaParams::default()),
+            };
+            let output = mama_with_kernel(&input, kernel)?;
+            Ok(output.mama_values)
+        }
+
+        "mwdx" => {
+            let input = match data {
+                MaData::Candles { candles, source } => MwdxInput::from_candles(
+                    candles,
+                    source,
+                    MwdxParams {
+                        factor: Some(0.2),
+                    },
+                ),
+                MaData::Slice(slice) => MwdxInput::from_slice(
+                    slice,
+                    MwdxParams {
+                        factor: Some(0.2),
+                    },
+                ),
+            };
+            let output = mwdx_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "nma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => NmaInput {
+                    data: NmaData::Candles { candles, source },
+                    params: NmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => NmaInput {
+                    data: NmaData::Slice(slice),
+                    params: NmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = nma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "pwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => PwmaInput {
+                    data: PwmaData::Candles { candles, source },
+                    params: PwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => PwmaInput {
+                    data: PwmaData::Slice(slice),
+                    params: PwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = pwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "reflex" => {
+            let input = match data {
+                MaData::Candles { candles, source } => ReflexInput {
+                    data: ReflexData::Candles { candles, source },
+                    params: ReflexParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => ReflexInput {
+                    data: ReflexData::Slice(slice),
+                    params: ReflexParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = reflex_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "sinwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SinWmaInput {
+                    data: SinWmaData::Candles { candles, source },
+                    params: SinWmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SinWmaInput {
+                    data: SinWmaData::Slice(slice),
+                    params: SinWmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = sinwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "sqwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SqwmaInput {
+                    data: SqwmaData::Candles { candles, source },
+                    params: SqwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SqwmaInput {
+                    data: SqwmaData::Slice(slice),
+                    params: SqwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = sqwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "srwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SrwmaInput {
+                    data: SrwmaData::Candles { candles, source },
+                    params: SrwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SrwmaInput {
+                    data: SrwmaData::Slice(slice),
+                    params: SrwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = srwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "smma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SmmaInput {
+                    data: SmmaData::Candles { candles, source },
+                    params: SmmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SmmaInput {
+                    data: SmmaData::Slice(slice),
+                    params: SmmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = smma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "supersmoother" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SuperSmootherInput {
+                    data: SuperSmootherData::Candles { candles, source },
+                    params: SuperSmootherParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SuperSmootherInput {
+                    data: SuperSmootherData::Slice(slice),
+                    params: SuperSmootherParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = supersmoother_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "supersmoother_3_pole" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SuperSmoother3PoleInput {
+                    data: SuperSmoother3PoleData::Candles { candles, source },
+                    params: SuperSmoother3PoleParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SuperSmoother3PoleInput {
+                    data: SuperSmoother3PoleData::Slice(slice),
+                    params: SuperSmoother3PoleParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = supersmoother_3_pole_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "swma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SwmaInput {
+                    data: SwmaData::Candles { candles, source },
+                    params: SwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => SwmaInput {
+                    data: SwmaData::Slice(slice),
+                    params: SwmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = swma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "tema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => TemaInput {
+                    data: TemaData::Candles { candles, source },
+                    params: TemaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => TemaInput {
+                    data: TemaData::Slice(slice),
+                    params: TemaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = tema_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "tilson" => {
+            let input = match data {
+                MaData::Candles { candles, source } => TilsonInput {
+                    data: TilsonData::Candles { candles, source },
+                    params: TilsonParams {
+                        period: Some(period),
+                        volume_factor: None,
+                    },
+                },
+                MaData::Slice(slice) => TilsonInput {
+                    data: TilsonData::Slice(slice),
+                    params: TilsonParams {
+                        period: Some(period),
+                        volume_factor: None,
+                    },
+                },
+            };
+            let output = tilson_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "trendflex" => {
+            let input = match data {
+                MaData::Candles { candles, source } => TrendFlexInput {
+                    data: TrendFlexData::Candles { candles, source },
+                    params: TrendFlexParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => TrendFlexInput {
+                    data: TrendFlexData::Slice(slice),
+                    params: TrendFlexParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = trendflex_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "trima" => {
+            let input = match data {
+                MaData::Candles { candles, source } => TrimaInput {
+                    data: TrimaData::Candles { candles, source },
+                    params: TrimaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => TrimaInput {
+                    data: TrimaData::Slice(slice),
+                    params: TrimaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = trima_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "wilders" => {
+            let input = match data {
+                MaData::Candles { candles, source } => WildersInput {
+                    data: WildersData::Candles { candles, source },
+                    params: WildersParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => WildersInput {
+                    data: WildersData::Slice(slice),
+                    params: WildersParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = wilders_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "wma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => WmaInput {
+                    data: WmaData::Candles { candles, source },
+                    params: WmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => WmaInput {
+                    data: WmaData::Slice(slice),
+                    params: WmaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = wma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "vpwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => VpwmaInput {
+                    data: VpwmaData::Candles {
+                        candles,
+                        source,
+                    },
+                    params: VpwmaParams {
+                        period: Some(period),
+                        power: Some(0.382),
+                    },
+                },
+                MaData::Slice(_) => {
+                    return Err("VPWMA requires candle data with volume".into());
+                }
+            };
+            let output = vpwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "vwap" => {
+            let input = match data {
+                MaData::Candles { candles, .. } => VwapInput {
+                    data: VwapData::Candles { candles, source: "hlc3" },
+                    params: VwapParams::default(),
+                },
+                MaData::Slice(_) => {
+                    return Err("VWAP requires candle data with high, low, close, and volume".into());
+                }
+            };
+            let output = vwap_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "vwma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => VwmaInput {
+                    data: VwmaData::Candles {
+                        candles,
+                        source,
+                    },
+                    params: VwmaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(_) => {
+                    return Err("VWMA requires candle data with volume".into());
+                }
+            };
+            let output = vwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "zlema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => ZlemaInput {
+                    data: ZlemaData::Candles { candles, source },
+                    params: ZlemaParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => ZlemaInput {
+                    data: ZlemaData::Slice(slice),
+                    params: ZlemaParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = zlema_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        _ => {
+            // Default to SMA for invalid MA types
+            ma_with_kernel("sma", data, period, kernel)
+        },
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "ma")]
-#[pyo3(signature = (data, ma_type, period))]
+#[pyo3(signature = (data, ma_type, period, kernel=None))]
 pub fn ma_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
     ma_type: &str,
     period: usize,
+    kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    use numpy::PyArrayMethods;
+    use numpy::{IntoPyArray, PyArrayMethods};
     
     let slice_in = data.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
     
-    // Pre-allocate uninitialized NumPy array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-    
-    // Run computation without GIL
-    let result = py.allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
-        // Call the Rust ma function
-        let result = ma(ma_type, MaData::Slice(slice_in), period)
+    // Get Vec<f64> from Rust function
+    let result_vec: Vec<f64> = py.allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
+        ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern)
             .map_err(|e| -> Box<dyn Error + Send + Sync> { 
                 Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-            })?;
-        Ok(result)
+            })
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
     
-    // Copy result to output array
-    slice_out.copy_from_slice(&result);
-    
-    Ok(out_arr)
+    // Zero-copy transfer to NumPy
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "wasm")]

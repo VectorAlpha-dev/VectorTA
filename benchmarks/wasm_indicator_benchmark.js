@@ -78,22 +78,221 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
-    // Example: Simple Moving Average (uncomment when SMA WASM bindings are added)
-    /*
+    dema: {
+        name: 'DEMA',
+        // Safe API
+        safe: {
+            fn: 'dema_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dema_alloc',
+            freeFn: 'dema_free',
+            computeFn: 'dema_into',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'dema_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]     // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 10]     // 5 values
+                }
+            }
+        }
+    },
+    epma: {
+        name: 'EPMA',
+        // Safe API
+        safe: {
+            fn: 'epma_js',
+            params: { period: 11, offset: 4 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'epma_alloc',
+            freeFn: 'epma_free',
+            computeFn: 'epma_into',
+            params: { period: 11, offset: 4 }
+        },
+        // Batch API
+        batch: {
+            fn: 'epma_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5],      // 3 values
+                    offset_range: [2, 4, 1]        // 3 values
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [5, 25, 2],      // 11 values
+                    offset_range: [1, 4, 1]        // 4 values
+                    // Total: 44 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'epma_batch_into'
+        }
+    },
+    jma: {
+        name: 'JMA',
+        // Safe API
+        safe: {
+            fn: 'jma_js',
+            params: { period: 7, phase: 50.0, power: 2 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'jma_alloc',
+            freeFn: 'jma_free',
+            computeFn: 'jma_into',
+            params: { period: 7, phase: 50.0, power: 2 }
+        },
+        // Batch API
+        batch: {
+            fn: 'jma_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5],      // 3 values
+                    phase_range: [0.0, 100.0, 50.0], // 3 values
+                    power_range: [1, 3, 1]         // 3 values
+                    // Total: 27 combinations
+                },
+                medium: {
+                    period_range: [5, 25, 5],      // 5 values
+                    phase_range: [0.0, 100.0, 25.0], // 5 values
+                    power_range: [1, 3, 1]         // 3 values
+                    // Total: 75 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'jma_batch_into'
+        }
+    },
+    highpass_2_pole: {
+        name: 'HighPass 2-Pole',
+        // Safe API
+        safe: {
+            fn: 'highpass_2_pole_js',
+            params: { period: 48, k: 0.707 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'highpass_2_pole_alloc',
+            freeFn: 'highpass_2_pole_free',
+            computeFn: 'highpass_2_pole_into',
+            params: { period: 48, k: 0.707 }
+        },
+        // Batch API
+        batch: {
+            fn: 'highpass_2_pole_batch',
+            config: {
+                small: {
+                    period_range: [20, 60, 20],    // 3 values
+                    k_range: [0.5, 0.9, 0.2]       // 3 values
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [20, 80, 10],    // 7 values
+                    k_range: [0.3, 0.9, 0.1]       // 7 values
+                    // Total: 49 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'highpass_2_pole_batch_into'
+        }
+    },
+    nma: {
+        name: 'NMA',
+        // Safe API
+        safe: {
+            fn: 'nma_js',
+            params: { period: 40 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'nma_alloc',
+            freeFn: 'nma_free',
+            computeFn: 'nma_into',
+            params: { period: 40 }
+        },
+        // Batch API
+        batch: {
+            fn: 'nma_batch',
+            config: {
+                small: {
+                    period_range: [20, 60, 20]     // 3 values
+                },
+                medium: {
+                    period_range: [10, 90, 10]     // 9 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'nma_batch_into'
+        }
+    },
     sma: {
         name: 'SMA',
+        // Safe API
         safe: {
-            fn: 'sma_js',
-            params: { period: 20 }
+            fn: 'sma',
+            params: { period: 14 }
         },
+        // Fast/Unsafe API
         fast: {
             allocFn: 'sma_alloc',
             freeFn: 'sma_free',
             computeFn: 'sma_into',
-            params: { period: 20 }
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'sma_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 25, 2]       // 11 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'sma_batch_into'
         }
     },
-    */
+    supersmoother_3_pole: {
+        name: 'SuperSmoother 3-Pole',
+        // Safe API
+        safe: {
+            fn: 'supersmoother_3_pole_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'supersmoother_3_pole_alloc',
+            freeFn: 'supersmoother_3_pole_free',
+            computeFn: 'supersmoother_3_pole_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'supersmoother_3_pole_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 30, 2]      // 11 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'supersmoother_3_pole_batch_into'
+        }
+    }
     // Example: Exponential Moving Average (uncomment when EMA WASM bindings are added)
     /*
     ema: {
@@ -370,9 +569,19 @@ class WasmIndicatorBenchmark {
             // Calculate total combinations for batch
             if (batchConfig.period_range) {
                 const periods = Math.floor((batchConfig.period_range[1] - batchConfig.period_range[0]) / batchConfig.period_range[2]) + 1;
-                const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
-                const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
-                console.log(`  Total combinations: ${periods * offsets * sigmas}`);
+                let totalCombos = periods;
+                
+                if (batchConfig.offset_range) {
+                    const offsets = Math.floor((batchConfig.offset_range[1] - batchConfig.offset_range[0]) / batchConfig.offset_range[2]) + 1;
+                    totalCombos *= offsets;
+                }
+                
+                if (batchConfig.sigma_range) {
+                    const sigmas = Math.floor((batchConfig.sigma_range[1] - batchConfig.sigma_range[0]) / batchConfig.sigma_range[2]) + 1;
+                    totalCombos *= sigmas;
+                }
+                
+                console.log(`  Total combinations: ${totalCombos}`);
             }
         }
     }

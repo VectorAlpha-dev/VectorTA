@@ -363,6 +363,207 @@ test('EPMA batch performance test', () => {
     console.log(`  EPMA Batch time: ${batchTime}ms, Single calls time: ${singleTime}ms`);
 });
 
+// Zero-copy API tests
+test('EPMA zero-copy API', () => {
+    const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const period = 5;
+    const offset = 2;
+    
+    // Allocate buffer
+    const ptr = wasm.epma_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute EPMA in-place
+    try {
+        wasm.epma_into(ptr, ptr, data.length, period, offset);
+        
+        // Verify results match regular API
+        const regularResult = wasm.epma_js(data, period, offset);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.epma_free(ptr, data.length);
+    }
+});
+
+test('EPMA zero-copy with large dataset', () => {
+    const size = 10000;
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+        data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
+    }
+    
+    const ptr = wasm.epma_alloc(size);
+    assert(ptr !== 0, 'Failed to allocate large buffer');
+    
+    try {
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        memView.set(data);
+        
+        wasm.epma_into(ptr, ptr, size, 11, 4);
+        
+        // Recreate view in case memory grew
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        
+        // Check warmup period has NaN (period + offset + 1 = 11 + 4 + 1 = 16)
+        for (let i = 0; i < 16; i++) {
+            assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
+        }
+        
+        // Check after warmup has values
+        for (let i = 16; i < Math.min(100, size); i++) {
+            assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
+        }
+    } finally {
+        wasm.epma_free(ptr, size);
+    }
+});
+
+test('EPMA zero-copy error handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.epma_into(0, 0, 10, 9, 3);
+    }, /null pointer|Null pointer/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.epma_alloc(10);
+    try {
+        // Initialize memory with valid data
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, 10);
+        for (let i = 0; i < 10; i++) {
+            memView[i] = i + 1.0;
+        }
+        
+        // Invalid period
+        assert.throws(() => {
+            wasm.epma_into(ptr, ptr, 10, 0, 3);
+        }, /Invalid period/);
+        
+        // Invalid offset (offset >= period)
+        assert.throws(() => {
+            wasm.epma_into(ptr, ptr, 10, 5, 5);
+        }, /Invalid offset/);
+    } finally {
+        wasm.epma_free(ptr, 10);
+    }
+});
+
+test('EPMA zero-copy memory management', () => {
+    // Allocate and free multiple times to ensure no leaks
+    const sizes = [100, 1000, 10000];
+    
+    for (const size of sizes) {
+        const ptr = wasm.epma_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write pattern to verify memory
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+        for (let i = 0; i < Math.min(10, size); i++) {
+            memView[i] = i * 1.5;
+        }
+        
+        // Verify pattern
+        for (let i = 0; i < Math.min(10, size); i++) {
+            assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
+        }
+        
+        // Free memory
+        wasm.epma_free(ptr, size);
+    }
+});
+
+test('EPMA batch unified API', async () => {
+    const close = new Float64Array(testData.close.slice(0, 100));
+    
+    // Test unified batch API with serde
+    const config = {
+        period_range: [5, 9, 2],  // 5, 7, 9
+        offset_range: [1, 3, 1]   // 1, 2, 3
+    };
+    
+    const result = wasm.epma_batch(close, config);
+    
+    // Verify structure
+    assert(result.values, 'Missing values in batch result');
+    assert(result.combos, 'Missing combos in batch result');
+    assert(result.rows === 9, `Expected 9 rows, got ${result.rows}`);
+    assert(result.cols === 100, `Expected 100 cols, got ${result.cols}`);
+    assert(result.values.length === 900, `Expected 900 values, got ${result.values.length}`);
+    
+    // Verify first combination matches individual calculation
+    const firstCombo = result.combos[0];
+    const firstRow = result.values.slice(0, 100);
+    const singleResult = wasm.epma_js(close, firstCombo.period || 11, firstCombo.offset || 4);
+    
+    assertArrayClose(
+        firstRow, 
+        singleResult, 
+        1e-10, 
+        "First batch row mismatch with unified API"
+    );
+});
+
+test('EPMA batch zero-copy API', () => {
+    const close = new Float64Array(testData.close.slice(0, 50));
+    
+    // Allocate memory for input and output
+    const inPtr = wasm.epma_alloc(close.length);
+    const rows = 4; // 2 periods x 2 offsets
+    const outPtr = wasm.epma_alloc(close.length * rows);
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
+        inView.set(close);
+        
+        // Execute batch computation
+        const numRows = wasm.epma_batch_into(
+            inPtr, outPtr, close.length,
+            5, 10, 5,     // period: 5, 10
+            2, 4, 2       // offset: 2, 4
+        );
+        
+        assert.strictEqual(numRows, rows, `Expected ${rows} rows, got ${numRows}`);
+        
+        // Verify results
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length * rows);
+        
+        // Check each row has appropriate NaN warmup
+        const metadata = wasm.epma_batch_metadata_js(5, 10, 5, 2, 4, 2);
+        for (let row = 0; row < rows; row++) {
+            const period = metadata[row * 2];
+            const offset = metadata[row * 2 + 1];
+            const warmup = period + offset + 1;
+            const rowStart = row * 50;
+            
+            // Check warmup NaNs
+            for (let i = 0; i < warmup && i < 50; i++) {
+                assert(isNaN(outView[rowStart + i]), 
+                    `Expected NaN at row ${row} index ${i}`);
+            }
+        }
+    } finally {
+        wasm.epma_free(inPtr, close.length);
+        wasm.epma_free(outPtr, close.length * rows);
+    }
+});
+
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
 test.after(() => {

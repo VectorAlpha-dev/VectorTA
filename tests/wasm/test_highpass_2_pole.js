@@ -191,18 +191,18 @@ test('HighPass2 batch', () => {
     const k_end = 0.9;
     const k_step = 0.2;      // k: 0.5, 0.7, 0.9
     
-    const batch_result = wasm.highpass_2_pole_batch_js(
-        close, 
-        period_start, period_end, period_step,
-        k_start, k_end, k_step
-    );
-    const metadata = wasm.highpass_2_pole_batch_metadata_js(
-        period_start, period_end, period_step,
-        k_start, k_end, k_step
-    );
+    // Create config object for batch API
+    const config = {
+        period_range: [period_start, period_end, period_step],
+        k_range: [k_start, k_end, k_step]
+    };
     
-    // Metadata should contain [period, k] pairs
-    assert.strictEqual(metadata.length, 18);  // 3 periods x 3 k values x 2 values per combo
+    const batch_output = wasm.highpass_2_pole_batch(close, config);
+    const batch_result = batch_output.values;
+    const metadata = batch_output.combos;
+    
+    // Metadata should contain combo objects
+    assert.strictEqual(metadata.length, 9);  // 3 periods x 3 k values
     
     // Batch result should contain all individual results flattened
     assert.strictEqual(batch_result.length, 9 * close.length);  // 3 periods x 3 k values = 9 rows
@@ -259,7 +259,12 @@ test('HighPass2 batch performance', () => {
     
     // Test 5 periods x 4 k values = 20 combinations
     const startBatch = performance.now();
-    const batchResult = wasm.highpass_2_pole_batch_js(close, 30, 70, 10, 0.3, 0.9, 0.2);
+    const config = {
+        period_range: [30, 70, 10],
+        k_range: [0.3, 0.9, 0.2]
+    };
+    const batchOutput = wasm.highpass_2_pole_batch(close, config);
+    const batchResult = batchOutput.values;
     const batchTime = performance.now() - startBatch;
     
     const startSingle = performance.now();

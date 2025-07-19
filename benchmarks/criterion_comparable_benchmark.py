@@ -107,7 +107,8 @@ class CriterionComparableBenchmark:
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
-            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop'
+            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
+            'cg', 'cfo'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -128,32 +129,45 @@ class CriterionComparableBenchmark:
             best_time = float('inf')
             best_kernel = None
             
-            # Check each kernel variant (for batch operations, check batch kernels)
-            if indicator.endswith('_batch'):
-                kernels_to_check = ['avx512batch', 'avx2batch', 'scalarbatch', '']
-            else:
-                kernels_to_check = ['avx512', 'avx2', 'scalar', '']
-                
-            for kernel in kernels_to_check:
-                if kernel:
-                    bench_name = f"{indicator}_{kernel}"
+            # Try different directory name patterns
+            possible_dirs = [indicator, f"{indicator}_bench"]
+            
+            for dir_name in possible_dirs:
+                dir_path = criterion_dir / dir_name
+                if not dir_path.exists():
+                    continue
+                    
+                # Check each kernel variant (for batch operations, check batch kernels)
+                if indicator.endswith('_batch'):
+                    kernels_to_check = ['avx512batch', 'avx2batch', 'scalarbatch', '']
                 else:
-                    bench_name = indicator
-                
-                json_path = criterion_dir / indicator / bench_name / target_size / 'new' / 'estimates.json'
-                
-                if json_path.exists():
-                    try:
-                        with open(json_path, 'r') as f:
-                            data = json.load(f)
-                            median_ns = data['median']['point_estimate']
-                            median_ms = median_ns / 1_000_000
-                            
-                            if median_ms < best_time:
-                                best_time = median_ms
-                                best_kernel = kernel or 'auto'
-                    except Exception as e:
-                        print(f"  Error reading {json_path}: {e}")
+                    kernels_to_check = ['avx512', 'avx2', 'scalar', '']
+                    
+                for kernel in kernels_to_check:
+                    if kernel:
+                        # The directory structure is: indicator/indicator_kernel/size/new/estimates.json
+                        bench_name = f"{indicator}_{kernel}"
+                        json_path = dir_path / bench_name / target_size / 'new' / 'estimates.json'
+                    else:
+                        # For indicators without kernel suffix, check if they have a direct structure
+                        # Some indicators might be in: indicator/scalar/size/new/estimates.json
+                        json_path = dir_path / 'scalar' / target_size / 'new' / 'estimates.json'
+                        if not json_path.exists():
+                            # Try the base path without kernel subdirectory
+                            json_path = dir_path / target_size / 'new' / 'estimates.json'
+                    
+                    if json_path.exists():
+                        try:
+                            with open(json_path, 'r') as f:
+                                data = json.load(f)
+                                median_ns = data['median']['point_estimate']
+                                median_ms = median_ns / 1_000_000
+                                
+                                if median_ms < best_time:
+                                    best_time = median_ms
+                                    best_kernel = kernel or 'auto'
+                        except Exception as e:
+                            print(f"  Error reading {json_path}: {e}")
             
             if best_time < float('inf'):
                 self.rust_results[indicator] = best_time
@@ -257,7 +271,7 @@ class CriterionComparableBenchmark:
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
-            ('nma', lambda: my_project.nma(data['close'], data['volume'])),
+            ('nma', lambda: my_project.nma(data['close'], 40)),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
@@ -360,13 +374,13 @@ class CriterionComparableBenchmark:
                 
                 # Status based on overhead percentage
                 if overhead_pct <= 15:
-                    status = "✅ EXCELLENT"
+                    status = "EXCELLENT"
                 elif overhead_pct <= 30:
-                    status = "👍 GOOD"
+                    status = "GOOD"
                 elif overhead_pct <= 50:
-                    status = "⚠️  OK"
+                    status = "OK"
                 else:
-                    status = "❌ HIGH"
+                    status = "HIGH"
                 
                 print(f"{indicator:25} {python_time:12.2f} {rust_time:12.2f} "
                       f"{overhead_pct:11.1f}% {status}")
@@ -405,11 +419,11 @@ class CriterionComparableBenchmark:
                 overhead_pct = (batch_time / single_time - 1) * 100
                 
                 if overhead_pct <= 10:
-                    status = "✅ OK"
+                    status = "OK"
                 elif overhead_pct <= 20:
-                    status = "⚠️  MODERATE"
+                    status = "MODERATE"
                 else:
-                    status = "❌ HIGH"
+                    status = "HIGH"
                 
                 print(f"{base_name:20} {single_time:12.2f} {batch_time:12.2f} "
                       f"{overhead_pct:11.1f}% {status}")

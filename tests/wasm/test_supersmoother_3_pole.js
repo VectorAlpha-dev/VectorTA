@@ -253,3 +253,155 @@ test('SuperSmoother3Pole reinput consistency', (t) => {
     }
     assert.ok(hasValid, 'Expected some valid values in reinput result');
 });
+
+// ===================== Fast/Unsafe API Tests =====================
+
+test('SuperSmoother3Pole fast API basic test', (t) => {
+    const data = loadTestData();
+    const closePrices = data.close;
+    const period = 14;
+    const len = closePrices.length;
+    
+    // Allocate memory
+    const inPtr = wasm.supersmoother_3_pole_alloc(len);
+    const outPtr = wasm.supersmoother_3_pole_alloc(len);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        memory.set(closePrices);
+        
+        // Compute
+        wasm.supersmoother_3_pole_into(inPtr, outPtr, len, period);
+        
+        // Read results
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const resultCopy = Array.from(result);
+        
+        // Compare with safe API
+        const safeResult = wasm.supersmoother_3_pole_js(closePrices, period);
+        
+        assert.strictEqual(resultCopy.length, safeResult.length);
+        for (let i = 0; i < resultCopy.length; i++) {
+            if (isNaN(resultCopy[i]) && isNaN(safeResult[i])) continue;
+            assert.ok(
+                Math.abs(resultCopy[i] - safeResult[i]) < 1e-10,
+                `Mismatch at index ${i}: fast=${resultCopy[i]}, safe=${safeResult[i]}`
+            );
+        }
+    } finally {
+        // Free memory
+        wasm.supersmoother_3_pole_free(inPtr, len);
+        wasm.supersmoother_3_pole_free(outPtr, len);
+    }
+});
+
+test('SuperSmoother3Pole fast API aliasing test', (t) => {
+    const data = loadTestData();
+    const closePrices = data.close.slice(0, 100); // Use smaller dataset
+    const period = 14;
+    const len = closePrices.length;
+    
+    // Allocate single buffer for in-place operation
+    const ptr = wasm.supersmoother_3_pole_alloc(len);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        memory.set(closePrices);
+        
+        // Compute in-place (same pointer for input and output)
+        wasm.supersmoother_3_pole_into(ptr, ptr, len, period);
+        
+        // Read results
+        const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+        const resultCopy = Array.from(result);
+        
+        // Compare with safe API
+        const safeResult = wasm.supersmoother_3_pole_js(closePrices, period);
+        
+        assert.strictEqual(resultCopy.length, safeResult.length);
+        for (let i = 0; i < resultCopy.length; i++) {
+            if (isNaN(resultCopy[i]) && isNaN(safeResult[i])) continue;
+            assert.ok(
+                Math.abs(resultCopy[i] - safeResult[i]) < 1e-10,
+                `In-place mismatch at index ${i}: fast=${resultCopy[i]}, safe=${safeResult[i]}`
+            );
+        }
+    } finally {
+        // Free memory
+        wasm.supersmoother_3_pole_free(ptr, len);
+    }
+});
+
+test('SuperSmoother3Pole fast batch API test', (t) => {
+    const data = loadTestData();
+    const closePrices = data.close.slice(0, 1000); // Use smaller dataset for batch
+    const len = closePrices.length;
+    
+    // Define batch parameters
+    const periodStart = 10;
+    const periodEnd = 20;
+    const periodStep = 5;
+    const numPeriods = Math.floor((periodEnd - periodStart) / periodStep) + 1;
+    const totalSize = numPeriods * len;
+    
+    // Allocate memory
+    const inPtr = wasm.supersmoother_3_pole_alloc(len);
+    const outPtr = wasm.supersmoother_3_pole_alloc(totalSize);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        memory.set(closePrices);
+        
+        // Compute batch
+        const rows = wasm.supersmoother_3_pole_batch_into(
+            inPtr,
+            outPtr,
+            len,
+            periodStart,
+            periodEnd,
+            periodStep
+        );
+        
+        assert.strictEqual(rows, numPeriods, 'Batch should return correct number of rows');
+        
+        // Read results
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
+        
+        // Verify some results
+        for (let p = 0; p < numPeriods; p++) {
+            const rowStart = p * len;
+            const row = result.slice(rowStart, rowStart + len);
+            
+            // Check that first few values are not NaN (3-pole initialization)
+            for (let i = 0; i < Math.min(3, row.length); i++) {
+                assert.ok(!isNaN(row[i]), `Row ${p}, value at index ${i} should not be NaN`);
+            }
+        }
+    } finally {
+        // Free memory
+        wasm.supersmoother_3_pole_free(inPtr, len);
+        wasm.supersmoother_3_pole_free(outPtr, totalSize);
+    }
+});
+
+test('SuperSmoother3Pole unified batch API test', (t) => {
+    const data = loadTestData();
+    const closePrices = data.close.slice(0, 100); // Small dataset
+    
+    // Test new batch API
+    const config = {
+        period_range: [10, 20, 5]
+    };
+    
+    const result = wasm.supersmoother_3_pole_batch(closePrices, config);
+    
+    // Verify result structure
+    assert.ok(result.values, 'Result should have values');
+    assert.ok(result.rows === 3, 'Should have 3 rows (periods: 10, 15, 20)');
+    assert.ok(result.cols === closePrices.length, 'Columns should match input length');
+    assert.ok(result.periods, 'Result should have periods array');
+    assert.deepStrictEqual(result.periods, [10, 15, 20], 'Periods should match config');
+});
