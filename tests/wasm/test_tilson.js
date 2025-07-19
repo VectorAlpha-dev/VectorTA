@@ -355,6 +355,181 @@ describe('Tilson T3 Moving Average', () => {
             }
         }
     });
+    
+    test('unified batch API with config object', () => {
+        const data = new Float64Array(100);
+        for (let i = 0; i < 100; i++) {
+            data[i] = Math.random() * 100;
+        }
+        
+        const config = {
+            period_range: [3, 7, 2],
+            volume_factor_range: [0.0, 0.6, 0.3]
+        };
+        
+        const result = wasm.tilson_batch(data, config);
+        
+        // Expected combinations
+        const expectedPeriods = [3, 5, 7];
+        const expectedVFactors = [0.0, 0.3, 0.6];
+        const expectedCombos = expectedPeriods.length * expectedVFactors.length;
+        
+        assert.strictEqual(result.combos.length, expectedCombos, 'Should have correct number of combinations');
+        assert.strictEqual(result.rows, expectedCombos, 'Rows should match combinations');
+        assert.strictEqual(result.cols, data.length, 'Cols should match data length');
+        assert.strictEqual(result.values.length, expectedCombos * data.length, 'Values array size should be rows*cols');
+        
+        // Verify parameter combinations
+        let comboIdx = 0;
+        for (const period of expectedPeriods) {
+            for (const vFactor of expectedVFactors) {
+                assert.strictEqual(result.combos[comboIdx].period, period, `Period mismatch at ${comboIdx}`);
+                assert(Math.abs(result.combos[comboIdx].volume_factor - vFactor) < 1e-10, `Volume factor mismatch at ${comboIdx}`);
+                comboIdx++;
+            }
+        }
+    });
+    
+    test('zero-copy API', () => {
+        const data = new Float64Array([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+        ]);
+        const period = 5;
+        const volumeFactor = 0.0;
+        
+        // Allocate buffer
+        const ptr = wasm.tilson_alloc(data.length);
+        assert(ptr !== 0, 'Failed to allocate memory');
+        
+        // Create view into WASM memory
+        const memView = new Float64Array(
+            wasm.__wasm.memory.buffer,
+            ptr,
+            data.length
+        );
+        
+        // Copy data into WASM memory
+        memView.set(data);
+        
+        // Compute Tilson in-place
+        try {
+            wasm.tilson_into(ptr, ptr, data.length, period, volumeFactor);
+            
+            // Verify results match regular API
+            const regularResult = wasm.tilson_js(data, period, volumeFactor);
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                    continue; // Both NaN is OK
+                }
+                assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                       `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+            }
+        } finally {
+            // Always free memory
+            wasm.tilson_free(ptr, data.length);
+        }
+    });
+    
+    test('zero-copy batch API', () => {
+        const data = new Float64Array(50);
+        for (let i = 0; i < 50; i++) {
+            data[i] = Math.random() * 100;
+        }
+        
+        const periodStart = 3;
+        const periodEnd = 5;
+        const periodStep = 2;
+        const vFactorStart = 0.0;
+        const vFactorEnd = 0.6;
+        const vFactorStep = 0.6;
+        
+        // Expected: periods [3, 5], vFactors [0.0, 0.6] = 4 combinations
+        const expectedRows = 4;
+        const totalSize = expectedRows * data.length;
+        
+        // Allocate buffers
+        const inPtr = wasm.tilson_alloc(data.length);
+        const outPtr = wasm.tilson_alloc(totalSize);
+        
+        assert(inPtr !== 0, 'Failed to allocate input buffer');
+        assert(outPtr !== 0, 'Failed to allocate output buffer');
+        
+        try {
+            // Copy data to input buffer
+            const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+            inView.set(data);
+            
+            // Run batch computation
+            const rows = wasm.tilson_batch_into(
+                inPtr, outPtr, data.length,
+                periodStart, periodEnd, periodStep,
+                vFactorStart, vFactorEnd, vFactorStep
+            );
+            
+            assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
+            
+            // Verify at least that we have data
+            const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
+            let hasNonNaN = false;
+            for (let i = 0; i < totalSize; i++) {
+                if (!isNaN(outView[i])) {
+                    hasNonNaN = true;
+                    break;
+                }
+            }
+            assert(hasNonNaN, 'Output should contain some non-NaN values');
+        } finally {
+            wasm.tilson_free(inPtr, data.length);
+            wasm.tilson_free(outPtr, totalSize);
+        }
+    });
+    
+    test('deprecated TilsonContext API', () => {
+        const period = 5;
+        const volumeFactor = 0.7;
+        
+        // Create context
+        const context = new wasm.TilsonContext(period, volumeFactor);
+        
+        // Test warmup period
+        assert.strictEqual(context.get_warmup_period(), 6 * (period - 1), 'Warmup period should be 6*(period-1)');
+        
+        // Feed data and verify warmup
+        const testData = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
+        const results = [];
+        
+        for (let i = 0; i < testData.length; i++) {
+            const result = context.update(testData[i]);
+            results.push(result === undefined ? null : result);
+        }
+        
+        // Check warmup period
+        const warmup = 6 * (period - 1); // 24 for period=5
+        for (let i = 0; i < warmup && i < results.length; i++) {
+            assert(results[i] === null, `Should return null during warmup at index ${i}`);
+        }
+        
+        // Should have values after warmup
+        for (let i = warmup; i < results.length; i++) {
+            assert(results[i] !== null && !isNaN(results[i]), `Should return valid value after warmup at index ${i}`);
+        }
+        
+        // Test reset
+        context.reset();
+        const afterReset = context.update(10.0);
+        assert(afterReset === null || afterReset === undefined, 'Should return null/undefined after reset');
+        
+        // Test error handling
+        assert.throws(() => {
+            new wasm.TilsonContext(0, 0.5);
+        }, /Invalid period/, 'Should throw for invalid period');
+        
+        assert.throws(() => {
+            new wasm.TilsonContext(5, NaN);
+        }, /Invalid volume factor/, 'Should throw for NaN volume factor');
+    });
 });
 
 // Run tests if this file is executed directly

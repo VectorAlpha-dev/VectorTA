@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-19T22:03:43.661Z",
+  "timestamp": "2025-07-19T21:13:27.890Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "tema_safe_10k": {
-      "name": "tema_safe_10k",
-      "median": 0.038838369304556385,
-      "mean": 0.036656402877697794,
-      "min": 0.0300896882494003,
-      "max": 0.044283932853716804,
+    "tilson_safe_10k": {
+      "name": "tilson_safe_10k",
+      "median": 0.036456486486486646,
+      "mean": 0.038885513513513506,
+      "min": 0.03418378378378385,
+      "max": 0.04487702702702711,
       "samples": 10,
-      "warmupIterations": 4170,
-      "throughput": 0.257477339524315,
+      "warmupIterations": 3700,
+      "throughput": 0.2742996093083931,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_safe_100k": {
-      "name": "tema_safe_100k",
-      "median": 0.3165568627450984,
-      "mean": 0.29553078431372587,
-      "min": 0.23415098039215848,
-      "max": 0.34610784313725373,
+    "tilson_safe_100k": {
+      "name": "tilson_safe_100k",
+      "median": 0.3651340909090896,
+      "mean": 0.3333129545454545,
+      "min": 0.2778863636363631,
+      "max": 0.410670454545456,
       "samples": 10,
-      "warmupIterations": 511,
-      "throughput": 0.3158990114219168,
+      "warmupIterations": 449,
+      "throughput": 0.2738719897422501,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_safe_1M": {
-      "name": "tema_safe_1M",
-      "median": 2.627260000000001,
-      "mean": 2.58134,
-      "min": 2.492100000000005,
-      "max": 2.651389999999992,
+    "tilson_safe_1M": {
+      "name": "tilson_safe_1M",
+      "median": 3.078449999999998,
+      "mean": 3.041227000000001,
+      "min": 2.9444100000000164,
+      "max": 3.097360000000003,
       "samples": 10,
-      "warmupIterations": 56,
-      "throughput": 0.3814772805127774,
+      "warmupIterations": 51,
+      "throughput": 0.32556643765531373,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_fast_10k": {
-      "name": "tema_fast_10k",
-      "median": 0.013701955307262707,
-      "mean": 0.01370514897579149,
-      "min": 0.013563221601489789,
-      "max": 0.013841620111731854,
+    "tilson_fast_10k": {
+      "name": "tilson_fast_10k",
+      "median": 0.019526881720430135,
+      "mean": 0.01958966397849457,
+      "min": 0.019412768817204246,
+      "max": 0.020205779569892307,
       "samples": 10,
-      "warmupIterations": 10742,
-      "throughput": 0.7298228446781979,
+      "warmupIterations": 7446,
+      "throughput": 0.5121145374449332,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_fast_100k": {
-      "name": "tema_fast_100k",
-      "median": 0.13648073394495508,
-      "mean": 0.1363181651376143,
-      "min": 0.13532477064220091,
-      "max": 0.1373889908256863,
+    "tilson_fast_100k": {
+      "name": "tilson_fast_100k",
+      "median": 0.19705000000000214,
+      "mean": 0.19753539473684145,
+      "min": 0.19508421052631475,
+      "max": 0.20096447368421136,
       "samples": 10,
-      "warmupIterations": 1098,
-      "throughput": 0.732704148853212,
+      "warmupIterations": 765,
+      "throughput": 0.5074854097944629,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_fast_1M": {
-      "name": "tema_fast_1M",
-      "median": 1.3738600000000134,
-      "mean": 1.3689730000000098,
-      "min": 1.3514200000000074,
-      "max": 1.3798400000000128,
+    "tilson_fast_1M": {
+      "name": "tilson_fast_1M",
+      "median": 1.9655499999999848,
+      "mean": 1.958748999999998,
+      "min": 1.935490000000027,
+      "max": 1.9791900000000169,
       "samples": 10,
-      "warmupIterations": 108,
-      "throughput": 0.7295066455097247,
+      "warmupIterations": 75,
+      "throughput": 0.5099030805626964,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "tema"
+      "indicator": "tilson"
     },
-    "tema_batch_small": {
-      "name": "tema_batch_small",
-      "median": 0.8816833333333357,
-      "mean": 0.9134544444444476,
-      "min": 0.8576777777777806,
-      "max": 1.0855333333333368,
+    "tilson_batch_small": {
+      "name": "tilson_batch_small",
+      "median": 2.8433500000000094,
+      "mean": 2.8388229999999974,
+      "min": 2.7366899999999985,
+      "max": 2.91572000000001,
       "samples": 10,
-      "warmupIterations": 181,
-      "throughput": 0.011341940606037665,
+      "warmupIterations": 50,
+      "throughput": 0.003516978212319963,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "tema",
+      "indicator": "tilson",
       "batchSize": "small"
     },
-    "tema_batch_medium": {
-      "name": "tema_batch_medium",
-      "median": 1.7453999999999723,
-      "mean": 1.808806999999997,
-      "min": 1.6948300000000018,
-      "max": 2.1447200000000066,
+    "tilson_batch_medium": {
+      "name": "tilson_batch_medium",
+      "median": 7.624849999999969,
+      "mean": 7.764043000000003,
+      "min": 7.536009999999988,
+      "max": 8.34157,
       "samples": 10,
-      "warmupIterations": 81,
-      "throughput": 0.005729345708720155,
+      "warmupIterations": 19,
+      "throughput": 0.0013115012098598713,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "tema",
+      "indicator": "tilson",
       "batchSize": "medium"
     }
   }
