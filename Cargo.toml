@@ -66,7 +66,7 @@ path = "src/bin/generate_references.rs"
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 1  # Reduced from 255 for faster compilation
+codegen-units   = 255  # Reduced from 255 for faster compilation
 incremental = false
 # panic = "abort"  # Commented out to allow benchmarks to compile
 overflow-checks = false
@@ -86,7 +86,7 @@ strip = "symbols"
 # Don't inherit from any profile to avoid panic strategy conflicts
 opt-level = 3
 lto = false  # Disabled for faster compilation
-codegen-units = 1  # Increased for faster compilation
+codegen-units = 255  # Increased for faster compilation
 incremental = false
 overflow-checks = false
 debug = false  # Disabled for faster compilation

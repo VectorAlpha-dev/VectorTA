@@ -294,14 +294,14 @@ These are non-negotiable requirements for ALL indicators:
 
 #### 1. Zero Memory Copy Operations
 
-**Always use helper functions for efficient memory allocation:**
+**CRITICAL: For OUTPUT vectors matching input data length, ALWAYS use helper functions:**
 
 ```rust
-// ✅ CORRECT - For single output:
+// ✅ CORRECT - For output vectors:
 let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
-// ❌ WRONG - Avoid these patterns:
-let mut out = vec![f64::NAN; data.len()];
+// ❌ WRONG - NEVER use these patterns for output:
+let mut out = vec![f64::NAN; data.len()];  // NEVER for output!
 let mut out = Vec::with_capacity(data.len());
 out.resize(data.len(), f64::NAN);
 ```
@@ -313,6 +313,20 @@ let mut buf_mu = make_uninit_matrix(rows, cols);
 init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 // Then convert to mutable slice for computation
 ```
+
+**NUANCE: Small intermediate vectors are acceptable:**
+```rust
+// ✅ OK - Small weight/coefficient vectors (size << data.len()):
+let mut weights = AVec::with_capacity(CACHELINE_ALIGN, period);  // OK if period << data.len()
+let mut sqrt_diffs = vec![0.0; period];  // OK for small period
+let coefficients = vec![0.1, 0.2, 0.3, 0.4];  // OK for constants
+
+// ❌ WRONG - Output or data-sized vectors:
+let mut temp_data = vec![0.0; data.len()];  // NEVER!
+let mut ln_values = Vec::with_capacity(data.len());  // NEVER!
+```
+
+**Rule of thumb**: If the vector size is proportional to the input data length (O(n)), use the uninitialized memory helpers. If it's a small fixed size or proportional to a parameter like period (typically O(1) or O(period) where period << n), regular Vec or AVec is acceptable.
 
 #### 2. Binding Requirements
 
