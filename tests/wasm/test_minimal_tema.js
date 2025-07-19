@@ -1,0 +1,49 @@
+// Minimal test to isolate TEMA issue
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load WASM module
+const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+const importPath = process.platform === 'win32' 
+    ? 'file:///' + wasmPath.replace(/\\/g, '/')
+    : wasmPath;
+const wasm = await import(importPath);
+
+// Test the exact failing case
+console.log('Testing TEMA with period=2, data=[1,2]');
+try {
+    const data = new Float64Array([1, 2]);
+    console.log('Calling tema_js...');
+    const result = wasm.tema_js(data, 2);
+    console.log('Success! Result:', Array.from(result));
+} catch (error) {
+    console.error('Error:', error.message);
+    console.error('Full error:', error);
+    
+    // Try to get more info about the error
+    if (error.stack) {
+        const lines = error.stack.split('\n');
+        console.log('\nStack trace:');
+        lines.forEach(line => console.log('  ', line));
+    }
+}
+
+// Also test with the zero-copy API to see if it's specific to tema_js
+console.log('\n\nTesting with zero-copy API...');
+try {
+    const data = new Float64Array([1, 2]);
+    const ptr = wasm.tema_alloc(2);
+    const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, 2);
+    memView.set(data);
+    
+    console.log('Calling tema_into...');
+    wasm.tema_into(ptr, ptr, 2, 2);
+    console.log('Success! Result:', Array.from(memView));
+    
+    wasm.tema_free(ptr, 2);
+} catch (error) {
+    console.error('Error:', error.message);
+}

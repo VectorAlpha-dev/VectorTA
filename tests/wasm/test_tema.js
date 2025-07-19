@@ -146,8 +146,14 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const maxPeriod = 15;
         const stepPeriod = 2;
         
+        // Use the deprecated API for backward compatibility test
         const values = wasm.tema_batch_js(data, minPeriod, maxPeriod, stepPeriod);
-        const metadata = wasm.tema_batch_metadata_js(minPeriod, maxPeriod, stepPeriod);
+        
+        // Create metadata manually since metadata_js was removed
+        const metadata = [];
+        for (let p = minPeriod; p <= maxPeriod; p += stepPeriod) {
+            metadata.push(p);
+        }
         
         // Expected periods: 5, 7, 9, 11, 13, 15
         const expectedPeriods = [];
@@ -297,14 +303,17 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
     
     test('batch metadata structure', () => {
-        const metadata = wasm.tema_batch_metadata_js(5, 15, 2);
+        // Test with the new ergonomic API (need at least 15 data points for period 15)
+        const result = wasm.tema_batch(new Float64Array(20), {
+            period_range: [5, 15, 2]
+        });
         
         // Should have periods: 5, 7, 9, 11, 13, 15
         const expectedPeriods = [5, 7, 9, 11, 13, 15];
-        assert.strictEqual(metadata.length, expectedPeriods.length);
+        assert.strictEqual(result.combos.length, expectedPeriods.length);
         
         for (let i = 0; i < expectedPeriods.length; i++) {
-            assert.strictEqual(metadata[i], expectedPeriods[i], `Period ${i} should match`);
+            assert.strictEqual(result.combos[i].period, expectedPeriods[i], `Period ${i} should match`);
         }
     });
     
@@ -369,6 +378,169 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
                     assertAllNaN(result, 'Should be all NaN when warmup exceeds data length');
                 }
             }
+        }
+    });
+
+    // New API tests
+    test('TEMA zero-copy API', () => {
+        const data = new Float64Array(100);
+        for (let i = 0; i < 100; i++) {
+            data[i] = Math.sin(i * 0.1) * 10 + 50;
+        }
+        const period = 14;
+
+        // Allocate buffer
+        const ptr = wasm.tema_alloc(data.length);
+        assert(ptr !== 0, 'Failed to allocate memory');
+
+        try {
+            // Create view into WASM memory
+            const memView = new Float64Array(
+                wasm.__wasm.memory.buffer,
+                ptr,
+                data.length
+            );
+
+            // Copy data into WASM memory
+            memView.set(data);
+
+            // Compute TEMA in-place
+            wasm.tema_into(ptr, ptr, data.length, period);
+
+            // Verify results match regular API
+            const regularResult = wasm.tema_js(data, period);
+            for (let i = 0; i < data.length; i++) {
+                if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                    continue; // Both NaN is OK
+                }
+                assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                       `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+            }
+        } finally {
+            // Always free memory
+            wasm.tema_free(ptr, data.length);
+        }
+    });
+
+    test('TEMA ergonomic batch API', () => {
+        const close = new Float64Array(testData.close.slice(0, 50));
+        
+        const result = wasm.tema_batch(close, {
+            period_range: [5, 15, 5]  // 5, 10, 15
+        });
+
+        // Check structure
+        assert(result.values, 'Should have values array');
+        assert(result.combos, 'Should have combos array');
+        assert(typeof result.rows === 'number', 'Should have rows count');
+        assert(typeof result.cols === 'number', 'Should have cols count');
+
+        // Check dimensions
+        assert.strictEqual(result.rows, 3);
+        assert.strictEqual(result.cols, 50);
+        assert.strictEqual(result.combos.length, 3);
+        assert.strictEqual(result.values.length, 150);
+
+        // Check combos structure
+        assert.strictEqual(result.combos[0].period, 5);
+        assert.strictEqual(result.combos[1].period, 10);
+        assert.strictEqual(result.combos[2].period, 15);
+
+        // Verify against individual calculations
+        for (let i = 0; i < result.combos.length; i++) {
+            const period = result.combos[i].period;
+            const individual = wasm.tema_js(close, period);
+            const batchRow = result.values.slice(i * 50, (i + 1) * 50);
+            assertArrayClose(batchRow, individual, 1e-10,
+                           `Batch row ${i} (period ${period}) should match individual`);
+        }
+    });
+
+    test('TEMA batch zero-copy API', () => {
+        const data = new Float64Array(100);
+        for (let i = 0; i < 100; i++) {
+            data[i] = Math.random() * 100;
+        }
+
+        const periods = { start: 5, end: 15, step: 5 }; // 3 periods
+        const numCombos = 3;
+        const totalSize = numCombos * data.length;
+
+        // Allocate input and output buffers
+        const inPtr = wasm.tema_alloc(data.length);
+        const outPtr = wasm.tema_alloc(totalSize);
+
+        try {
+            // Copy input data
+            const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
+            inView.set(data);
+
+            // Run batch computation
+            const rows = wasm.tema_batch_into(
+                inPtr, outPtr, data.length,
+                periods.start, periods.end, periods.step
+            );
+
+            assert.strictEqual(rows, numCombos, 'Should return correct number of rows');
+
+            // Verify results
+            const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
+            
+            // Compare with ergonomic API
+            const ergonomicResult = wasm.tema_batch(data, {
+                period_range: [periods.start, periods.end, periods.step]
+            });
+
+            assertArrayClose(
+                Array.from(outView),
+                ergonomicResult.values,
+                1e-10,
+                'Zero-copy batch should match ergonomic batch'
+            );
+        } finally {
+            wasm.tema_free(inPtr, data.length);
+            wasm.tema_free(outPtr, totalSize);
+        }
+    });
+
+    test('TEMA error handling - null pointers', () => {
+        assert.throws(() => {
+            wasm.tema_into(0, 0, 10, 9);
+        }, /null pointer/i);
+
+        // Test with allocated memory but invalid parameters
+        const ptr = wasm.tema_alloc(10);
+        try {
+            // Invalid period
+            assert.throws(() => {
+                wasm.tema_into(ptr, ptr, 10, 0);
+            }, /Invalid period/);
+        } finally {
+            wasm.tema_free(ptr, 10);
+        }
+    });
+
+    test('TEMA batch memory leak prevention', () => {
+        // Allocate and free multiple times to ensure no leaks
+        const sizes = [100, 1000, 10000];
+        
+        for (const size of sizes) {
+            const ptr = wasm.tema_alloc(size);
+            assert(ptr !== 0, `Failed to allocate ${size} elements`);
+            
+            // Write pattern to verify memory
+            const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
+            for (let i = 0; i < Math.min(10, size); i++) {
+                memView[i] = i * 1.5;
+            }
+            
+            // Verify pattern
+            for (let i = 0; i < Math.min(10, size); i++) {
+                assert.strictEqual(memView[i], i * 1.5, `Memory at ${i} should match pattern`);
+            }
+            
+            // Free memory
+            wasm.tema_free(ptr, size);
         }
     });
 });

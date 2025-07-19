@@ -6,28 +6,35 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "supersmoother_3_pole": 3.1987,
-    "supersmoother": 3.51406
+    "tema": 2.60646,
+    "tema_batch": 107.525345
   },
   "rust_results": {
-    "supersmoother_3_pole": 2.5563313492063493,
-    "supersmoother": 3.535156666666667
+    "tema": 2.7388870535714287,
+    "tema_batch": 105.4645
   },
   "comparisons": [
     {
-      "indicator": "supersmoother",
-      "python_ms": 3.51406,
-      "rust_ms": 3.535156666666667,
-      "overhead_ms": -0.021096666666666763,
-      "overhead_pct": -0.5967675171397402
+      "indicator": "tema",
+      "python_ms": 2.60646,
+      "rust_ms": 2.7388870535714287,
+      "overhead_ms": -0.13242705357142848,
+      "overhead_pct": -4.835068076237292
     },
     {
-      "indicator": "supersmoother_3_pole",
-      "python_ms": 3.1987,
-      "rust_ms": 2.5563313492063493,
-      "overhead_ms": 0.6423686507936508,
-      "overhead_pct": 25.128536290613646
+      "indicator": "tema_batch",
+      "python_ms": 107.525345,
+      "rust_ms": 105.4645,
+      "overhead_ms": 2.0608450000000005,
+      "overhead_pct": 1.954065111957104
     }
   ],
-  "batch_comparisons": []
+  "batch_comparisons": [
+    {
+      "indicator": "tema",
+      "single_ms": 2.60646,
+      "batch_ms": 107.525345,
+      "overhead_pct": 4025.3403083108888
+    }
+  ]
 }
