@@ -256,9 +256,13 @@
       "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py -v)",
       "Bash(../.venv/Scripts/python.exe:*)",
       "Bash(../../.venv/Scripts/python.exe -m pytest test_supersmoother.py::TestSuperSmoother::test_batch_processing -v)",
-      "Bash(.run_python_benchmark.bat trendflex)",
-      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py trendflex)",
-      "Bash(.run_wasm_benchmark.bat trendflex)"
+      "Bash(test_bindings.bat trima)",
+      "Bash(git stash:*)",
+      "Bash(.venv\\Scripts\\python.exe tests\\python\\test_trima.py:*)",
+      "Bash(.venvScriptspython test_trima_kernels.py)",
+      "Bash(./run_wasm_benchmark.bat trima)",
+      "Bash(....\\.venv\\Scripts\\python -m pytest test_trima.py::TestTrima::test_trima_streaming -xvs)",
+      "Bash(.venv\\Scripts\\python tests\\python\\test_trima.py)"
     ],
     "deny": []
   }

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-19T22:05:21.167Z",
+  "timestamp": "2025-07-19T22:40:33.011Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "trendflex_safe_10k": {
-      "name": "trendflex_safe_10k",
-      "median": 0.06849702970296986,
-      "mean": 0.07047074257425742,
-      "min": 0.06626930693069354,
-      "max": 0.08035841584158408,
+    "trima_safe_10k": {
+      "name": "trima_safe_10k",
+      "median": 0.038407881773399107,
+      "mean": 0.03561948275862065,
+      "min": 0.03006354679802944,
+      "max": 0.04034064039408859,
       "samples": 10,
-      "warmupIterations": 2028,
-      "throughput": 0.1459917319533992,
+      "warmupIterations": 4064,
+      "throughput": 0.2603632259388461,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_safe_100k": {
-      "name": "trendflex_safe_100k",
-      "median": 0.6431999999999995,
-      "mean": 0.6787222727272737,
-      "min": 0.6100545454545454,
-      "max": 0.8038727272727276,
+    "trima_safe_100k": {
+      "name": "trima_safe_100k",
+      "median": 0.30719615384615157,
+      "mean": 0.2866371153846149,
+      "min": 0.2402903846153864,
+      "max": 0.32756153846153996,
       "samples": 10,
-      "warmupIterations": 220,
-      "throughput": 0.15547263681592052,
+      "warmupIterations": 529,
+      "throughput": 0.3255249089156289,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_safe_1M": {
-      "name": "trendflex_safe_1M",
-      "median": 6.72958000000001,
-      "mean": 6.745243000000002,
-      "min": 6.579470000000015,
-      "max": 7.11237000000001,
+    "trima_safe_1M": {
+      "name": "trima_safe_1M",
+      "median": 2.64507000000001,
+      "mean": 2.646691999999998,
+      "min": 2.610690000000022,
+      "max": 2.6853399999999965,
       "samples": 10,
-      "warmupIterations": 23,
-      "throughput": 0.14893054247070375,
+      "warmupIterations": 56,
+      "throughput": 0.37890868672662587,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_fast_10k": {
-      "name": "trendflex_fast_10k",
-      "median": 0.052555281690140065,
-      "mean": 0.05258830985915482,
-      "min": 0.05192359154929664,
-      "max": 0.05364119718309904,
+    "trima_fast_10k": {
+      "name": "trima_fast_10k",
+      "median": 0.015027575757575863,
+      "mean": 0.015031101010101014,
+      "min": 0.014962323232323181,
+      "max": 0.015112727272727134,
       "samples": 10,
-      "warmupIterations": 2845,
-      "throughput": 0.190275832959261,
+      "warmupIterations": 9902,
+      "throughput": 0.6654433264100295,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_fast_100k": {
-      "name": "trendflex_fast_100k",
-      "median": 0.5334037037037147,
-      "mean": 0.5335003703703731,
-      "min": 0.5318370370370287,
-      "max": 0.5357740740740795,
+    "trima_fast_100k": {
+      "name": "trima_fast_100k",
+      "median": 0.15137599999999793,
+      "mean": 0.15158030000000008,
+      "min": 0.15064600000000156,
+      "max": 0.15348000000000184,
       "samples": 10,
-      "warmupIterations": 279,
-      "throughput": 0.18747526368048276,
+      "warmupIterations": 1000,
+      "throughput": 0.660606701194386,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_fast_1M": {
-      "name": "trendflex_fast_1M",
-      "median": 5.85972999999999,
-      "mean": 5.857241999999997,
-      "min": 5.805199999999968,
-      "max": 5.948869999999988,
+    "trima_fast_1M": {
+      "name": "trima_fast_1M",
+      "median": 1.517300000000023,
+      "mean": 1.519390000000003,
+      "min": 1.506790000000001,
+      "max": 1.5315299999999752,
       "samples": 10,
-      "warmupIterations": 26,
-      "throughput": 0.171038597341516,
+      "warmupIterations": 98,
+      "throughput": 0.6605417517959433,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "trendflex"
+      "indicator": "trima"
     },
-    "trendflex_batch_small": {
-      "name": "trendflex_batch_small",
-      "median": 1.0402571428571394,
-      "mean": 1.052457857142859,
-      "min": 1.0160500000000152,
-      "max": 1.1849357142857246,
+    "trima_batch_small": {
+      "name": "trima_batch_small",
+      "median": 0.8073368421052548,
+      "mean": 0.8506426315789429,
+      "min": 0.7943578947368367,
+      "max": 1.0343894736841943,
       "samples": 10,
-      "warmupIterations": 140,
-      "throughput": 0.00961300777280346,
+      "warmupIterations": 195,
+      "throughput": 0.012386403640298966,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "trendflex",
+      "indicator": "trima",
       "batchSize": "small"
     },
-    "trendflex_batch_medium": {
-      "name": "trendflex_batch_medium",
-      "median": 5.416600000000017,
-      "mean": 5.47758800000001,
-      "min": 5.150450000000001,
-      "max": 6.036099999999988,
+    "trima_batch_medium": {
+      "name": "trima_batch_medium",
+      "median": 2.54396999999999,
+      "mean": 2.629531999999999,
+      "min": 2.463909999999987,
+      "max": 2.831100000000015,
       "samples": 10,
-      "warmupIterations": 27,
-      "throughput": 0.0018461765683269891,
+      "warmupIterations": 59,
+      "throughput": 0.003930863964590792,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "trendflex",
+      "indicator": "trima",
       "batchSize": "medium"
     }
   }
