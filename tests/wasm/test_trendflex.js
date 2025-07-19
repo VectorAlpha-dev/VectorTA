@@ -199,3 +199,176 @@ test('trendflex_all_nan_input', () => {
         wasm.trendflex_js(allNan, 20);
     }, /All values are NaN/);
 });
+
+// New ergonomic batch API tests
+test('trendflex_batch_ergonomic_single_parameter', () => {
+    const close = testData.close;
+    
+    // Using the new ergonomic batch API for single parameter
+    const batchResult = wasm.trendflex_batch(close, {
+        period_range: [20, 20, 0]
+    });
+    
+    // Should match single calculation
+    const singleResult = wasm.trendflex_js(close, 20);
+    
+    assert.strictEqual(batchResult.values.length, singleResult.length);
+    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
+});
+
+test('trendflex_batch_ergonomic_multiple_periods', () => {
+    const close = testData.close.slice(0, 100);
+    
+    // Multiple periods: 10, 20, 30 using ergonomic API
+    const batchResult = wasm.trendflex_batch(close, {
+        period_range: [10, 30, 10]      // period range
+    });
+    
+    // Should have 3 rows * 100 cols = 300 values
+    assert.strictEqual(batchResult.values.length, 3 * 100);
+    assert.strictEqual(batchResult.rows, 3);
+    assert.strictEqual(batchResult.cols, 100);
+    
+    // Check combos
+    assert.strictEqual(batchResult.combos.length, 3);
+    assert.strictEqual(batchResult.combos[0].period, 10);
+    assert.strictEqual(batchResult.combos[1].period, 20);
+    assert.strictEqual(batchResult.combos[2].period, 30);
+});
+
+test('trendflex_batch_edge_cases', () => {
+    const close = new Float64Array(10);
+    close.fill(100);
+    
+    // Single value sweep
+    const singleBatch = wasm.trendflex_batch(close, {
+        period_range: [5, 5, 1]
+    });
+    
+    assert.strictEqual(singleBatch.values.length, 10);
+    assert.strictEqual(singleBatch.combos.length, 1);
+    
+    // Step larger than range
+    const largeBatch = wasm.trendflex_batch(close, {
+        period_range: [5, 7, 10] // Step larger than range
+    });
+    
+    // Should only have period=5
+    assert.strictEqual(largeBatch.values.length, 10);
+    assert.strictEqual(largeBatch.combos.length, 1);
+    
+    // Empty data should throw
+    assert.throws(() => {
+        wasm.trendflex_batch(new Float64Array([]), {
+            period_range: [20, 20, 0]
+        });
+    }, /All values are NaN/);
+});
+
+// Zero-copy API tests
+test('trendflex_zero_copy_basic', () => {
+    const data = new Float64Array(testData.close);
+    const period = 20;
+    
+    // Allocate buffer
+    const ptr = wasm.trendflex_alloc(data.length);
+    assert(ptr !== 0, 'Failed to allocate memory');
+    
+    // Create view into WASM memory
+    const memView = new Float64Array(
+        wasm.__wasm.memory.buffer,
+        ptr,
+        data.length
+    );
+    
+    // Copy data into WASM memory
+    memView.set(data);
+    
+    // Compute TrendFlex in-place
+    try {
+        wasm.trendflex_into(ptr, ptr, data.length, period);
+        
+        // Verify results match regular API
+        const regularResult = wasm.trendflex_js(data, period);
+        for (let i = 0; i < data.length; i++) {
+            if (isNaN(regularResult[i]) && isNaN(memView[i])) {
+                continue; // Both NaN is OK
+            }
+            assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
+                   `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
+        }
+    } finally {
+        // Always free memory
+        wasm.trendflex_free(ptr, data.length);
+    }
+});
+
+test('trendflex_zero_copy_error_handling', () => {
+    // Test null pointer
+    assert.throws(() => {
+        wasm.trendflex_into(0, 0, 10, 20);
+    }, /null pointer|invalid memory/i);
+    
+    // Test invalid parameters with allocated memory
+    const ptr = wasm.trendflex_alloc(10);
+    try {
+        // Invalid period (0)
+        assert.throws(() => {
+            wasm.trendflex_into(ptr, ptr, 10, 0);
+        }, /Invalid period/);
+        
+        // Period exceeds length
+        assert.throws(() => {
+            wasm.trendflex_into(ptr, ptr, 10, 20);
+        }, /Invalid period/);
+    } finally {
+        wasm.trendflex_free(ptr, 10);
+    }
+});
+
+test('trendflex_batch_into', () => {
+    const data = new Float64Array(testData.close.slice(0, 100));
+    const period_start = 10;
+    const period_end = 30;
+    const period_step = 10;
+    
+    // Calculate expected size (3 periods × 100 data points)
+    const expected_combos = 3;
+    const total_size = expected_combos * data.length;
+    
+    // Allocate input and output buffers
+    const in_ptr = wasm.trendflex_alloc(data.length);
+    const out_ptr = wasm.trendflex_alloc(total_size);
+    
+    try {
+        // Copy data to input buffer
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, in_ptr, data.length);
+        inView.set(data);
+        
+        // Call batch_into
+        const n_combos = wasm.trendflex_batch_into(
+            in_ptr, out_ptr, data.length,
+            period_start, period_end, period_step
+        );
+        
+        assert.strictEqual(n_combos, expected_combos);
+        
+        // Verify output
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, out_ptr, total_size);
+        
+        // Compare with regular batch API
+        const regularBatch = wasm.trendflex_batch(data, {
+            period_range: [period_start, period_end, period_step]
+        });
+        
+        assertArrayClose(
+            Array.from(outView),
+            regularBatch.values,
+            1e-10,
+            "Batch into vs regular batch mismatch"
+        );
+    } finally {
+        wasm.trendflex_free(in_ptr, data.length);
+        wasm.trendflex_free(out_ptr, total_size);
+    }
+});

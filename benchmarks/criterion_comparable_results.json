@@ -6,19 +6,27 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "tilson": 2.39717,
-    "tilson_batch": 383.348185
+    "trendflex": 7.25868,
+    "trendflex_batch": 95.13912
   },
   "rust_results": {
-    "tilson": 4.287308666666666
+    "trendflex": 7.3857,
+    "trendflex_batch": 95.0371
   },
   "comparisons": [
     {
-      "indicator": "tilson",
-      "python_ms": 2.39717,
-      "rust_ms": 4.287308666666666,
-      "overhead_ms": -1.8901386666666662,
-      "overhead_pct": -44.086834273498376
+      "indicator": "trendflex",
+      "python_ms": 7.25868,
+      "rust_ms": 7.3857,
+      "overhead_ms": -0.1270199999999999,
+      "overhead_pct": -1.7198099029205105
+    },
+    {
+      "indicator": "trendflex_batch",
+      "python_ms": 95.13912,
+      "rust_ms": 95.0371,
+      "overhead_ms": 0.10202000000001021,
+      "overhead_pct": 0.1073475516403688
     }
   ],
   "batch_comparisons": []

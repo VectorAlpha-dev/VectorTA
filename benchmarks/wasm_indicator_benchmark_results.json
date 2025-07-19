@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-19T21:13:27.890Z",
+  "timestamp": "2025-07-19T22:05:21.167Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "tilson_safe_10k": {
-      "name": "tilson_safe_10k",
-      "median": 0.036456486486486646,
-      "mean": 0.038885513513513506,
-      "min": 0.03418378378378385,
-      "max": 0.04487702702702711,
+    "trendflex_safe_10k": {
+      "name": "trendflex_safe_10k",
+      "median": 0.06849702970296986,
+      "mean": 0.07047074257425742,
+      "min": 0.06626930693069354,
+      "max": 0.08035841584158408,
       "samples": 10,
-      "warmupIterations": 3700,
-      "throughput": 0.2742996093083931,
+      "warmupIterations": 2028,
+      "throughput": 0.1459917319533992,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_safe_100k": {
-      "name": "tilson_safe_100k",
-      "median": 0.3651340909090896,
-      "mean": 0.3333129545454545,
-      "min": 0.2778863636363631,
-      "max": 0.410670454545456,
+    "trendflex_safe_100k": {
+      "name": "trendflex_safe_100k",
+      "median": 0.6431999999999995,
+      "mean": 0.6787222727272737,
+      "min": 0.6100545454545454,
+      "max": 0.8038727272727276,
       "samples": 10,
-      "warmupIterations": 449,
-      "throughput": 0.2738719897422501,
+      "warmupIterations": 220,
+      "throughput": 0.15547263681592052,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_safe_1M": {
-      "name": "tilson_safe_1M",
-      "median": 3.078449999999998,
-      "mean": 3.041227000000001,
-      "min": 2.9444100000000164,
-      "max": 3.097360000000003,
+    "trendflex_safe_1M": {
+      "name": "trendflex_safe_1M",
+      "median": 6.72958000000001,
+      "mean": 6.745243000000002,
+      "min": 6.579470000000015,
+      "max": 7.11237000000001,
       "samples": 10,
-      "warmupIterations": 51,
-      "throughput": 0.32556643765531373,
+      "warmupIterations": 23,
+      "throughput": 0.14893054247070375,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_fast_10k": {
-      "name": "tilson_fast_10k",
-      "median": 0.019526881720430135,
-      "mean": 0.01958966397849457,
-      "min": 0.019412768817204246,
-      "max": 0.020205779569892307,
+    "trendflex_fast_10k": {
+      "name": "trendflex_fast_10k",
+      "median": 0.052555281690140065,
+      "mean": 0.05258830985915482,
+      "min": 0.05192359154929664,
+      "max": 0.05364119718309904,
       "samples": 10,
-      "warmupIterations": 7446,
-      "throughput": 0.5121145374449332,
+      "warmupIterations": 2845,
+      "throughput": 0.190275832959261,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_fast_100k": {
-      "name": "tilson_fast_100k",
-      "median": 0.19705000000000214,
-      "mean": 0.19753539473684145,
-      "min": 0.19508421052631475,
-      "max": 0.20096447368421136,
+    "trendflex_fast_100k": {
+      "name": "trendflex_fast_100k",
+      "median": 0.5334037037037147,
+      "mean": 0.5335003703703731,
+      "min": 0.5318370370370287,
+      "max": 0.5357740740740795,
       "samples": 10,
-      "warmupIterations": 765,
-      "throughput": 0.5074854097944629,
+      "warmupIterations": 279,
+      "throughput": 0.18747526368048276,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_fast_1M": {
-      "name": "tilson_fast_1M",
-      "median": 1.9655499999999848,
-      "mean": 1.958748999999998,
-      "min": 1.935490000000027,
-      "max": 1.9791900000000169,
+    "trendflex_fast_1M": {
+      "name": "trendflex_fast_1M",
+      "median": 5.85972999999999,
+      "mean": 5.857241999999997,
+      "min": 5.805199999999968,
+      "max": 5.948869999999988,
       "samples": 10,
-      "warmupIterations": 75,
-      "throughput": 0.5099030805626964,
+      "warmupIterations": 26,
+      "throughput": 0.171038597341516,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "tilson"
+      "indicator": "trendflex"
     },
-    "tilson_batch_small": {
-      "name": "tilson_batch_small",
-      "median": 2.8433500000000094,
-      "mean": 2.8388229999999974,
-      "min": 2.7366899999999985,
-      "max": 2.91572000000001,
+    "trendflex_batch_small": {
+      "name": "trendflex_batch_small",
+      "median": 1.0402571428571394,
+      "mean": 1.052457857142859,
+      "min": 1.0160500000000152,
+      "max": 1.1849357142857246,
       "samples": 10,
-      "warmupIterations": 50,
-      "throughput": 0.003516978212319963,
+      "warmupIterations": 140,
+      "throughput": 0.00961300777280346,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "tilson",
+      "indicator": "trendflex",
       "batchSize": "small"
     },
-    "tilson_batch_medium": {
-      "name": "tilson_batch_medium",
-      "median": 7.624849999999969,
-      "mean": 7.764043000000003,
-      "min": 7.536009999999988,
-      "max": 8.34157,
+    "trendflex_batch_medium": {
+      "name": "trendflex_batch_medium",
+      "median": 5.416600000000017,
+      "mean": 5.47758800000001,
+      "min": 5.150450000000001,
+      "max": 6.036099999999988,
       "samples": 10,
-      "warmupIterations": 19,
-      "throughput": 0.0013115012098598713,
+      "warmupIterations": 27,
+      "throughput": 0.0018461765683269891,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "tilson",
+      "indicator": "trendflex",
       "batchSize": "medium"
     }
   }
