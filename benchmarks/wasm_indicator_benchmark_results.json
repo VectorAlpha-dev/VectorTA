@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-19T15:19:28.118Z",
+  "timestamp": "2025-07-19T22:40:33.011Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "supersmoother_safe_10k": {
-      "name": "supersmoother_safe_10k",
-      "median": 0.04823472222222236,
-      "mean": 0.05118572916666666,
-      "min": 0.04698333333333338,
-      "max": 0.06227430555555537,
+    "trima_safe_10k": {
+      "name": "trima_safe_10k",
+      "median": 0.038407881773399107,
+      "mean": 0.03561948275862065,
+      "min": 0.03006354679802944,
+      "max": 0.04034064039408859,
       "samples": 10,
-      "warmupIterations": 2888,
-      "throughput": 0.2073195312275038,
+      "warmupIterations": 4064,
+      "throughput": 0.2603632259388461,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_safe_100k": {
-      "name": "supersmoother_safe_100k",
-      "median": 0.4068705882352955,
-      "mean": 0.4300026470588244,
-      "min": 0.38742058823529263,
-      "max": 0.5204058823529415,
+    "trima_safe_100k": {
+      "name": "trima_safe_100k",
+      "median": 0.30719615384615157,
+      "mean": 0.2866371153846149,
+      "min": 0.2402903846153864,
+      "max": 0.32756153846153996,
       "samples": 10,
-      "warmupIterations": 343,
-      "throughput": 0.24577839463335566,
+      "warmupIterations": 529,
+      "throughput": 0.3255249089156289,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_safe_1M": {
-      "name": "supersmoother_safe_1M",
-      "median": 4.377980000000003,
-      "mean": 4.356190999999996,
-      "min": 4.236869999999999,
-      "max": 4.440509999999994,
+    "trima_safe_1M": {
+      "name": "trima_safe_1M",
+      "median": 2.64507000000001,
+      "mean": 2.646691999999998,
+      "min": 2.610690000000022,
+      "max": 2.6853399999999965,
       "samples": 10,
-      "warmupIterations": 35,
-      "throughput": 0.22892749624255923,
+      "warmupIterations": 56,
+      "throughput": 0.37890868672662587,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_fast_10k": {
-      "name": "supersmoother_fast_10k",
-      "median": 0.029973547094188237,
-      "mean": 0.030086673346693422,
-      "min": 0.029668737474949722,
-      "max": 0.031052104208417072,
+    "trima_fast_10k": {
+      "name": "trima_fast_10k",
+      "median": 0.015027575757575863,
+      "mean": 0.015031101010101014,
+      "min": 0.014962323232323181,
+      "max": 0.015112727272727134,
       "samples": 10,
-      "warmupIterations": 4999,
-      "throughput": 0.3336275139067196,
+      "warmupIterations": 9902,
+      "throughput": 0.6654433264100295,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_fast_100k": {
-      "name": "supersmoother_fast_100k",
-      "median": 0.2995020000000022,
-      "mean": 0.301140800000001,
-      "min": 0.29576000000000024,
-      "max": 0.31753999999999905,
+    "trima_fast_100k": {
+      "name": "trima_fast_100k",
+      "median": 0.15137599999999793,
+      "mean": 0.15158030000000008,
+      "min": 0.15064600000000156,
+      "max": 0.15348000000000184,
       "samples": 10,
-      "warmupIterations": 500,
-      "throughput": 0.3338875867272982,
+      "warmupIterations": 1000,
+      "throughput": 0.660606701194386,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_fast_1M": {
-      "name": "supersmoother_fast_1M",
-      "median": 2.980879999999979,
-      "mean": 2.982229000000002,
-      "min": 2.9493199999999886,
-      "max": 3.019560000000001,
+    "trima_fast_1M": {
+      "name": "trima_fast_1M",
+      "median": 1.517300000000023,
+      "mean": 1.519390000000003,
+      "min": 1.506790000000001,
+      "max": 1.5315299999999752,
       "samples": 10,
-      "warmupIterations": 50,
-      "throughput": 0.336222860363385,
+      "warmupIterations": 98,
+      "throughput": 0.6605417517959433,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "supersmoother"
+      "indicator": "trima"
     },
-    "supersmoother_batch_small": {
-      "name": "supersmoother_batch_small",
-      "median": 0.2584305084745796,
-      "mean": 0.2662264406779672,
-      "min": 0.23045423728813996,
-      "max": 0.30731355932203325,
+    "trima_batch_small": {
+      "name": "trima_batch_small",
+      "median": 0.8073368421052548,
+      "mean": 0.8506426315789429,
+      "min": 0.7943578947368367,
+      "max": 1.0343894736841943,
       "samples": 10,
-      "warmupIterations": 591,
-      "throughput": 0.03869512179125571,
+      "warmupIterations": 195,
+      "throughput": 0.012386403640298966,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "supersmoother",
+      "indicator": "trima",
       "batchSize": "small"
     },
-    "supersmoother_batch_medium": {
-      "name": "supersmoother_batch_medium",
-      "median": 0.4489419354838666,
-      "mean": 0.47376645161290476,
-      "min": 0.4119161290322623,
-      "max": 0.554858064516133,
+    "trima_batch_medium": {
+      "name": "trima_batch_medium",
+      "median": 2.54396999999999,
+      "mean": 2.629531999999999,
+      "min": 2.463909999999987,
+      "max": 2.831100000000015,
       "samples": 10,
-      "warmupIterations": 319,
-      "throughput": 0.022274595464605165,
+      "warmupIterations": 59,
+      "throughput": 0.003930863964590792,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "supersmoother",
+      "indicator": "trima",
       "batchSize": "medium"
     }
   }

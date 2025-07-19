@@ -808,7 +808,7 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'supersmoother_3_pole_batch_into'
         }
-    }
+    },
     ema: {
         name: 'EMA',
         safe: {
@@ -832,6 +832,35 @@ const INDICATORS = {
                 }
             },
             fastFn: 'ema_batch_into'
+        }
+    },
+    trima: {
+        name: 'TRIMA',
+        // Safe API
+        safe: {
+            fn: 'trima_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'trima_alloc',
+            freeFn: 'trima_free',
+            computeFn: 'trima_into',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'trima_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 5]       // 9 values
+                }
+            },
+            // Fast batch API
+            fastFn: 'trima_batch_into'
         }
     },
     gaussian: {
@@ -1344,8 +1373,8 @@ class WasmIndicatorBenchmark {
                     wasmFn.call(this.wasm, data, start, end, step);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                    wasmFn.apply(this.wasm, params);
                 }
-                wasmFn.apply(this.wasm, params);
             }, benchName, {
                 dataSize: data.length,
                 api: 'batch',
@@ -1420,8 +1449,8 @@ class WasmIndicatorBenchmark {
             // These indicators expect: data, period_start, period_end, period_step
             const period = batchConfig.period_range;
             return [data, period[0], period[1], period[2]];
-        } else if (indicatorKey === 'swma') {
-            // SWMA uses the new unified batch API with serde config
+        } else if (indicatorKey === 'swma' || indicatorKey === 'trima') {
+            // SWMA and TRIMA use the new unified batch API with serde config
             return [data, { period_range: batchConfig.period_range }];
         } else if (batchConfig.period_range) {
             // Most indicators with period ranges
