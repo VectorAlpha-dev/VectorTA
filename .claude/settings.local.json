@@ -228,7 +228,24 @@
       "Bash(set CARGO_PROFILE_RELEASE_LTO=off)",
       "Bash(if exist:*)",
       "Bash(.venvScriptspython.exe -m pytest tests/python/test_kama.py -v)",
-      "Bash(.venvScriptspython.exe tests/python/test_ehlers_itrend.py)"
+      "Bash(.venvScriptspython.exe tests/python/test_ehlers_itrend.py)",
+      "Bash(run_wasm_benchmark.bat ehlers_itrend)",
+      "Bash(run_python_benchmark:*)",
+      "Bash(C:\\\"Rust Projects \"\\my_project-bindings-4\\run_python_benchmark.bat fwma)",
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_fwma.py -k test_fwma_batch -v)",
+      "Bash(test_bindings.bat fwma)",
+      "Bash(set RUSTFLAGS=-C target-cpu=native -C opt-level=3)",
+      "Bash(set OPENBLAS_NUM_THREADS=1)",
+      "Bash(set MKL_NUM_THREADS=1)",
+      "Bash(.\\run_python_benchmark.bat kama)",
+      "Bash(.venv\\Scripts\\python benchmarks/criterion_comparable_benchmark.py kama)",
+      "Bash(.venv\\\\Scripts\\\\python:*)",
+      "Bash(..\\..\\.venv\\Scripts\\python -m pytest test_kama.py::test_kama_batch -v -s)",
+      "Bash(run_wasm_benchmark:*)",
+      "Bash(.venvScriptspython.exe -OO benchmarks/criterion_comparable_benchmark.py mama)",
+      "Bash(powershell:*)",
+      "Bash(test_bindings.bat sqwma)",
+      "Bash(.venvScriptspython tests/python/test_sqwma.py -v)"
     ],
     "deny": []
   }

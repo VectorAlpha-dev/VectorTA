@@ -25,6 +25,10 @@ def test_kama_partial_params():
     # Test with default period (30)
     result = kama(close, 30)
     assert len(result) == len(close)
+    
+    # Test with kernel parameter
+    result_with_kernel = kama(close, 30, kernel="scalar")
+    assert len(result_with_kernel) == len(close)
 
 
 def test_kama_accuracy():
@@ -457,6 +461,32 @@ def test_kama_zero_copy_verification():
     # Batch should also use zero-copy
     batch_result = kama_batch(close, (10, 30, 10))
     assert batch_result['values'].shape == (3, len(close))
+
+
+def test_kama_kernel_parameter():
+    """Test KAMA with different kernel parameters"""
+    data = load_test_data()
+    close = np.array(data['close'][:100], dtype=np.float64)
+    
+    # Test with different kernels
+    kernels = ["scalar", "auto"]
+    period = 30
+    
+    for kernel in kernels:
+        result = kama(close, period, kernel=kernel)
+        assert len(result) == len(close)
+        # Verify warmup period
+        assert np.all(np.isnan(result[:period]))
+        # Verify we have values after warmup
+        assert np.all(~np.isnan(result[period:]))
+    
+    # Test batch with kernel
+    batch_result = kama_batch(close, (10, 30, 10), kernel="scalar")
+    assert batch_result['values'].shape == (3, len(close))
+    
+    # Invalid kernel should raise error
+    with pytest.raises(ValueError):
+        kama(close, period, kernel="invalid_kernel")
 
 
 if __name__ == "__main__":

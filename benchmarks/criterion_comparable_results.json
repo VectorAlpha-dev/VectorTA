@@ -6,9 +6,19 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "ehlers_itrend": 8.30354
+    "swma": 2.12968
   },
-  "rust_results": {},
-  "comparisons": [],
+  "rust_results": {
+    "swma": 1.5688675757575756
+  },
+  "comparisons": [
+    {
+      "indicator": "swma",
+      "python_ms": 2.12968,
+      "rust_ms": 1.5688675757575756,
+      "overhead_ms": 0.5608124242424244,
+      "overhead_pct": 35.746320015034996
+    }
+  ],
   "batch_comparisons": []
 }

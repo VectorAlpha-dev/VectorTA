@@ -248,6 +248,15 @@ pub fn mama_with_kernel(
 
     /* ---------- run kernel in-place ----------------- */
     unsafe {
+        // For WASM, use SIMD128 when available instead of scalar
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+                mama_simd128_inplace(data, fast_limit, slow_limit, &mut mama_values, &mut fama_values);
+                return Ok(MamaOutput { mama_values, fama_values });
+            }
+        }
+        
         match chosen {
             /* ---- scalar (one-row) ---------------------------------- */
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -301,6 +310,15 @@ pub fn mama_compute_into(
 
     /* ---------- run kernel in-place -------------------------------- */
     unsafe {
+        // For WASM, use SIMD128 when available instead of scalar
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+                mama_simd128_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
+                return Ok(());
+            }
+        }
+        
         match chosen {
             /* ---- scalar (one-row) ---------------------------------- */
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -323,6 +341,35 @@ pub fn mama_compute_into(
         }
     }
 
+    Ok(())
+}
+
+/// Computes MAMA directly into provided output slices, avoiding allocation.
+/// The output slices must be the same length as the input data.
+/// This is the preferred method for WASM bindings to minimize allocations.
+#[inline]
+pub fn mama_into_slice(
+    dst_mama: &mut [f64], 
+    dst_fama: &mut [f64], 
+    input: &MamaInput, 
+    kern: Kernel
+) -> Result<(), MamaError> {
+    let (data, _fast_limit, _slow_limit, _chosen) = mama_prepare(input, kern)?;
+    
+    // Verify output buffer sizes match input
+    if dst_mama.len() != data.len() || dst_fama.len() != data.len() {
+        return Err(MamaError::NotEnoughData {
+            needed: data.len(),
+            found: dst_mama.len(),
+        });
+    }
+    
+    // Compute MAMA values directly into dst slices
+    mama_compute_into(input, kern, dst_mama, dst_fama)?;
+    
+    // MAMA produces values from the first data point
+    // No NaN warmup period needed as the algorithm starts immediately
+    
     Ok(())
 }
 
@@ -807,6 +854,186 @@ pub fn mama_scalar_inplace(
         /* --- store ----------------------------------------------------- */
         out_mama[i] = cur_mama;
         out_fama[i] = cur_fama;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn mama_simd128_inplace(
+    data: &[f64],
+    fast_limit: f64,
+    slow_limit: f64,
+    out_mama: &mut [f64],
+    out_fama: &mut [f64],
+) {
+    use core::arch::wasm32::*;
+    
+    debug_assert_eq!(data.len(), out_mama.len());
+    debug_assert_eq!(data.len(), out_fama.len());
+    
+    let len = data.len();
+    
+    // Ring buffers & rolling state
+    let mut smooth_buf = [data[0]; 7];
+    let mut detrender_buf = [data[0]; 7];
+    let mut i1_buf = [data[0]; 7];
+    let mut q1_buf = [data[0]; 7];
+    
+    let mut prev_mesa_period = 0.0;
+    let mut prev_mama = data[0];
+    let mut prev_fama = data[0];
+    let mut prev_i2_sm = 0.0;
+    let mut prev_q2_sm = 0.0;
+    let mut prev_re = 0.0;
+    let mut prev_im = 0.0;
+    let mut prev_phase = 0.0;
+    
+    // SIMD128 constants for Hilbert transform
+    let hilbert_weights = f64x2(0.0962, 0.5769);
+    let neg_hilbert_weights = f64x2(-0.5769, -0.0962);
+    
+    // 4-3-2-1 smoother weights
+    let smooth_weights = f64x2(4.0, 3.0);
+    let smooth_weights2 = f64x2(2.0, 1.0);
+    let smooth_div = f64x2_splat(0.1);
+    
+    #[inline(always)]
+    fn hilbert_simd128(x0: f64, x2: f64, x4: f64, x6: f64, weights: v128, neg_weights: v128) -> f64 {
+        // Pack values for SIMD computation
+        let v1 = f64x2(x0, x2);
+        let v2 = f64x2(x4, x6);
+        
+        // Multiply and accumulate
+        let prod1 = f64x2_mul(v1, weights);
+        let prod2 = f64x2_mul(v2, neg_weights);
+        let sum = f64x2_add(prod1, prod2);
+        
+        // Extract and sum elements
+        f64x2_extract_lane::<0>(sum) + f64x2_extract_lane::<1>(sum)
+    }
+    
+    for i in 0..len {
+        let price = data[i];
+        
+        // 4-3-2-1 smoother using SIMD
+        let s1 = if i >= 1 { data[i - 1] } else { price };
+        let s2 = if i >= 2 { data[i - 2] } else { price };
+        let s3 = if i >= 3 { data[i - 3] } else { price };
+        
+        // Use SIMD for smoothing calculation
+        let v1 = f64x2(price, s1);
+        let v2 = f64x2(s2, s3);
+        let prod1 = f64x2_mul(v1, smooth_weights);
+        let prod2 = f64x2_mul(v2, smooth_weights2);
+        let sum = f64x2_add(prod1, prod2);
+        let smooth_val = (f64x2_extract_lane::<0>(sum) + f64x2_extract_lane::<1>(sum)) * 0.1;
+        
+        let idx = i % 7;
+        smooth_buf[idx] = smooth_val;
+        
+        // Hilbert transform (detrender) using SIMD
+        let x0 = smooth_buf[idx];
+        let x2 = smooth_buf[(idx + 5) % 7];
+        let x4 = smooth_buf[(idx + 3) % 7];
+        let x6 = smooth_buf[(idx + 1) % 7];
+        
+        let mesa_mult = 0.075 * prev_mesa_period + 0.54;
+        let dt_val = hilbert_simd128(x0, x2, x4, x6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
+        detrender_buf[idx] = dt_val;
+        
+        // In-phase & quadrature
+        let i1_val = if i >= 3 {
+            detrender_buf[(idx + 4) % 7]  // lag 3
+        } else {
+            dt_val
+        };
+        i1_buf[idx] = i1_val;
+        
+        let d0 = detrender_buf[idx];
+        let d2 = detrender_buf[(idx + 5) % 7];
+        let d4 = detrender_buf[(idx + 3) % 7];
+        let d6 = detrender_buf[(idx + 1) % 7];
+        let q1_val = hilbert_simd128(d0, d2, d4, d6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
+        q1_buf[idx] = q1_val;
+        
+        // 90° leads (J components) using SIMD
+        let j_i = {
+            let i0 = i1_buf[idx];
+            let i2 = i1_buf[(idx + 5) % 7];
+            let i4 = i1_buf[(idx + 3) % 7];
+            let i6 = i1_buf[(idx + 1) % 7];
+            hilbert_simd128(i0, i2, i4, i6, hilbert_weights, neg_hilbert_weights) * mesa_mult
+        };
+        let j_q = {
+            let q0 = q1_buf[idx];
+            let q2 = q1_buf[(idx + 5) % 7];
+            let q4 = q1_buf[(idx + 3) % 7];
+            let q6 = q1_buf[(idx + 1) % 7];
+            hilbert_simd128(q0, q2, q4, q6, hilbert_weights, neg_hilbert_weights) * mesa_mult
+        };
+        
+        // Homodyne discriminator
+        let i2 = i1_val - j_q;
+        let q2 = q1_val + j_i;
+        let i2_sm = 0.2 * i2 + 0.8 * prev_i2_sm;
+        let q2_sm = 0.2 * q2 + 0.8 * prev_q2_sm;
+        let re = 0.2 * (i2_sm * prev_i2_sm + q2_sm * prev_q2_sm) + 0.8 * prev_re;
+        let im = 0.2 * (i2_sm * prev_q2_sm - q2_sm * prev_i2_sm) + 0.8 * prev_im;
+        prev_i2_sm = i2_sm;
+        prev_q2_sm = q2_sm;
+        prev_re = re;
+        prev_im = im;
+        
+        // Dominant cycle period
+        let mut mesa_period = if re != 0.0 && im != 0.0 {
+            2.0 * std::f64::consts::PI / (im / re).atan()
+        } else {
+            prev_mesa_period
+        };
+        
+        // Apply Mesa constraints
+        if mesa_period > 1.5 * prev_mesa_period {
+            mesa_period = 1.5 * prev_mesa_period;
+        }
+        if mesa_period < 0.67 * prev_mesa_period {
+            mesa_period = 0.67 * prev_mesa_period;
+        }
+        if mesa_period < 6.0 {
+            mesa_period = 6.0;
+        }
+        if mesa_period > 50.0 {
+            mesa_period = 50.0;
+        }
+        
+        // Phase from homodyne discriminator
+        let phase = if i1_val != 0.0 {
+            (q1_val / i1_val).atan()
+        } else {
+            0.0
+        };
+        
+        // Adjust phase change
+        let delta_phase = if prev_phase - phase < 1.0 {
+            prev_phase - phase
+        } else {
+            0.0
+        };
+        
+        prev_mesa_period = mesa_period;
+        prev_phase = phase;
+        
+        // Alpha calculation
+        let alpha = fast_limit / delta_phase.max(fast_limit / slow_limit).max(slow_limit);
+        
+        // MAMA and FAMA calculation
+        let mama_val = alpha * price + (1.0 - alpha) * prev_mama;
+        let fama_val = 0.5 * alpha * mama_val + (1.0 - 0.5 * alpha) * prev_fama;
+        
+        out_mama[i] = mama_val;
+        out_fama[i] = fama_val;
+        
+        prev_mama = mama_val;
+        prev_fama = fama_val;
     }
 }
 
@@ -1757,67 +1984,49 @@ mod python_bindings {
     use pyo3::types::PyDict;
     use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyArrayMethods, IntoPyArray};
     use std::collections::HashMap;
+    use crate::utilities::kernel_validation::validate_kernel;
     
     #[pyfunction]
     #[pyo3(name = "mama")]
+    #[pyo3(signature = (data, fast_limit, slow_limit, kernel=None))]
     pub fn mama_py<'py>(
         py: Python<'py>,
         data: PyReadonlyArray1<'py, f64>,
         fast_limit: f64,
         slow_limit: f64,
+        kernel: Option<&str>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let slice_in = data.as_slice()?;  // zero-copy read
+        let slice_in = data.as_slice()?;
+        let kern = validate_kernel(kernel, false)?;
+        
         let params = MamaParams {
             fast_limit: Some(fast_limit),
             slow_limit: Some(slow_limit),
         };
         let input = MamaInput::from_slice(slice_in, params);
         
-        // Pre-allocate NumPy output arrays
-        let mama_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-        let fama_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-        let mama_slice = unsafe { mama_arr.as_slice_mut()? };
-        let fama_slice = unsafe { fama_arr.as_slice_mut()? };
-        
-        // Compute directly into pre-allocated arrays (zero-copy)
-        py.allow_threads(|| -> Result<(), MamaError> {
-            let (data, fast_limit, slow_limit, chosen) = mama_prepare(&input, Kernel::Auto)?;
-            // MAMA produces values from the first data point
-            // The algorithm uses adaptive techniques that start immediately
-            unsafe {
-                match chosen {
-                    Kernel::Scalar | Kernel::ScalarBatch => {
-                        mama_scalar_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
-                    }
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 | Kernel::Avx2Batch => {
-                        mama_avx2_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
-                    }
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 | Kernel::Avx512Batch => {
-                        mama_avx2_inplace(data, fast_limit, slow_limit, mama_slice, fama_slice);
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            Ok(())
+        // Get the MamaOutput struct with Vec<f64> fields
+        let result = py.allow_threads(|| {
+            mama_with_kernel(&input, kern)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
         
-        // Return dict with "mama" and "fama" keys
+        // Zero-copy transfer both outputs to NumPy arrays
         let dict = PyDict::new(py);
-        dict.set_item("mama", mama_arr)?;
-        dict.set_item("fama", fama_arr)?;
+        dict.set_item("mama", result.mama_values.into_pyarray(py))?;
+        dict.set_item("fama", result.fama_values.into_pyarray(py))?;
         Ok(dict)
     }
     
     #[pyfunction]
     #[pyo3(name = "mama_batch")]
+    #[pyo3(signature = (data, fast_limit_range, slow_limit_range, kernel=None))]
     pub fn mama_batch_py<'py>(
         py: Python<'py>,
         data: PyReadonlyArray1<'py, f64>,
         fast_limit_range: (f64, f64, f64),
         slow_limit_range: (f64, f64, f64),
+        kernel: Option<&str>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let slice_in = data.as_slice()?;
         let sweep = MamaBatchRange {
@@ -1837,8 +2046,10 @@ mod python_bindings {
         let fama_slice = unsafe { fama_arr.as_slice_mut()? };
         
         // 3. Heavy work without the GIL
+        let kern = validate_kernel(kernel, true)?;
+        
         let combos = py.allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
-            let kernel = match Kernel::Auto {
+            let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
@@ -1916,16 +2127,15 @@ pub fn mama_js(data: &[f64], fast_limit: f64, slow_limit: f64) -> Result<Vec<f64
     };
     let input = MamaInput::from_slice(data, params);
     
-    match mama(&input) {
-        Ok(output) => {
-            // Return both arrays concatenated: first mama_values, then fama_values
-            let mut result = Vec::with_capacity(output.mama_values.len() * 2);
-            result.extend_from_slice(&output.mama_values);
-            result.extend_from_slice(&output.fama_values);
-            Ok(result)
-        }
-        Err(e) => Err(JsValue::from_str(&e.to_string()))
-    }
+    // Allocate output buffer once for both outputs
+    let mut output = vec![0.0; data.len() * 2];
+    let (mama_slice, fama_slice) = output.split_at_mut(data.len());
+    
+    // Compute directly into output buffer
+    mama_into_slice(mama_slice, fama_slice, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1944,16 +2154,18 @@ pub fn mama_batch_js(
         slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
     };
     
-    match mama_batch_with_kernel(data, &range, Kernel::Auto) {
-        Ok(batch_output) => {
-            // Return both arrays concatenated: first all mama_values, then all fama_values
-            let mut result = Vec::with_capacity(batch_output.mama_values.len() + batch_output.fama_values.len());
-            result.extend_from_slice(&batch_output.mama_values);
-            result.extend_from_slice(&batch_output.fama_values);
-            Ok(result)
-        }
-        Err(e) => Err(JsValue::from_str(&e.to_string()))
-    }
+    let batch_output = mama_batch_with_kernel(data, &range, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // Pre-allocate exact size needed
+    let total_len = batch_output.mama_values.len() + batch_output.fama_values.len();
+    let mut result = Vec::with_capacity(total_len);
+    
+    // Extend in one go
+    result.extend_from_slice(&batch_output.mama_values);
+    result.extend_from_slice(&batch_output.fama_values);
+    
+    Ok(result)
 }
 
 #[cfg(feature = "wasm")]
@@ -2000,4 +2212,126 @@ pub fn mama_batch_rows_cols_js(
     
     let combos = expand_grid(&range);
     vec![combos.len(), data_len]
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mama_alloc(len: usize) -> *mut f64 {
+    // Allocate memory for input/output buffer
+    let mut vec = Vec::<f64>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec); // Prevent deallocation
+    ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mama_free(ptr: *mut f64, len: usize) {
+    // Free allocated memory
+    if !ptr.is_null() {
+        unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mama_into(
+    in_ptr: *const f64,
+    out_mama_ptr: *mut f64,
+    out_fama_ptr: *mut f64,
+    len: usize,
+    fast_limit: f64,
+    slow_limit: f64,
+) -> Result<(), JsValue> {
+    // Check for null pointers
+    if in_ptr.is_null() || out_mama_ptr.is_null() || out_fama_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to mama_into"));
+    }
+    
+    unsafe {
+        // Create slice from pointer
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        // Validate inputs
+        if len < 10 {
+            return Err(JsValue::from_str("Insufficient data for MAMA"));
+        }
+        
+        // Create input parameters
+        let params = MamaParams {
+            fast_limit: Some(fast_limit),
+            slow_limit: Some(slow_limit),
+        };
+        let input = MamaInput::from_slice(data, params);
+        
+        // Check for aliasing (input and output buffers overlap)
+        let needs_temp = in_ptr == out_mama_ptr || in_ptr == out_fama_ptr;
+        
+        if needs_temp {
+            // Use temporary buffers to avoid corruption during computation
+            let mut temp_mama = vec![0.0; len];
+            let mut temp_fama = vec![0.0; len];
+            mama_into_slice(&mut temp_mama, &mut temp_fama, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Copy results back to output
+            let out_mama = std::slice::from_raw_parts_mut(out_mama_ptr, len);
+            let out_fama = std::slice::from_raw_parts_mut(out_fama_ptr, len);
+            out_mama.copy_from_slice(&temp_mama);
+            out_fama.copy_from_slice(&temp_fama);
+        } else {
+            // No aliasing, compute directly into output
+            let out_mama = std::slice::from_raw_parts_mut(out_mama_ptr, len);
+            let out_fama = std::slice::from_raw_parts_mut(out_fama_ptr, len);
+            mama_into_slice(out_mama, out_fama, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mama_batch_into(
+    in_ptr: *const f64,
+    out_mama_ptr: *mut f64,
+    out_fama_ptr: *mut f64,
+    len: usize,
+    fast_limit_start: f64,
+    fast_limit_end: f64,
+    fast_limit_step: f64,
+    slow_limit_start: f64,
+    slow_limit_end: f64,
+    slow_limit_step: f64,
+) -> Result<usize, JsValue> {
+    if in_ptr.is_null() || out_mama_ptr.is_null() || out_fama_ptr.is_null() {
+        return Err(JsValue::from_str("null pointer passed to mama_batch_into"));
+    }
+    
+    unsafe {
+        let data = std::slice::from_raw_parts(in_ptr, len);
+        
+        let range = MamaBatchRange {
+            fast_limit: (fast_limit_start, fast_limit_end, fast_limit_step),
+            slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
+        };
+        
+        let batch_output = mama_batch_with_kernel(data, &range, Kernel::Auto)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        let rows = batch_output.combos.len();
+        let cols = len;
+        let total_elements = rows * cols;
+        
+        // Write mama values
+        let out_mama = std::slice::from_raw_parts_mut(out_mama_ptr, total_elements);
+        out_mama.copy_from_slice(&batch_output.mama_values);
+        
+        // Write fama values
+        let out_fama = std::slice::from_raw_parts_mut(out_fama_ptr, total_elements);
+        out_fama.copy_from_slice(&batch_output.fama_values);
+        
+        Ok(rows)
+    }
 }
