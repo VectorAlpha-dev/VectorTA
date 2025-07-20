@@ -294,6 +294,280 @@ test('VWMA batch edge cases', () => {
 
 // Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
+test('VWMA fast/unsafe API basic', () => {
+    // Test fast API with separate output buffer
+    const close = new Float64Array(testData.close.slice(0, 100));
+    const volume = new Float64Array(testData.volume.slice(0, 100));
+    
+    // Allocate buffers in WASM memory
+    const closePtr = wasm.vwma_alloc(100);
+    const volumePtr = wasm.vwma_alloc(100);
+    const outPtr = wasm.vwma_alloc(100);
+    
+    try {
+        // Get WASM memory reference (check both possible locations)
+        const memory = wasm.__wasm?.memory || wasm.memory;
+        if (!memory) {
+            throw new Error('WASM memory not accessible');
+        }
+        
+        // Copy input data into WASM memory
+        const closeView = new Float64Array(memory.buffer, closePtr, 100);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, 100);
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        // Call fast API with WASM pointers
+        wasm.vwma_into(
+            closePtr,
+            volumePtr,
+            outPtr,
+            100,
+            20  // period
+        );
+        
+        // Read results from output buffer
+        const result = new Float64Array(memory.buffer, outPtr, 100);
+        const resultCopy = new Float64Array(result); // Copy before freeing
+        
+        // Compare with safe API
+        const safeResult = wasm.vwma_js(close, volume, 20);
+        assertArrayClose(resultCopy, safeResult, 1e-10, "Fast vs safe API mismatch");
+    } finally {
+        // Clean up
+        wasm.vwma_free(closePtr, 100);
+        wasm.vwma_free(volumePtr, 100);
+        wasm.vwma_free(outPtr, 100);
+    }
+});
+
+test('VWMA fast API in-place operation (aliasing)', () => {
+    // Test fast API with output aliasing price input
+    const prices = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const volumes = new Float64Array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    
+    // Make a copy for comparison
+    const pricesCopy = new Float64Array(prices);
+    
+    // Allocate buffers in WASM memory
+    const pricePtr = wasm.vwma_alloc(10);
+    const volumePtr = wasm.vwma_alloc(10);
+    
+    try {
+        // Get WASM memory reference
+        const memory = wasm.__wasm?.memory || wasm.memory;
+        if (!memory) {
+            throw new Error('WASM memory not accessible');
+        }
+        
+        // Copy input data into WASM memory
+        const priceView = new Float64Array(memory.buffer, pricePtr, 10);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, 10);
+        priceView.set(prices);
+        volumeView.set(volumes);
+        
+        // Use price buffer as output (in-place)
+        wasm.vwma_into(
+            pricePtr,
+            volumePtr,
+            pricePtr,  // Output to same as price input (aliasing)
+            10,
+            3  // period
+        );
+        
+        // Read results from price buffer (which was modified in-place)
+        const result = new Float64Array(memory.buffer, pricePtr, 10);
+        const resultCopy = new Float64Array(result); // Copy before comparison
+        
+        // Verify with safe API
+        const expected = wasm.vwma_js(pricesCopy, volumes, 3);
+        assertArrayClose(resultCopy, expected, 1e-10, "In-place operation mismatch");
+    } finally {
+        // Clean up
+        wasm.vwma_free(pricePtr, 10);
+        wasm.vwma_free(volumePtr, 10);
+    }
+});
+
+test('VWMA fast API null pointer handling', () => {
+    // Test null pointer error handling
+    assert.throws(() => {
+        wasm.vwma_into(0, 0, 0, 10, 5);
+    }, /Null pointer/);
+});
+
+test('VWMA memory allocation and deallocation', () => {
+    // Test alloc/free functions
+    const sizes = [10, 100, 1000];
+    
+    // Get WASM memory reference
+    const memory = wasm.__wasm?.memory || wasm.memory;
+    if (!memory) {
+        throw new Error('WASM memory not accessible');
+    }
+    
+    for (const size of sizes) {
+        const ptr = wasm.vwma_alloc(size);
+        assert(ptr !== 0, `Failed to allocate ${size} elements`);
+        
+        // Write some data
+        const arr = new Float64Array(memory.buffer, ptr, size);
+        for (let i = 0; i < size; i++) {
+            arr[i] = i;
+        }
+        
+        // Verify data
+        for (let i = 0; i < size; i++) {
+            assert.strictEqual(arr[i], i);
+        }
+        
+        // Free memory
+        wasm.vwma_free(ptr, size);
+    }
+});
+
+test('VWMA batch unified API with serde config', () => {
+    // Test new unified batch API with configuration object
+    const close = new Float64Array(testData.close.slice(0, 50));
+    const volume = new Float64Array(testData.volume.slice(0, 50));
+    
+    const config = {
+        period_range: [10, 20, 5]  // [start, end, step]
+    };
+    
+    const result = wasm.vwma_batch(close, volume, config);
+    
+    // Verify result structure
+    assert(result.values instanceof Array, "Expected values array");
+    assert(result.combos instanceof Array, "Expected combos array");
+    assert.strictEqual(result.rows, 3, "Expected 3 rows (periods: 10, 15, 20)");
+    assert.strictEqual(result.cols, 50, "Expected 50 columns");
+    assert.strictEqual(result.values.length, 150, "Expected 150 total values");
+    
+    // Verify combos
+    assert.strictEqual(result.combos.length, 3);
+    assert.strictEqual(result.combos[0].period, 10);
+    assert.strictEqual(result.combos[1].period, 15);
+    assert.strictEqual(result.combos[2].period, 20);
+});
+
+test('VWMA batch fast API', () => {
+    // Test batch fast API
+    const close = new Float64Array(testData.close.slice(0, 30));
+    const volume = new Float64Array(testData.volume.slice(0, 30));
+    
+    // Get WASM memory reference
+    const memory = wasm.__wasm?.memory || wasm.memory;
+    if (!memory) {
+        throw new Error('WASM memory not accessible');
+    }
+    
+    // Allocate input buffers in WASM memory
+    const closePtr = wasm.vwma_alloc(30);
+    const volumePtr = wasm.vwma_alloc(30);
+    
+    // Allocate output for 2 periods × 30 values = 60 total
+    const outPtr = wasm.vwma_alloc(60);
+    
+    try {
+        // Copy input data into WASM memory
+        const closeView = new Float64Array(memory.buffer, closePtr, 30);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, 30);
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        const rows = wasm.vwma_batch_into(
+            closePtr,
+            volumePtr,
+            outPtr,
+            30,
+            10, 15, 5  // periods: 10, 15
+        );
+        
+        assert.strictEqual(rows, 2, "Expected 2 rows");
+        
+        // Read results
+        const result = new Float64Array(memory.buffer, outPtr, 60);
+        
+        // Verify against individual calculations
+        const expected1 = wasm.vwma_js(close, volume, 10);
+        const expected2 = wasm.vwma_js(close, volume, 15);
+        
+        assertArrayClose(
+            result.slice(0, 30), 
+            expected1, 
+            1e-10, 
+            "Batch row 1 mismatch"
+        );
+        assertArrayClose(
+            result.slice(30, 60), 
+            expected2, 
+            1e-10, 
+            "Batch row 2 mismatch"
+        );
+    } finally {
+        wasm.vwma_free(closePtr, 30);
+        wasm.vwma_free(volumePtr, 30);
+        wasm.vwma_free(outPtr, 60);
+    }
+});
+
+test('VWMA batch fast API with aliasing', () => {
+    // Test batch fast API with aliasing - single period so output size equals input size
+    const prices = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const volumes = new Float64Array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    
+    // Get WASM memory reference
+    const memory = wasm.__wasm?.memory || wasm.memory;
+    if (!memory) {
+        throw new Error('WASM memory not accessible');
+    }
+    
+    // Allocate input buffers in WASM memory
+    const pricePtr = wasm.vwma_alloc(10);
+    const volumePtr = wasm.vwma_alloc(10);
+    
+    try {
+        // Copy input data into WASM memory
+        const priceView = new Float64Array(memory.buffer, pricePtr, 10);
+        const volumeView = new Float64Array(memory.buffer, volumePtr, 10);
+        priceView.set(prices);
+        volumeView.set(volumes);
+        
+        // Make copies for verification
+        const pricesCopy = new Float64Array(prices);
+        const volumesCopy = new Float64Array(volumes);
+        
+        // Test with output buffer aliasing price buffer
+        // Single period so output size = input size
+        const rows = wasm.vwma_batch_into(
+            pricePtr,
+            volumePtr,
+            pricePtr,  // Output aliases with prices
+            10,
+            3, 3, 1  // single period: 3
+        );
+        
+        assert.strictEqual(rows, 1, "Expected 1 row");
+        
+        // Read results from price buffer (now contains output)
+        const result = new Float64Array(memory.buffer, pricePtr, 10);
+        const resultCopy = new Float64Array(result); // Copy for comparison
+        
+        // Verify against expected
+        const expected = wasm.vwma_js(pricesCopy, volumesCopy, 3);
+        assertArrayClose(
+            resultCopy, 
+            expected, 
+            1e-10, 
+            "Batch aliasing mismatch"
+        );
+    } finally {
+        wasm.vwma_free(pricePtr, 10);
+        wasm.vwma_free(volumePtr, 10);
+    }
+});
+
 test.after(() => {
     console.log('VWMA WASM tests completed');
 });

@@ -263,10 +263,13 @@
       "Bash(./run_wasm_benchmark.bat trima)",
       "Bash(....\\.venv\\Scripts\\python -m pytest test_trima.py::TestTrima::test_trima_streaming -xvs)",
       "Bash(.venv\\Scripts\\python tests\\python\\test_trima.py)",
-      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py vwap)",
-      "Bash(test_bindings.bat zlema)",
-      "Bash(.venv\\Scripts\\python.exe:*)",
-      "Bash(.run_wasm_benchmark.bat adx)"
+      "Bash(.venv\\\\Scripts\\\\python:*)",
+      "Bash(.venv\\Scripts\\python -m pytest tests/python/test_vwma.py -v)",
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py ad)",
+      "Bash(where run_wasm_benchmark.bat)",
+      "Bash(./run_wasm_benchmark.bat ad)",
+      "Bash(unset RUSTFLAGS)",
+      "Bash(.run_wasm_benchmark.bat adxr)"
     ],
     "deny": []
   }

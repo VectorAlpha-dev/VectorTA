@@ -6,43 +6,27 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "adx": 3.53212,
-    "adxr": 8.517845,
-    "adxr_batch": 5.199865,
-    "adx_batch": 3.446205
+    "adxr": 4.889845,
+    "adxr_batch": 4.87616
   },
   "rust_results": {
-    "adx": 3.4461945,
-    "adxr": 4.834554017857143
+    "adxr": 5.070085555555556
   },
   "comparisons": [
     {
-      "indicator": "adx",
-      "python_ms": 3.53212,
-      "rust_ms": 3.4461945,
-      "overhead_ms": 0.0859255000000001,
-      "overhead_pct": 2.493344470255532
-    },
-    {
       "indicator": "adxr",
-      "python_ms": 8.517845,
-      "rust_ms": 4.834554017857143,
-      "overhead_ms": 3.6832909821428563,
-      "overhead_pct": 76.1867789363419
+      "python_ms": 4.889845,
+      "rust_ms": 5.070085555555556,
+      "overhead_ms": -0.18024055555555574,
+      "overhead_pct": -3.5549805536921775
     }
   ],
   "batch_comparisons": [
     {
       "indicator": "adxr",
-      "single_ms": 8.517845,
-      "batch_ms": 5.199865,
-      "overhead_pct": -38.9532798495394
-    },
-    {
-      "indicator": "adx",
-      "single_ms": 3.53212,
-      "batch_ms": 3.446205,
-      "overhead_pct": -2.432391877965645
+      "single_ms": 4.889845,
+      "batch_ms": 4.87616,
+      "overhead_pct": -0.27986572171512236
     }
   ]
 }

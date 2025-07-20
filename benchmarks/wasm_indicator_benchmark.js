@@ -104,6 +104,37 @@ const INDICATORS = {
             }
         }
     },
+    adxr: {
+        name: 'ADXR',
+        // Safe API
+        safe: {
+            fn: 'adxr_js',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'adxr_alloc',
+            freeFn: 'adxr_free',
+            computeFn: 'adxr_into',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'adxr_batch',
+            fastFn: 'adxr_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]  // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
     alma: {
         name: 'ALMA',
         // Safe API
@@ -1213,6 +1244,68 @@ const INDICATORS = {
             fastFn: 'trendflex_batch_into'
         }
     },
+    vwma: {
+        name: 'VWMA (Volume Weighted Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'vwma_js',
+            params: { period: 20 },
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vwma_alloc',
+            freeFn: 'vwma_free',
+            computeFn: 'vwma_into',
+            params: { period: 20 },
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        },
+        // Batch API
+        batch: {
+            fn: 'vwma_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                },
+                medium: {
+                    period_range: [5, 50, 5]       // 10 values: 5, 10, 15, ..., 50
+                }
+            },
+            // Fast batch API
+            fastFn: 'vwma_batch_into',
+            inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        }
+    },
+    ad: {
+        name: 'AD (Accumulation/Distribution)',
+        // Safe API
+        safe: {
+            fn: 'ad_js',
+            params: {},  // AD has no parameters
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        },
+        // Fast/Unsafe API (to be implemented)
+        fast: {
+            allocFn: 'ad_alloc',
+            freeFn: 'ad_free',
+            computeFn: 'ad_into',
+            params: {},  // AD has no parameters
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        },
+        // Batch API
+        batch: {
+            fn: 'ad_batch_js',
+            config: {
+                small: {
+                    // AD has no parameters, so batch is just processing multiple securities
+                },
+                medium: {
+                    // AD has no parameters, so batch is just processing multiple securities
+                }
+            },
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        }
+    },
     vwap: {
         name: 'VWAP',
         // Safe API
@@ -1346,18 +1439,19 @@ class WasmIndicatorBenchmark {
         // Note: CSV format is timestamp,open,close,high,low,volume
         // So close is at index 2, not 4!
         const closes = [];
+        const volumes = [];
         const timestamps = [];
         const volumes = [];
         
         for (const line of lines) {
             const parts = line.split(',');
             if (parts.length >= 6) {
-                timestamps.push(parseFloat(parts[0]));
                 opens.push(parseFloat(parts[1]));
                 closes.push(parseFloat(parts[2]));
                 highs.push(parseFloat(parts[3]));
                 lows.push(parseFloat(parts[4]));
                 volumes.push(parseFloat(parts[5]));
+                volumes.push(parseFloat(parts[5])); // Volume is column 5
             }
         }
         
@@ -1535,28 +1629,43 @@ class WasmIndicatorBenchmark {
             let inPtr, outPtr, highPtr, lowPtr, closePtr, timestampsPtr, volumesPtr, pricesPtr, outPtr2;
             
             try {
-                // Handle VWAP inputs if needed
-                if (indicatorConfig.fast.needsVwapInputs) {
-                    const vwap = this.vwapData[sizeName];
+                // Handle custom inputs
+                if (indicatorConfig.fast && indicatorConfig.fast.inputs) {
+                    const ohlc = this.ohlcData[sizeName];
+                    const inputPtrs = {};
                     
-                    // Allocate buffers for timestamps, volumes, prices
-                    timestampsPtr = this.wasm[allocFn](len);
-                    volumesPtr = this.wasm[allocFn](len);
-                    pricesPtr = this.wasm[allocFn](len);
+                    // Allocate buffers for each input
+                    for (const input of indicatorConfig.fast.inputs) {
+                        inputPtrs[input] = this.wasm[allocFn](len);
+                    }
                     outPtr = this.wasm[allocFn](len);
                     
-                    // Copy data
-                    const timestampsView = new Float64Array(this.wasm.__wasm.memory.buffer, timestampsPtr, len);
-                    const volumesView = new Float64Array(this.wasm.__wasm.memory.buffer, volumesPtr, len);
-                    const pricesView = new Float64Array(this.wasm.__wasm.memory.buffer, pricesPtr, len);
-                    
-                    timestampsView.set(vwap.timestamps);
-                    volumesView.set(vwap.volumes);
-                    pricesView.set(vwap.prices);
+                    // Copy data for each input
+                    for (const input of indicatorConfig.fast.inputs) {
+                        const view = new Float64Array(this.wasm.__wasm.memory.buffer, inputPtrs[input], len);
+                        if (input === 'prices') {
+                            view.set(ohlc.close);
+                        } else if (input === 'volumes') {
+                            view.set(ohlc.volume);
+                        } else if (ohlc[input]) {
+                            view.set(ohlc[input]);
+                        }
+                    }
                     
                     const result = this.benchmarkFunction(() => {
-                        const paramArray = this.prepareFastParams(params, null, outPtr, len, indicatorConfig.fast, 
-                            highPtr, lowPtr, closePtr, false, null, timestampsPtr, volumesPtr, pricesPtr);
+                        // Build parameter array based on inputs
+                        const paramArray = [];
+                        for (const input of indicatorConfig.fast.inputs) {
+                            paramArray.push(inputPtrs[input]);
+                        }
+                        paramArray.push(outPtr);
+                        paramArray.push(len);
+                        
+                        // Add other parameters
+                        for (const value of Object.values(params)) {
+                            paramArray.push(value);
+                        }
+                        
                         this.wasm[computeFn].apply(this.wasm, paramArray);
                     }, benchName, {
                         dataSize: len,
@@ -1566,8 +1675,11 @@ class WasmIndicatorBenchmark {
 
                     this.results[benchName] = result;
                     this.printResult(result);
+                    
+                    // Store pointers for cleanup in finally block
+                    Object.assign(this, { inputPtrs, outPtr });
                 }
-                // Handle multiple inputs if needed
+                // Handle multiple inputs if needed (legacy)
                 else if (indicatorConfig.fast.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
                     
@@ -1647,6 +1759,16 @@ class WasmIndicatorBenchmark {
                     if (volumesPtr) this.wasm[freeFn](volumesPtr, len);
                     if (pricesPtr) this.wasm[freeFn](pricesPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
+                } else if (this.inputPtrs) {
+                    // Clean up custom input pointers
+                    for (const ptr of Object.values(this.inputPtrs)) {
+                        if (ptr) this.wasm[freeFn](ptr, len);
+                    }
+                    delete this.inputPtrs;
+                    if (this.outPtr) {
+                        this.wasm[freeFn](this.outPtr, len);
+                        delete this.outPtr;
+                    }
                 } else if (indicatorConfig.fast.needsMultipleInputs) {
                     if (highPtr) this.wasm[freeFn](highPtr, len);
                     if (lowPtr) this.wasm[freeFn](lowPtr, len);
@@ -1689,6 +1811,29 @@ class WasmIndicatorBenchmark {
                 if (indicatorConfig.needsVwapInputs || indicatorConfig.batch?.needsVwapInputs) {
                     const vwap = this.vwapData[sizeName];
                     wasmFn.call(this.wasm, vwap.timestamps, vwap.volumes, vwap.prices, { anchor_range: batchConfig.anchor_range });
+                } else if (indicatorKey === 'ad') {
+                    // AD batch requires flattened arrays and rows parameter
+                    const ohlc = this.ohlcData[sizeName];
+                    // Simulate batch of 10 securities
+                    const rows = 10;
+                    const cols = Math.floor(ohlc.high.length / rows);
+                    const flatSize = rows * cols;
+                    
+                    // Create flattened arrays (repeat same data for each row)
+                    const highs_flat = new Float64Array(flatSize);
+                    const lows_flat = new Float64Array(flatSize);
+                    const closes_flat = new Float64Array(flatSize);
+                    const volumes_flat = new Float64Array(flatSize);
+                    
+                    for (let i = 0; i < rows; i++) {
+                        const offset = i * cols;
+                        highs_flat.set(ohlc.high.subarray(0, cols), offset);
+                        lows_flat.set(ohlc.low.subarray(0, cols), offset);
+                        closes_flat.set(ohlc.close.subarray(0, cols), offset);
+                        volumes_flat.set(ohlc.volume.subarray(0, cols), offset);
+                    }
+                    
+                    wasmFn.call(this.wasm, highs_flat, lows_flat, closes_flat, volumes_flat, rows);
                 } else if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
                     // ADOSC needs volume in addition to high, low, close
@@ -1706,7 +1851,7 @@ class WasmIndicatorBenchmark {
                     // TrendFlex uses the new ergonomic batch API with config object
                     wasmFn.call(this.wasm, data, batchConfig);
                 } else {
-                    const params = this.prepareBatchParams(indicatorKey, data, batchConfig);
+                    const params = this.prepareBatchParams(indicatorKey, data, batchConfig, sizeName);
                     wasmFn.apply(this.wasm, params);
                 }
             }, benchName, {
@@ -1769,8 +1914,34 @@ class WasmIndicatorBenchmark {
             return result;
         }
         
-        // Check if this indicator needs multiple inputs
-        if (indicatorConfig.needsMultipleInputs) {
+        // Check if indicator specifies custom inputs
+        if (indicatorConfig.safe && indicatorConfig.safe.inputs) {
+            const result = [];
+            const ohlc = this.ohlcData[sizeName];
+            
+            // Add each specified input in order
+            for (const input of indicatorConfig.safe.inputs) {
+                if (input === 'prices') {
+                    result.push(ohlc.close);
+                } else if (input === 'volumes') {
+                    result.push(ohlc.volume);
+                } else if (ohlc[input]) {
+                    result.push(ohlc[input]);
+                } else {
+                    throw new Error(`Unknown input type: ${input}`);
+                }
+            }
+            
+            // Add parameters in order
+            for (const value of Object.values(params)) {
+                result.push(value);
+            }
+            
+            return result;
+        }
+        
+        // Check if this indicator needs multiple inputs (legacy)
+        if (indicatorConfig.needsMultipleInputs || (indicatorConfig.safe && indicatorConfig.safe.needsMultipleInputs)) {
             const ohlc = this.ohlcData[sizeName];
             
             // Special case for ACOSC which only needs high/low
@@ -1822,7 +1993,7 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for batch API call
      */
-    prepareBatchParams(indicatorKey, data, batchConfig) {
+    prepareBatchParams(indicatorKey, data, batchConfig, sizeName) {
         // Special handling for different indicators
         if (indicatorKey === 'mama') {
             // MAMA expects: data, fast_limit_start, fast_limit_end, fast_limit_step, slow_limit_start, slow_limit_end, slow_limit_step
@@ -1851,6 +2022,10 @@ class WasmIndicatorBenchmark {
                 period_range: batchConfig.period_range,
                 volume_factor_range: batchConfig.volume_factor_range || [0.0, 0.0, 0.0]
             }];
+        } else if (indicatorKey === 'vwma') {
+            // VWMA uses the new unified batch API with serde config
+            const ohlc = this.ohlcData[sizeName];
+            return [ohlc.close, ohlc.volume, { period_range: batchConfig.period_range }];
         } else if (batchConfig.period_range) {
             // Most indicators with period ranges
             const period = batchConfig.period_range;
@@ -1891,7 +2066,7 @@ class WasmIndicatorBenchmark {
         }
         
         // Check if this indicator needs multiple inputs
-        if (indicatorConfig.needsMultipleInputs) {
+        if (indicatorConfig.needsMultipleInputs || (indicatorConfig.fast && indicatorConfig.fast.needsMultipleInputs)) {
             // Special case for ACOSC: high_ptr, low_ptr, osc_ptr, change_ptr, len
             if (indicatorConfig.name === 'ACOSC') {
                 const result = [highPtr, lowPtr, outPtr, outPtr2, len];
@@ -1910,7 +2085,7 @@ class WasmIndicatorBenchmark {
                 return result;
             }
             
-            // For FRAMA and others: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
+            // For FRAMA/ADXR and others: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
             const result = [highPtr, lowPtr, closePtr, outPtr, len];
             
             // Add indicator parameters
