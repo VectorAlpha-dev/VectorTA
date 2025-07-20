@@ -6,19 +6,27 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "trima": 2.62586
+    "adosc": 3.18461,
+    "adosc_batch": 3.18174
   },
   "rust_results": {
-    "trima": 2.457458928571428
+    "adosc": 3.754771
   },
   "comparisons": [
     {
-      "indicator": "trima",
-      "python_ms": 2.62586,
-      "rust_ms": 2.457458928571428,
-      "overhead_ms": 0.16840107142857175,
-      "overhead_pct": 6.852650494812829
+      "indicator": "adosc",
+      "python_ms": 3.18461,
+      "rust_ms": 3.754771,
+      "overhead_ms": -0.5701609999999997,
+      "overhead_pct": -15.18497399708264
     }
   ],
-  "batch_comparisons": []
+  "batch_comparisons": [
+    {
+      "indicator": "adosc",
+      "single_ms": 3.18461,
+      "batch_ms": 3.18174,
+      "overhead_pct": -0.0901209253252433
+    }
+  ]
 }

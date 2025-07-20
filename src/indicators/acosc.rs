@@ -527,11 +527,15 @@ impl AcoscBuilder {
 }
 
 #[cfg(feature = "python")]
-use numpy;
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -564,54 +568,30 @@ use wasm_bindgen::prelude::*;
 ///     If high/low lengths mismatch or insufficient data.
 pub fn acosc_py<'py>(
 	py: Python<'py>,
-	high: numpy::PyReadonlyArray1<'py, f64>,
-	low: numpy::PyReadonlyArray1<'py, f64>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
-) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
-	use numpy::{PyArray1, PyArrayMethods};
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let high_slice = high.as_slice()?; // zero-copy, read-only view
-	let low_slice = low.as_slice()?; // zero-copy, read-only view
-
-	// Parse and validate kernel
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
 	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = AcoscParams::default();
 	let acosc_in = AcoscInput::from_slices(high_slice, low_slice, params);
 
-	// Allocate NumPy output buffers
-	let out_osc = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
-	let out_change = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
-	let slice_osc = unsafe { out_osc.as_slice_mut()? };
-	let slice_change = unsafe { out_change.as_slice_mut()? };
+	// Get result vectors from Rust function
+	let (osc_vec, change_vec) = py
+		.allow_threads(|| {
+			acosc_with_kernel(&acosc_in, kern)
+				.map(|output| (output.osc, output.change))
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), AcoscError> {
-		// Prepare and resolve kernel
-		let (_, _, chosen) = acosc_prepare(&acosc_in, kern)?;
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// 1. Write NaN prefix to the first 38 elements (ACOSC warmup period)
-		const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
-		if high_slice.len() >= WARMUP_PERIOD {
-			slice_osc[..WARMUP_PERIOD].fill(f64::NAN);
-			slice_change[..WARMUP_PERIOD].fill(f64::NAN);
-		} else {
-			// If data is shorter than warmup, fill everything with NaN
-			slice_osc.fill(f64::NAN);
-			slice_change.fill(f64::NAN);
-		}
-
-		// 2. acosc_compute_into MUST write to all elements from index 38 onwards
-		// This is guaranteed by the ACOSC algorithm implementation
-		acosc_compute_into(high_slice, low_slice, chosen, slice_osc, slice_change);
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok((out_osc.into(), out_change.into()))
+	// Zero-copy transfer to NumPy
+	Ok((osc_vec.into_pyarray(py), change_vec.into_pyarray(py)))
 }
 
 #[cfg(feature = "python")]
@@ -658,24 +638,21 @@ impl AcoscStreamPy {
 ///     Dictionary with 'osc' and 'change' arrays (2D with 1 row).
 pub fn acosc_batch_py<'py>(
 	py: Python<'py>,
-	high: numpy::PyReadonlyArray1<'py, f64>,
-	low: numpy::PyReadonlyArray1<'py, f64>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-	use numpy::{PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
-
-	// Parse and validate kernel
 	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
 	// Since ACOSC has no parameters, we always have 1 row
 	let rows = 1;
 	let cols = high_slice.len();
 
-	// Pre-allocate NumPy arrays
+	// Pre-allocate output arrays for batch (this is acceptable for batch operations)
 	let out_osc = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let out_change = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_osc = unsafe { out_osc.as_slice_mut()? };
@@ -695,21 +672,13 @@ pub fn acosc_batch_py<'py>(
 			_ => unreachable!(),
 		};
 
-		// SAFETY: We must write to ALL elements before returning to Python
-		// 1. Write NaN prefix to the first 38 elements (ACOSC warmup period)
-		const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
-		if high_slice.len() >= WARMUP_PERIOD {
-			slice_osc[..WARMUP_PERIOD].fill(f64::NAN);
-			slice_change[..WARMUP_PERIOD].fill(f64::NAN);
-		} else {
-			// If data is shorter than warmup, fill everything with NaN
-			slice_osc.fill(f64::NAN);
-			slice_change.fill(f64::NAN);
-		}
-
-		// 2. acosc_compute_into MUST write to all elements from index 38 onwards
-		// This is guaranteed by the ACOSC algorithm implementation
-		acosc_compute_into(high_slice, low_slice, simd, slice_osc, slice_change);
+		// Call the batch function that will handle NaN initialization internally
+		let batch_output = acosc_batch_with_kernel(high_slice, low_slice, kern)?;
+		
+		// Copy results to pre-allocated arrays
+		slice_osc.copy_from_slice(&batch_output.osc);
+		slice_change.copy_from_slice(&batch_output.change);
+		
 		Ok(())
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -727,22 +696,69 @@ pub fn acosc_batch_py<'py>(
 pub fn acosc_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
 	let params = AcoscParams::default();
 	let input = AcoscInput::from_slices(high, low, params);
+	
+	// Pre-allocate single output vector for flattened results
+	let len = high.len();
+	let mut output = vec![0.0; len * 2];
+	
+	// Split the output into osc and change slices
+	let (osc_slice, change_slice) = output.split_at_mut(len);
+	
+	// Use zero-copy helper
+	acosc_into_slice(osc_slice, change_slice, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
 
-	acosc_with_kernel(&input, Kernel::Scalar)
-		.map(|o| {
-			// Flatten osc and change into a single vector
-			let mut result = Vec::with_capacity(o.osc.len() * 2);
-			result.extend_from_slice(&o.osc);
-			result.extend_from_slice(&o.change);
-			result
-		})
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AcoscBatchConfig {
+	// Empty config since ACOSC has no parameters
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct AcoscBatchJsOutput {
+	pub values: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = acosc_batch)]
+pub fn acosc_batch_unified_js(high: &[f64], low: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
+	// Since ACOSC has no parameters, we always have 1 row
+	let rows = 1;
+	let cols = high.len();
+	
+	// Pre-allocate single output vector for flattened results
+	let mut output = vec![0.0; cols * 2];
+	
+	// Split the output into osc and change slices
+	let (osc_slice, change_slice) = output.split_at_mut(cols);
+	
+	// Use zero-copy helper
+	let params = AcoscParams::default();
+	let input = AcoscInput::from_slices(high, low, params);
+	
+	acosc_into_slice(osc_slice, change_slice, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = AcoscBatchJsOutput {
+		values: output,
+		rows,
+		cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn acosc_batch_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
-	// Since ACOSC has no parameters, batch is the same as single
+	// Legacy API for backward compatibility
 	acosc_js(high, low)
 }
 
@@ -751,6 +767,111 @@ pub fn acosc_batch_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
 pub fn acosc_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
 	// Since ACOSC has no parameters, return empty metadata
 	Ok(vec![])
+}
+
+/// Helper function for zero-copy WASM transfers - writes directly to output slices
+#[cfg(feature = "wasm")]
+pub fn acosc_into_slice(
+	osc_dst: &mut [f64],
+	change_dst: &mut [f64],
+	input: &AcoscInput,
+	kern: Kernel,
+) -> Result<(), AcoscError> {
+	let (high, low, kernel) = acosc_prepare(input, kern)?;
+	
+	// Validate output lengths
+	if osc_dst.len() != high.len() || change_dst.len() != high.len() {
+		return Err(AcoscError::LengthMismatch {
+			high_len: high.len(),
+			low_len: osc_dst.len(),
+		});
+	}
+	
+	// Compute directly into output slices
+	acosc_compute_into(high, low, kernel, osc_dst, change_dst);
+	
+	// Fill warmup period with NaN (first 38 values)
+	const WARMUP_PERIOD: usize = 38; // PERIOD_SMA34 + PERIOD_SMA5 - 1
+	for i in 0..WARMUP_PERIOD.min(osc_dst.len()) {
+		osc_dst[i] = f64::NAN;
+		change_dst[i] = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	osc_ptr: *mut f64,
+	change_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || osc_ptr.is_null() || change_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to acosc_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		// Check for minimum data length
+		if len < 39 {
+			return Err(JsValue::from_str("Not enough data"));
+		}
+		
+		let params = AcoscParams::default();
+		let input = AcoscInput::from_slices(high, low, params);
+		
+		// Check aliasing for all pointer combinations
+		let need_temp = high_ptr == osc_ptr as *const f64 || 
+		                high_ptr == change_ptr as *const f64 ||
+		                low_ptr == osc_ptr as *const f64 || 
+		                low_ptr == change_ptr as *const f64 ||
+		                osc_ptr == change_ptr;
+		
+		if need_temp {
+			// Use temporary buffers if any aliasing detected
+			let mut temp_osc = vec![0.0; len];
+			let mut temp_change = vec![0.0; len];
+			
+			acosc_into_slice(&mut temp_osc, &mut temp_change, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let osc_out = std::slice::from_raw_parts_mut(osc_ptr, len);
+			let change_out = std::slice::from_raw_parts_mut(change_ptr, len);
+			osc_out.copy_from_slice(&temp_osc);
+			change_out.copy_from_slice(&temp_change);
+		} else {
+			// Direct computation when no aliasing
+			let osc_out = std::slice::from_raw_parts_mut(osc_ptr, len);
+			let change_out = std::slice::from_raw_parts_mut(change_ptr, len);
+			
+			acosc_into_slice(osc_out, change_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn acosc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
 }
 
 #[cfg(test)]
