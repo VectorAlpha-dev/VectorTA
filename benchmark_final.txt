@@ -1,0 +1,3284 @@
+Loading WASM module...
+WASM module loaded successfully
+Loading test data...
+Loaded data sizes: 10k, 100k, 1M
+
+WASM Indicator Performance Benchmark
+================================================================================
+Configuration:
+  Warmup: 150ms
+  Samples: 10
+  Min iterations: 10
+  GC disabled: true
+  Indicators: frama, pwma, adxr, alma, adosc, acosc, vpwma, edcf, highpass, jsa, maaq, smma, supersmoother, ehlers_itrend, fwma, hma, kama, sqwma, mama, reflex, swma, cwma, dema, epma, jma, highpass_2_pole, nma, sma, supersmoother_3_pole, ema, trima, tema, wilders, wma, gaussian, hwma, mwdx, srwma, linreg, sinwma, tilson, trendflex, alligator, vwma, ad, vwap, zlema, adx
+
+================================================================================
+Benchmarking FRAMA
+================================================================================
+
+--- FRAMA Safe API ---
+
+frama_safe_10k:
+  Median: 0.776 ms
+  Mean:   0.777 ms
+  Min:    0.767 ms
+  Max:    0.794 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 181
+
+frama_safe_100k:
+  Median: 7.782 ms
+  Mean:   7.771 ms
+  Min:    7.701 ms
+  Max:    7.845 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 19
+
+frama_safe_1M:
+  Median: 83.662 ms
+  Mean:   84.158 ms
+  Min:    82.460 ms
+  Max:    86.848 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 2
+
+--- FRAMA Fast/Unsafe API ---
+
+frama_fast_10k:
+  Median: 0.762 ms
+  Mean:   0.761 ms
+  Min:    0.753 ms
+  Max:    0.771 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 193
+
+frama_fast_100k:
+  Median: 8.210 ms
+  Mean:   8.277 ms
+  Min:    7.751 ms
+  Max:    8.963 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 20
+
+frama_fast_1M:
+  Median: 90.901 ms
+  Mean:   89.551 ms
+  Min:    83.201 ms
+  Max:    96.081 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 2
+
+--- FRAMA Batch API ---
+
+frama_batch_small:
+  Median: 14.919 ms
+  Mean:   14.706 ms
+  Min:    13.523 ms
+  Max:    16.939 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 10
+  Total combinations: 1
+
+frama_batch_medium:
+  Median: 75.013 ms
+  Mean:   76.029 ms
+  Min:    69.228 ms
+  Max:    86.076 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 3
+  Total combinations: 1
+
+================================================================================
+Benchmarking PWMA
+================================================================================
+
+--- PWMA Safe API ---
+
+pwma_safe_10k:
+  Median: 0.066 ms
+  Mean:   0.059 ms
+  Min:    0.045 ms
+  Max:    0.076 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2884
+
+pwma_safe_100k:
+  Median: 0.526 ms
+  Mean:   0.493 ms
+  Min:    0.374 ms
+  Max:    0.647 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 358
+
+pwma_safe_1M:
+  Median: 5.308 ms
+  Mean:   5.228 ms
+  Min:    4.117 ms
+  Max:    6.734 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 34
+
+--- PWMA Fast/Unsafe API ---
+
+pwma_fast_10k:
+  Median: 0.052 ms
+  Mean:   0.046 ms
+  Min:    0.027 ms
+  Max:    0.053 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 3818
+
+pwma_fast_100k:
+  Median: 0.515 ms
+  Mean:   0.438 ms
+  Min:    0.272 ms
+  Max:    0.521 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 304
+
+pwma_fast_1M:
+  Median: 3.628 ms
+  Mean:   3.563 ms
+  Min:    2.707 ms
+  Max:    4.867 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 47
+
+--- PWMA Batch API ---
+
+pwma_batch_small:
+  Median: 0.294 ms
+  Mean:   0.262 ms
+  Min:    0.184 ms
+  Max:    0.327 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 488
+  Total combinations: 6
+
+pwma_batch_medium:
+  Median: 0.622 ms
+  Mean:   0.592 ms
+  Min:    0.435 ms
+  Max:    0.784 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 238
+  Total combinations: 11
+
+================================================================================
+Benchmarking ADXR
+================================================================================
+
+--- ADXR Safe API ---
+
+adxr_safe_10k:
+  Median: 0.065 ms
+  Mean:   0.069 ms
+  Min:    0.059 ms
+  Max:    0.091 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2141
+
+adxr_safe_100k:
+  Median: 1.173 ms
+  Mean:   1.227 ms
+  Min:    1.153 ms
+  Max:    1.453 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 127
+
+adxr_safe_1M:
+  Median: 13.121 ms
+  Mean:   13.602 ms
+  Min:    12.825 ms
+  Max:    15.668 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 12
+
+--- ADXR Fast/Unsafe API ---
+
+adxr_fast_10k:
+  Median: 0.075 ms
+  Mean:   0.074 ms
+  Min:    0.073 ms
+  Max:    0.075 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 2074
+
+adxr_fast_100k:
+  Median: 1.049 ms
+  Mean:   1.051 ms
+  Min:    1.042 ms
+  Max:    1.064 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 114
+
+adxr_fast_1M:
+  Median: 11.385 ms
+  Mean:   11.707 ms
+  Min:    10.677 ms
+  Max:    13.406 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 13
+
+--- ADXR Batch API ---
+
+adxr_batch_small:
+  Median: 1.033 ms
+  Mean:   1.095 ms
+  Min:    0.973 ms
+  Max:    1.502 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 148
+  Total combinations: 3
+
+adxr_batch_medium:
+  Median: 1.688 ms
+  Mean:   1.663 ms
+  Min:    1.527 ms
+  Max:    1.731 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 92
+  Total combinations: 5
+
+================================================================================
+Benchmarking ALMA
+================================================================================
+
+--- ALMA Safe API ---
+
+alma_safe_10k:
+  Median: 0.042 ms
+  Mean:   0.043 ms
+  Min:    0.031 ms
+  Max:    0.054 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 4060
+
+alma_safe_100k:
+  Median: 0.400 ms
+  Mean:   0.392 ms
+  Min:    0.250 ms
+  Max:    0.514 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 366
+
+alma_safe_1M:
+  Median: 4.076 ms
+  Mean:   3.870 ms
+  Min:    3.084 ms
+  Max:    4.184 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 41
+
+--- ALMA Fast/Unsafe API ---
+
+alma_fast_10k:
+  Median: 0.032 ms
+  Mean:   0.032 ms
+  Min:    0.031 ms
+  Max:    0.032 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4905
+
+alma_fast_100k:
+  Median: 0.159 ms
+  Mean:   0.160 ms
+  Min:    0.154 ms
+  Max:    0.175 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 633
+
+alma_fast_1M:
+  Median: 2.988 ms
+  Mean:   2.706 ms
+  Min:    1.718 ms
+  Max:    3.020 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 71
+
+--- ALMA Batch API ---
+
+alma_batch_small:
+  Median: 11.375 ms
+  Mean:   10.526 ms
+  Min:    7.821 ms
+  Max:    12.320 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 13
+  Total combinations: 27
+
+alma_batch_medium:
+  Median: 40.559 ms
+  Mean:   38.313 ms
+  Min:    27.695 ms
+  Max:    44.730 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 6
+  Total combinations: 90
+
+================================================================================
+Benchmarking ADOSC
+================================================================================
+
+--- ADOSC Safe API ---
+
+adosc_safe_10k:
+  Median: 0.031 ms
+  Mean:   0.031 ms
+  Min:    0.018 ms
+  Max:    0.051 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3973
+
+adosc_safe_100k:
+  Median: 0.464 ms
+  Mean:   0.467 ms
+  Min:    0.411 ms
+  Max:    0.532 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 318
+
+adosc_safe_1M:
+  Median: 5.874 ms
+  Mean:   5.958 ms
+  Min:    5.538 ms
+  Max:    6.819 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 27
+
+--- ADOSC Fast/Unsafe API ---
+
+adosc_fast_10k:
+  Median: 0.017 ms
+  Mean:   0.016 ms
+  Min:    0.015 ms
+  Max:    0.017 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9086
+
+adosc_fast_100k:
+  Median: 0.455 ms
+  Mean:   0.450 ms
+  Min:    0.426 ms
+  Max:    0.472 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 337
+
+adosc_fast_1M:
+  Median: 4.193 ms
+  Mean:   4.183 ms
+  Min:    3.969 ms
+  Max:    4.367 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 37
+
+--- ADOSC Batch API ---
+
+adosc_batch_small:
+  Median: 4.285 ms
+  Mean:   4.237 ms
+  Min:    3.968 ms
+  Max:    4.408 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 33
+  Total combinations: 9
+
+adosc_batch_medium:
+  Median: 8.666 ms
+  Mean:   9.051 ms
+  Min:    7.562 ms
+  Max:    11.121 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 15
+  Total combinations: 25
+
+================================================================================
+Benchmarking ACOSC
+================================================================================
+
+--- ACOSC Safe API ---
+
+acosc_safe_10k:
+  Median: 0.047 ms
+  Mean:   0.047 ms
+  Min:    0.028 ms
+  Max:    0.061 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2937
+
+acosc_safe_100k:
+  Median: 0.378 ms
+  Mean:   0.380 ms
+  Min:    0.362 ms
+  Max:    0.407 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 388
+
+acosc_safe_1M:
+  Median: 4.127 ms
+  Mean:   4.308 ms
+  Min:    3.939 ms
+  Max:    5.201 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 39
+
+--- ACOSC Fast/Unsafe API ---
+
+acosc_fast_10k:
+  Median: 0.028 ms
+  Mean:   0.027 ms
+  Min:    0.023 ms
+  Max:    0.028 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 7864
+
+acosc_fast_100k:
+  Median: 0.275 ms
+  Mean:   0.266 ms
+  Min:    0.233 ms
+  Max:    0.284 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 558
+
+acosc_fast_1M:
+  Median: 2.312 ms
+  Mean:   2.232 ms
+  Min:    1.730 ms
+  Max:    3.012 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 82
+
+--- ACOSC Batch API ---
+
+acosc_batch_small:
+  Median: 0.909 ms
+  Mean:   0.861 ms
+  Min:    0.650 ms
+  Max:    0.922 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 216
+  Total combinations: 1
+
+acosc_batch_medium:
+  Median: 0.898 ms
+  Mean:   0.899 ms
+  Min:    0.884 ms
+  Max:    0.919 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 166
+  Total combinations: 1
+
+================================================================================
+Benchmarking VPWMA
+================================================================================
+
+--- VPWMA Safe API ---
+
+vpwma_safe_10k:
+  Median: 0.079 ms
+  Mean:   0.074 ms
+  Min:    0.046 ms
+  Max:    0.114 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1550
+
+vpwma_safe_100k:
+  Median: 0.578 ms
+  Mean:   0.579 ms
+  Min:    0.474 ms
+  Max:    0.773 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 190
+
+vpwma_safe_1M:
+  Median: 6.534 ms
+  Mean:   6.329 ms
+  Min:    5.386 ms
+  Max:    7.772 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 27
+
+--- VPWMA Fast/Unsafe API ---
+
+vpwma_fast_10k:
+  Median: 0.044 ms
+  Mean:   0.044 ms
+  Min:    0.043 ms
+  Max:    0.045 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 3266
+
+vpwma_fast_100k:
+  Median: 0.430 ms
+  Mean:   0.449 ms
+  Min:    0.425 ms
+  Max:    0.541 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 345
+
+vpwma_fast_1M:
+  Median: 4.506 ms
+  Mean:   4.587 ms
+  Min:    4.354 ms
+  Max:    4.998 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 34
+
+--- VPWMA Batch API ---
+
+vpwma_batch_small:
+  Median: 0.391 ms
+  Mean:   0.410 ms
+  Min:    0.324 ms
+  Max:    0.535 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 349
+  Total combinations: 3
+
+vpwma_batch_medium:
+  Median: 1.569 ms
+  Mean:   1.580 ms
+  Min:    1.232 ms
+  Max:    1.992 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 115
+  Total combinations: 5
+
+================================================================================
+Benchmarking EDCF
+================================================================================
+
+--- EDCF Safe API ---
+
+edcf_safe_10k:
+  Median: 1.684 ms
+  Mean:   1.726 ms
+  Min:    1.630 ms
+  Max:    2.128 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 62
+
+edcf_safe_100k:
+  Median: 18.171 ms
+  Mean:   19.229 ms
+  Min:    16.454 ms
+  Max:    24.964 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+
+edcf_safe_1M:
+  Median: 196.820 ms
+  Mean:   196.502 ms
+  Min:    173.233 ms
+  Max:    225.465 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 1
+
+--- EDCF Fast/Unsafe API ---
+
+edcf_fast_10k:
+  Median: 1.708 ms
+  Mean:   1.866 ms
+  Min:    1.574 ms
+  Max:    2.452 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 90
+
+edcf_fast_100k:
+  Median: 24.051 ms
+  Mean:   22.200 ms
+  Min:    17.519 ms
+  Max:    24.703 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 10
+
+edcf_fast_1M:
+  Median: 163.003 ms
+  Mean:   171.154 ms
+  Min:    158.663 ms
+  Max:    197.642 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 1
+
+================================================================================
+Benchmarking HighPass
+================================================================================
+
+--- HighPass Safe API ---
+
+highpass_safe_10k:
+  Median: 0.021 ms
+  Mean:   0.022 ms
+  Min:    0.016 ms
+  Max:    0.034 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 7120
+
+highpass_safe_100k:
+  Median: 0.181 ms
+  Mean:   0.204 ms
+  Min:    0.166 ms
+  Max:    0.282 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 790
+
+highpass_safe_1M:
+  Median: 2.201 ms
+  Mean:   2.215 ms
+  Min:    2.158 ms
+  Max:    2.343 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 62
+
+--- HighPass Fast/Unsafe API ---
+
+highpass_fast_10k:
+  Median: 0.011 ms
+  Mean:   0.011 ms
+  Min:    0.010 ms
+  Max:    0.011 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 14151
+
+highpass_fast_100k:
+  Median: 0.105 ms
+  Mean:   0.106 ms
+  Min:    0.105 ms
+  Max:    0.106 ms
+  Throughput: 0.9 M elem/s
+  Samples: 10, Warmup iterations: 1432
+
+highpass_fast_1M:
+  Median: 1.054 ms
+  Mean:   1.053 ms
+  Min:    1.048 ms
+  Max:    1.059 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 142
+
+--- HighPass Batch API ---
+
+highpass_batch_small:
+  Median: 1.279 ms
+  Mean:   1.267 ms
+  Min:    1.143 ms
+  Max:    1.372 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 114
+  Total combinations: 4
+
+highpass_batch_medium:
+  Median: 2.087 ms
+  Mean:   2.074 ms
+  Min:    1.935 ms
+  Max:    2.143 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 73
+  Total combinations: 7
+
+================================================================================
+Benchmarking JSA
+================================================================================
+
+--- JSA Safe API ---
+
+jsa_safe_10k:
+  Median: 0.009 ms
+  Mean:   0.010 ms
+  Min:    0.007 ms
+  Max:    0.016 ms
+  Throughput: 1.2 M elem/s
+  Samples: 10, Warmup iterations: 15896
+
+jsa_safe_100k:
+  Median: 0.094 ms
+  Mean:   0.090 ms
+  Min:    0.079 ms
+  Max:    0.096 ms
+  Throughput: 1.1 M elem/s
+  Samples: 10, Warmup iterations: 1522
+
+jsa_safe_1M:
+  Median: 1.551 ms
+  Mean:   1.541 ms
+  Min:    1.458 ms
+  Max:    1.612 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 100
+
+--- JSA Fast/Unsafe API ---
+
+jsa_fast_10k:
+  Median: 0.002 ms
+  Mean:   0.002 ms
+  Min:    0.002 ms
+  Max:    0.002 ms
+  Throughput: 5.0 M elem/s
+  Samples: 10, Warmup iterations: 73506
+
+jsa_fast_100k:
+  Median: 0.019 ms
+  Mean:   0.019 ms
+  Min:    0.018 ms
+  Max:    0.020 ms
+  Throughput: 5.4 M elem/s
+  Samples: 10, Warmup iterations: 7885
+
+jsa_fast_1M:
+  Median: 0.184 ms
+  Mean:   0.184 ms
+  Min:    0.183 ms
+  Max:    0.187 ms
+  Throughput: 5.4 M elem/s
+  Samples: 10, Warmup iterations: 806
+
+--- JSA Batch API ---
+
+jsa_batch_small:
+  Median: 1.144 ms
+  Mean:   1.166 ms
+  Min:    1.100 ms
+  Max:    1.255 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 127
+  Total combinations: 4
+
+jsa_batch_medium:
+  Median: 2.650 ms
+  Mean:   2.650 ms
+  Min:    2.621 ms
+  Max:    2.726 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 58
+  Total combinations: 9
+
+================================================================================
+Benchmarking MAAQ
+================================================================================
+
+--- MAAQ Safe API ---
+
+maaq_safe_10k:
+  Median: 0.039 ms
+  Mean:   0.039 ms
+  Min:    0.038 ms
+  Max:    0.042 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3701
+
+maaq_safe_100k:
+  Median: 0.402 ms
+  Mean:   0.411 ms
+  Min:    0.391 ms
+  Max:    0.451 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 370
+
+maaq_safe_1M:
+  Median: 4.929 ms
+  Mean:   4.892 ms
+  Min:    4.732 ms
+  Max:    5.032 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 29
+
+--- MAAQ Fast/Unsafe API ---
+
+maaq_fast_10k:
+  Median: 0.034 ms
+  Mean:   0.034 ms
+  Min:    0.034 ms
+  Max:    0.035 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4363
+
+maaq_fast_100k:
+  Median: 0.341 ms
+  Mean:   0.341 ms
+  Min:    0.338 ms
+  Max:    0.347 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 436
+
+maaq_fast_1M:
+  Median: 3.402 ms
+  Mean:   3.400 ms
+  Min:    3.366 ms
+  Max:    3.466 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 44
+
+--- MAAQ Batch API ---
+
+maaq_batch_small:
+  Median: 1.088 ms
+  Mean:   1.102 ms
+  Min:    1.082 ms
+  Max:    1.143 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 136
+  Total combinations: 3
+
+maaq_batch_medium:
+  Median: 2.442 ms
+  Mean:   2.438 ms
+  Min:    2.393 ms
+  Max:    2.487 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 62
+  Total combinations: 5
+
+================================================================================
+Benchmarking SMMA
+================================================================================
+
+--- SMMA Safe API ---
+
+smma_safe_10k:
+  Median: 0.021 ms
+  Mean:   0.021 ms
+  Min:    0.020 ms
+  Max:    0.026 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 5912
+
+smma_safe_100k:
+  Median: 0.220 ms
+  Mean:   0.220 ms
+  Min:    0.202 ms
+  Max:    0.244 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 676
+
+smma_safe_1M:
+  Median: 2.793 ms
+  Mean:   2.794 ms
+  Min:    2.732 ms
+  Max:    2.894 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 52
+
+--- SMMA Fast/Unsafe API ---
+
+smma_fast_10k:
+  Median: 0.016 ms
+  Mean:   0.016 ms
+  Min:    0.016 ms
+  Max:    0.016 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9451
+
+smma_fast_100k:
+  Median: 0.156 ms
+  Mean:   0.156 ms
+  Min:    0.155 ms
+  Max:    0.158 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 960
+
+smma_fast_1M:
+  Median: 1.565 ms
+  Mean:   1.568 ms
+  Min:    1.553 ms
+  Max:    1.611 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 97
+
+--- SMMA Batch API ---
+
+smma_batch_small:
+  Median: 0.921 ms
+  Mean:   0.925 ms
+  Min:    0.910 ms
+  Max:    0.954 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 159
+  Total combinations: 3
+
+smma_batch_medium:
+  Median: 1.555 ms
+  Mean:   1.531 ms
+  Min:    1.444 ms
+  Max:    1.593 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 97
+  Total combinations: 5
+
+================================================================================
+Benchmarking SuperSmoother
+================================================================================
+
+--- SuperSmoother Safe API ---
+
+supersmoother_safe_10k:
+  Median: 0.040 ms
+  Mean:   0.040 ms
+  Min:    0.033 ms
+  Max:    0.053 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4015
+
+supersmoother_safe_100k:
+  Median: 0.357 ms
+  Mean:   0.349 ms
+  Min:    0.335 ms
+  Max:    0.365 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 423
+
+supersmoother_safe_1M:
+  Median: 4.270 ms
+  Mean:   4.290 ms
+  Min:    4.171 ms
+  Max:    4.519 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 37
+
+--- SuperSmoother Fast/Unsafe API ---
+
+supersmoother_fast_10k:
+  Median: 0.030 ms
+  Mean:   0.030 ms
+  Min:    0.030 ms
+  Max:    0.031 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4952
+
+supersmoother_fast_100k:
+  Median: 0.303 ms
+  Mean:   0.303 ms
+  Min:    0.300 ms
+  Max:    0.309 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 499
+
+supersmoother_fast_1M:
+  Median: 3.056 ms
+  Mean:   3.055 ms
+  Min:    3.014 ms
+  Max:    3.122 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 50
+
+--- SuperSmoother Batch API ---
+
+supersmoother_batch_small:
+  Median: 0.213 ms
+  Mean:   0.207 ms
+  Min:    0.194 ms
+  Max:    0.223 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 696
+  Total combinations: 6
+
+supersmoother_batch_medium:
+  Median: 0.402 ms
+  Mean:   0.386 ms
+  Min:    0.358 ms
+  Max:    0.422 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 380
+  Total combinations: 11
+
+================================================================================
+Benchmarking Ehlers Instantaneous Trendline
+================================================================================
+
+--- Ehlers Instantaneous Trendline Safe API ---
+
+ehlers_itrend_safe_10k:
+  Median: 0.167 ms
+  Mean:   0.168 ms
+  Min:    0.161 ms
+  Max:    0.184 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 878
+
+ehlers_itrend_safe_100k:
+  Median: 1.600 ms
+  Mean:   1.617 ms
+  Min:    1.596 ms
+  Max:    1.694 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 94
+
+ehlers_itrend_safe_1M:
+  Median: 17.160 ms
+  Mean:   17.105 ms
+  Min:    16.818 ms
+  Max:    17.276 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 9
+
+--- Ehlers Instantaneous Trendline Fast/Unsafe API ---
+
+ehlers_itrend_fast_10k:
+  Median: 0.158 ms
+  Mean:   0.158 ms
+  Min:    0.157 ms
+  Max:    0.162 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 925
+
+ehlers_itrend_fast_100k:
+  Median: 1.595 ms
+  Mean:   1.593 ms
+  Min:    1.580 ms
+  Max:    1.617 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 94
+
+ehlers_itrend_fast_1M:
+  Median: 15.863 ms
+  Mean:   15.842 ms
+  Min:    15.682 ms
+  Max:    16.029 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 10
+
+--- Ehlers Instantaneous Trendline Batch API ---
+
+ehlers_itrend_batch_small:
+  Median: 4.083 ms
+  Mean:   4.127 ms
+  Min:    3.896 ms
+  Max:    4.443 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 34
+  Total combinations: 1
+
+ehlers_itrend_batch_medium:
+  Median: 8.915 ms
+  Mean:   8.982 ms
+  Min:    8.817 ms
+  Max:    9.411 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 17
+  Total combinations: 1
+
+================================================================================
+Benchmarking FWMA
+================================================================================
+
+--- FWMA Safe API ---
+
+fwma_safe_10k:
+  Median: 0.016 ms
+  Mean:   0.017 ms
+  Min:    0.016 ms
+  Max:    0.029 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 8825
+
+fwma_safe_100k:
+  Median: 0.171 ms
+  Mean:   0.170 ms
+  Min:    0.164 ms
+  Max:    0.176 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 877
+
+fwma_safe_1M:
+  Median: 2.243 ms
+  Mean:   2.275 ms
+  Min:    2.202 ms
+  Max:    2.572 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 66
+
+--- FWMA Fast/Unsafe API ---
+
+fwma_fast_10k:
+  Median: 0.011 ms
+  Mean:   0.011 ms
+  Min:    0.011 ms
+  Max:    0.011 ms
+  Throughput: 0.9 M elem/s
+  Samples: 10, Warmup iterations: 13293
+
+fwma_fast_100k:
+  Median: 0.113 ms
+  Mean:   0.114 ms
+  Min:    0.110 ms
+  Max:    0.122 ms
+  Throughput: 0.9 M elem/s
+  Samples: 10, Warmup iterations: 1357
+
+fwma_fast_1M:
+  Median: 1.093 ms
+  Mean:   1.093 ms
+  Min:    1.079 ms
+  Max:    1.132 ms
+  Throughput: 0.9 M elem/s
+  Samples: 10, Warmup iterations: 137
+
+--- FWMA Batch API ---
+
+fwma_batch_small:
+  Median: 0.123 ms
+  Mean:   0.122 ms
+  Min:    0.118 ms
+  Max:    0.127 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1216
+  Total combinations: 5
+
+fwma_batch_medium:
+  Median: 0.371 ms
+  Mean:   0.367 ms
+  Min:    0.348 ms
+  Max:    0.410 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 414
+  Total combinations: 10
+
+================================================================================
+Benchmarking Hull Moving Average (HMA)
+================================================================================
+
+--- Hull Moving Average (HMA) Safe API ---
+
+hma_safe_10k:
+  Median: 0.028 ms
+  Mean:   0.028 ms
+  Min:    0.026 ms
+  Max:    0.031 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 5425
+
+hma_safe_100k:
+  Median: 0.298 ms
+  Mean:   0.289 ms
+  Min:    0.270 ms
+  Max:    0.303 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 524
+
+hma_safe_1M:
+  Median: 3.562 ms
+  Mean:   3.576 ms
+  Min:    3.509 ms
+  Max:    3.762 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 42
+
+--- Hull Moving Average (HMA) Fast/Unsafe API ---
+
+hma_fast_10k:
+  Median: 0.022 ms
+  Mean:   0.022 ms
+  Min:    0.022 ms
+  Max:    0.023 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 6628
+
+hma_fast_100k:
+  Median: 0.221 ms
+  Mean:   0.221 ms
+  Min:    0.221 ms
+  Max:    0.224 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 677
+
+hma_fast_1M:
+  Median: 2.222 ms
+  Mean:   2.227 ms
+  Min:    2.214 ms
+  Max:    2.251 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 64
+
+--- Hull Moving Average (HMA) Batch API ---
+
+hma_batch_small:
+  Median: 0.081 ms
+  Mean:   0.080 ms
+  Min:    0.076 ms
+  Max:    0.087 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1821
+  Total combinations: 3
+
+hma_batch_medium:
+  Median: 0.139 ms
+  Mean:   0.145 ms
+  Min:    0.125 ms
+  Max:    0.188 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1136
+  Total combinations: 5
+
+================================================================================
+Benchmarking KAMA
+================================================================================
+
+--- KAMA Safe API ---
+
+kama_safe_10k:
+  Median: 0.021 ms
+  Mean:   0.021 ms
+  Min:    0.020 ms
+  Max:    0.022 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 6653
+
+kama_safe_100k:
+  Median: 0.233 ms
+  Mean:   0.230 ms
+  Min:    0.209 ms
+  Max:    0.251 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 671
+
+kama_safe_1M:
+  Median: 2.776 ms
+  Mean:   2.779 ms
+  Min:    2.723 ms
+  Max:    2.851 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 53
+
+--- KAMA Fast/Unsafe API ---
+
+kama_fast_10k:
+  Median: 0.016 ms
+  Mean:   0.016 ms
+  Min:    0.016 ms
+  Max:    0.016 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9359
+
+kama_fast_100k:
+  Median: 0.160 ms
+  Mean:   0.161 ms
+  Min:    0.160 ms
+  Max:    0.164 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 931
+
+kama_fast_1M:
+  Median: 1.575 ms
+  Mean:   1.578 ms
+  Min:    1.567 ms
+  Max:    1.614 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 96
+
+--- KAMA Batch API ---
+
+kama_batch_small:
+  Median: 0.058 ms
+  Mean:   0.058 ms
+  Min:    0.057 ms
+  Max:    0.060 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2586
+  Total combinations: 3
+
+kama_batch_medium:
+  Median: 0.181 ms
+  Mean:   0.180 ms
+  Min:    0.170 ms
+  Max:    0.183 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 829
+  Total combinations: 9
+
+================================================================================
+Benchmarking SQWMA (Square Weighted Moving Average)
+================================================================================
+
+--- SQWMA (Square Weighted Moving Average) Safe API ---
+
+sqwma_safe_10k:
+  Median: 0.043 ms
+  Mean:   0.043 ms
+  Min:    0.043 ms
+  Max:    0.045 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 3436
+
+sqwma_safe_100k:
+  Median: 0.452 ms
+  Mean:   0.458 ms
+  Min:    0.436 ms
+  Max:    0.487 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 332
+
+sqwma_safe_1M:
+  Median: 5.343 ms
+  Mean:   5.319 ms
+  Min:    5.106 ms
+  Max:    5.538 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 30
+
+--- SQWMA (Square Weighted Moving Average) Fast/Unsafe API ---
+
+sqwma_fast_10k:
+  Median: 0.040 ms
+  Mean:   0.040 ms
+  Min:    0.040 ms
+  Max:    0.041 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 3716
+
+sqwma_fast_100k:
+  Median: 0.391 ms
+  Mean:   0.391 ms
+  Min:    0.388 ms
+  Max:    0.396 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 384
+
+sqwma_fast_1M:
+  Median: 3.932 ms
+  Mean:   3.928 ms
+  Min:    3.903 ms
+  Max:    3.972 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 39
+
+--- SQWMA (Square Weighted Moving Average) Batch API ---
+
+sqwma_batch_small:
+  Median: 0.147 ms
+  Mean:   0.146 ms
+  Min:    0.142 ms
+  Max:    0.152 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1004
+  Total combinations: 4
+
+sqwma_batch_medium:
+  Median: 0.282 ms
+  Mean:   0.281 ms
+  Min:    0.270 ms
+  Max:    0.292 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 518
+  Total combinations: 6
+
+================================================================================
+Benchmarking MAMA (MESA Adaptive Moving Average)
+================================================================================
+
+--- MAMA (MESA Adaptive Moving Average) Safe API ---
+
+mama_safe_10k:
+  Median: 0.304 ms
+  Mean:   0.304 ms
+  Min:    0.300 ms
+  Max:    0.315 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 450
+
+mama_safe_100k:
+  Median: 3.420 ms
+  Mean:   3.413 ms
+  Min:    3.344 ms
+  Max:    3.545 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 44
+
+mama_safe_1M:
+  Median: 35.044 ms
+  Mean:   35.089 ms
+  Min:    34.676 ms
+  Max:    36.059 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 5
+
+--- MAMA (MESA Adaptive Moving Average) Fast/Unsafe API ---
+
+mama_fast_10k:
+  Median: 0.293 ms
+  Mean:   0.293 ms
+  Min:    0.291 ms
+  Max:    0.294 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 509
+
+mama_fast_100k:
+  Median: 3.216 ms
+  Mean:   3.230 ms
+  Min:    3.199 ms
+  Max:    3.338 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 47
+
+mama_fast_1M:
+  Median: 32.569 ms
+  Mean:   32.504 ms
+  Min:    32.203 ms
+  Max:    32.813 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 5
+
+--- MAMA (MESA Adaptive Moving Average) Batch API ---
+
+mama_batch_small:
+  Median: 3.185 ms
+  Mean:   3.189 ms
+  Min:    3.132 ms
+  Max:    3.332 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 48
+  Total combinations: 1
+
+mama_batch_medium:
+  Median: 17.271 ms
+  Mean:   17.361 ms
+  Min:    17.176 ms
+  Max:    17.752 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 9
+  Total combinations: 1
+
+================================================================================
+Benchmarking Reflex
+================================================================================
+
+--- Reflex Safe API ---
+
+reflex_safe_10k:
+  Median: 0.142 ms
+  Mean:   0.143 ms
+  Min:    0.141 ms
+  Max:    0.151 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1035
+
+reflex_safe_100k:
+  Median: 1.424 ms
+  Mean:   1.440 ms
+  Min:    1.402 ms
+  Max:    1.530 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 103
+
+reflex_safe_1M:
+  Median: 15.652 ms
+  Mean:   15.633 ms
+  Min:    15.130 ms
+  Max:    16.484 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 10
+
+--- Reflex Fast/Unsafe API ---
+
+reflex_fast_10k:
+  Median: 0.138 ms
+  Mean:   0.139 ms
+  Min:    0.135 ms
+  Max:    0.156 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1012
+
+reflex_fast_100k:
+  Median: 1.403 ms
+  Mean:   1.403 ms
+  Min:    1.386 ms
+  Max:    1.437 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 109
+
+reflex_fast_1M:
+  Median: 14.024 ms
+  Mean:   14.078 ms
+  Min:    13.798 ms
+  Max:    14.647 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 11
+
+--- Reflex Batch API ---
+
+reflex_batch_small:
+  Median: 0.005 ms
+  Mean:   0.006 ms
+  Min:    0.005 ms
+  Max:    0.011 ms
+  Throughput: 1.8 M elem/s
+  Samples: 10, Warmup iterations: 26421
+  Total combinations: 3
+
+reflex_batch_medium:
+  Median: 0.006 ms
+  Mean:   0.006 ms
+  Min:    0.005 ms
+  Max:    0.007 ms
+  Throughput: 1.8 M elem/s
+  Samples: 10, Warmup iterations: 16101
+  Total combinations: 9
+
+================================================================================
+Benchmarking SWMA (Symmetric Weighted Moving Average)
+================================================================================
+
+--- SWMA (Symmetric Weighted Moving Average) Safe API ---
+
+swma_safe_10k:
+  Median: 0.018 ms
+  Mean:   0.021 ms
+  Min:    0.017 ms
+  Max:    0.032 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 7642
+
+swma_safe_100k:
+  Median: 0.184 ms
+  Mean:   0.183 ms
+  Min:    0.168 ms
+  Max:    0.189 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 793
+
+swma_safe_1M:
+  Median: 2.410 ms
+  Mean:   2.456 ms
+  Min:    2.349 ms
+  Max:    2.771 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 63
+
+--- SWMA (Symmetric Weighted Moving Average) Fast/Unsafe API ---
+
+swma_fast_10k:
+  Median: 0.013 ms
+  Mean:   0.013 ms
+  Min:    0.013 ms
+  Max:    0.013 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 11653
+
+swma_fast_100k:
+  Median: 0.129 ms
+  Mean:   0.129 ms
+  Min:    0.127 ms
+  Max:    0.133 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 1164
+
+swma_fast_1M:
+  Median: 1.300 ms
+  Mean:   1.303 ms
+  Min:    1.274 ms
+  Max:    1.335 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 115
+
+--- SWMA (Symmetric Weighted Moving Average) Batch API ---
+
+swma_batch_small:
+  Median: 1.514 ms
+  Mean:   1.501 ms
+  Min:    1.381 ms
+  Max:    1.774 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 95
+  Total combinations: 5
+
+swma_batch_medium:
+  Median: 3.049 ms
+  Mean:   3.032 ms
+  Min:    2.977 ms
+  Max:    3.093 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 50
+  Total combinations: 10
+
+================================================================================
+Benchmarking CWMA
+================================================================================
+
+--- CWMA Safe API ---
+
+cwma_safe_10k:
+  Median: 0.035 ms
+  Mean:   0.035 ms
+  Min:    0.032 ms
+  Max:    0.039 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4161
+
+cwma_safe_100k:
+  Median: 0.348 ms
+  Mean:   0.343 ms
+  Min:    0.332 ms
+  Max:    0.357 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 429
+
+cwma_safe_1M:
+  Median: 3.969 ms
+  Mean:   3.975 ms
+  Min:    3.936 ms
+  Max:    4.085 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 37
+
+--- CWMA Fast/Unsafe API ---
+
+cwma_fast_10k:
+  Median: 0.029 ms
+  Mean:   0.029 ms
+  Min:    0.029 ms
+  Max:    0.029 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 5219
+
+cwma_fast_100k:
+  Median: 0.289 ms
+  Mean:   0.289 ms
+  Min:    0.284 ms
+  Max:    0.294 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 527
+
+cwma_fast_1M:
+  Median: 2.859 ms
+  Mean:   2.864 ms
+  Min:    2.845 ms
+  Max:    2.921 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 53
+
+--- CWMA Batch API ---
+
+cwma_batch_small:
+  Median: 0.918 ms
+  Mean:   0.938 ms
+  Min:    0.890 ms
+  Max:    1.165 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 160
+  Total combinations: 3
+
+cwma_batch_medium:
+  Median: 3.036 ms
+  Mean:   3.027 ms
+  Min:    2.965 ms
+  Max:    3.096 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 49
+  Total combinations: 9
+
+================================================================================
+Benchmarking DEMA
+================================================================================
+
+--- DEMA Safe API ---
+
+dema_safe_10k:
+  Median: 0.018 ms
+  Mean:   0.021 ms
+  Min:    0.017 ms
+  Max:    0.035 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 8735
+
+dema_safe_100k:
+  Median: 0.185 ms
+  Mean:   0.183 ms
+  Min:    0.171 ms
+  Max:    0.190 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 798
+
+dema_safe_1M:
+  Median: 2.449 ms
+  Mean:   2.452 ms
+  Min:    2.382 ms
+  Max:    2.497 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 63
+
+--- DEMA Fast/Unsafe API ---
+
+dema_fast_10k:
+  Median: 0.012 ms
+  Mean:   0.012 ms
+  Min:    0.012 ms
+  Max:    0.012 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 12068
+
+dema_fast_100k:
+  Median: 0.122 ms
+  Mean:   0.122 ms
+  Min:    0.120 ms
+  Max:    0.123 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 1235
+
+dema_fast_1M:
+  Median: 1.214 ms
+  Mean:   1.213 ms
+  Min:    1.205 ms
+  Max:    1.227 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 125
+
+--- DEMA Batch API ---
+
+dema_batch_small:
+  Median: 0.891 ms
+  Mean:   0.885 ms
+  Min:    0.823 ms
+  Max:    0.957 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 173
+  Total combinations: 3
+
+dema_batch_medium:
+  Median: 1.446 ms
+  Mean:   1.463 ms
+  Min:    1.375 ms
+  Max:    1.605 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 103
+  Total combinations: 5
+
+================================================================================
+Benchmarking EPMA
+================================================================================
+
+--- EPMA Safe API ---
+
+epma_safe_10k:
+  Median: 0.029 ms
+  Mean:   0.028 ms
+  Min:    0.028 ms
+  Max:    0.029 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4985
+
+epma_safe_100k:
+  Median: 0.308 ms
+  Mean:   0.304 ms
+  Min:    0.287 ms
+  Max:    0.318 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 498
+
+epma_safe_1M:
+  Median: 3.646 ms
+  Mean:   3.635 ms
+  Min:    3.563 ms
+  Max:    3.702 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 41
+
+--- EPMA Fast/Unsafe API ---
+
+epma_fast_10k:
+  Median: 0.024 ms
+  Mean:   0.024 ms
+  Min:    0.024 ms
+  Max:    0.024 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 6251
+
+epma_fast_100k:
+  Median: 0.236 ms
+  Mean:   0.236 ms
+  Min:    0.235 ms
+  Max:    0.238 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 636
+
+epma_fast_1M:
+  Median: 2.371 ms
+  Mean:   2.374 ms
+  Min:    2.354 ms
+  Max:    2.412 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 64
+
+--- EPMA Batch API ---
+
+epma_batch_small:
+  Median: 2.863 ms
+  Mean:   2.845 ms
+  Min:    2.687 ms
+  Max:    2.895 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 49
+  Total combinations: 9
+
+epma_batch_medium:
+  Median: 15.250 ms
+  Mean:   15.392 ms
+  Min:    14.832 ms
+  Max:    16.714 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 11
+  Total combinations: 44
+
+================================================================================
+Benchmarking JMA
+================================================================================
+
+--- JMA Safe API ---
+
+jma_safe_10k:
+  Median: 0.023 ms
+  Mean:   0.023 ms
+  Min:    0.022 ms
+  Max:    0.023 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 6602
+
+jma_safe_100k:
+  Median: 0.241 ms
+  Mean:   0.260 ms
+  Min:    0.223 ms
+  Max:    0.335 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 629
+
+jma_safe_1M:
+  Median: 2.983 ms
+  Mean:   2.989 ms
+  Min:    2.954 ms
+  Max:    3.058 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 50
+
+--- JMA Fast/Unsafe API ---
+
+jma_fast_10k:
+  Median: 0.017 ms
+  Mean:   0.017 ms
+  Min:    0.017 ms
+  Max:    0.017 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 8585
+
+jma_fast_100k:
+  Median: 0.173 ms
+  Mean:   0.174 ms
+  Min:    0.172 ms
+  Max:    0.177 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 863
+
+jma_fast_1M:
+  Median: 1.724 ms
+  Mean:   1.724 ms
+  Min:    1.719 ms
+  Max:    1.733 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 87
+
+--- JMA Batch API ---
+
+jma_batch_small:
+  Median: 7.874 ms
+  Mean:   7.847 ms
+  Min:    7.745 ms
+  Max:    7.987 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 20
+  Total combinations: 3
+
+jma_batch_medium:
+  Median: 23.830 ms
+  Mean:   23.740 ms
+  Min:    22.608 ms
+  Max:    24.807 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+  Total combinations: 5
+
+================================================================================
+Benchmarking HighPass 2-Pole
+================================================================================
+
+--- HighPass 2-Pole Safe API ---
+
+highpass_2_pole_safe_10k:
+  Median: 0.035 ms
+  Mean:   0.035 ms
+  Min:    0.033 ms
+  Max:    0.037 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3991
+
+highpass_2_pole_safe_100k:
+  Median: 0.353 ms
+  Mean:   0.349 ms
+  Min:    0.339 ms
+  Max:    0.359 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 426
+
+highpass_2_pole_safe_1M:
+  Median: 4.205 ms
+  Mean:   4.256 ms
+  Min:    4.154 ms
+  Max:    4.501 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 36
+
+--- HighPass 2-Pole Fast/Unsafe API ---
+
+highpass_2_pole_fast_10k:
+  Median: 0.030 ms
+  Mean:   0.030 ms
+  Min:    0.029 ms
+  Max:    0.030 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 5005
+
+highpass_2_pole_fast_100k:
+  Median: 0.293 ms
+  Mean:   0.293 ms
+  Min:    0.292 ms
+  Max:    0.295 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 508
+
+highpass_2_pole_fast_1M:
+  Median: 2.951 ms
+  Mean:   2.949 ms
+  Min:    2.934 ms
+  Max:    2.966 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 52
+
+--- HighPass 2-Pole Batch API ---
+
+highpass_2_pole_batch_small:
+  Median: 2.828 ms
+  Mean:   2.819 ms
+  Min:    2.696 ms
+  Max:    2.870 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 50
+  Total combinations: 3
+
+highpass_2_pole_batch_medium:
+  Median: 16.022 ms
+  Mean:   16.189 ms
+  Min:    15.600 ms
+  Max:    18.061 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 10
+  Total combinations: 7
+
+================================================================================
+Benchmarking NMA
+================================================================================
+
+--- NMA Safe API ---
+
+nma_safe_10k:
+  Median: 0.168 ms
+  Mean:   0.167 ms
+  Min:    0.164 ms
+  Max:    0.172 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 879
+
+nma_safe_100k:
+  Median: 1.707 ms
+  Mean:   1.717 ms
+  Min:    1.694 ms
+  Max:    1.821 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 88
+
+nma_safe_1M:
+  Median: 17.831 ms
+  Mean:   17.839 ms
+  Min:    17.737 ms
+  Max:    18.003 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 9
+
+--- NMA Fast/Unsafe API ---
+
+nma_fast_10k:
+  Median: 0.166 ms
+  Mean:   0.172 ms
+  Min:    0.162 ms
+  Max:    0.211 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 908
+
+nma_fast_100k:
+  Median: 1.613 ms
+  Mean:   1.614 ms
+  Min:    1.603 ms
+  Max:    1.628 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 92
+
+nma_fast_1M:
+  Median: 16.202 ms
+  Mean:   16.185 ms
+  Min:    16.089 ms
+  Max:    16.279 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 10
+
+--- NMA Batch API ---
+
+nma_batch_small:
+  Median: 1.419 ms
+  Mean:   1.420 ms
+  Min:    1.389 ms
+  Max:    1.458 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 101
+  Total combinations: 3
+
+nma_batch_medium:
+  Median: 4.690 ms
+  Mean:   4.692 ms
+  Min:    4.647 ms
+  Max:    4.748 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 33
+  Total combinations: 9
+
+================================================================================
+Benchmarking SMA
+================================================================================
+
+--- SMA Safe API ---
+
+sma_safe_10k:
+  Median: 0.009 ms
+  Mean:   0.010 ms
+  Min:    0.008 ms
+  Max:    0.015 ms
+  Throughput: 1.1 M elem/s
+  Samples: 10, Warmup iterations: 16415
+
+sma_safe_100k:
+  Median: 0.097 ms
+  Mean:   0.098 ms
+  Min:    0.089 ms
+  Max:    0.121 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 1509
+
+sma_safe_1M:
+  Median: 1.523 ms
+  Mean:   1.518 ms
+  Min:    1.487 ms
+  Max:    1.542 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 91
+
+--- SMA Fast/Unsafe API ---
+
+sma_fast_10k:
+  Median: 0.004 ms
+  Mean:   0.004 ms
+  Min:    0.004 ms
+  Max:    0.004 ms
+  Throughput: 2.7 M elem/s
+  Samples: 10, Warmup iterations: 40589
+
+sma_fast_100k:
+  Median: 0.037 ms
+  Mean:   0.037 ms
+  Min:    0.036 ms
+  Max:    0.037 ms
+  Throughput: 2.7 M elem/s
+  Samples: 10, Warmup iterations: 4092
+
+sma_fast_1M:
+  Median: 0.353 ms
+  Mean:   0.354 ms
+  Min:    0.352 ms
+  Max:    0.359 ms
+  Throughput: 2.8 M elem/s
+  Samples: 10, Warmup iterations: 423
+
+--- SMA Batch API ---
+
+sma_batch_small:
+  Median: 0.856 ms
+  Mean:   0.858 ms
+  Min:    0.803 ms
+  Max:    0.896 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 174
+  Total combinations: 3
+
+sma_batch_medium:
+  Median: 2.983 ms
+  Mean:   2.975 ms
+  Min:    2.931 ms
+  Max:    3.006 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 51
+  Total combinations: 11
+
+================================================================================
+Benchmarking SuperSmoother 3-Pole
+================================================================================
+
+--- SuperSmoother 3-Pole Safe API ---
+
+supersmoother_3_pole_safe_10k:
+  Median: 0.037 ms
+  Mean:   0.037 ms
+  Min:    0.036 ms
+  Max:    0.038 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3857
+
+supersmoother_3_pole_safe_100k:
+  Median: 0.390 ms
+  Mean:   0.389 ms
+  Min:    0.372 ms
+  Max:    0.408 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 399
+
+supersmoother_3_pole_safe_1M:
+  Median: 4.523 ms
+  Mean:   4.542 ms
+  Min:    4.467 ms
+  Max:    4.760 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 34
+
+--- SuperSmoother 3-Pole Fast/Unsafe API ---
+
+supersmoother_3_pole_fast_10k:
+  Median: 0.033 ms
+  Mean:   0.033 ms
+  Min:    0.033 ms
+  Max:    0.033 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4529
+
+supersmoother_3_pole_fast_100k:
+  Median: 0.329 ms
+  Mean:   0.329 ms
+  Min:    0.328 ms
+  Max:    0.330 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 455
+
+supersmoother_3_pole_fast_1M:
+  Median: 3.287 ms
+  Mean:   3.285 ms
+  Min:    3.273 ms
+  Max:    3.308 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 46
+
+--- SuperSmoother 3-Pole Batch API ---
+
+supersmoother_3_pole_batch_small:
+  Median: 0.960 ms
+  Mean:   0.965 ms
+  Min:    0.941 ms
+  Max:    0.997 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 153
+  Total combinations: 3
+
+supersmoother_3_pole_batch_medium:
+  Median: 3.353 ms
+  Mean:   3.395 ms
+  Min:    3.292 ms
+  Max:    3.855 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 45
+  Total combinations: 11
+
+================================================================================
+Benchmarking EMA
+================================================================================
+
+--- EMA Safe API ---
+
+ema_safe_10k:
+  Median: 0.069 ms
+  Mean:   0.069 ms
+  Min:    0.067 ms
+  Max:    0.071 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 2166
+
+ema_safe_100k:
+  Median: 0.686 ms
+  Mean:   0.690 ms
+  Min:    0.679 ms
+  Max:    0.711 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 218
+
+ema_safe_1M:
+  Median: 7.748 ms
+  Mean:   7.755 ms
+  Min:    7.645 ms
+  Max:    7.961 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 20
+
+--- EMA Fast/Unsafe API ---
+
+ema_fast_10k:
+  Median: 0.064 ms
+  Mean:   0.064 ms
+  Min:    0.064 ms
+  Max:    0.065 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2317
+
+ema_fast_100k:
+  Median: 0.644 ms
+  Mean:   0.644 ms
+  Min:    0.640 ms
+  Max:    0.652 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 234
+
+ema_fast_1M:
+  Median: 6.483 ms
+  Mean:   6.472 ms
+  Min:    6.439 ms
+  Max:    6.515 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 24
+
+--- EMA Batch API ---
+
+ema_batch_small:
+  Median: 1.206 ms
+  Mean:   1.185 ms
+  Min:    1.099 ms
+  Max:    1.219 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 120
+  Total combinations: 4
+
+ema_batch_medium:
+  Median: 2.866 ms
+  Mean:   2.841 ms
+  Min:    2.714 ms
+  Max:    2.912 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 53
+  Total combinations: 10
+
+================================================================================
+Benchmarking TRIMA
+================================================================================
+
+--- TRIMA Safe API ---
+
+trima_safe_10k:
+  Median: 0.020 ms
+  Mean:   0.022 ms
+  Min:    0.019 ms
+  Max:    0.032 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 6394
+
+trima_safe_100k:
+  Median: 0.210 ms
+  Mean:   0.208 ms
+  Min:    0.197 ms
+  Max:    0.215 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 698
+
+trima_safe_1M:
+  Median: 2.771 ms
+  Mean:   2.775 ms
+  Min:    2.714 ms
+  Max:    2.866 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 55
+
+--- TRIMA Fast/Unsafe API ---
+
+trima_fast_10k:
+  Median: 0.015 ms
+  Mean:   0.016 ms
+  Min:    0.015 ms
+  Max:    0.016 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9690
+
+trima_fast_100k:
+  Median: 0.151 ms
+  Mean:   0.151 ms
+  Min:    0.150 ms
+  Max:    0.155 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 989
+
+trima_fast_1M:
+  Median: 1.522 ms
+  Mean:   1.520 ms
+  Min:    1.503 ms
+  Max:    1.546 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 100
+
+--- TRIMA Batch API ---
+
+trima_batch_small:
+  Median: 0.846 ms
+  Mean:   0.872 ms
+  Min:    0.824 ms
+  Max:    0.946 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 172
+  Total combinations: 3
+
+trima_batch_medium:
+  Median: 2.694 ms
+  Mean:   2.658 ms
+  Min:    2.481 ms
+  Max:    2.731 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 56
+  Total combinations: 9
+
+================================================================================
+Benchmarking TEMA
+================================================================================
+
+--- TEMA Safe API ---
+
+tema_safe_10k:
+  Median: 0.019 ms
+  Mean:   0.019 ms
+  Min:    0.018 ms
+  Max:    0.019 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 7727
+
+tema_safe_100k:
+  Median: 0.195 ms
+  Mean:   0.195 ms
+  Min:    0.181 ms
+  Max:    0.212 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 788
+
+tema_safe_1M:
+  Median: 2.590 ms
+  Mean:   2.586 ms
+  Min:    2.495 ms
+  Max:    2.717 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 59
+
+--- TEMA Fast/Unsafe API ---
+
+tema_fast_10k:
+  Median: 0.014 ms
+  Mean:   0.014 ms
+  Min:    0.014 ms
+  Max:    0.014 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 10756
+
+tema_fast_100k:
+  Median: 0.137 ms
+  Mean:   0.136 ms
+  Min:    0.135 ms
+  Max:    0.138 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 1102
+
+tema_fast_1M:
+  Median: 1.384 ms
+  Mean:   1.395 ms
+  Min:    1.367 ms
+  Max:    1.446 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 107
+
+--- TEMA Batch API ---
+
+tema_batch_small:
+  Median: 0.833 ms
+  Mean:   0.859 ms
+  Min:    0.824 ms
+  Max:    0.946 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 173
+  Total combinations: 3
+
+tema_batch_medium:
+  Median: 1.831 ms
+  Mean:   1.805 ms
+  Min:    1.698 ms
+  Max:    1.908 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 82
+  Total combinations: 6
+
+================================================================================
+Benchmarking Wilders
+================================================================================
+
+--- Wilders Safe API ---
+
+wilders_safe_10k:
+  Median: 0.020 ms
+  Mean:   0.020 ms
+  Min:    0.018 ms
+  Max:    0.021 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 6569
+
+wilders_safe_100k:
+  Median: 0.197 ms
+  Mean:   0.198 ms
+  Min:    0.190 ms
+  Max:    0.207 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 730
+
+wilders_safe_1M:
+  Median: 2.506 ms
+  Mean:   2.510 ms
+  Min:    2.484 ms
+  Max:    2.550 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 57
+
+--- Wilders Fast/Unsafe API ---
+
+wilders_fast_10k:
+  Median: 0.014 ms
+  Mean:   0.014 ms
+  Min:    0.014 ms
+  Max:    0.014 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 10715
+
+wilders_fast_100k:
+  Median: 0.138 ms
+  Mean:   0.138 ms
+  Min:    0.138 ms
+  Max:    0.140 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 1086
+
+wilders_fast_1M:
+  Median: 1.391 ms
+  Mean:   1.397 ms
+  Min:    1.379 ms
+  Max:    1.455 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 109
+
+--- Wilders Batch API ---
+
+wilders_batch_small:
+  Median: 0.863 ms
+  Mean:   0.886 ms
+  Min:    0.828 ms
+  Max:    1.040 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 173
+  Total combinations: 3
+
+wilders_batch_medium:
+  Median: 1.835 ms
+  Mean:   1.779 ms
+  Min:    1.684 ms
+  Max:    1.902 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 84
+  Total combinations: 6
+
+================================================================================
+Benchmarking WMA (Weighted Moving Average)
+================================================================================
+
+--- WMA (Weighted Moving Average) Safe API ---
+
+wma_safe_10k:
+  Median: 0.013 ms
+  Mean:   0.014 ms
+  Min:    0.012 ms
+  Max:    0.021 ms
+  Throughput: 0.8 M elem/s
+  Samples: 10, Warmup iterations: 11419
+
+wma_safe_100k:
+  Median: 0.133 ms
+  Mean:   0.136 ms
+  Min:    0.127 ms
+  Max:    0.156 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 1113
+
+wma_safe_1M:
+  Median: 1.953 ms
+  Mean:   1.941 ms
+  Min:    1.854 ms
+  Max:    2.021 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 80
+
+--- WMA (Weighted Moving Average) Fast/Unsafe API ---
+
+wma_fast_10k:
+  Median: 0.007 ms
+  Mean:   0.007 ms
+  Min:    0.007 ms
+  Max:    0.007 ms
+  Throughput: 1.4 M elem/s
+  Samples: 10, Warmup iterations: 20576
+
+wma_fast_100k:
+  Median: 0.073 ms
+  Mean:   0.073 ms
+  Min:    0.071 ms
+  Max:    0.075 ms
+  Throughput: 1.4 M elem/s
+  Samples: 10, Warmup iterations: 2126
+
+wma_fast_1M:
+  Median: 0.703 ms
+  Mean:   0.709 ms
+  Min:    0.698 ms
+  Max:    0.733 ms
+  Throughput: 1.4 M elem/s
+  Samples: 10, Warmup iterations: 207
+
+--- WMA (Weighted Moving Average) Batch API ---
+
+wma_batch_small:
+  Median: 0.033 ms
+  Mean:   0.033 ms
+  Min:    0.032 ms
+  Max:    0.034 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4314
+  Total combinations: 3
+
+wma_batch_medium:
+  Median: 0.113 ms
+  Mean:   0.114 ms
+  Min:    0.109 ms
+  Max:    0.123 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 1327
+  Total combinations: 9
+
+================================================================================
+Benchmarking Gaussian
+================================================================================
+
+--- Gaussian Safe API ---
+
+gaussian_safe_10k:
+  Median: 0.246 ms
+  Mean:   0.246 ms
+  Min:    0.241 ms
+  Max:    0.260 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 617
+
+gaussian_safe_100k:
+  Median: 2.478 ms
+  Mean:   2.484 ms
+  Min:    2.449 ms
+  Max:    2.540 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 61
+
+gaussian_safe_1M:
+  Median: 25.237 ms
+  Mean:   25.269 ms
+  Min:    24.736 ms
+  Max:    26.060 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 6
+
+--- Gaussian Fast/Unsafe API ---
+
+gaussian_fast_10k:
+  Median: 0.239 ms
+  Mean:   0.239 ms
+  Min:    0.236 ms
+  Max:    0.241 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 632
+
+gaussian_fast_100k:
+  Median: 2.384 ms
+  Mean:   2.383 ms
+  Min:    2.371 ms
+  Max:    2.399 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 64
+
+gaussian_fast_1M:
+  Median: 24.256 ms
+  Mean:   24.236 ms
+  Min:    23.881 ms
+  Max:    24.501 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+
+--- Gaussian Batch API ---
+
+gaussian_batch_small:
+  Median: 4.382 ms
+  Mean:   4.385 ms
+  Min:    4.211 ms
+  Max:    4.587 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 33
+  Total combinations: 3
+
+gaussian_batch_medium:
+  Median: 15.865 ms
+  Mean:   15.779 ms
+  Min:    15.391 ms
+  Max:    16.138 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 10
+  Total combinations: 9
+
+================================================================================
+Benchmarking HWMA
+================================================================================
+
+--- HWMA Safe API ---
+
+hwma_safe_10k:
+  Median: 0.223 ms
+  Mean:   0.225 ms
+  Min:    0.222 ms
+  Max:    0.236 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 655
+
+hwma_safe_100k:
+  Median: 2.277 ms
+  Mean:   2.288 ms
+  Min:    2.234 ms
+  Max:    2.374 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 66
+
+hwma_safe_1M:
+  Median: 23.528 ms
+  Mean:   23.588 ms
+  Min:    23.482 ms
+  Max:    23.834 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+
+--- HWMA Fast/Unsafe API ---
+
+hwma_fast_10k:
+  Median: 0.218 ms
+  Mean:   0.219 ms
+  Min:    0.218 ms
+  Max:    0.222 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 682
+
+hwma_fast_100k:
+  Median: 2.179 ms
+  Mean:   2.180 ms
+  Min:    2.176 ms
+  Max:    2.186 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 69
+
+hwma_fast_1M:
+  Median: 22.185 ms
+  Mean:   22.172 ms
+  Min:    22.052 ms
+  Max:    22.300 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+
+--- HWMA Batch API ---
+
+hwma_batch_small:
+  Median: 5.930 ms
+  Mean:   5.920 ms
+  Min:    5.758 ms
+  Max:    6.028 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 24
+  Total combinations: 1
+
+hwma_batch_medium:
+  Median: 23.828 ms
+  Mean:   23.933 ms
+  Min:    23.339 ms
+  Max:    24.782 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 7
+  Total combinations: 1
+
+================================================================================
+Benchmarking MWDX
+================================================================================
+
+--- MWDX Safe API ---
+
+mwdx_safe_10k:
+  Median: 0.016 ms
+  Mean:   0.017 ms
+  Min:    0.015 ms
+  Max:    0.030 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9326
+
+mwdx_safe_100k:
+  Median: 0.163 ms
+  Mean:   0.164 ms
+  Min:    0.158 ms
+  Max:    0.178 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 902
+
+mwdx_safe_1M:
+  Median: 2.150 ms
+  Mean:   2.162 ms
+  Min:    2.132 ms
+  Max:    2.231 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 69
+
+--- MWDX Fast/Unsafe API ---
+
+mwdx_fast_10k:
+  Median: 0.010 ms
+  Mean:   0.010 ms
+  Min:    0.010 ms
+  Max:    0.010 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 13943
+
+mwdx_fast_100k:
+  Median: 0.105 ms
+  Mean:   0.105 ms
+  Min:    0.104 ms
+  Max:    0.106 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 1431
+
+mwdx_fast_1M:
+  Median: 1.038 ms
+  Mean:   1.039 ms
+  Min:    1.034 ms
+  Max:    1.054 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 144
+
+--- MWDX Batch API ---
+
+mwdx_batch_small:
+  Median: 0.837 ms
+  Mean:   0.868 ms
+  Min:    0.823 ms
+  Max:    1.014 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 175
+  Total combinations: 1
+
+mwdx_batch_medium:
+  Median: 1.372 ms
+  Mean:   1.445 ms
+  Min:    1.355 ms
+  Max:    1.762 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 109
+  Total combinations: 1
+
+================================================================================
+Benchmarking SRWMA
+================================================================================
+
+--- SRWMA Safe API ---
+
+srwma_safe_10k:
+  Median: 0.037 ms
+  Mean:   0.037 ms
+  Min:    0.036 ms
+  Max:    0.039 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3732
+
+srwma_safe_100k:
+  Median: 0.382 ms
+  Mean:   0.376 ms
+  Min:    0.363 ms
+  Max:    0.389 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 391
+
+srwma_safe_1M:
+  Median: 4.494 ms
+  Mean:   4.513 ms
+  Min:    4.396 ms
+  Max:    4.802 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 34
+
+--- SRWMA Fast/Unsafe API ---
+
+srwma_fast_10k:
+  Median: 0.032 ms
+  Mean:   0.032 ms
+  Min:    0.032 ms
+  Max:    0.033 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4614
+
+srwma_fast_100k:
+  Median: 0.324 ms
+  Mean:   0.324 ms
+  Min:    0.320 ms
+  Max:    0.330 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 464
+
+srwma_fast_1M:
+  Median: 3.280 ms
+  Mean:   3.322 ms
+  Min:    3.212 ms
+  Max:    3.757 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 47
+
+--- SRWMA Batch API ---
+
+srwma_batch_small:
+  Median: 0.907 ms
+  Mean:   0.909 ms
+  Min:    0.889 ms
+  Max:    0.933 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 160
+  Total combinations: 3
+
+srwma_batch_medium:
+  Median: 3.088 ms
+  Mean:   3.107 ms
+  Min:    2.985 ms
+  Max:    3.353 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 50
+  Total combinations: 9
+
+================================================================================
+Benchmarking LinReg
+================================================================================
+
+--- LinReg Safe API ---
+
+linreg_safe_10k:
+  Median: 0.015 ms
+  Mean:   0.016 ms
+  Min:    0.015 ms
+  Max:    0.031 ms
+  Throughput: 0.7 M elem/s
+  Samples: 10, Warmup iterations: 9848
+
+linreg_safe_100k:
+  Median: 0.158 ms
+  Mean:   0.158 ms
+  Min:    0.153 ms
+  Max:    0.163 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 931
+
+linreg_safe_1M:
+  Median: 2.284 ms
+  Mean:   2.314 ms
+  Min:    2.177 ms
+  Max:    2.562 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 68
+
+--- LinReg Fast/Unsafe API ---
+
+linreg_fast_10k:
+  Median: 0.010 ms
+  Mean:   0.010 ms
+  Min:    0.010 ms
+  Max:    0.010 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 14862
+
+linreg_fast_100k:
+  Median: 0.098 ms
+  Mean:   0.099 ms
+  Min:    0.097 ms
+  Max:    0.101 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 1525
+
+linreg_fast_1M:
+  Median: 0.979 ms
+  Mean:   0.982 ms
+  Min:    0.970 ms
+  Max:    0.992 ms
+  Throughput: 1.0 M elem/s
+  Samples: 10, Warmup iterations: 153
+
+--- LinReg Batch API ---
+
+linreg_batch_small:
+  Median: 0.860 ms
+  Mean:   0.850 ms
+  Min:    0.811 ms
+  Max:    0.870 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 176
+  Total combinations: 3
+
+linreg_batch_medium:
+  Median: 2.619 ms
+  Mean:   2.604 ms
+  Min:    2.547 ms
+  Max:    2.670 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 58
+  Total combinations: 9
+
+================================================================================
+Benchmarking SINWMA
+================================================================================
+
+--- SINWMA Safe API ---
+
+sinwma_safe_10k:
+  Median: 0.027 ms
+  Mean:   0.027 ms
+  Min:    0.026 ms
+  Max:    0.028 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 5350
+
+sinwma_safe_100k:
+  Median: 0.287 ms
+  Mean:   0.287 ms
+  Min:    0.267 ms
+  Max:    0.311 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 529
+
+sinwma_safe_1M:
+  Median: 3.439 ms
+  Mean:   3.456 ms
+  Min:    3.407 ms
+  Max:    3.532 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 40
+
+--- SINWMA Fast/Unsafe API ---
+
+sinwma_fast_10k:
+  Median: 0.023 ms
+  Mean:   0.023 ms
+  Min:    0.022 ms
+  Max:    0.023 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 6613
+
+sinwma_fast_100k:
+  Median: 0.220 ms
+  Mean:   0.222 ms
+  Min:    0.220 ms
+  Max:    0.229 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 677
+
+sinwma_fast_1M:
+  Median: 2.251 ms
+  Mean:   2.253 ms
+  Min:    2.219 ms
+  Max:    2.313 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 67
+
+--- SINWMA Batch API ---
+
+sinwma_batch_small:
+  Median: 0.904 ms
+  Mean:   0.903 ms
+  Min:    0.880 ms
+  Max:    0.934 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 163
+  Total combinations: 3
+
+sinwma_batch_medium:
+  Median: 2.936 ms
+  Mean:   2.920 ms
+  Min:    2.864 ms
+  Max:    2.991 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 52
+  Total combinations: 9
+
+================================================================================
+Benchmarking Tilson T3
+================================================================================
+
+--- Tilson T3 Safe API ---
+
+tilson_safe_10k:
+  Median: 0.024 ms
+  Mean:   0.024 ms
+  Min:    0.023 ms
+  Max:    0.024 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 6240
+
+tilson_safe_100k:
+  Median: 0.251 ms
+  Mean:   0.253 ms
+  Min:    0.233 ms
+  Max:    0.283 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 620
+
+tilson_safe_1M:
+  Median: 3.029 ms
+  Mean:   3.024 ms
+  Min:    3.002 ms
+  Max:    3.046 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 50
+
+--- Tilson T3 Fast/Unsafe API ---
+
+tilson_fast_10k:
+  Median: 0.019 ms
+  Mean:   0.019 ms
+  Min:    0.019 ms
+  Max:    0.019 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 7690
+
+tilson_fast_100k:
+  Median: 0.194 ms
+  Mean:   0.194 ms
+  Min:    0.193 ms
+  Max:    0.195 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 772
+
+tilson_fast_1M:
+  Median: 1.939 ms
+  Mean:   1.938 ms
+  Min:    1.931 ms
+  Max:    1.943 ms
+  Throughput: 0.5 M elem/s
+  Samples: 10, Warmup iterations: 78
+
+--- Tilson T3 Batch API ---
+
+tilson_batch_small:
+  Median: 2.833 ms
+  Mean:   2.825 ms
+  Min:    2.617 ms
+  Max:    3.080 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 50
+  Total combinations: 9
+
+tilson_batch_medium:
+  Median: 7.234 ms
+  Mean:   7.275 ms
+  Min:    7.195 ms
+  Max:    7.438 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 21
+  Total combinations: 25
+
+================================================================================
+Benchmarking TrendFlex
+================================================================================
+
+--- TrendFlex Safe API ---
+
+trendflex_safe_10k:
+  Median: 0.068 ms
+  Mean:   0.067 ms
+  Min:    0.056 ms
+  Max:    0.083 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 2629
+
+trendflex_safe_100k:
+  Median: 0.572 ms
+  Mean:   0.577 ms
+  Min:    0.558 ms
+  Max:    0.617 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 253
+
+trendflex_safe_1M:
+  Median: 6.898 ms
+  Mean:   6.912 ms
+  Min:    6.703 ms
+  Max:    7.253 ms
+  Throughput: 0.1 M elem/s
+  Samples: 10, Warmup iterations: 22
+
+--- TrendFlex Fast/Unsafe API ---
+
+trendflex_fast_10k:
+  Median: 0.052 ms
+  Mean:   0.053 ms
+  Min:    0.052 ms
+  Max:    0.056 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 2864
+
+trendflex_fast_100k:
+  Median: 0.531 ms
+  Mean:   0.532 ms
+  Min:    0.529 ms
+  Max:    0.537 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 280
+
+trendflex_fast_1M:
+  Median: 5.861 ms
+  Mean:   5.851 ms
+  Min:    5.789 ms
+  Max:    5.981 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 26
+
+--- TrendFlex Batch API ---
+
+trendflex_batch_small:
+  Median: 0.979 ms
+  Mean:   0.980 ms
+  Min:    0.966 ms
+  Max:    0.993 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 125
+  Total combinations: 3
+
+trendflex_batch_medium:
+  Median: 5.532 ms
+  Mean:   5.378 ms
+  Min:    4.998 ms
+  Max:    5.648 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 28
+  Total combinations: 16
+
+================================================================================
+Benchmarking Alligator
+================================================================================
+
+--- Alligator Safe API ---
+
+alligator_safe_10k:
+  Median: 0.029 ms
+  Mean:   0.029 ms
+  Min:    0.028 ms
+  Max:    0.031 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 4930
+
+alligator_safe_100k:
+  Median: 0.443 ms
+  Mean:   0.442 ms
+  Min:    0.418 ms
+  Max:    0.475 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 316
+
+alligator_safe_1M:
+  Median: 4.835 ms
+  Mean:   4.887 ms
+  Min:    4.714 ms
+  Max:    5.106 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 31
+
+--- Alligator Fast/Unsafe API ---
+
+alligator_fast_10k:
+  Median: 0.017 ms
+  Mean:   0.017 ms
+  Min:    0.016 ms
+  Max:    0.018 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9001
+
+alligator_fast_100k:
+  Median: 0.168 ms
+  Mean:   0.168 ms
+  Min:    0.165 ms
+  Max:    0.172 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 882
+
+alligator_fast_1M:
+  Median: 1.717 ms
+  Mean:   1.714 ms
+  Min:    1.677 ms
+  Max:    1.744 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 88
+
+--- Alligator Batch API ---
+
+alligator_batch_small:
+  Median: 0.752 ms
+  Mean:   0.753 ms
+  Min:    0.740 ms
+  Max:    0.777 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 193
+  Total combinations: 1
+
+alligator_batch_medium:
+  Median: 1156.217 ms
+  Mean:   1151.752 ms
+  Min:    1123.970 ms
+  Max:    1171.187 ms
+  Throughput: 0.0 M elem/s
+  Samples: 10, Warmup iterations: 1
+  Total combinations: 1
+
+================================================================================
+Benchmarking VWMA (Volume Weighted Moving Average)
+================================================================================
+
+--- VWMA (Volume Weighted Moving Average) Safe API ---
+
+vwma_safe_10k:
+  Median: 0.017 ms
+  Mean:   0.018 ms
+  Min:    0.015 ms
+  Max:    0.030 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 9694
+
+vwma_safe_100k:
+  Median: 0.157 ms
+  Mean:   0.159 ms
+  Min:    0.147 ms
+  Max:    0.194 ms
+  Throughput: 0.6 M elem/s
+  Samples: 10, Warmup iterations: 955
+vwma: Price and volume mismatch: price length = 1002240, volume length = 2004480

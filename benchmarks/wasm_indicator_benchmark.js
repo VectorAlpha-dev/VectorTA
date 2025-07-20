@@ -274,19 +274,8 @@ const INDICATORS = {
             freeFn: 'edcf_free',
             computeFn: 'edcf_into',
             params: { period: 15 }
-        },
-        // Batch API
-        batch: {
-            fn: 'edcf_batch',
-            config: {
-                small: {
-                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
-                },
-                medium: {
-                    period_range: [15, 50, 5]  // 8 values: 15, 20, 25, ..., 50
-                }
-            }
         }
+        // No batch API available
     },
     highpass: {
         name: 'HighPass',
@@ -424,7 +413,7 @@ const INDICATORS = {
         },
         // Batch API
         batch: {
-            fn: 'supersmoother_batch_js',  // Use the old API for benchmarking
+            fn: 'supersmoother_batch_js',  // Use the JS API that takes parameters
             fastFn: 'supersmoother_batch_into',
             config: {
                 small: {
@@ -484,7 +473,7 @@ const INDICATORS = {
         },
         // Batch API (optional)
         batch: {
-            fn: 'fwma_batch',
+            fn: 'fwma_batch_js',
             config: {
                 // Reduced combinations for faster execution
                 small: {
@@ -516,7 +505,7 @@ const INDICATORS = {
         },
         // Batch API
         batch: {
-            fn: 'hma_batch',  // This calls hma_batch_unified_js
+            fn: 'hma_batch_js',  // Use JS API for parameters
             config: {
                 small: {
                     period_range: [5, 15, 5]       // 3 values: 5, 10, 15
@@ -545,7 +534,7 @@ const INDICATORS = {
         },
         // Batch API
         batch: {
-            fn: 'kama_batch',
+            fn: 'kama_batch_js',
             config: {
                 small: {
                     period_range: [10, 30, 10]  // 3 values: 10, 20, 30
@@ -1553,7 +1542,6 @@ class WasmIndicatorBenchmark {
         const closes = [];
         const volumes = [];
         const timestamps = [];
-        const volumes = [];
         
         for (const line of lines) {
             const parts = line.split(',');
@@ -1562,7 +1550,6 @@ class WasmIndicatorBenchmark {
                 closes.push(parseFloat(parts[2]));
                 highs.push(parseFloat(parts[3]));
                 lows.push(parseFloat(parts[4]));
-                volumes.push(parseFloat(parts[5]));
                 volumes.push(parseFloat(parts[5])); // Volume is column 5
             }
         }
@@ -1592,7 +1579,8 @@ class WasmIndicatorBenchmark {
                 open: new Float64Array(opens),
                 high: new Float64Array(highs),
                 low: new Float64Array(lows),
-                close: new Float64Array(closes)
+                close: new Float64Array(closes),
+                volume: new Float64Array(volumes)
             }
         };
         
@@ -1738,7 +1726,7 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_fast_${sizeName}`;
             const len = data.length;
             
-            let inPtr, outPtr, highPtr, lowPtr, closePtr, outPtr2, outPtr3, timestampsPtr, volumesPtr, pricesPtr, outPtr2;
+            let inPtr, outPtr, highPtr, lowPtr, closePtr, outPtr2, outPtr3, timestampsPtr, volumesPtr, pricesPtr, volumePtr;
             
             try {
                 // Handle custom inputs
@@ -1811,18 +1799,19 @@ class WasmIndicatorBenchmark {
                     const lowView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
                     const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, closePtr, len);
                     
-                    highView.set(ohlc.high);
-                    lowView.set(ohlc.low);
-                    closeView.set(ohlc.close);
+                    highView.set(ohlc.high.slice(0, len));
+                    lowView.set(ohlc.low.slice(0, len));
+                    closeView.set(ohlc.close.slice(0, len));
                     
                     // Copy volume data for ADOSC
                     if (indicatorConfig.name === 'ADOSC') {
                         const volumeView = new Float64Array(this.wasm.__wasm.memory.buffer, volumePtr, len);
-                        volumeView.set(ohlc.volume);
+                        // Use slice to ensure we don't exceed the allocated buffer length
+                        volumeView.set(ohlc.volume.slice(0, len));
                     }
                     
                     // Allocate second output buffer if indicator has dual outputs
-                    const outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
+                    outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
                     
                     // Debug removed for performance
                     
@@ -1830,6 +1819,36 @@ class WasmIndicatorBenchmark {
                         // Pass the full indicatorConfig so name is available
                         const modifiedConfig = Object.assign({}, indicatorConfig.fast, { name: indicatorConfig.name });
                         const paramArray = this.prepareFastParams(params, null, outPtr, len, modifiedConfig, highPtr, lowPtr, closePtr, indicatorConfig.fast.dualOutput, outPtr2, volumePtr);
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
+
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                } else if (indicatorConfig.fast.needsVwapInputs) {
+                    // Handle VWAP indicators that need timestamps, volumes, prices
+                    const vwap = this.vwapData[sizeName];
+                    
+                    // Allocate buffers for VWAP inputs
+                    timestampsPtr = this.wasm[allocFn](len);
+                    volumesPtr = this.wasm[allocFn](len);
+                    pricesPtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);
+                    
+                    // Copy data
+                    const timestampsView = new Float64Array(this.wasm.__wasm.memory.buffer, timestampsPtr, len);
+                    const volumesView = new Float64Array(this.wasm.__wasm.memory.buffer, volumesPtr, len);
+                    const pricesView = new Float64Array(this.wasm.__wasm.memory.buffer, pricesPtr, len);
+                    
+                    timestampsView.set(vwap.timestamps);
+                    volumesView.set(vwap.volumes);
+                    pricesView.set(vwap.prices);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = this.prepareFastParams(params, null, outPtr, len, indicatorConfig.fast, null, null, null, false, null, null, timestampsPtr, volumesPtr, pricesPtr);
                         this.wasm[computeFn].apply(this.wasm, paramArray);
                     }, benchName, {
                         dataSize: len,
@@ -1868,15 +1887,15 @@ class WasmIndicatorBenchmark {
                 } else {
                     // Pre-allocate buffers outside of benchmark
                     inPtr = this.wasm[allocFn](len);
-                            outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
                     outPtr = this.wasm[allocFn](len);
+                    outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
                     
                     // Copy data once
                     const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, len);
                     inView.set(data);
                     
                     const result = this.benchmarkFunction(() => {
-                        const paramArray = this.prepareFastParams(params, inPtr, outPtr, len, indicatorConfig.fast, dualOutput, outPtr2);
+                        const paramArray = this.prepareFastParams(params, inPtr, outPtr, len, indicatorConfig.fast, null, null, null, indicatorConfig.fast.dualOutput, outPtr2, null);
                         this.wasm[computeFn].apply(this.wasm, paramArray);
                     }, benchName, {
                         dataSize: len,
@@ -1910,6 +1929,7 @@ class WasmIndicatorBenchmark {
                     if (closePtr) this.wasm[freeFn](closePtr, len);
                     if (volumePtr) this.wasm[freeFn](volumePtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
+                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
                 } else if (outputCount === 3) {
                     if (inPtr) this.wasm[freeFn](inPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
@@ -1987,8 +2007,16 @@ class WasmIndicatorBenchmark {
                     // PWMA and SuperSmoother have special batch APIs that take individual parameters
                     const [start, end, step] = batchConfig.period_range;
                     wasmFn.call(this.wasm, data, start, end, step);
-                } else if (indicatorKey === 'trendflex' || indicatorKey === 'wilders') {
-                    // TrendFlex and Wilders use the new ergonomic batch API with config object
+                } else if (indicatorKey === 'trendflex' || indicatorKey === 'wilders' || indicatorKey === 'alma' || 
+                           indicatorKey === 'highpass' || indicatorKey === 'jsa' || indicatorKey === 'maaq' || 
+                           indicatorKey === 'smma' || indicatorKey === 'ehlers_itrend' ||
+                           indicatorKey === 'cwma' || indicatorKey === 'dema' || indicatorKey === 'epma' || 
+                           indicatorKey === 'jma' || indicatorKey === 'highpass_2_pole' || indicatorKey === 'nma' || 
+                           indicatorKey === 'sma' || indicatorKey === 'supersmoother_3_pole' || indicatorKey === 'ema' || 
+                           indicatorKey === 'tema' || indicatorKey === 'gaussian' || indicatorKey === 'hwma' || 
+                           indicatorKey === 'mwdx' || indicatorKey === 'srwma' || indicatorKey === 'linreg' || 
+                           indicatorKey === 'sinwma' || indicatorKey === 'zlema' || indicatorKey === 'adx') {
+                    // These indicators use the new ergonomic batch API with config object
                     wasmFn.call(this.wasm, data, batchConfig);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig, sizeName);
@@ -2191,7 +2219,7 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for fast API call
      */
-    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null, timestampsPtr = null, volumesPtr = null, pricesPtr = null) {
+    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null, volumePtr = null, timestampsPtr = null, volumesPtr = null, pricesPtr = null) {
         // Check if this indicator needs VWAP inputs
         if (indicatorConfig.needsVwapInputs) {
             // For VWAP: timestamps_ptr, volumes_ptr, prices_ptr, out_ptr, len, ...params
