@@ -291,19 +291,148 @@ pub fn pwma_avx512(data: &[f64], weights: &[f64], period: usize, first: usize, o
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn pwma_avx2(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	pwma_scalar(data, weights, period, first, out)
+    let len = data.len();
+    let vecs = period / 4;  // AVX2 processes 4 doubles per vector
+    let tail = period % 4;
+    
+    for i in (first + period - 1)..len {
+        let start = i + 1 - period;
+        let mut acc = _mm256_setzero_pd();
+        
+        // Process full 256-bit vectors (4 doubles at a time)
+        for v in 0..vecs {
+            let d = _mm256_loadu_pd(data.as_ptr().add(start + v * 4));
+            let w = _mm256_loadu_pd(weights.as_ptr().add(v * 4));
+            acc = _mm256_fmadd_pd(d, w, acc);
+        }
+        
+        // Horizontal sum of acc
+        // Split 256-bit into two 128-bit halves and add
+        let low128 = _mm256_castpd256_pd128(acc);
+        let high128 = _mm256_extractf128_pd(acc, 1);
+        let sum128 = _mm_add_pd(low128, high128);
+        
+        // Final horizontal add of 2 doubles
+        let high64 = _mm_unpackhi_pd(sum128, sum128);
+        let final_sum = _mm_add_sd(sum128, high64);
+        let mut total = _mm_cvtsd_f64(final_sum);
+        
+        // Process tail elements
+        for t in 0..tail {
+            let d = *data.as_ptr().add(start + vecs * 4 + t);
+            let w = *weights.as_ptr().add(vecs * 4 + t);
+            total = d.mul_add(w, total);
+        }
+        
+        *out.as_mut_ptr().add(i) = total;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn pwma_avx512_short(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	pwma_scalar(data, weights, period, first, out)
+    let vecs = period / 8;
+    let tail = period % 8;
+	let len = data.len();
+
+    // For short periods, keep it simple
+    for i in (first + period - 1)..len {
+        let start = i + 1 - period;
+        let mut acc = _mm512_setzero_pd();
+
+        // Process all full vectors
+        for v in 0..vecs {
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + v * 8));
+            let w = _mm512_loadu_pd(weights.as_ptr().add(v * 8));
+            acc = _mm512_fmadd_pd(d, w, acc);
+        }
+
+        // Optimized horizontal sum using shuffles
+        // Sum pairs: [a+e, b+f, c+g, d+h]
+        let shuf = _mm512_shuffle_pd(acc, acc, 0b01010101);
+        let sum1 = _mm512_add_pd(acc, shuf);
+        
+        // Sum quads: [a+e+c+g, b+f+d+h, ...]
+        let perm = _mm512_permutex_pd(sum1, 0b01001110);
+        let sum2 = _mm512_add_pd(sum1, perm);
+        
+        // Final sum across 256-bit lanes
+        let low = _mm512_castpd512_pd256(sum2);
+        let high = _mm512_extractf64x4_pd(sum2, 1);
+        let final256 = _mm256_add_pd(low, high);
+        let mut total = _mm256_cvtsd_f64(final256);
+
+        // Process tail
+        for t in 0..tail {
+            let d = *data.as_ptr().add(start + vecs * 8 + t);
+            let w = *weights.as_ptr().add(vecs * 8 + t);
+            total = d.mul_add(w, total);
+        }
+        *out.as_mut_ptr().add(i) = total;
+    }
 }
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn pwma_avx512_long(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	pwma_scalar(data, weights, period, first, out)
+    let len = data.len();
+    let full_vecs = period / 8;
+    let tail = period % 8;
+
+    for i in (first + period - 1)..len {
+        let start = i + 1 - period;
+        
+        // Accumulate all vectors first, then do a single horizontal sum
+        let mut acc0 = _mm512_setzero_pd();
+        let mut acc1 = _mm512_setzero_pd();
+        
+        // Process vectors in pairs for better ILP
+        let pairs = full_vecs / 2;
+        let remaining = full_vecs % 2;
+        
+        for p in 0..pairs {
+            let base = p * 2 * 8;
+            let d0 = _mm512_loadu_pd(data.as_ptr().add(start + base));
+            let d1 = _mm512_loadu_pd(data.as_ptr().add(start + base + 8));
+            let w0 = _mm512_loadu_pd(weights.as_ptr().add(base));
+            let w1 = _mm512_loadu_pd(weights.as_ptr().add(base + 8));
+            
+            acc0 = _mm512_fmadd_pd(d0, w0, acc0);
+            acc1 = _mm512_fmadd_pd(d1, w1, acc1);
+        }
+        
+        // Process remaining vector
+        if remaining > 0 {
+            let base = pairs * 2 * 8;
+            let d = _mm512_loadu_pd(data.as_ptr().add(start + base));
+            let w = _mm512_loadu_pd(weights.as_ptr().add(base));
+            acc0 = _mm512_fmadd_pd(d, w, acc0);
+        }
+        
+        // Combine accumulators
+        let acc = _mm512_add_pd(acc0, acc1);
+        
+        // Single horizontal sum at the end
+        let low256 = _mm512_castpd512_pd256(acc);
+        let high256 = _mm512_extractf64x4_pd(acc, 1);
+        let sum256 = _mm256_add_pd(low256, high256);
+        let low128 = _mm256_castpd256_pd128(sum256);
+        let high128 = _mm256_extractf128_pd(sum256, 1);
+        let sum128 = _mm_add_pd(low128, high128);
+        let high64 = _mm_unpackhi_pd(sum128, sum128);
+        let final_sum = _mm_add_sd(sum128, high64);
+        let mut total = _mm_cvtsd_f64(final_sum);
+        
+        // Process tail elements
+        for t in 0..tail {
+            let d = *data.as_ptr().add(start + full_vecs * 8 + t);
+            let w = *weights.as_ptr().add(full_vecs * 8 + t);
+            total = d.mul_add(w, total);
+        }
+        
+        *out.as_mut_ptr().add(i) = total;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -658,7 +787,9 @@ unsafe fn pwma_row_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 unsafe fn pwma_row_avx2(data: &[f64], first: usize, period: usize, stride: usize, w_ptr: *const f64, out: &mut [f64]) {
-	pwma_row_scalar(data, first, period, stride, w_ptr, out)
+	// Create a slice from the weight pointer for pwma_avx2
+	let weights = std::slice::from_raw_parts(w_ptr, period);
+	pwma_avx2(data, weights, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -688,7 +819,38 @@ unsafe fn pwma_row_avx512_short(
 	w_ptr: *const f64,
 	out: &mut [f64],
 ) {
-	pwma_row_scalar(data, first, period, stride, w_ptr, out)
+	let vecs = period / 8;
+	let tail = period % 8;
+	
+	for i in (first + period - 1)..data.len() {
+		let start = i + 1 - period;
+		let mut acc = _mm512_setzero_pd();
+		
+		// Process full 512-bit vectors
+		for v in 0..vecs {
+			let d = _mm512_loadu_pd(data.as_ptr().add(start + v * 8));
+			let w = _mm512_loadu_pd(w_ptr.add(v * 8));
+			acc = _mm512_fmadd_pd(d, w, acc);
+		}
+		
+		// Horizontal sum
+		let low256 = _mm512_castpd512_pd256(acc);
+		let high256 = _mm512_extractf64x4_pd(acc, 1);
+		let sum256 = _mm256_add_pd(low256, high256);
+		let low128 = _mm256_castpd256_pd128(sum256);
+		let high128 = _mm256_extractf128_pd(sum256, 1);
+		let sum128 = _mm_add_pd(low128, high128);
+		let high64 = _mm_unpackhi_pd(sum128, sum128);
+		let final_sum = _mm_add_sd(sum128, high64);
+		let mut total = _mm_cvtsd_f64(final_sum);
+		
+		// Process tail
+		for t in 0..tail {
+			total += *data.get_unchecked(start + vecs * 8 + t) * *w_ptr.add(vecs * 8 + t);
+		}
+		
+		out[i] = total;
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -701,7 +863,76 @@ unsafe fn pwma_row_avx512_long(
 	w_ptr: *const f64,
 	out: &mut [f64],
 ) {
-	pwma_row_scalar(data, first, period, stride, w_ptr, out)
+	let full_vecs = period / 8;
+	let tail = period % 8;
+	
+	for i in (first + period - 1)..data.len() {
+		let start = i + 1 - period;
+		let mut total = 0.0;
+		
+		// Process in chunks of 4 vectors for better ILP
+		let chunks = full_vecs / 4;
+		let remaining_vecs = full_vecs % 4;
+		
+		for c in 0..chunks {
+			let base = c * 4 * 8;
+			let d0 = _mm512_loadu_pd(data.as_ptr().add(start + base));
+			let d1 = _mm512_loadu_pd(data.as_ptr().add(start + base + 8));
+			let d2 = _mm512_loadu_pd(data.as_ptr().add(start + base + 16));
+			let d3 = _mm512_loadu_pd(data.as_ptr().add(start + base + 24));
+			
+			let w0 = _mm512_loadu_pd(w_ptr.add(base));
+			let w1 = _mm512_loadu_pd(w_ptr.add(base + 8));
+			let w2 = _mm512_loadu_pd(w_ptr.add(base + 16));
+			let w3 = _mm512_loadu_pd(w_ptr.add(base + 24));
+			
+			let prod0 = _mm512_mul_pd(d0, w0);
+			let prod1 = _mm512_mul_pd(d1, w1);
+			let prod2 = _mm512_mul_pd(d2, w2);
+			let prod3 = _mm512_mul_pd(d3, w3);
+			
+			let sum01 = _mm512_add_pd(prod0, prod1);
+			let sum23 = _mm512_add_pd(prod2, prod3);
+			let sum_all = _mm512_add_pd(sum01, sum23);
+			
+			// Horizontal sum
+			let low256 = _mm512_castpd512_pd256(sum_all);
+			let high256 = _mm512_extractf64x4_pd(sum_all, 1);
+			let sum256 = _mm256_add_pd(low256, high256);
+			let low128 = _mm256_castpd256_pd128(sum256);
+			let high128 = _mm256_extractf128_pd(sum256, 1);
+			let sum128 = _mm_add_pd(low128, high128);
+			let high64 = _mm_unpackhi_pd(sum128, sum128);
+			let final_sum = _mm_add_sd(sum128, high64);
+			total += _mm_cvtsd_f64(final_sum);
+		}
+		
+		// Process remaining vectors
+		for v in 0..remaining_vecs {
+			let base = chunks * 4 * 8 + v * 8;
+			let d = _mm512_loadu_pd(data.as_ptr().add(start + base));
+			let w = _mm512_loadu_pd(w_ptr.add(base));
+			let prod = _mm512_mul_pd(d, w);
+			
+			// Horizontal sum
+			let low256 = _mm512_castpd512_pd256(prod);
+			let high256 = _mm512_extractf64x4_pd(prod, 1);
+			let sum256 = _mm256_add_pd(low256, high256);
+			let low128 = _mm256_castpd256_pd128(sum256);
+			let high128 = _mm256_extractf128_pd(sum256, 1);
+			let sum128 = _mm_add_pd(low128, high128);
+			let high64 = _mm_unpackhi_pd(sum128, sum128);
+			let final_sum = _mm_add_sd(sum128, high64);
+			total += _mm_cvtsd_f64(final_sum);
+		}
+		
+		// Process tail
+		for t in 0..tail {
+			total += *data.get_unchecked(start + full_vecs * 8 + t) * *w_ptr.add(full_vecs * 8 + t);
+		}
+		
+		out[i] = total;
+	}
 }
 
 #[inline]
