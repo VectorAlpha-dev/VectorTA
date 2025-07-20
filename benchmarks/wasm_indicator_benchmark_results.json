@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-19T22:40:33.011Z",
+  "timestamp": "2025-07-20T20:21:43.221Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "trima_safe_10k": {
-      "name": "trima_safe_10k",
-      "median": 0.038407881773399107,
-      "mean": 0.03561948275862065,
-      "min": 0.03006354679802944,
-      "max": 0.04034064039408859,
+    "adx_safe_10k": {
+      "name": "adx_safe_10k",
+      "median": 0.05697580645161288,
+      "mean": 0.05935346774193553,
+      "min": 0.056158467741935725,
+      "max": 0.06702096774193521,
       "samples": 10,
-      "warmupIterations": 4064,
-      "throughput": 0.2603632259388461,
+      "warmupIterations": 2483,
+      "throughput": 0.17551309271054502,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_safe_100k": {
-      "name": "trima_safe_100k",
-      "median": 0.30719615384615157,
-      "mean": 0.2866371153846149,
-      "min": 0.2402903846153864,
-      "max": 0.32756153846153996,
+    "adx_safe_100k": {
+      "name": "adx_safe_100k",
+      "median": 1.1429749999999974,
+      "mean": 1.1693733333333305,
+      "min": 1.1154833333333347,
+      "max": 1.3746416666666619,
       "samples": 10,
-      "warmupIterations": 529,
-      "throughput": 0.3255249089156289,
+      "warmupIterations": 127,
+      "throughput": 0.08749097749294624,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_safe_1M": {
-      "name": "trima_safe_1M",
-      "median": 2.64507000000001,
-      "mean": 2.646691999999998,
-      "min": 2.610690000000022,
-      "max": 2.6853399999999965,
+    "adx_safe_1M": {
+      "name": "adx_safe_1M",
+      "median": 12.654910000000019,
+      "mean": 13.156556000000004,
+      "min": 12.533439999999995,
+      "max": 16.599229999999988,
       "samples": 10,
-      "warmupIterations": 56,
-      "throughput": 0.37890868672662587,
+      "warmupIterations": 13,
+      "throughput": 0.0791977185139996,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_fast_10k": {
-      "name": "trima_fast_10k",
-      "median": 0.015027575757575863,
-      "mean": 0.015031101010101014,
-      "min": 0.014962323232323181,
-      "max": 0.015112727272727134,
+    "adx_fast_10k": {
+      "name": "adx_fast_10k",
+      "median": 0.03619974619289397,
+      "mean": 0.0361771319796955,
+      "min": 0.03554644670050712,
+      "max": 0.036636802030457355,
       "samples": 10,
-      "warmupIterations": 9902,
-      "throughput": 0.6654433264100295,
+      "warmupIterations": 3947,
+      "throughput": 0.27624503074452506,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_fast_100k": {
-      "name": "trima_fast_100k",
-      "median": 0.15137599999999793,
-      "mean": 0.15158030000000008,
-      "min": 0.15064600000000156,
-      "max": 0.15348000000000184,
+    "adx_fast_100k": {
+      "name": "adx_fast_100k",
+      "median": 0.9984000000000075,
+      "mean": 0.9985780000000007,
+      "min": 0.991286666666656,
+      "max": 1.010573333333347,
       "samples": 10,
-      "warmupIterations": 1000,
-      "throughput": 0.660606701194386,
+      "warmupIterations": 151,
+      "throughput": 0.10016025641025565,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_fast_1M": {
-      "name": "trima_fast_1M",
-      "median": 1.517300000000023,
-      "mean": 1.519390000000003,
-      "min": 1.506790000000001,
-      "max": 1.5315299999999752,
+    "adx_fast_1M": {
+      "name": "adx_fast_1M",
+      "median": 10.70574999999999,
+      "mean": 10.892413000000015,
+      "min": 10.598860000000013,
+      "max": 11.770980000000055,
       "samples": 10,
-      "warmupIterations": 98,
-      "throughput": 0.6605417517959433,
+      "warmupIterations": 15,
+      "throughput": 0.0936169815286179,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "trima"
+      "indicator": "adx"
     },
-    "trima_batch_small": {
-      "name": "trima_batch_small",
-      "median": 0.8073368421052548,
-      "mean": 0.8506426315789429,
-      "min": 0.7943578947368367,
-      "max": 1.0343894736841943,
+    "adx_batch_small": {
+      "name": "adx_batch_small",
+      "median": 1.211463636363574,
+      "mean": 1.2350381818181466,
+      "min": 1.1704363636364095,
+      "max": 1.4463363636362951,
       "samples": 10,
-      "warmupIterations": 195,
-      "throughput": 0.012386403640298966,
+      "warmupIterations": 119,
+      "throughput": 0.008254478054344906,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "trima",
+      "indicator": "adx",
       "batchSize": "small"
     },
-    "trima_batch_medium": {
-      "name": "trima_batch_medium",
-      "median": 2.54396999999999,
-      "mean": 2.629531999999999,
-      "min": 2.463909999999987,
-      "max": 2.831100000000015,
+    "adx_batch_medium": {
+      "name": "adx_batch_medium",
+      "median": 2.020640000000003,
+      "mean": 1.988270999999995,
+      "min": 1.8545600000000377,
+      "max": 2.084490000000005,
       "samples": 10,
-      "warmupIterations": 59,
-      "throughput": 0.003930863964590792,
+      "warmupIterations": 72,
+      "throughput": 0.0049489270726106515,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "trima",
+      "indicator": "adx",
       "batchSize": "medium"
     }
   }

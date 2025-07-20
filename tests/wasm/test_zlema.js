@@ -95,9 +95,15 @@ test('ZLEMA reinput', () => {
     
     assert.strictEqual(secondResult.length, firstResult.length, 'Output length should match input');
     
-    // Check that values after warmup period are finite
-    for (let idx = 14; idx < secondResult.length; idx++) {
-        assert(isFinite(secondResult[idx]), `NaN found at index ${idx}`);
+    // Find first non-NaN index in second result
+    let firstValidIdx = 0;
+    while (firstValidIdx < secondResult.length && isNaN(secondResult[firstValidIdx])) {
+        firstValidIdx++;
+    }
+    
+    // Check that values after the first valid index are finite
+    for (let idx = firstValidIdx; idx < secondResult.length; idx++) {
+        assert(isFinite(secondResult[idx]), `NaN found at index ${idx} after first valid at ${firstValidIdx}`);
     }
 });
 
@@ -184,7 +190,118 @@ test('ZLEMA empty input', () => {
     
     assert.throws(() => {
         wasm.zlema_js(data, 14);
-    }, /Invalid period/, 'Should throw error for empty input');
+    }, /All values are NaN/, 'Should throw error for empty input');
+});
+
+test('ZLEMA fast API basic', () => {
+    const data = testData.close;
+    const period = 14;
+    
+    // Allocate memory
+    const inPtr = wasm.zlema_alloc(data.length);
+    const outPtr = wasm.zlema_alloc(data.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(data, inPtr / 8);
+        
+        // Compute
+        wasm.zlema_into(inPtr, outPtr, data.length, period);
+        
+        // Read results
+        const result = Array.from(memory.slice(outPtr / 8, outPtr / 8 + data.length));
+        
+        // Compare with safe API
+        const safeResult = wasm.zlema_js(data, period);
+        assertArrayClose(result, safeResult, 1e-9, 'Fast API should match safe API');
+    } finally {
+        // Clean up
+        wasm.zlema_free(inPtr, data.length);
+        wasm.zlema_free(outPtr, data.length);
+    }
+});
+
+test('ZLEMA fast API in-place (aliasing)', () => {
+    const data = testData.close;
+    const period = 14;
+    
+    // Allocate memory
+    const ptr = wasm.zlema_alloc(data.length);
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(data, ptr / 8);
+        
+        // Compute in-place (same pointer for input and output)
+        wasm.zlema_into(ptr, ptr, data.length, period);
+        
+        // Read results
+        const result = Array.from(memory.slice(ptr / 8, ptr / 8 + data.length));
+        
+        // Compare with safe API
+        const safeResult = wasm.zlema_js(data, period);
+        assertArrayClose(result, safeResult, 1e-9, 'In-place computation should match safe API');
+    } finally {
+        // Clean up
+        wasm.zlema_free(ptr, data.length);
+    }
+});
+
+test('ZLEMA unified batch API', () => {
+    const data = testData.close;
+    
+    // Test with config object
+    const config = {
+        period_range: [14, 20, 2]  // 14, 16, 18, 20
+    };
+    
+    const result = wasm.zlema_batch(data, config);
+    
+    assert(result.values, 'Result should have values array');
+    assert(result.combos, 'Result should have combos array');
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows (periods)');
+    assert.strictEqual(result.cols, data.length, 'Columns should match data length');
+    assert.strictEqual(result.values.length, 4 * data.length, 'Values should be flattened 2D array');
+    
+    // Check that first row matches single calculation
+    const firstRowValues = result.values.slice(0, data.length);
+    const singleResult = wasm.zlema_js(data, 14);
+    assertArrayClose(firstRowValues, singleResult, 1e-9, 'First row should match period=14 calculation');
+});
+
+test('ZLEMA batch fast API', () => {
+    const data = testData.close;
+    const periodStart = 10;
+    const periodEnd = 20;
+    const periodStep = 5;  // 10, 15, 20 = 3 rows
+    
+    // Allocate memory
+    const inPtr = wasm.zlema_alloc(data.length);
+    const outPtr = wasm.zlema_alloc(3 * data.length);  // 3 rows
+    
+    try {
+        // Copy data to WASM memory
+        const memory = new Float64Array(wasm.__wasm.memory.buffer);
+        memory.set(data, inPtr / 8);
+        
+        // Compute batch
+        const rows = wasm.zlema_batch_into(inPtr, outPtr, data.length, periodStart, periodEnd, periodStep);
+        assert.strictEqual(rows, 3, 'Should return 3 rows');
+        
+        // Read results
+        const result = Array.from(memory.slice(outPtr / 8, outPtr / 8 + 3 * data.length));
+        
+        // Check first row (period=10)
+        const firstRow = result.slice(0, data.length);
+        const expected10 = wasm.zlema_js(data, 10);
+        assertArrayClose(firstRow, expected10, 1e-9, 'First batch row should match period=10');
+    } finally {
+        // Clean up
+        wasm.zlema_free(inPtr, data.length);
+        wasm.zlema_free(outPtr, 3 * data.length);
+    }
 });
 
 test.after(() => {

@@ -128,18 +128,24 @@ test('VWAP batch processing', () => {
         (h + testData.low[i] + testData.close[i]) / 3.0
     );
     
-    const result = wasm.vwap_batch_js(
+    // Use the new batch API with config object
+    const result_old = wasm.vwap_batch(
         timestamps,
         volumes,
         prices,
-        "1d",
-        "3d",
-        1
+        { anchor_range: ["1d", "3d", 1] }
     );
     
-    // Result should be flattened 2D array (3 rows * data length)
-    assert.strictEqual(result.length, 3 * prices.length, 
-        'Batch result should have 3 rows × data length values');
+    // Result should be an object with values, anchors, rows, cols
+    assert(result_old.values, 'Result should have values array');
+    assert(result_old.anchors, 'Result should have anchors array');
+    assert.strictEqual(result_old.rows, 3, 'Should have 3 rows (1d, 2d, 3d)');
+    assert.strictEqual(result_old.cols, prices.length, 'Cols should match input length');
+    assert.deepStrictEqual(result_old.anchors, ["1d", "2d", "3d"], 'Anchors should match expected');
+    
+    // Check that values array has correct length
+    assert.strictEqual(result_old.values.length, result_old.rows * result_old.cols, 
+        'Values array should have rows × cols elements');
     
     // Get metadata to verify anchors
     const metadata = wasm.vwap_batch_metadata_js("1d", "3d", 1);
@@ -148,7 +154,7 @@ test('VWAP batch processing', () => {
     
     // Check that first row (1d) matches single VWAP calculation
     const single_vwap = wasm.vwap_js(timestamps, volumes, prices, "1d");
-    const first_row = result.slice(0, prices.length);
+    const first_row = result_old.values.slice(0, prices.length);
     assertArrayClose(first_row, single_vwap, 1e-9, 'Batch 1d row should match single calculation');
 });
 
@@ -178,6 +184,164 @@ test('VWAP nan handling', () => {
         if (!isNaN(result[i])) {
             assert(isFinite(result[i]), `Found non-finite value at index ${i}`);
         }
+    }
+});
+
+test('VWAP fast API (vwap_into)', () => {
+    const timestamps = testData.timestamp;
+    const volumes = testData.volume;
+    const prices = testData.close;
+    const len = prices.length;
+    
+    // Allocate memory
+    const outPtr = wasm.vwap_alloc(len);
+    
+    try {
+        // Copy input data to WASM memory
+        const timestampsPtr = wasm.vwap_alloc(len);
+        const volumesPtr = wasm.vwap_alloc(len);
+        const pricesPtr = wasm.vwap_alloc(len);
+        
+        const timestampsView = new Float64Array(wasm.__wasm.memory.buffer, timestampsPtr, len);
+        const volumesView = new Float64Array(wasm.__wasm.memory.buffer, volumesPtr, len);
+        const pricesView = new Float64Array(wasm.__wasm.memory.buffer, pricesPtr, len);
+        
+        timestampsView.set(timestamps);
+        volumesView.set(volumes);
+        pricesView.set(prices);
+        
+        // Call fast API
+        wasm.vwap_into(timestampsPtr, volumesPtr, pricesPtr, outPtr, len, "1d");
+        
+        // Read result
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        const resultCopy = Array.from(result);
+        
+        // Compare with safe API
+        const expected = wasm.vwap_js(timestamps, volumes, prices, "1d");
+        assertArrayClose(resultCopy, expected, 1e-9, 'Fast API should match safe API');
+        
+        // Clean up input buffers
+        wasm.vwap_free(timestampsPtr, len);
+        wasm.vwap_free(volumesPtr, len);
+        wasm.vwap_free(pricesPtr, len);
+    } finally {
+        // Always free allocated memory
+        wasm.vwap_free(outPtr, len);
+    }
+});
+
+test('VWAP fast API aliasing', () => {
+    const timestamps = testData.timestamp.slice(0, 100);
+    const volumes = testData.volume.slice(0, 100);
+    const prices = testData.close.slice(0, 100);
+    const len = prices.length;
+    
+    // Test in-place operation (aliasing)
+    const pricesPtr = wasm.vwap_alloc(len);
+    const timestampsPtr = wasm.vwap_alloc(len);
+    const volumesPtr = wasm.vwap_alloc(len);
+    
+    try {
+        // Copy data to WASM memory
+        const timestampsView = new Float64Array(wasm.__wasm.memory.buffer, timestampsPtr, len);
+        const volumesView = new Float64Array(wasm.__wasm.memory.buffer, volumesPtr, len);
+        const pricesView = new Float64Array(wasm.__wasm.memory.buffer, pricesPtr, len);
+        
+        timestampsView.set(timestamps);
+        volumesView.set(volumes);
+        pricesView.set(prices);
+        
+        // Save original prices for comparison
+        const originalPrices = Array.from(pricesView);
+        
+        // Call with aliasing (output = prices input)
+        wasm.vwap_into(timestampsPtr, volumesPtr, pricesPtr, pricesPtr, len, "1d");
+        
+        // Result should now be in pricesView
+        const result = Array.from(pricesView);
+        
+        // Compare with safe API
+        const expected = wasm.vwap_js(timestamps, volumes, originalPrices, "1d");
+        assertArrayClose(result, expected, 1e-9, 'Aliased fast API should match safe API');
+    } finally {
+        wasm.vwap_free(timestampsPtr, len);
+        wasm.vwap_free(volumesPtr, len);
+        wasm.vwap_free(pricesPtr, len);
+    }
+});
+
+test('VWAP batch with serde config', () => {
+    const timestamps = testData.timestamp;
+    const volumes = testData.volume;
+    const prices = testData.close;
+    
+    // Use new batch API with config object
+    const config = {
+        anchor_range: ["1d", "3d", 1]
+    };
+    
+    const result = wasm.vwap_batch(timestamps, volumes, prices, config);
+    
+    // Result should be an object with values, anchors, rows, cols
+    assert(result.values, 'Result should have values array');
+    assert(result.anchors, 'Result should have anchors array');
+    assert.strictEqual(result.rows, 3, 'Should have 3 rows (1d, 2d, 3d)');
+    assert.strictEqual(result.cols, prices.length, 'Cols should match input length');
+    assert.deepStrictEqual(result.anchors, ["1d", "2d", "3d"], 'Anchors should match expected');
+    
+    // Check that values array has correct length
+    assert.strictEqual(result.values.length, result.rows * result.cols, 
+        'Values array should have rows × cols elements');
+});
+
+test('VWAP batch_into API', () => {
+    const timestamps = testData.timestamp.slice(0, 100);
+    const volumes = testData.volume.slice(0, 100);
+    const prices = testData.close.slice(0, 100);
+    const len = prices.length;
+    
+    // Calculate expected output dimensions
+    const rows = 3; // 1d, 2d, 3d
+    const totalSize = rows * len;
+    
+    // Allocate memory
+    const timestampsPtr = wasm.vwap_alloc(len);
+    const volumesPtr = wasm.vwap_alloc(len);
+    const pricesPtr = wasm.vwap_alloc(len);
+    const outPtr = wasm.vwap_alloc(totalSize);
+    
+    try {
+        // Copy input data
+        const timestampsView = new Float64Array(wasm.__wasm.memory.buffer, timestampsPtr, len);
+        const volumesView = new Float64Array(wasm.__wasm.memory.buffer, volumesPtr, len);
+        const pricesView = new Float64Array(wasm.__wasm.memory.buffer, pricesPtr, len);
+        
+        timestampsView.set(timestamps);
+        volumesView.set(volumes);
+        pricesView.set(prices);
+        
+        // Call batch_into
+        const actualRows = wasm.vwap_batch_into(
+            timestampsPtr, volumesPtr, pricesPtr, outPtr, len,
+            "1d", "3d", 1
+        );
+        
+        assert.strictEqual(actualRows, rows, 'Should return correct number of rows');
+        
+        // Read and verify result
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
+        const resultCopy = Array.from(result);
+        
+        // First row should match single VWAP with 1d anchor
+        const expected1d = wasm.vwap_js(timestamps, volumes, prices, "1d");
+        const firstRow = resultCopy.slice(0, len);
+        assertArrayClose(firstRow, expected1d, 1e-9, 'First row should match 1d VWAP');
+    } finally {
+        wasm.vwap_free(timestampsPtr, len);
+        wasm.vwap_free(volumesPtr, len);
+        wasm.vwap_free(pricesPtr, len);
+        wasm.vwap_free(outPtr, totalSize);
     }
 });
 
