@@ -3357,3 +3357,64 @@ ad_safe_100k:
   Max:    0.433 ms
   Throughput: 0.3 M elem/s
   Samples: 10, Warmup iterations: 386
+
+ad_safe_1M:
+  Median: 5.235 ms
+  Mean:   5.299 ms
+  Min:    5.139 ms
+  Max:    5.583 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 28
+
+--- AD (Accumulation/Distribution) Fast/Unsafe API ---
+
+ad_fast_10k:
+  Median: 0.006 ms
+  Mean:   0.006 ms
+  Min:    0.006 ms
+  Max:    0.006 ms
+  Throughput: 1.8 M elem/s
+  Samples: 10, Warmup iterations: 25947
+
+ad_fast_100k:
+  Median: 0.266 ms
+  Mean:   0.266 ms
+  Min:    0.263 ms
+  Max:    0.272 ms
+  Throughput: 0.4 M elem/s
+  Samples: 10, Warmup iterations: 542
+
+ad_fast_1M:
+  Median: 3.166 ms
+  Mean:   3.167 ms
+  Min:    3.149 ms
+  Max:    3.210 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 48
+
+--- AD (Accumulation/Distribution) Batch API ---
+
+ad_batch_small:
+  Median: 0.034 ms
+  Mean:   0.034 ms
+  Min:    0.033 ms
+  Max:    0.036 ms
+  Throughput: 0.3 M elem/s
+  Samples: 10, Warmup iterations: 3827
+  Total combinations: 1
+
+ad_batch_medium:
+  Median: 0.041 ms
+  Mean:   0.040 ms
+  Min:    0.035 ms
+  Max:    0.044 ms
+  Throughput: 0.2 M elem/s
+  Samples: 10, Warmup iterations: 3246
+  Total combinations: 1
+
+================================================================================
+Benchmarking VWAP
+================================================================================
+
+--- VWAP Safe API ---
+vwap: Mismatch in length of timestamps (0), prices (10000), or volumes (10000).
