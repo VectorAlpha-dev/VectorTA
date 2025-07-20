@@ -727,6 +727,16 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn _mm512_abs_pd(a: __m512d) -> __m512d {
+	// AVX512 doesn't have a dedicated abs instruction for doubles
+	// We use bitwise AND to clear the sign bit
+	let sign_mask = _mm512_set1_pd(-0.0); // All bits 0 except sign bit
+	_mm512_andnot_pd(sign_mask, a) // Clear sign bit
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,avx512bw,fma")]
 pub unsafe fn nma_avx512(data: &[f64], period: usize, first: usize, ln_values: &mut [f64], sqrt_diffs: &mut [f64], out: &mut [f64]) {
 	let len = data.len();
@@ -774,21 +784,50 @@ pub unsafe fn nma_avx512(data: &[f64], period: usize, first: usize, ln_values: &
 		// Process period values in chunks of 8
 		let mut idx = 0;
 		while idx + 8 <= period {
-			// Load ln differences |ln[j-i] - ln[j-i-1]| for i in idx..idx+8
-			let mut diffs = [0.0f64; 8];
-			for k in 0..8 {
-				let i = idx + k;
-				let diff = (ln_values[j - i] - ln_values[j - i - 1]).abs();
-				diffs[k] = diff;
+			// More efficient approach: load contiguous memory and compute differences
+			// We need ln_values[j-idx-8] through ln_values[j-idx] (9 values total)
+			// to compute 8 differences
+			
+			// Check if we can safely load 9 values
+			if j >= idx + 8 {
+				// Load 9 consecutive values: ln_values[j-idx-8] to ln_values[j-idx]
+				let base_ptr = ln_values.as_ptr().add(j - idx - 8);
+				
+				// Load the first 8 values (prev values)
+				let prev = _mm512_loadu_pd(base_ptr);
+				// Load the next 8 values (curr values) - overlapping by 7
+				let curr = _mm512_loadu_pd(base_ptr.add(1));
+				
+				// Now we have:
+				// prev: [j-idx-8, j-idx-7, j-idx-6, j-idx-5, j-idx-4, j-idx-3, j-idx-2, j-idx-1]
+				// curr: [j-idx-7, j-idx-6, j-idx-5, j-idx-4, j-idx-3, j-idx-2, j-idx-1, j-idx]
+				
+				// Compute differences: curr - prev
+				let diff = _mm512_sub_pd(curr, prev);
+				let abs_diff = _mm512_abs_pd(diff);
+				
+				// Now we need to reverse the order to match sqrt_diffs[idx..idx+8]
+				// diff[0] corresponds to i=idx+7, but sqrt_diffs[0] corresponds to i=idx
+				// So we need to reverse the difference vector
+				let perm_indices = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+				let oi_vec = _mm512_permutexvar_pd(perm_indices, abs_diff);
+				
+				// Load corresponding sqrt_diffs
+				let weights = _mm512_loadu_pd(sqrt_diffs.as_ptr().add(idx));
+				
+				// Accumulate weighted sum
+				num_accum = _mm512_fmadd_pd(oi_vec, weights, num_accum);
+				denom_accum = _mm512_add_pd(denom_accum, oi_vec);
+			} else {
+				// Fallback to scalar for edge cases
+				for k in 0..8 {
+					let i = idx + k;
+					let oi = (ln_values[j - i] - ln_values[j - i - 1]).abs();
+					let weight = sqrt_diffs[i];
+					num_accum = _mm512_mask_add_pd(num_accum, 1 << k, num_accum, _mm512_set1_pd(oi * weight));
+					denom_accum = _mm512_mask_add_pd(denom_accum, 1 << k, denom_accum, _mm512_set1_pd(oi));
+				}
 			}
-			let oi_vec = _mm512_loadu_pd(diffs.as_ptr());
-			
-			// Load corresponding sqrt_diffs
-			let weights = _mm512_loadu_pd(sqrt_diffs.as_ptr().add(idx));
-			
-			// Accumulate weighted sum
-			num_accum = _mm512_fmadd_pd(oi_vec, weights, num_accum);
-			denom_accum = _mm512_add_pd(denom_accum, oi_vec);
 			
 			idx += 8;
 		}
