@@ -1212,6 +1212,94 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'trendflex_batch_into'
         }
+    },
+    vwap: {
+        name: 'VWAP',
+        // Safe API
+        safe: {
+            fn: 'vwap_js',
+            params: { anchor: '1d', kernel: null },  // anchor and kernel as separate params
+            needsVwapInputs: true  // Special flag for VWAP's unique inputs
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vwap_alloc',
+            freeFn: 'vwap_free',
+            computeFn: 'vwap_into',
+            params: { anchor: '1d' },
+            needsVwapInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'vwap_batch',
+            config: {
+                small: {
+                    anchor_range: ['1m', '15m', 14]    // 1m, 15m (2 values)
+                },
+                medium: {
+                    anchor_range: ['1m', '1h', 59]     // 1m, 1h (2 values)
+                }
+            },
+            needsVwapInputs: true
+        }
+    },
+    zlema: {
+        name: 'ZLEMA',
+        // Safe API
+        safe: {
+            fn: 'zlema_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'zlema_alloc',
+            freeFn: 'zlema_free',
+            computeFn: 'zlema_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'zlema_batch',
+            fastFn: 'zlema_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 2]      // 6 values
+                },
+                medium: {
+                    period_range: [5, 25, 5]       // 5 values
+                }
+            }
+        }
+    },
+    adx: {
+        name: 'ADX',
+        // Safe API - requires high, low, close
+        safe: {
+            fn: 'adx_js',
+            params: { period: 14 }
+        },
+        needsMultipleInputs: true, // ADX needs high, low, close arrays
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'adx_alloc',
+            freeFn: 'adx_free',
+            computeFn: 'adx_into',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'adx_batch',
+            fastFn: 'adx_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 18, 4]      // 3 values: 10, 14, 18
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            }
+        }
     }
 };
 
@@ -1258,16 +1346,18 @@ class WasmIndicatorBenchmark {
         // Note: CSV format is timestamp,open,close,high,low,volume
         // So close is at index 2, not 4!
         const closes = [];
+        const timestamps = [];
         const volumes = [];
         
         for (const line of lines) {
             const parts = line.split(',');
             if (parts.length >= 6) {
+                timestamps.push(parseFloat(parts[0]));
                 opens.push(parseFloat(parts[1]));
-                highs.push(parseFloat(parts[2]));
-                lows.push(parseFloat(parts[3]));
-                closes.push(parseFloat(parts[2])); // Close is column 2
-                volumes.push(parseFloat(parts[5])); // Volume is column 5
+                closes.push(parseFloat(parts[2]));
+                highs.push(parseFloat(parts[3]));
+                lows.push(parseFloat(parts[4]));
+                volumes.push(parseFloat(parts[5]));
             }
         }
         
@@ -1296,8 +1386,32 @@ class WasmIndicatorBenchmark {
                 open: new Float64Array(opens),
                 high: new Float64Array(highs),
                 low: new Float64Array(lows),
-                close: new Float64Array(closes),
-                volume: new Float64Array(volumes)
+                close: new Float64Array(closes)
+            }
+        };
+        
+        // Store VWAP data (timestamps, volumes, prices)
+        this.vwapData = {
+            '10k': {
+                timestamps: new Float64Array(timestamps.slice(0, 10_000)),
+                volumes: new Float64Array(volumes.slice(0, 10_000)),
+                prices: new Float64Array(closes.slice(0, 10_000).map((c, i) => 
+                    (highs[i] + lows[i] + c) / 3.0  // HLC3 price
+                ))
+            },
+            '100k': {
+                timestamps: new Float64Array(timestamps.slice(0, 100_000)),
+                volumes: new Float64Array(volumes.slice(0, 100_000)),
+                prices: new Float64Array(closes.slice(0, 100_000).map((c, i) => 
+                    (highs[i] + lows[i] + c) / 3.0
+                ))
+            },
+            '1M': {
+                timestamps: new Float64Array(timestamps),
+                volumes: new Float64Array(volumes),
+                prices: new Float64Array(closes.map((c, i) => 
+                    (highs[i] + lows[i] + c) / 3.0
+                ))
             }
         };
         
@@ -1418,11 +1532,43 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_fast_${sizeName}`;
             const len = data.length;
             
-            let inPtr, outPtr, outPtr2, highPtr, lowPtr, closePtr, volumePtr;
+            let inPtr, outPtr, highPtr, lowPtr, closePtr, timestampsPtr, volumesPtr, pricesPtr, outPtr2;
             
             try {
+                // Handle VWAP inputs if needed
+                if (indicatorConfig.fast.needsVwapInputs) {
+                    const vwap = this.vwapData[sizeName];
+                    
+                    // Allocate buffers for timestamps, volumes, prices
+                    timestampsPtr = this.wasm[allocFn](len);
+                    volumesPtr = this.wasm[allocFn](len);
+                    pricesPtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);
+                    
+                    // Copy data
+                    const timestampsView = new Float64Array(this.wasm.__wasm.memory.buffer, timestampsPtr, len);
+                    const volumesView = new Float64Array(this.wasm.__wasm.memory.buffer, volumesPtr, len);
+                    const pricesView = new Float64Array(this.wasm.__wasm.memory.buffer, pricesPtr, len);
+                    
+                    timestampsView.set(vwap.timestamps);
+                    volumesView.set(vwap.volumes);
+                    pricesView.set(vwap.prices);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = this.prepareFastParams(params, null, outPtr, len, indicatorConfig.fast, 
+                            highPtr, lowPtr, closePtr, false, null, timestampsPtr, volumesPtr, pricesPtr);
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
+
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                }
                 // Handle multiple inputs if needed
-                if (indicatorConfig.fast.needsMultipleInputs) {
+                else if (indicatorConfig.fast.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
                     
                     // Allocate buffers for high, low, close
@@ -1496,7 +1642,12 @@ class WasmIndicatorBenchmark {
                 }
             } finally {
                 // Clean up allocated memory
-                if (indicatorConfig.fast.needsMultipleInputs) {
+                if (indicatorConfig.fast.needsVwapInputs) {
+                    if (timestampsPtr) this.wasm[freeFn](timestampsPtr, len);
+                    if (volumesPtr) this.wasm[freeFn](volumesPtr, len);
+                    if (pricesPtr) this.wasm[freeFn](pricesPtr, len);
+                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                } else if (indicatorConfig.fast.needsMultipleInputs) {
                     if (highPtr) this.wasm[freeFn](highPtr, len);
                     if (lowPtr) this.wasm[freeFn](lowPtr, len);
                     if (closePtr) this.wasm[freeFn](closePtr, len);
@@ -1535,7 +1686,10 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_batch_${configName}`;
             
             const result = this.benchmarkFunction(() => {
-                if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
+                if (indicatorConfig.needsVwapInputs || indicatorConfig.batch?.needsVwapInputs) {
+                    const vwap = this.vwapData[sizeName];
+                    wasmFn.call(this.wasm, vwap.timestamps, vwap.volumes, vwap.prices, { anchor_range: batchConfig.anchor_range });
+                } else if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
                     // ADOSC needs volume in addition to high, low, close
                     if (indicatorConfig.name === 'ADOSC') {
@@ -1602,6 +1756,19 @@ class WasmIndicatorBenchmark {
      * Prepare parameters for safe API call
      */
     prepareParams(params, data, indicatorConfig, sizeName) {
+        // Check if this indicator needs VWAP inputs
+        if (indicatorConfig.safe?.needsVwapInputs || indicatorConfig.needsVwapInputs) {
+            const vwap = this.vwapData[sizeName];
+            const result = [vwap.timestamps, vwap.volumes, vwap.prices];
+            
+            // Add parameters in order
+            for (const value of Object.values(params)) {
+                result.push(value);
+            }
+            
+            return result;
+        }
+        
         // Check if this indicator needs multiple inputs
         if (indicatorConfig.needsMultipleInputs) {
             const ohlc = this.ohlcData[sizeName];
@@ -1674,6 +1841,10 @@ class WasmIndicatorBenchmark {
         } else if (indicatorKey === 'swma' || indicatorKey === 'trima') {
             // SWMA and TRIMA use the new unified batch API with serde config
             return [data, { period_range: batchConfig.period_range }];
+        } else if (indicatorKey === 'vwap') {
+            // VWAP uses the new unified batch API with serde config
+            const vwap = this.vwapData[Object.keys(this.vwapData)[0]]; // Get appropriate size
+            return [vwap.timestamps, vwap.volumes, vwap.prices, { anchor_range: batchConfig.anchor_range }];
         } else if (indicatorKey === 'tilson') {
             // Tilson uses the new unified batch API with serde config
             return [data, { 
@@ -1705,8 +1876,19 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for fast API call
      */
-    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null, volumePtr = null) {
-        // Prepare parameters for the fast API call
+    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null, timestampsPtr = null, volumesPtr = null, pricesPtr = null) {
+        // Check if this indicator needs VWAP inputs
+        if (indicatorConfig.needsVwapInputs) {
+            // For VWAP: timestamps_ptr, volumes_ptr, prices_ptr, out_ptr, len, ...params
+            const result = [timestampsPtr, volumesPtr, pricesPtr, outPtr, len];
+            
+            // Add indicator parameters
+            for (const value of Object.values(params)) {
+                result.push(value);
+            }
+            
+            return result;
+        }
         
         // Check if this indicator needs multiple inputs
         if (indicatorConfig.needsMultipleInputs) {

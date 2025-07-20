@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-07-20T20:17:36.452Z",
+  "timestamp": "2025-07-20T20:21:43.221Z",
   "config": {
     "warmupTargetMs": 150,
     "sampleCount": 10,
@@ -7,110 +7,110 @@
     "disableGC": true
   },
   "results": {
-    "adosc_safe_10k": {
-      "name": "adosc_safe_10k",
-      "median": 0.03510663265306121,
-      "mean": 0.037402040816326525,
-      "min": 0.03196326530612235,
-      "max": 0.04435714285714294,
+    "adx_safe_10k": {
+      "name": "adx_safe_10k",
+      "median": 0.05697580645161288,
+      "mean": 0.05935346774193553,
+      "min": 0.056158467741935725,
+      "max": 0.06702096774193521,
       "samples": 10,
-      "warmupIterations": 3922,
-      "throughput": 0.2848464590387887,
+      "warmupIterations": 2483,
+      "throughput": 0.17551309271054502,
       "dataSize": 10000,
       "api": "safe",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_safe_100k": {
-      "name": "adosc_safe_100k",
-      "median": 0.43649687499999956,
-      "mean": 0.4724909374999989,
-      "min": 0.4225281249999995,
-      "max": 0.5988906249999992,
+    "adx_safe_100k": {
+      "name": "adx_safe_100k",
+      "median": 1.1429749999999974,
+      "mean": 1.1693733333333305,
+      "min": 1.1154833333333347,
+      "max": 1.3746416666666619,
       "samples": 10,
-      "warmupIterations": 323,
-      "throughput": 0.22909671460992725,
+      "warmupIterations": 127,
+      "throughput": 0.08749097749294624,
       "dataSize": 100000,
       "api": "safe",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_safe_1M": {
-      "name": "adosc_safe_1M",
-      "median": 4.828359999999998,
-      "mean": 4.773615,
-      "min": 4.408500000000004,
-      "max": 5.591399999999998,
+    "adx_safe_1M": {
+      "name": "adx_safe_1M",
+      "median": 12.654910000000019,
+      "mean": 13.156556000000004,
+      "min": 12.533439999999995,
+      "max": 16.599229999999988,
       "samples": 10,
-      "warmupIterations": 30,
-      "throughput": 0.2075735860623484,
+      "warmupIterations": 13,
+      "throughput": 0.0791977185139996,
       "dataSize": 1002240,
       "api": "safe",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_fast_10k": {
-      "name": "adosc_fast_10k",
-      "median": 0.011612225705329299,
-      "mean": 0.01164387147335424,
-      "min": 0.011540438871473343,
-      "max": 0.011942711598746127,
+    "adx_fast_10k": {
+      "name": "adx_fast_10k",
+      "median": 0.03619974619289397,
+      "mean": 0.0361771319796955,
+      "min": 0.03554644670050712,
+      "max": 0.036636802030457355,
       "samples": 10,
-      "warmupIterations": 12762,
-      "throughput": 0.8611613530221527,
+      "warmupIterations": 3947,
+      "throughput": 0.27624503074452506,
       "dataSize": 10000,
       "api": "fast",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_fast_100k": {
-      "name": "adosc_fast_100k",
-      "median": 0.25624821428571715,
-      "mean": 0.2557782142857158,
-      "min": 0.25339285714285814,
-      "max": 0.2588232142857204,
+    "adx_fast_100k": {
+      "name": "adx_fast_100k",
+      "median": 0.9984000000000075,
+      "mean": 0.9985780000000007,
+      "min": 0.991286666666656,
+      "max": 1.010573333333347,
       "samples": 10,
-      "warmupIterations": 561,
-      "throughput": 0.3902466219276746,
+      "warmupIterations": 151,
+      "throughput": 0.10016025641025565,
       "dataSize": 100000,
       "api": "fast",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_fast_1M": {
-      "name": "adosc_fast_1M",
-      "median": 2.455049999999983,
-      "mean": 2.460301,
-      "min": 2.418289999999979,
-      "max": 2.576299999999992,
+    "adx_fast_1M": {
+      "name": "adx_fast_1M",
+      "median": 10.70574999999999,
+      "mean": 10.892413000000015,
+      "min": 10.598860000000013,
+      "max": 11.770980000000055,
       "samples": 10,
-      "warmupIterations": 59,
-      "throughput": 0.408236084804793,
+      "warmupIterations": 15,
+      "throughput": 0.0936169815286179,
       "dataSize": 1002240,
       "api": "fast",
-      "indicator": "adosc"
+      "indicator": "adx"
     },
-    "adosc_batch_small": {
-      "name": "adosc_batch_small",
-      "median": 3.279260000000022,
-      "mean": 3.2734840000000034,
-      "min": 3.179399999999987,
-      "max": 3.4081200000000083,
+    "adx_batch_small": {
+      "name": "adx_batch_small",
+      "median": 1.211463636363574,
+      "mean": 1.2350381818181466,
+      "min": 1.1704363636364095,
+      "max": 1.4463363636362951,
       "samples": 10,
-      "warmupIterations": 43,
-      "throughput": 0.003049468477644326,
+      "warmupIterations": 119,
+      "throughput": 0.008254478054344906,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "adosc",
+      "indicator": "adx",
       "batchSize": "small"
     },
-    "adosc_batch_medium": {
-      "name": "adosc_batch_medium",
-      "median": 8.950799999999981,
-      "mean": 8.981392000000003,
-      "min": 8.811670000000003,
-      "max": 9.213639999999987,
+    "adx_batch_medium": {
+      "name": "adx_batch_medium",
+      "median": 2.020640000000003,
+      "mean": 1.988270999999995,
+      "min": 1.8545600000000377,
+      "max": 2.084490000000005,
       "samples": 10,
-      "warmupIterations": 17,
-      "throughput": 0.001117218572641554,
+      "warmupIterations": 72,
+      "throughput": 0.0049489270726106515,
       "dataSize": 10000,
       "api": "batch",
-      "indicator": "adosc",
+      "indicator": "adx",
       "batchSize": "medium"
     }
   }

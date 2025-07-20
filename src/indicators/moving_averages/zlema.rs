@@ -40,6 +40,8 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::JsValue;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 impl<'a> AsRef<[f64]> for ZlemaInput<'a> {
 	#[inline(always)]
@@ -63,6 +65,7 @@ pub struct ZlemaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct ZlemaParams {
 	pub period: Option<usize>,
 }
@@ -175,7 +178,12 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
 	let len = data.len();
 	let period = input.get_period();
 
-	if period == 0 || len == 0 || period > len {
+	// Check for empty data first - treat as "all values are NaN"
+	if len == 0 {
+		return Err(ZlemaError::AllValuesNaN);
+	}
+
+	if period == 0 || period > len {
 		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
 	}
 
@@ -547,13 +555,9 @@ fn zlema_batch_inner(
 		return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 
-	// Check for empty data first
+	// Check for empty data first - treat as "all values are NaN"
 	if data.is_empty() {
-		let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(0);
-		return Err(ZlemaError::InvalidPeriod {
-			period: max_p,
-			data_len: 0,
-		});
+		return Err(ZlemaError::AllValuesNaN);
 	}
 
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
@@ -620,6 +624,81 @@ fn zlema_batch_inner(
 #[inline(always)]
 pub fn expand_grid_zlema(r: &ZlemaBatchRange) -> Vec<ZlemaParams> {
 	expand_grid(r)
+}
+
+/// Direct buffer write version for Python bindings
+#[inline(always)]
+pub fn zlema_batch_inner_into(
+	data: &[f64],
+	sweep: &ZlemaBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<ZlemaParams>, ZlemaError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(ZlemaError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	// Check for empty data first - treat as "all values are NaN"
+	if data.is_empty() {
+		return Err(ZlemaError::AllValuesNaN);
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(ZlemaError::InvalidPeriod {
+			period: max_p,
+			data_len: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+
+	// Initialize warmup periods with NaN
+	for (row, &warmup) in warm.iter().enumerate() {
+		let row_start = row * cols;
+		out[row_start..row_start + warmup].fill(f64::NAN);
+	}
+
+	let do_row = |row: usize, dst: &mut [f64]| {
+		let period = combos[row].period.unwrap();
+
+		match kern {
+			Kernel::Scalar => zlema_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => zlema_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => zlema_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(r, slice)| do_row(r, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (r, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(r, slice);
+			}
+		}
+	} else {
+		for (r, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(r, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[cfg(test)]
@@ -1042,6 +1121,71 @@ pub fn zlema_compute_into(input: &ZlemaInput, kernel: Kernel, out: &mut [f64]) -
 	Ok(())
 }
 
+/// WASM-optimized helper function that writes directly to output slice - no allocations
+#[inline]
+pub fn zlema_into_slice(dst: &mut [f64], input: &ZlemaInput, kern: Kernel) -> Result<(), ZlemaError> {
+	let data: &[f64] = match &input.data {
+		ZlemaData::Candles { candles, source } => source_type(candles, source),
+		ZlemaData::Slice(sl) => sl,
+	};
+
+	let len = data.len();
+	let period = input.get_period();
+
+	// Check for empty data first - treat as "all values are NaN"
+	if len == 0 {
+		return Err(ZlemaError::AllValuesNaN);
+	}
+
+	if dst.len() != len {
+		return Err(ZlemaError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+
+	if period == 0 || period > len {
+		return Err(ZlemaError::InvalidPeriod { period, data_len: len });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(ZlemaError::AllValuesNaN)?;
+	if (len - first) < period {
+		return Err(ZlemaError::InvalidPeriod {
+			period,
+			data_len: len - first,
+		});
+	}
+
+	let warm = first + period;
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Compute directly into dst
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => {
+			zlema_scalar(data, period, first, dst);
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => {
+			zlema_avx2(data, period, first, dst);
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => {
+			zlema_avx512(data, period, first, dst);
+		}
+		_ => unreachable!(),
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..warm] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "zlema")]
 #[pyo3(signature = (data, period, kernel=None))]
@@ -1074,26 +1218,23 @@ pub fn zlema_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Parse kernel string to enum with CPU feature validation
+	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
-
-	// Build input struct
+	
 	let params = ZlemaParams { period: Some(period) };
 	let zlema_in = ZlemaInput::from_slice(slice_in, params);
 
-	// Allocate NumPy output buffer
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		zlema_with_kernel(&zlema_in, kern)
+			.map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL - TRUE ZERO-COPY
-	py.allow_threads(|| -> Result<(), ZlemaError> { zlema_compute_into(&zlema_in, kern, slice_out) })
-		.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1147,41 +1288,48 @@ pub fn zlema_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
-
+	let kern = validate_kernel(kernel, true)?;
 	let sweep = ZlemaBatchRange { period: period_range };
 
-	// Expand grid once to know rows*cols
+	// Calculate dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	// Pre-allocate NumPy array (1-D, will reshape later)
+	// Pre-allocate output array (OK for batch operations)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Parse kernel string to enum with CPU feature validation
-	let kern = validate_kernel(kernel, true)?;
-
-	// Heavy work without the GIL
-	py.allow_threads(|| -> Result<(), ZlemaError> {
-		let result = zlema_batch_with_kernel(slice_in, &sweep, kern)?;
-		// Copy result directly into pre-allocated buffer
-		slice_out.copy_from_slice(&result.values);
-		Ok(())
+	// Compute without GIL
+	let combos = py.allow_threads(|| {
+		// Handle kernel selection for batch operations
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Map batch kernels to regular kernels for ZLEMA
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		zlema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build dict with the GIL
+	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-
+	
 	dict.set_item(
 		"periods",
-		combos
-			.iter()
+		combos.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
-			.into_pyarray(py),
+			.into_pyarray(py)
 	)?;
 
 	Ok(dict.into())
@@ -1193,9 +1341,12 @@ pub fn zlema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let params = ZlemaParams { period: Some(period) };
 	let input = ZlemaInput::from_slice(data, params);
 
-	zlema_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut output = vec![0.0; data.len()];
+
+	zlema_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1235,4 +1386,158 @@ pub fn zlema_batch_metadata_js(
 	}
 
 	Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ZlemaBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ZlemaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<ZlemaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = zlema_batch)]
+pub fn zlema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: ZlemaBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = ZlemaBatchRange {
+		period: config.period_range,
+	};
+
+	// Use batch kernel detection and conversion like alma does
+	let kernel = match Kernel::Auto {
+		Kernel::Auto => {
+			let batch_kernel = detect_best_batch_kernel();
+			match batch_kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => Kernel::Scalar,
+			}
+		}
+		k => k,
+	};
+	
+	let output = zlema_batch_inner(data, &sweep, kernel, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = ZlemaBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to zlema_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+		
+		let params = ZlemaParams { period: Some(period) };
+		let input = ZlemaInput::from_slice(data, params);
+
+		if in_ptr == out_ptr {
+			// CRITICAL: Aliasing check - handle in-place operations
+			let mut temp = vec![0.0; len];
+			zlema_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			zlema_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn zlema_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to zlema_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = ZlemaBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+
+		// Use batch kernel detection and conversion
+		let kernel = match Kernel::Auto {
+			Kernel::Auto => {
+				let batch_kernel = detect_best_batch_kernel();
+				match batch_kernel {
+					Kernel::Avx512Batch => Kernel::Avx512,
+					Kernel::Avx2Batch => Kernel::Avx2,
+					Kernel::ScalarBatch => Kernel::Scalar,
+					_ => Kernel::Scalar,
+				}
+			}
+			k => k,
+		};
+		
+		zlema_batch_inner_into(data, &sweep, kernel, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

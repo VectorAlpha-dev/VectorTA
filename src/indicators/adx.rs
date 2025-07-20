@@ -382,14 +382,21 @@ pub fn adx_batch_with_kernel(
 	let kernel = match k {
 		Kernel::Auto => detect_best_batch_kernel(),
 		other if other.is_batch() => other,
+		Kernel::Scalar => Kernel::ScalarBatch,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => Kernel::Avx2Batch,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => Kernel::Avx512Batch,
 		_ => return Err(AdxError::InvalidPeriod { period: 0, data_len: 0 }),
 	};
 
 	let simd = match kernel {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		_ => Kernel::Scalar,
 	};
 	adx_batch_par_slice(high, low, close, sweep, simd)
 }
@@ -547,7 +554,7 @@ fn adx_batch_inner(
 			Kernel::Avx2 => adx_row_avx2(high, low, close, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => adx_row_avx512(high, low, close, period, out_row),
-			_ => unreachable!(),
+			_ => adx_row_scalar(high, low, close, period, out_row),
 		}
 	};
 	if parallel {
@@ -1015,7 +1022,7 @@ pub fn adx_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
@@ -1026,79 +1033,20 @@ pub fn adx_py<'py>(
 		return Err(PyValueError::new_err("Input arrays must have the same length"));
 	}
 
-	// Use kernel validation for safety
+	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = AdxParams { period: Some(period) };
 	let adx_in = AdxInput::from_slices(high_slice, low_slice, close_slice, params);
 
-	// Allocate uninitialized NumPy output buffer
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [close_slice.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| adx_with_kernel(&adx_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), AdxError> {
-		// Prepare data
-		let period = adx_in.get_period();
-		let len = close_slice.len();
-
-		// Validate inputs
-		if period == 0 || period > len {
-			return Err(AdxError::InvalidPeriod { period, data_len: len });
-		}
-		if len < period + 1 {
-			return Err(AdxError::NotEnoughValidData {
-				needed: period + 1,
-				valid: len,
-			});
-		}
-		if high_slice.iter().all(|x| x.is_nan())
-			|| low_slice.iter().all(|x| x.is_nan())
-			|| close_slice.iter().all(|x| x.is_nan())
-		{
-			return Err(AdxError::AllValuesNaN);
-		}
-
-		// Kernel selection
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			k => k,
-		};
-
-		// Initialize warmup period with NaN values
-		let warmup_period = 2 * period - 1;
-		for i in 0..warmup_period.min(len) {
-			slice_out[i] = f64::NAN;
-		}
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// adx_scalar (and its AVX stubs) will write to appropriate indices
-		// The warmup region has been initialized with NaN above
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => {
-					adx_scalar(high_slice, low_slice, close_slice, period, slice_out)
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => adx_avx2(high_slice, low_slice, close_slice, period, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => adx_avx512(high_slice, low_slice, close_slice, period, slice_out),
-				#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-				Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-					// Fallback to scalar when AVX is not available
-					adx_scalar(high_slice, low_slice, close_slice, period, slice_out)
-				}
-				_ => unreachable!(),
-			}
-		}
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1147,72 +1095,26 @@ pub fn adx_batch_py<'py>(
 		return Err(PyValueError::new_err("Input arrays must have the same length"));
 	}
 
-	let sweep = AdxBatchRange { period: period_range };
-
-	// 1. Expand grid once to know rows*cols
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = close_slice.len();
-
-	// 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-	// Use kernel validation for safety
+	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, true)?;
 
-	// 3. Heavy work without the GIL
-	let combos = py
+	let sweep = AdxBatchRange { period: period_range };
+
+	// Get batch output from Rust function
+	let output = py
 		.allow_threads(|| {
-			// Resolve Kernel::Auto to a specific kernel
-			let kernel = match kern {
-				Kernel::Auto => detect_best_batch_kernel(),
-				k => k,
-			};
-			let simd = match kernel {
-				Kernel::Avx512Batch => Kernel::Avx512,
-				Kernel::Avx2Batch => Kernel::Avx2,
-				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => return Err(AdxError::InvalidPeriod { period: 0, data_len: 0 }),
-			};
-
-			// Process each row
-			for (row, combo) in combos.iter().enumerate() {
-				let period = combo.period.unwrap();
-				let row_start = row * cols;
-				let row_slice = &mut slice_out[row_start..row_start + cols];
-
-				// Initialize warmup period with NaN values for this row
-				let warmup_period = 2 * period - 1;
-				for i in 0..warmup_period.min(cols) {
-					row_slice[i] = f64::NAN;
-				}
-
-				unsafe {
-					match simd {
-						Kernel::Scalar => adx_row_scalar(high_slice, low_slice, close_slice, period, row_slice),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx2 => adx_row_avx2(high_slice, low_slice, close_slice, period, row_slice),
-						#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-						Kernel::Avx512 => adx_row_avx512(high_slice, low_slice, close_slice, period, row_slice),
-						#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-						Kernel::Avx2 | Kernel::Avx512 => adx_row_scalar(high_slice, low_slice, close_slice, period, row_slice),
-						_ => unreachable!(),
-					}
-				}
-			}
-
-			Ok(combos)
+			// Use the high-level batch function that handles kernel conversion
+			adx_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, kern)
 		})
-		.map_err(|e: AdxError| PyValueError::new_err(e.to_string()))?;
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 4. Build dict with the GIL
+	// Build dict with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("values", output.values.into_pyarray(py).reshape((output.rows, output.cols))?)?;
 	dict.set_item(
 		"periods",
-		combos
+		output
+			.combos
 			.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1232,10 +1134,17 @@ pub fn adx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result
 
 	let params = AdxParams { period: Some(period) };
 	let input = AdxInput::from_slices(high, low, close, params);
-
-	adx_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	
+	let mut output = vec![0.0; high.len()];  // Single allocation
+	#[cfg(target_arch = "wasm32")]
+	let kernel = Kernel::Scalar;
+	#[cfg(not(target_arch = "wasm32"))]
+	let kernel = Kernel::Auto;
+	
+	adx_into_slice(&mut output, &input, kernel)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1258,7 +1167,12 @@ pub fn adx_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
-	adx_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+	#[cfg(target_arch = "wasm32")]
+	let kernel = Kernel::ScalarBatch;
+	#[cfg(not(target_arch = "wasm32"))]
+	let kernel = Kernel::Auto;
+	
+	adx_batch_inner(high, low, close, &sweep, kernel, false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1309,7 +1223,12 @@ pub fn adx_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: Js
 	};
 
 	// 2. Run the existing core logic
-	let output = adx_batch_inner(high, low, close, &sweep, Kernel::Scalar, false)
+	#[cfg(target_arch = "wasm32")]
+	let kernel = Kernel::ScalarBatch;
+	#[cfg(not(target_arch = "wasm32"))]
+	let kernel = Kernel::Auto;
+	
+	let output = adx_batch_inner(high, low, close, &sweep, kernel, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 3. Create the structured output
@@ -1322,4 +1241,185 @@ pub fn adx_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: Js
 
 	// 4. Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ====== Optimized WASM API following ALMA pattern ======
+
+/// Core helper function that writes directly to output slice - no allocations
+#[inline]
+pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result<(), AdxError> {
+	let (high, low, close) = match &input.data {
+		AdxData::Candles { candles } => {
+			let high = candles
+				.select_candle_field("high")
+				.map_err(|_| AdxError::CandleFieldError { field: "high" })?;
+			let low = candles
+				.select_candle_field("low")
+				.map_err(|_| AdxError::CandleFieldError { field: "low" })?;
+			let close = candles
+				.select_candle_field("close")
+				.map_err(|_| AdxError::CandleFieldError { field: "close" })?;
+			(high, low, close)
+		}
+		AdxData::Slices { high, low, close } => (*high, *low, *close),
+	};
+
+	let len = close.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(AdxError::InvalidPeriod { period, data_len: len });
+	}
+	if len < period + 1 {
+		return Err(AdxError::NotEnoughValidData {
+			needed: period + 1,
+			valid: len,
+		});
+	}
+	if high.iter().all(|x| x.is_nan()) || low.iter().all(|x| x.is_nan()) || close.iter().all(|x| x.is_nan()) {
+		return Err(AdxError::AllValuesNaN);
+	}
+
+	if dst.len() != len {
+		return Err(AdxError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Fill output with NaN prefix for warmup period
+	let warmup_period = 2 * period - 1;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => adx_scalar(high, low, close, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => adx_avx2(high, low, close, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => adx_avx512(high, low, close, period, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let params = AdxParams { period: Some(period) };
+		let input = AdxInput::from_slices(high, low, close, params);
+		
+		#[cfg(target_arch = "wasm32")]
+		let kernel = Kernel::Scalar;
+		#[cfg(not(target_arch = "wasm32"))]
+		let kernel = Kernel::Auto;
+		
+		// Check for aliasing with any of the input pointers
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// Need temporary buffer for aliased case
+			let mut temp = vec![0.0; len];
+			adx_into_slice(&mut temp, &input, kernel)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing, can write directly
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			adx_into_slice(out, &input, kernel)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn adx_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to adx_batch_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+
+		let sweep = AdxBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		// Calculate number of combinations
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Use batch function with direct output
+		#[cfg(target_arch = "wasm32")]
+		let kernel = Kernel::ScalarBatch;
+		#[cfg(not(target_arch = "wasm32"))]
+		let kernel = Kernel::Auto;
+		
+		let result = adx_batch_inner(high, low, close, &sweep, kernel, false)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		// Copy results to output buffer
+		out.copy_from_slice(&result.values);
+
+		Ok(rows)
+	}
 }
