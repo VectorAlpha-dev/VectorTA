@@ -140,6 +140,65 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
+    adosc: {
+        name: 'ADOSC',
+        needsMultipleInputs: true,  // Uses high, low, close, volume
+        // Safe API
+        safe: {
+            fn: 'adosc_js',
+            params: { short_period: 3, long_period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'adosc_alloc',
+            freeFn: 'adosc_free',
+            computeFn: 'adosc_into',
+            params: { short_period: 3, long_period: 10 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'adosc_batch',
+            config: {
+                small: {
+                    short_period_range: [2, 4, 1],   // 3 values
+                    long_period_range: [8, 12, 2]    // 3 values = 9 combinations
+                },
+                medium: {
+                    short_period_range: [2, 6, 1],   // 5 values
+                    long_period_range: [8, 16, 2]    // 5 values = 25 combinations
+                }
+            }
+        }
+    },
+    acosc: {
+        name: 'ACOSC',
+        needsMultipleInputs: true,  // Uses high, low (not close)
+        // Safe API
+        safe: {
+            fn: 'acosc_js',
+            params: {}  // No parameters for ACOSC
+        },
+        // Fast/Unsafe API  
+        fast: {
+            allocFn: 'acosc_alloc',
+            freeFn: 'acosc_free',
+            computeFn: 'acosc_into',
+            params: {},
+            needsMultipleInputs: true,
+            // For ACOSC: high_ptr, low_ptr, osc_ptr, change_ptr, len
+            dualOutput: true  // Has two outputs (osc and change)
+        },
+        // Batch API
+        batch: {
+            fn: 'acosc_batch',
+            config: {
+                // ACOSC has no parameters, so batch always returns 1 row
+                small: {},
+                medium: {}
+            }
+        }
+    },
     vpwma: {
         name: 'VPWMA',
         // Safe API
@@ -1199,14 +1258,16 @@ class WasmIndicatorBenchmark {
         // Note: CSV format is timestamp,open,close,high,low,volume
         // So close is at index 2, not 4!
         const closes = [];
+        const volumes = [];
         
         for (const line of lines) {
             const parts = line.split(',');
-            if (parts.length >= 5) {
+            if (parts.length >= 6) {
                 opens.push(parseFloat(parts[1]));
                 highs.push(parseFloat(parts[2]));
                 lows.push(parseFloat(parts[3]));
                 closes.push(parseFloat(parts[2])); // Close is column 2
+                volumes.push(parseFloat(parts[5])); // Volume is column 5
             }
         }
         
@@ -1221,19 +1282,22 @@ class WasmIndicatorBenchmark {
                 open: new Float64Array(opens.slice(0, 10_000)),
                 high: new Float64Array(highs.slice(0, 10_000)),
                 low: new Float64Array(lows.slice(0, 10_000)),
-                close: new Float64Array(closes.slice(0, 10_000))
+                close: new Float64Array(closes.slice(0, 10_000)),
+                volume: new Float64Array(volumes.slice(0, 10_000))
             },
             '100k': {
                 open: new Float64Array(opens.slice(0, 100_000)),
                 high: new Float64Array(highs.slice(0, 100_000)),
                 low: new Float64Array(lows.slice(0, 100_000)),
-                close: new Float64Array(closes.slice(0, 100_000))
+                close: new Float64Array(closes.slice(0, 100_000)),
+                volume: new Float64Array(volumes.slice(0, 100_000))
             },
             '1M': {
                 open: new Float64Array(opens),
                 high: new Float64Array(highs),
                 low: new Float64Array(lows),
-                close: new Float64Array(closes)
+                close: new Float64Array(closes),
+                volume: new Float64Array(volumes)
             }
         };
         
@@ -1354,7 +1418,7 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_fast_${sizeName}`;
             const len = data.length;
             
-            let inPtr, outPtr, highPtr, lowPtr, closePtr;
+            let inPtr, outPtr, outPtr2, highPtr, lowPtr, closePtr, volumePtr;
             
             try {
                 // Handle multiple inputs if needed
@@ -1367,6 +1431,11 @@ class WasmIndicatorBenchmark {
                     closePtr = this.wasm[allocFn](len);
                     outPtr = this.wasm[allocFn](len);
                     
+                    // Allocate volume buffer for ADOSC
+                    if (indicatorConfig.name === 'ADOSC') {
+                        volumePtr = this.wasm[allocFn](len);
+                    }
+                    
                     // Copy data
                     const highView = new Float64Array(this.wasm.__wasm.memory.buffer, highPtr, len);
                     const lowView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
@@ -1376,8 +1445,21 @@ class WasmIndicatorBenchmark {
                     lowView.set(ohlc.low);
                     closeView.set(ohlc.close);
                     
+                    // Copy volume data for ADOSC
+                    if (indicatorConfig.name === 'ADOSC') {
+                        const volumeView = new Float64Array(this.wasm.__wasm.memory.buffer, volumePtr, len);
+                        volumeView.set(ohlc.volume);
+                    }
+                    
+                    // Allocate second output buffer if indicator has dual outputs
+                    const outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
+                    
+                    // Debug removed for performance
+                    
                     const result = this.benchmarkFunction(() => {
-                        const paramArray = this.prepareFastParams(params, null, outPtr, len, indicatorConfig.fast, highPtr, lowPtr, closePtr);
+                        // Pass the full indicatorConfig so name is available
+                        const modifiedConfig = Object.assign({}, indicatorConfig.fast, { name: indicatorConfig.name });
+                        const paramArray = this.prepareFastParams(params, null, outPtr, len, modifiedConfig, highPtr, lowPtr, closePtr, indicatorConfig.fast.dualOutput, outPtr2, volumePtr);
                         this.wasm[computeFn].apply(this.wasm, paramArray);
                     }, benchName, {
                         dataSize: len,
@@ -1387,10 +1469,13 @@ class WasmIndicatorBenchmark {
 
                     this.results[benchName] = result;
                     this.printResult(result);
+                    
+                    // Clean up outPtr2 if allocated
+                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
                 } else {
                     // Pre-allocate buffers outside of benchmark
                     inPtr = this.wasm[allocFn](len);
-            const outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
+                    outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
                     outPtr = this.wasm[allocFn](len);
                     
                     // Copy data once
@@ -1415,13 +1500,12 @@ class WasmIndicatorBenchmark {
                     if (highPtr) this.wasm[freeFn](highPtr, len);
                     if (lowPtr) this.wasm[freeFn](lowPtr, len);
                     if (closePtr) this.wasm[freeFn](closePtr, len);
+                    if (volumePtr) this.wasm[freeFn](volumePtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
                 } else {
                     if (inPtr) this.wasm[freeFn](inPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
-                }
-                if (dualOutput && outPtr2) {
-                    this.wasm[freeFn](outPtr2, len);
+                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
                 }
             }
         }
@@ -1453,7 +1537,13 @@ class WasmIndicatorBenchmark {
             const result = this.benchmarkFunction(() => {
                 if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
-                    wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
+                    // ADOSC needs volume in addition to high, low, close
+                    if (indicatorConfig.name === 'ADOSC') {
+                        // ADOSC uses the new ergonomic batch API with config object
+                        wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, ohlc.volume, batchConfig);
+                    } else {
+                        wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
+                    }
                 } else if ((indicatorKey === 'pwma' || indicatorKey === 'supersmoother') && batchConfig.period_range) {
                     // PWMA and SuperSmoother have special batch APIs that take individual parameters
                     const [start, end, step] = batchConfig.period_range;
@@ -1497,6 +1587,13 @@ class WasmIndicatorBenchmark {
                     totalCombinations *= vFactors;
                 }
             }
+            
+            // Handle ADOSC's special ranges
+            if (batchConfig.short_period_range && batchConfig.long_period_range) {
+                const shortPeriods = Math.floor((batchConfig.short_period_range[1] - batchConfig.short_period_range[0]) / batchConfig.short_period_range[2]) + 1;
+                const longPeriods = Math.floor((batchConfig.long_period_range[1] - batchConfig.long_period_range[0]) / batchConfig.long_period_range[2]) + 1;
+                totalCombinations = shortPeriods * longPeriods;
+            }
             console.log(`  Total combinations: ${totalCombinations}`);
         }
     }
@@ -1508,6 +1605,32 @@ class WasmIndicatorBenchmark {
         // Check if this indicator needs multiple inputs
         if (indicatorConfig.needsMultipleInputs) {
             const ohlc = this.ohlcData[sizeName];
+            
+            // Special case for ACOSC which only needs high/low
+            if (indicatorConfig.name === 'ACOSC') {
+                const result = [ohlc.high, ohlc.low];
+                
+                // Add parameters in order
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
+            // Special case for ADOSC which needs high, low, close, volume
+            if (indicatorConfig.name === 'ADOSC') {
+                const result = [ohlc.high, ohlc.low, ohlc.close, ohlc.volume];
+                
+                // Add parameters in order
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
+            // Default case: high, low, close
             const result = [ohlc.high, ohlc.low, ohlc.close];
             
             // Add parameters in order
@@ -1582,10 +1705,30 @@ class WasmIndicatorBenchmark {
     /**
      * Prepare parameters for fast API call
      */
-    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null) {
+    prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null, volumePtr = null) {
+        // Prepare parameters for the fast API call
+        
         // Check if this indicator needs multiple inputs
         if (indicatorConfig.needsMultipleInputs) {
-            // For FRAMA: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
+            // Special case for ACOSC: high_ptr, low_ptr, osc_ptr, change_ptr, len
+            if (indicatorConfig.name === 'ACOSC') {
+                const result = [highPtr, lowPtr, outPtr, outPtr2, len];
+                
+                // Add indicator parameters
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
+            // Special case for ADOSC: high_ptr, low_ptr, close_ptr, volume_ptr, out_ptr, len, short_period, long_period
+            if (indicatorConfig.name === 'ADOSC') {
+                const result = [highPtr, lowPtr, closePtr, volumePtr, outPtr, len, params.short_period, params.long_period];
+                return result;
+            }
+            
+            // For FRAMA and others: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
             const result = [highPtr, lowPtr, closePtr, outPtr, len];
             
             // Add indicator parameters

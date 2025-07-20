@@ -229,3 +229,139 @@ test('ADOSC comparison with Rust', () => {
     
     compareWithRust('adosc', Array.from(result), 'hlcv', expected.defaultParams);
 });
+
+test('ADOSC fast API - allocation and deallocation', () => {
+    const len = 100;
+    const ptr = wasm.adosc_alloc(len);
+    
+    assert.notStrictEqual(ptr, 0, 'Allocated pointer should not be null');
+    
+    // Clean up
+    wasm.adosc_free(ptr, len);
+});
+
+test('ADOSC fast API - basic computation', () => {
+    const { high, low, close, volume } = testData;
+    const len = high.length;
+    
+    // Allocate buffers
+    const highPtr = wasm.adosc_alloc(len);
+    const lowPtr = wasm.adosc_alloc(len);
+    const closePtr = wasm.adosc_alloc(len);
+    const volumePtr = wasm.adosc_alloc(len);
+    const outPtr = wasm.adosc_alloc(len);
+    
+    try {
+        // Create views into WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        // Copy data into WASM memory
+        highView.set(high);
+        lowView.set(low);
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        // Compute ADOSC using fast API
+        wasm.adosc_into(
+            highPtr,
+            lowPtr,
+            closePtr,
+            volumePtr,
+            outPtr,
+            len,
+            3,  // short_period
+            10  // long_period
+        );
+        
+        // Read results from output buffer
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
+        
+        // Verify results match safe API
+        const safeResult = wasm.adosc_js(high, low, close, volume, 3, 10);
+        
+        for (let i = 0; i < len; i++) {
+            assertClose(result[i], safeResult[i], 1e-10, `Fast API mismatch at index ${i}`);
+        }
+    } finally {
+        // Always clean up
+        wasm.adosc_free(highPtr, len);
+        wasm.adosc_free(lowPtr, len);
+        wasm.adosc_free(closePtr, len);
+        wasm.adosc_free(volumePtr, len);
+        wasm.adosc_free(outPtr, len);
+    }
+});
+
+test('ADOSC fast API - in-place computation (aliasing)', () => {
+    const { high, low, close, volume } = testData;
+    const len = high.length;
+    
+    // Allocate buffers
+    const highPtr = wasm.adosc_alloc(len);
+    const lowPtr = wasm.adosc_alloc(len);
+    const closePtr = wasm.adosc_alloc(len);
+    const volumePtr = wasm.adosc_alloc(len);
+    
+    try {
+        // Create views into WASM memory
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
+        
+        // Copy data into WASM memory
+        highView.set(high);
+        lowView.set(low);
+        closeView.set(close);
+        volumeView.set(volume);
+        
+        // Use close buffer as output (aliasing test)
+        wasm.adosc_into(
+            highPtr,
+            lowPtr,
+            closePtr,
+            volumePtr,
+            closePtr,  // Output to same buffer as close (aliasing)
+            len,
+            3,  // short_period
+            10  // long_period
+        );
+        
+        // Verify results match safe API
+        const expected = wasm.adosc_js(high, low, close, volume, 3, 10);
+        
+        // closeView might be invalid after memory growth, so recreate
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        
+        for (let i = 0; i < len; i++) {
+            assertClose(resultView[i], expected[i], 1e-10, `In-place computation mismatch at index ${i}`);
+        }
+    } finally {
+        // Always clean up
+        wasm.adosc_free(highPtr, len);
+        wasm.adosc_free(lowPtr, len);
+        wasm.adosc_free(closePtr, len);
+        wasm.adosc_free(volumePtr, len);
+    }
+});
+
+test('ADOSC fast API - null pointer handling', () => {
+    const len = 100;
+    
+    // Test with null input pointers
+    assert.throws(
+        () => wasm.adosc_into(0, 0, 0, 0, wasm.adosc_alloc(len), len, 3, 10),
+        /Null pointer/
+    );
+    
+    // Test with null output pointer
+    const dummyPtr = wasm.adosc_alloc(len);
+    assert.throws(
+        () => wasm.adosc_into(dummyPtr, dummyPtr, dummyPtr, dummyPtr, 0, len, 3, 10),
+        /Null pointer/
+    );
+    wasm.adosc_free(dummyPtr, len);
+});
