@@ -140,6 +140,37 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
+    vpwma: {
+        name: 'VPWMA',
+        // Safe API
+        safe: {
+            fn: 'vpwma_js',
+            params: { period: 14, power: 0.382 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vpwma_alloc',
+            freeFn: 'vpwma_free',
+            computeFn: 'vpwma_into',
+            params: { period: 14, power: 0.382 }
+        },
+        // Batch API
+        batch: {
+            fn: 'vpwma_batch_js',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values
+                    power_range: [0.2, 0.6, 0.2]    // 3 values = 9 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values
+                    power_range: [0.1, 0.9, 0.2]    // 5 values = 25 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'vpwma_batch_into'
+        }
+    },
     edcf: {
         name: 'EDCF',
         // Safe API
@@ -1512,6 +1543,11 @@ class WasmIndicatorBenchmark {
             // These indicators expect: data, period_start, period_end, period_step
             const period = batchConfig.period_range;
             return [data, period[0], period[1], period[2]];
+        } else if (indicatorKey === 'vpwma') {
+            // VPWMA expects: data, period_start, period_end, period_step, power_start, power_end, power_step
+            const period = batchConfig.period_range || [14, 14, 1];
+            const power = batchConfig.power_range || [0.382, 0.382, 0.1];
+            return [data, period[0], period[1], period[2], power[0], power[1], power[2]];
         } else if (indicatorKey === 'swma' || indicatorKey === 'trima') {
             // SWMA and TRIMA use the new unified batch API with serde config
             return [data, { period_range: batchConfig.period_range }];
