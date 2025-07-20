@@ -204,6 +204,64 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
 	Ok(AdOutput { values: out })
 }
 
+/// Write AD values directly to output slice - no allocations
+pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(), AdError> {
+	let (high, low, close, volume) = match &input.data {
+		AdData::Candles { candles, .. } => {
+			(&candles.high[..], &candles.low[..], &candles.close[..], &candles.volume[..])
+		}
+		AdData::Slices { high, low, close, volume } => (*high, *low, *close, *volume),
+	};
+
+	// Check for empty input
+	if high.is_empty() {
+		return Err(AdError::NotEnoughData { len: 0 });
+	}
+
+	// Validate array lengths
+	if high.len() != low.len() || high.len() != close.len() || high.len() != volume.len() {
+		return Err(AdError::DataLengthMismatch {
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: close.len(),
+			volume_len: volume.len(),
+		});
+	}
+
+	if dst.len() != high.len() {
+		return Err(AdError::DataLengthMismatch {
+			high_len: high.len(),
+			low_len: dst.len(),
+			close_len: dst.len(),
+			volume_len: dst.len(),
+		});
+	}
+
+	// Compute AD values directly into dst
+	match kern {
+		Kernel::Auto => {
+			let k = detect_best_kernel();
+			match k {
+				Kernel::Scalar => ad_scalar(high, low, close, volume, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 => ad_avx2(high, low, close, volume, dst),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 => ad_avx512(high, low, close, volume, dst),
+				_ => ad_scalar(high, low, close, volume, dst),
+			}
+		}
+		Kernel::Scalar => ad_scalar(high, low, close, volume, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => ad_avx2(high, low, close, volume, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => ad_avx512(high, low, close, volume, dst),
+		_ => ad_scalar(high, low, close, volume, dst),
+	}
+
+	// AD has no warmup period, so no NaN filling needed
+	Ok(())
+}
+
 #[inline]
 pub fn ad_scalar(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
 	let size = high.len();
@@ -509,7 +567,7 @@ pub fn ad_py<'py>(
 	volume: numpy::PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	// Zero-copy views of input arrays
 	let high_slice = high.as_slice()?;
@@ -523,53 +581,15 @@ pub fn ad_py<'py>(
 	// Create input struct
 	let input = AdInput::from_slices(high_slice, low_slice, close_slice, volume_slice, AdParams::default());
 
-	// Allocate output array
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
-	let out_slice = unsafe { out_arr.as_slice_mut()? };
-
-	// Compute without GIL
-	py.allow_threads(|| -> Result<(), AdError> {
-		// Validate input lengths
-		if high_slice.len() != low_slice.len()
-			|| high_slice.len() != close_slice.len()
-			|| high_slice.len() != volume_slice.len()
-		{
-			return Err(AdError::DataLengthMismatch {
-				high_len: high_slice.len(),
-				low_len: low_slice.len(),
-				close_len: close_slice.len(),
-				volume_len: volume_slice.len(),
-			});
-		}
-
-		let size = high_slice.len();
-		if size < 1 {
-			return Err(AdError::NotEnoughData { len: size });
-		}
-
-		// Direct computation into output slice - true zero-copy
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			k => k,
-		};
-
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => {
-					ad_scalar(high_slice, low_slice, close_slice, volume_slice, out_slice)
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => ad_avx2(high_slice, low_slice, close_slice, volume_slice, out_slice),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => ad_avx512(high_slice, low_slice, close_slice, volume_slice, out_slice),
-				_ => unreachable!(),
-			}
-		}
-		Ok(())
+	// Compute without GIL and get Vec<f64> result
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		ad_with_kernel(&input, kern)
+			.map(|o| o.values)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -706,10 +726,12 @@ pub fn ad_batch_py<'py>(
 #[wasm_bindgen]
 pub fn ad_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
 	let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
-
-	ad_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	
+	let mut output = vec![0.0; high.len()];  // Single allocation
+	ad_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -766,6 +788,65 @@ pub fn ad_batch_js(
 pub fn ad_batch_metadata_js(rows: usize, cols: usize) -> Vec<f64> {
 	// For AD, we just return the dimensions since there are no parameters
 	vec![rows as f64, cols as f64]
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ad_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+
+		let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
+
+		// Check for aliasing - if any input pointer equals output pointer
+		if high_ptr as *const f64 == out_ptr || low_ptr as *const f64 == out_ptr || 
+		   close_ptr as *const f64 == out_ptr || volume_ptr as *const f64 == out_ptr {
+			// Handle aliasing case with temp buffer
+			let mut temp = vec![0.0; len];
+			ad_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing - compute directly into output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			ad_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
 }
 
 #[cfg(test)]

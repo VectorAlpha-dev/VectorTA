@@ -104,6 +104,37 @@ const INDICATORS = {
             }
         }
     },
+    adxr: {
+        name: 'ADXR',
+        // Safe API
+        safe: {
+            fn: 'adxr_js',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'adxr_alloc',
+            freeFn: 'adxr_free',
+            computeFn: 'adxr_into',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'adxr_batch',
+            fastFn: 'adxr_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]  // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
     alma: {
         name: 'ALMA',
         // Safe API
@@ -1154,6 +1185,36 @@ const INDICATORS = {
             fastFn: 'vwma_batch_into',
             inputs: ['prices', 'volumes']  // Special: requires both price and volume
         }
+    },
+    ad: {
+        name: 'AD (Accumulation/Distribution)',
+        // Safe API
+        safe: {
+            fn: 'ad_js',
+            params: {},  // AD has no parameters
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        },
+        // Fast/Unsafe API (to be implemented)
+        fast: {
+            allocFn: 'ad_alloc',
+            freeFn: 'ad_free',
+            computeFn: 'ad_into',
+            params: {},  // AD has no parameters
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        },
+        // Batch API
+        batch: {
+            fn: 'ad_batch_js',
+            config: {
+                small: {
+                    // AD has no parameters, so batch is just processing multiple securities
+                },
+                medium: {
+                    // AD has no parameters, so batch is just processing multiple securities
+                }
+            },
+            inputs: ['high', 'low', 'close', 'volume']  // Requires OHLCV data
+        }
     }
 };
 
@@ -1517,7 +1578,30 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_batch_${configName}`;
             
             const result = this.benchmarkFunction(() => {
-                if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
+                if (indicatorKey === 'ad') {
+                    // AD batch requires flattened arrays and rows parameter
+                    const ohlc = this.ohlcData[sizeName];
+                    // Simulate batch of 10 securities
+                    const rows = 10;
+                    const cols = Math.floor(ohlc.high.length / rows);
+                    const flatSize = rows * cols;
+                    
+                    // Create flattened arrays (repeat same data for each row)
+                    const highs_flat = new Float64Array(flatSize);
+                    const lows_flat = new Float64Array(flatSize);
+                    const closes_flat = new Float64Array(flatSize);
+                    const volumes_flat = new Float64Array(flatSize);
+                    
+                    for (let i = 0; i < rows; i++) {
+                        const offset = i * cols;
+                        highs_flat.set(ohlc.high.subarray(0, cols), offset);
+                        lows_flat.set(ohlc.low.subarray(0, cols), offset);
+                        closes_flat.set(ohlc.close.subarray(0, cols), offset);
+                        volumes_flat.set(ohlc.volume.subarray(0, cols), offset);
+                    }
+                    
+                    wasmFn.call(this.wasm, highs_flat, lows_flat, closes_flat, volumes_flat, rows);
+                } else if (indicatorConfig.needsMultipleInputs || indicatorConfig.fast?.needsMultipleInputs) {
                     const ohlc = this.ohlcData[sizeName];
                     wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
                 } else if ((indicatorKey === 'pwma' || indicatorKey === 'supersmoother') && batchConfig.period_range) {
@@ -1598,7 +1682,7 @@ class WasmIndicatorBenchmark {
         }
         
         // Check if this indicator needs multiple inputs (legacy)
-        if (indicatorConfig.needsMultipleInputs) {
+        if (indicatorConfig.needsMultipleInputs || (indicatorConfig.safe && indicatorConfig.safe.needsMultipleInputs)) {
             const ohlc = this.ohlcData[sizeName];
             const result = [ohlc.high, ohlc.low, ohlc.close];
             
@@ -1675,8 +1759,8 @@ class WasmIndicatorBenchmark {
      */
     prepareFastParams(params, inPtr, outPtr, len, indicatorConfig, highPtr, lowPtr, closePtr, dualOutput = false, outPtr2 = null) {
         // Check if this indicator needs multiple inputs
-        if (indicatorConfig.needsMultipleInputs) {
-            // For FRAMA: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
+        if (indicatorConfig.needsMultipleInputs || (indicatorConfig.fast && indicatorConfig.fast.needsMultipleInputs)) {
+            // For FRAMA/ADXR: high_ptr, low_ptr, close_ptr, out_ptr, len, ...params
             const result = [highPtr, lowPtr, closePtr, outPtr, len];
             
             // Add indicator parameters

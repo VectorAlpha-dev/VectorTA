@@ -6,19 +6,27 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "vwma": 1.1598708333333334
+    "adxr": 4.889845,
+    "adxr_batch": 4.87616
   },
   "rust_results": {
-    "vwma": 1.1424228571428572
+    "adxr": 5.070085555555556
   },
   "comparisons": [
     {
-      "indicator": "vwma",
-      "python_ms": 1.1598708333333334,
-      "rust_ms": 1.1424228571428572,
-      "overhead_ms": 0.017447976190476222,
-      "overhead_pct": 1.5272782824139908
+      "indicator": "adxr",
+      "python_ms": 4.889845,
+      "rust_ms": 5.070085555555556,
+      "overhead_ms": -0.18024055555555574,
+      "overhead_pct": -3.5549805536921775
     }
   ],
-  "batch_comparisons": []
+  "batch_comparisons": [
+    {
+      "indicator": "adxr",
+      "single_ms": 4.889845,
+      "batch_ms": 4.87616,
+      "overhead_pct": -0.27986572171512236
+    }
+  ]
 }
