@@ -262,7 +262,12 @@
       "Bash(.venvScriptspython test_trima_kernels.py)",
       "Bash(./run_wasm_benchmark.bat trima)",
       "Bash(....\\.venv\\Scripts\\python -m pytest test_trima.py::TestTrima::test_trima_streaming -xvs)",
-      "Bash(.venv\\Scripts\\python tests\\python\\test_trima.py)"
+      "Bash(.venv\\Scripts\\python tests\\python\\test_trima.py)",
+      "Bash(.venvScriptspython.exe benchmarks/criterion_comparable_benchmark.py wma)",
+      "Bash(touch:*)",
+      "Bash(./run_wasm_benchmark.bat --rebuild wma)",
+      "Bash(./run_python_benchmark.bat alligator)",
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)"
     ],
     "deny": []
   }

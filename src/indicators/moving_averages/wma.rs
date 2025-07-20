@@ -15,13 +15,15 @@
 //! - **`Err(WmaError)`** otherwise.
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -183,6 +185,27 @@ pub fn wma_with_kernel(input: &WmaInput, kernel: Kernel) -> Result<WmaOutput, Wm
 	Ok(WmaOutput { values: out })
 }
 
+#[inline]
+pub fn wma_into_slice(dst: &mut [f64], input: &WmaInput, kern: Kernel) -> Result<(), WmaError> {
+	let (data, period, first, chosen) = wma_prepare(input, kern)?;
+
+	if dst.len() != data.len() {
+		return Err(WmaError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	wma_compute_into(data, period, first, chosen, dst);
+
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
 fn wma_prepare<'a>(
 	input: &'a WmaInput,
 	kernel: Kernel,
@@ -236,7 +259,7 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 			Kernel::Avx2 | Kernel::Avx2Batch => wma_avx2(data, period, first, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => wma_avx512(data, period, first, out),
-			_ => unreachable!(),
+			Kernel::Auto | _ => wma_scalar(data, period, first, out),
 		}
 	}
 }
@@ -310,10 +333,12 @@ pub fn wma_with_kernel_batch(data: &[f64], sweep: &WmaBatchRange, k: Kernel) -> 
 	};
 
 	let simd = match kernel {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		_ => Kernel::Scalar,
 	};
 	wma_batch_par_slice(data, sweep, simd)
 }
@@ -544,12 +569,12 @@ fn wma_batch_inner_into(
 		let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
 		match kern {
-			Kernel::Scalar => wma_row_scalar(data, first, period, out_row),
+			Kernel::Scalar | Kernel::ScalarBatch => wma_row_scalar(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => wma_row_avx2(data, first, period, out_row),
+			Kernel::Avx2 | Kernel::Avx2Batch => wma_row_avx2(data, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => wma_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
+			Kernel::Avx512 | Kernel::Avx512Batch => wma_row_avx512(data, first, period, out_row),
+			Kernel::Auto | _ => wma_row_scalar(data, first, period, out_row),
 		}
 	};
 
@@ -1072,34 +1097,24 @@ pub fn wma_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	let slice_in = data.as_slice()?; // zero-copy, read-only view
 
-	// Parse and validate kernel
-	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
+	// Parse and validate kernel before allow_threads
+	let kern = validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = WmaParams { period: Some(period) };
 	let wma_in = WmaInput::from_slice(slice_in, params);
 
-	// Allocate NumPy output buffer
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? }; // safe: we own the array
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| wma_with_kernel(&wma_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), WmaError> {
-		let (data, period, first, chosen) = wma_prepare(&wma_in, kern)?;
-		// Fill NaN prefix directly in output buffer (same as alloc_with_nan_prefix)
-		let warm = first + period;
-		slice_out[..warm].fill(f64::NAN);
-		// Compute directly into output buffer
-		wma_compute_into(data, period, first, chosen, slice_out);
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1158,7 +1173,7 @@ pub fn wma_batch_py<'py>(
 	let sweep = WmaBatchRange { period: period_range };
 
 	// Parse and validate kernel
-	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
+	let kern = validate_kernel(kernel, true)?;
 
 	// 1. Expand grid once to know rows*cols
 	let combos = expand_grid(&sweep);
@@ -1178,10 +1193,12 @@ pub fn wma_batch_py<'py>(
 				k => k,
 			};
 			let simd = match kernel {
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 				Kernel::Avx512Batch => Kernel::Avx512,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 				Kernel::Avx2Batch => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
-				_ => unreachable!(),
+				_ => Kernel::Scalar,
 			};
 			// Use the _into variant that writes directly to our pre-allocated buffer
 			wma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -1209,9 +1226,10 @@ pub fn wma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let params = WmaParams { period: Some(period) };
 	let input = WmaInput::from_slice(data, params);
 
-	wma_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut output = vec![0.0; data.len()];
+	wma_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1227,7 +1245,7 @@ pub fn wma_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
-	wma_batch_inner(data, &sweep, Kernel::Scalar, false)
+	wma_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1247,4 +1265,90 @@ pub fn wma_batch_metadata_js(period_start: usize, period_end: usize, period_step
 	}
 
 	Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = WmaParams { period: Some(period) };
+		let input = WmaInput::from_slice(data, params);
+
+		if in_ptr == out_ptr {
+			// Handle aliasing - allocate temporary buffer
+			let mut temp = vec![0.0; len];
+			wma_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing - write directly to output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			wma_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wma_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = WmaBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let total_size = rows * len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+
+		// Use the existing batch function that writes directly to the output
+		wma_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

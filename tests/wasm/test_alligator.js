@@ -541,6 +541,122 @@ test('Alligator batch - new API error handling', () => {
     }, /Invalid config/);
 });
 
+// Tests for fast/unsafe API
+test('Alligator fast API - basic functionality', () => {
+    const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
+    const hl2Array = new Float64Array(hl2);
+    const len = hl2Array.length;
+    
+    // Allocate memory
+    const inPtr = wasm.alligator_alloc(len);
+    const jawPtr = wasm.alligator_alloc(len);
+    const teethPtr = wasm.alligator_alloc(len);
+    const lipsPtr = wasm.alligator_alloc(len);
+    
+    try {
+        // Copy input data
+        const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
+        inView.set(hl2Array);
+        
+        // Compute
+        wasm.alligator_into(
+            inPtr, jawPtr, teethPtr, lipsPtr, len,
+            13, 8, 8, 5, 5, 3
+        );
+        
+        // Read results (recreate views in case memory grew)
+        const jawResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, jawPtr, len));
+        const teethResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, teethPtr, len));
+        const lipsResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, lipsPtr, len));
+        
+        // Compare with safe API
+        const safeResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
+        const safeJaw = safeResult.slice(0, len);
+        const safeTeeth = safeResult.slice(len, 2 * len);
+        const safeLips = safeResult.slice(2 * len, 3 * len);
+        
+        assertArrayClose(jawResult, safeJaw, 1e-10, "Fast API jaw mismatch");
+        assertArrayClose(teethResult, safeTeeth, 1e-10, "Fast API teeth mismatch");
+        assertArrayClose(lipsResult, safeLips, 1e-10, "Fast API lips mismatch");
+    } finally {
+        // Clean up
+        wasm.alligator_free(inPtr, len);
+        wasm.alligator_free(jawPtr, len);
+        wasm.alligator_free(teethPtr, len);
+        wasm.alligator_free(lipsPtr, len);
+    }
+});
+
+test('Alligator fast API - in-place operation (aliasing)', () => {
+    const hl2 = testData.high.slice(0, 100).map((h, i) => (h + testData.low[i]) / 2);
+    const hl2Array = new Float64Array(hl2);
+    const len = hl2Array.length;
+    
+    // Allocate only one buffer for input/output
+    const dataPtr = wasm.alligator_alloc(len);
+    const teethPtr = wasm.alligator_alloc(len);
+    const lipsPtr = wasm.alligator_alloc(len);
+    
+    try {
+        // Copy input data
+        const dataView = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len);
+        dataView.set(hl2Array);
+        
+        // Compute in-place (jaw output overwrites input)
+        wasm.alligator_into(
+            dataPtr, dataPtr, teethPtr, lipsPtr, len,  // jaw_ptr == in_ptr
+            13, 8, 8, 5, 5, 3
+        );
+        
+        // Read results (recreate views in case memory grew)
+        const jawResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len));
+        const teethResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, teethPtr, len));
+        const lipsResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, lipsPtr, len));
+        
+        // Compare with safe API
+        const safeResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
+        const safeJaw = safeResult.slice(0, len);
+        const safeTeeth = safeResult.slice(len, 2 * len);
+        const safeLips = safeResult.slice(2 * len, 3 * len);
+        
+        assertArrayClose(jawResult, safeJaw, 1e-10, "In-place jaw mismatch");
+        assertArrayClose(teethResult, safeTeeth, 1e-10, "In-place teeth mismatch");
+        assertArrayClose(lipsResult, safeLips, 1e-10, "In-place lips mismatch");
+    } finally {
+        // Clean up
+        wasm.alligator_free(dataPtr, len);
+        wasm.alligator_free(teethPtr, len);
+        wasm.alligator_free(lipsPtr, len);
+    }
+});
+
+test('Alligator fast API - null pointer handling', () => {
+    assert.throws(() => {
+        wasm.alligator_into(0, 0, 0, 0, 100, 13, 8, 8, 5, 5, 3);
+    }, /Null pointer/);
+});
+
+test('Alligator memory allocation and deallocation', () => {
+    const len = 1000;
+    
+    // Test allocation
+    const ptr = wasm.alligator_alloc(len);
+    assert(ptr !== 0, "Allocation should return non-zero pointer");
+    
+    // Test we can write to allocated memory
+    const view = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
+    view[0] = 42.0;
+    view[len - 1] = 99.0;
+    assert.strictEqual(view[0], 42.0);
+    assert.strictEqual(view[len - 1], 99.0);
+    
+    // Free the memory
+    wasm.alligator_free(ptr, len);
+    
+    // Free null pointer should not crash
+    wasm.alligator_free(0, len);
+});
+
 test.after(() => {
     console.log('Alligator WASM tests completed');
 });
