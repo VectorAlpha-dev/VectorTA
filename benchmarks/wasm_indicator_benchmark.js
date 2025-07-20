@@ -1012,6 +1012,63 @@ const INDICATORS = {
             fastFn: 'tema_batch_into'
         }
     },
+    wilders: {
+        name: 'Wilders',
+        // Safe API
+        safe: {
+            fn: 'wilders_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wilders_alloc',
+            freeFn: 'wilders_free',
+            computeFn: 'wilders_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'wilders_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                    // Total: 3 combinations
+                },
+                medium: {
+                    period_range: [5, 25, 4]       // 6 values
+                    // Total: 6 combinations
+                }
+            }
+        }
+    },
+    wma: {
+        name: 'WMA (Weighted Moving Average)',
+        // Safe API
+        safe: {
+            fn: 'wma_js',
+            params: { period: 30 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wma_alloc',
+            freeFn: 'wma_free',
+            computeFn: 'wma_into',
+            params: { period: 30 }
+        },
+        // Batch API
+        batch: {
+            fn: 'wma_batch_js',
+            config: {
+                small: {
+                    period_range: [10, 30, 10]     // 3 values: 10, 20, 30
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values: 10, 15, 20, ..., 50
+                }
+            },
+            fastFn: 'wma_batch_into'
+        }
+    },
     gaussian: {
         name: 'Gaussian',
         safe: {
@@ -1242,6 +1299,61 @@ const INDICATORS = {
             },
             // Fast batch API
             fastFn: 'trendflex_batch_into'
+        }
+    },
+    alligator: {
+        name: 'Alligator',
+        // Safe API
+        safe: {
+            fn: 'alligator_js',
+            params: { 
+                jaw_period: 13, 
+                jaw_offset: 8, 
+                teeth_period: 8, 
+                teeth_offset: 5, 
+                lips_period: 5, 
+                lips_offset: 3 
+            }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'alligator_alloc',
+            freeFn: 'alligator_free',
+            computeFn: 'alligator_into',
+            params: { 
+                jaw_period: 13, 
+                jaw_offset: 8, 
+                teeth_period: 8, 
+                teeth_offset: 5, 
+                lips_period: 5, 
+                lips_offset: 3 
+            },
+            // Alligator has multiple outputs
+            outputCount: 3
+        },
+        // Batch API
+        batch: {
+            fn: 'alligator_batch',
+            config: {
+                small: {
+                    jaw_period_range: [13, 13, 0],
+                    jaw_offset_range: [8, 8, 0],
+                    teeth_period_range: [8, 8, 0],
+                    teeth_offset_range: [5, 5, 0],
+                    lips_period_range: [5, 5, 0],
+                    lips_offset_range: [3, 3, 0]
+                    // Total: 1 combination (default params)
+                },
+                medium: {
+                    jaw_period_range: [10, 20, 5],      // 3 values
+                    jaw_offset_range: [6, 10, 2],       // 3 values
+                    teeth_period_range: [6, 10, 2],     // 3 values
+                    teeth_offset_range: [4, 6, 1],      // 3 values
+                    lips_period_range: [4, 6, 1],       // 3 values
+                    lips_offset_range: [2, 4, 1]        // 3 values
+                    // Total: 729 combinations (too many, but shows capability)
+                }
+            }
         }
     },
     vwma: {
@@ -1615,7 +1727,7 @@ class WasmIndicatorBenchmark {
     benchmarkFastAPI(indicatorKey, indicatorConfig) {
         console.log(`\n--- ${indicatorConfig.name} Fast/Unsafe API ---`);
         
-        const { allocFn, freeFn, computeFn, params, dualOutput } = indicatorConfig.fast;
+        const { allocFn, freeFn, computeFn, params, dualOutput, outputCount } = indicatorConfig.fast;
         
         if (!this.wasm[allocFn] || !this.wasm[freeFn] || !this.wasm[computeFn]) {
             console.log(`  Fast API functions not found, skipping...`);
@@ -1626,7 +1738,7 @@ class WasmIndicatorBenchmark {
             const benchName = `${indicatorKey}_fast_${sizeName}`;
             const len = data.length;
             
-            let inPtr, outPtr, highPtr, lowPtr, closePtr, timestampsPtr, volumesPtr, pricesPtr, outPtr2;
+            let inPtr, outPtr, highPtr, lowPtr, closePtr, outPtr2, outPtr3, timestampsPtr, volumesPtr, pricesPtr, outPtr2;
             
             try {
                 // Handle custom inputs
@@ -1727,13 +1839,36 @@ class WasmIndicatorBenchmark {
 
                     this.results[benchName] = result;
                     this.printResult(result);
+                } else if (outputCount === 3) {
+                    // Handle triple output indicators (alligator)
+                    inPtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);   // jaw
+                    outPtr2 = this.wasm[allocFn](len);  // teeth
+                    outPtr3 = this.wasm[allocFn](len);  // lips
                     
-                    // Clean up outPtr2 if allocated
-                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
+                    // Copy data once
+                    const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, len);
+                    inView.set(data);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = [inPtr, outPtr, outPtr2, outPtr3, len];
+                        // Add indicator parameters
+                        for (const value of Object.values(params)) {
+                            paramArray.push(value);
+                        }
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
+
+                    this.results[benchName] = result;
+                    this.printResult(result);
                 } else {
                     // Pre-allocate buffers outside of benchmark
                     inPtr = this.wasm[allocFn](len);
-                    outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
+                            outPtr2 = dualOutput ? this.wasm[allocFn](len) : null;
                     outPtr = this.wasm[allocFn](len);
                     
                     // Copy data once
@@ -1775,6 +1910,11 @@ class WasmIndicatorBenchmark {
                     if (closePtr) this.wasm[freeFn](closePtr, len);
                     if (volumePtr) this.wasm[freeFn](volumePtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
+                } else if (outputCount === 3) {
+                    if (inPtr) this.wasm[freeFn](inPtr, len);
+                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
+                    if (outPtr3) this.wasm[freeFn](outPtr3, len);
                 } else {
                     if (inPtr) this.wasm[freeFn](inPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
@@ -1847,8 +1987,8 @@ class WasmIndicatorBenchmark {
                     // PWMA and SuperSmoother have special batch APIs that take individual parameters
                     const [start, end, step] = batchConfig.period_range;
                     wasmFn.call(this.wasm, data, start, end, step);
-                } else if (indicatorKey === 'trendflex') {
-                    // TrendFlex uses the new ergonomic batch API with config object
+                } else if (indicatorKey === 'trendflex' || indicatorKey === 'wilders') {
+                    // TrendFlex and Wilders use the new ergonomic batch API with config object
                     wasmFn.call(this.wasm, data, batchConfig);
                 } else {
                     const params = this.prepareBatchParams(indicatorKey, data, batchConfig, sizeName);
@@ -2000,7 +2140,7 @@ class WasmIndicatorBenchmark {
             const fast = batchConfig.fast_limit_range || [0.5, 0.5, 0];
             const slow = batchConfig.slow_limit_range || [0.05, 0.05, 0];
             return [data, fast[0], fast[1], fast[2], slow[0], slow[1], slow[2]];
-        } else if (indicatorKey === 'sqwma' || indicatorKey === 'fwma' || indicatorKey === 'hma' || indicatorKey === 'kama') {
+        } else if (indicatorKey === 'sqwma' || indicatorKey === 'fwma' || indicatorKey === 'hma' || indicatorKey === 'kama' || indicatorKey === 'wma') {
             // These indicators expect: data, period_start, period_end, period_step
             const period = batchConfig.period_range;
             return [data, period[0], period[1], period[2]];

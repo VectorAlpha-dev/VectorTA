@@ -6,19 +6,18 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "adxr": 4.889845,
-    "adxr_batch": 4.87616
+    "alligator": 5.90828
   },
   "rust_results": {
-    "adxr": 5.070085555555556
+    "alligator": 3.7730542857142852
   },
   "comparisons": [
     {
-      "indicator": "adxr",
-      "python_ms": 4.889845,
-      "rust_ms": 5.070085555555556,
-      "overhead_ms": -0.18024055555555574,
-      "overhead_pct": -3.5549805536921775
+      "indicator": "alligator",
+      "python_ms": 5.90828,
+      "rust_ms": 3.7730542857142852,
+      "overhead_ms": 2.135225714285715,
+      "overhead_pct": 56.59143899334305
     }
   ],
   "batch_comparisons": [

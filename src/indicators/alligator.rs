@@ -1510,7 +1510,7 @@ pub fn alligator_py<'py>(
 	lips_offset: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	let slice_in = data.as_slice()?; // zero-copy, read-only view
 
@@ -1528,35 +1528,16 @@ pub fn alligator_py<'py>(
 	};
 	let alligator_in = AlligatorInput::from_slice(slice_in, params);
 
-	// ---------- allocate uninitialized NumPy output buffers ------------------------
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let jaw_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let teeth_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let lips_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-
-	let jaw_slice = unsafe { jaw_arr.as_slice_mut()? };
-	let teeth_slice = unsafe { teeth_arr.as_slice_mut()? };
-	let lips_slice = unsafe { lips_arr.as_slice_mut()? };
-
 	// ---------- heavy lifting without the GIL --------------------------------------
-	py.allow_threads(|| -> Result<(), AlligatorError> {
-		let AlligatorOutput { jaw, teeth, lips } = alligator_with_kernel(&alligator_in, kern)?;
+	let AlligatorOutput { jaw, teeth, lips } = py
+		.allow_threads(|| alligator_with_kernel(&alligator_in, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-		// SAFETY: We must write to ALL elements before returning to Python
-		// The alligator algorithm guarantees all elements are written
-		jaw_slice.copy_from_slice(&jaw);
-		teeth_slice.copy_from_slice(&teeth);
-		lips_slice.copy_from_slice(&lips);
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Build result dictionary
+	// Build result dictionary with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("jaw", jaw_arr)?;
-	dict.set_item("teeth", teeth_arr)?;
-	dict.set_item("lips", lips_arr)?;
+	dict.set_item("jaw", jaw.into_pyarray(py))?;
+	dict.set_item("teeth", teeth.into_pyarray(py))?;
+	dict.set_item("lips", lips.into_pyarray(py))?;
 
 	Ok(dict)
 }
@@ -1613,7 +1594,7 @@ pub fn alligator_batch_py<'py>(
 	lips_offset_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
@@ -1627,27 +1608,17 @@ pub fn alligator_batch_py<'py>(
 		lips_offset: lips_offset_range,
 	};
 
-	// 1. Expand grid once to know rows*cols
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
-
-	// 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let jaw_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let teeth_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let lips_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-
-	let jaw_slice = unsafe { jaw_arr.as_slice_mut()? };
-	let teeth_slice = unsafe { teeth_arr.as_slice_mut()? };
-	let lips_slice = unsafe { lips_arr.as_slice_mut()? };
-
 	// Use kernel validation for safety
 	let kern = validate_kernel(kernel, true)?;
 
-	// 3. Heavy work without the GIL
-	let combos = py
-		.allow_threads(|| {
+	// Heavy work without the GIL
+	let (batch_output, rows, cols) = py
+		.allow_threads(|| -> Result<(AlligatorBatchOutput, usize, usize), AlligatorError> {
+			// Expand grid to get dimensions
+			let combos = expand_grid(&sweep);
+			let rows = combos.len();
+			let cols = slice_in.len();
+
 			// Resolve Kernel::Auto to a specific kernel
 			let kernel = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
@@ -1660,32 +1631,27 @@ pub fn alligator_batch_py<'py>(
 				_ => unreachable!(),
 			};
 
-			// Use the batch function that writes directly to our pre-allocated buffers
-			let AlligatorBatchOutput {
-				jaw,
-				teeth,
-				lips,
-				combos,
-				..
-			} = alligator_batch_inner(slice_in, &sweep, simd, true)?;
-
-			// Copy data to output slices
-			jaw_slice.copy_from_slice(&jaw);
-			teeth_slice.copy_from_slice(&teeth);
-			lips_slice.copy_from_slice(&lips);
-
-			Ok::<Vec<AlligatorParams>, AlligatorError>(combos)
+			// Get the batch output
+			let output = alligator_batch_inner(slice_in, &sweep, simd, true)?;
+			Ok((output, rows, cols))
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 4. Build dict with the GIL
+	// Build dict with the GIL using zero-copy transfers
 	let dict = PyDict::new(py);
+	
+	// Convert flat vectors to 2D arrays
+	let jaw_arr = batch_output.jaw.into_pyarray(py);
+	let teeth_arr = batch_output.teeth.into_pyarray(py);
+	let lips_arr = batch_output.lips.into_pyarray(py);
+	
 	dict.set_item("jaw", jaw_arr.reshape((rows, cols))?)?;
 	dict.set_item("teeth", teeth_arr.reshape((rows, cols))?)?;
 	dict.set_item("lips", lips_arr.reshape((rows, cols))?)?;
+	
 	dict.set_item(
 		"jaw_periods",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.jaw_period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1693,7 +1659,7 @@ pub fn alligator_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"jaw_offsets",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.jaw_offset.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1701,7 +1667,7 @@ pub fn alligator_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"teeth_periods",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.teeth_period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1709,7 +1675,7 @@ pub fn alligator_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"teeth_offsets",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.teeth_offset.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1717,7 +1683,7 @@ pub fn alligator_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"lips_periods",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.lips_period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1725,7 +1691,7 @@ pub fn alligator_batch_py<'py>(
 	)?;
 	dict.set_item(
 		"lips_offsets",
-		combos
+		batch_output.combos
 			.iter()
 			.map(|p| p.lips_offset.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1733,6 +1699,118 @@ pub fn alligator_batch_py<'py>(
 	)?;
 
 	Ok(dict)
+}
+
+/// Write directly to output slices - no allocations (WASM optimization helper)
+pub fn alligator_into_slice(
+	jaw_dst: &mut [f64],
+	teeth_dst: &mut [f64],
+	lips_dst: &mut [f64],
+	input: &AlligatorInput,
+	kern: Kernel,
+) -> Result<(), AlligatorError> {
+	// Extract data and validate parameters
+	let data: &[f64] = match &input.data {
+		AlligatorData::Candles { candles, source } => source_type(candles, source),
+		AlligatorData::Slice(sl) => sl,
+	};
+
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(AlligatorError::AllValuesNaN)?;
+
+	let len = data.len();
+
+	// Validate destination slice lengths
+	if jaw_dst.len() != len || teeth_dst.len() != len || lips_dst.len() != len {
+		return Err(AlligatorError::InvalidJawPeriod {
+			period: jaw_dst.len(),
+			data_len: len,
+		});
+	}
+
+	// Get parameters
+	let jaw_period = input.get_jaw_period();
+	let jaw_offset = input.get_jaw_offset();
+	let teeth_period = input.get_teeth_period();
+	let teeth_offset = input.get_teeth_offset();
+	let lips_period = input.get_lips_period();
+	let lips_offset = input.get_lips_offset();
+
+	// Validate parameters
+	if jaw_period == 0 || jaw_period > len {
+		return Err(AlligatorError::InvalidJawPeriod {
+			period: jaw_period,
+			data_len: len,
+		});
+	}
+	if jaw_offset > len {
+		return Err(AlligatorError::InvalidJawOffset {
+			offset: jaw_offset,
+			data_len: len,
+		});
+	}
+	if teeth_period == 0 || teeth_period > len {
+		return Err(AlligatorError::InvalidTeethPeriod {
+			period: teeth_period,
+			data_len: len,
+		});
+	}
+	if teeth_offset > len {
+		return Err(AlligatorError::InvalidTeethOffset {
+			offset: teeth_offset,
+			data_len: len,
+		});
+	}
+	if lips_period == 0 || lips_period > len {
+		return Err(AlligatorError::InvalidLipsPeriod {
+			period: lips_period,
+			data_len: len,
+		});
+	}
+	if lips_offset > len {
+		return Err(AlligatorError::InvalidLipsOffset {
+			offset: lips_offset,
+			data_len: len,
+		});
+	}
+
+	// Calculate warmup periods for each line (including offset)
+	let jaw_warmup = first + jaw_period - 1 + jaw_offset;
+	let teeth_warmup = first + teeth_period - 1 + teeth_offset;
+	let lips_warmup = first + lips_period - 1 + lips_offset;
+
+	// Fill warmup periods with NaN
+	for v in &mut jaw_dst[..jaw_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut teeth_dst[..teeth_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut lips_dst[..lips_warmup] {
+		*v = f64::NAN;
+	}
+
+	// Compute SMMA values directly into the output slices
+	unsafe {
+		alligator_smma_scalar(
+			data,
+			jaw_period,
+			jaw_offset,
+			teeth_period,
+			teeth_offset,
+			lips_period,
+			lips_offset,
+			first,
+			len,
+			jaw_dst,
+			teeth_dst,
+			lips_dst,
+		);
+	}
+
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
@@ -1756,16 +1834,104 @@ pub fn alligator_js(
 	};
 	let input = AlligatorInput::from_slice(data, params);
 
-	alligator_with_kernel(&input, Kernel::Scalar)
-		.map(|o| {
-			// Flatten the three arrays into one for JS compatibility
-			let mut result = Vec::with_capacity(data.len() * 3);
-			result.extend_from_slice(&o.jaw);
-			result.extend_from_slice(&o.teeth);
-			result.extend_from_slice(&o.lips);
-			result
-		})
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	// Single allocation for all three outputs
+	let mut result = vec![0.0; data.len() * 3];
+	let (jaw, rem) = result.split_at_mut(data.len());
+	let (teeth, lips) = rem.split_at_mut(data.len());
+
+	alligator_into_slice(jaw, teeth, lips, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(result)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn alligator_into(
+	in_ptr: *const f64,
+	jaw_ptr: *mut f64,
+	teeth_ptr: *mut f64,
+	lips_ptr: *mut f64,
+	len: usize,
+	jaw_period: usize,
+	jaw_offset: usize,
+	teeth_period: usize,
+	teeth_offset: usize,
+	lips_period: usize,
+	lips_offset: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || jaw_ptr.is_null() || teeth_ptr.is_null() || lips_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = AlligatorParams {
+			jaw_period: Some(jaw_period),
+			jaw_offset: Some(jaw_offset),
+			teeth_period: Some(teeth_period),
+			teeth_offset: Some(teeth_offset),
+			lips_period: Some(lips_period),
+			lips_offset: Some(lips_offset),
+		};
+		let input = AlligatorInput::from_slice(data, params);
+
+		// Check for aliasing - need to check all combinations
+		let aliased = in_ptr == jaw_ptr as *const f64
+			|| in_ptr == teeth_ptr as *const f64
+			|| in_ptr == lips_ptr as *const f64
+			|| jaw_ptr == teeth_ptr
+			|| jaw_ptr == lips_ptr
+			|| teeth_ptr == lips_ptr;
+
+		if aliased {
+			// Use temporary buffers when aliasing detected
+			let mut temp_jaw = vec![0.0; len];
+			let mut temp_teeth = vec![0.0; len];
+			let mut temp_lips = vec![0.0; len];
+
+			alligator_into_slice(&mut temp_jaw, &mut temp_teeth, &mut temp_lips, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+			// Copy results to output pointers
+			let jaw_out = std::slice::from_raw_parts_mut(jaw_ptr, len);
+			let teeth_out = std::slice::from_raw_parts_mut(teeth_ptr, len);
+			let lips_out = std::slice::from_raw_parts_mut(lips_ptr, len);
+
+			jaw_out.copy_from_slice(&temp_jaw);
+			teeth_out.copy_from_slice(&temp_teeth);
+			lips_out.copy_from_slice(&temp_lips);
+		} else {
+			// Direct write when no aliasing
+			let jaw_out = std::slice::from_raw_parts_mut(jaw_ptr, len);
+			let teeth_out = std::slice::from_raw_parts_mut(teeth_ptr, len);
+			let lips_out = std::slice::from_raw_parts_mut(lips_ptr, len);
+
+			alligator_into_slice(jaw_out, teeth_out, lips_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
 }
 
 #[cfg(feature = "wasm")]
