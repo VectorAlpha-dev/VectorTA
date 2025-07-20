@@ -6,18 +6,18 @@
   "omp_threads": 1,
   "data_size": "1M",
   "python_results": {
-    "trima": 2.62586
+    "vwma": 1.1598708333333334
   },
   "rust_results": {
-    "trima": 2.457458928571428
+    "vwma": 1.1424228571428572
   },
   "comparisons": [
     {
-      "indicator": "trima",
-      "python_ms": 2.62586,
-      "rust_ms": 2.457458928571428,
-      "overhead_ms": 0.16840107142857175,
-      "overhead_pct": 6.852650494812829
+      "indicator": "vwma",
+      "python_ms": 1.1598708333333334,
+      "rust_ms": 1.1424228571428572,
+      "overhead_ms": 0.017447976190476222,
+      "overhead_pct": 1.5272782824139908
     }
   ],
   "batch_comparisons": []

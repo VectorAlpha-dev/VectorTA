@@ -24,6 +24,8 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -31,6 +33,8 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -54,6 +58,7 @@ pub struct VwmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct VwmaParams {
 	pub period: Option<usize>,
 }
@@ -223,6 +228,10 @@ pub fn vwma_with_kernel(input: &VwmaInput, kernel: Kernel) -> Result<VwmaOutput,
 			Kernel::Avx2 | Kernel::Avx2Batch => vwma_avx2(price, volume, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => vwma_avx512(price, volume, period, first, &mut out),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				vwma_scalar(price, volume, period, first, &mut out)
+			}
 			_ => unreachable!(),
 		}
 	}
@@ -296,7 +305,8 @@ pub fn vwma_batch_with_kernel(
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
+		// Fallback to scalar for any other case
+		_ => Kernel::Scalar,
 	};
 	vwma_batch_par_slice(price, volume, sweep, simd)
 }
@@ -415,7 +425,10 @@ fn vwma_batch_inner(
 			Kernel::Avx2 => vwma_row_avx2(price, volume, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => vwma_row_avx512(price, volume, first, period, out_row),
-			_ => unreachable!(),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => vwma_row_scalar(price, volume, first, period, out_row),
+			// Fallback to scalar for any other kernel variant
+			_ => vwma_row_scalar(price, volume, first, period, out_row),
 		}
 	};
 
@@ -952,81 +965,25 @@ pub fn vwma_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	let prices_slice = prices.as_slice()?;
 	let volumes_slice = volumes.as_slice()?;
 
-	// Parse and validate kernel
-	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
+	// Parse and validate kernel before allow_threads
+	let kern = validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = VwmaParams { period: Some(period) };
 	let vwma_in = VwmaInput::from_slice(prices_slice, volumes_slice, params);
 
-	// Allocate NumPy output buffer
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [prices_slice.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Get Vec<f64> from Rust function - zero-copy optimization
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| vwma_with_kernel(&vwma_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), VwmaError> {
-		let (price, volume): (&[f64], &[f64]) = match &vwma_in.data {
-			VwmaData::Slice { prices, volumes } => (prices, volumes),
-			_ => unreachable!(),
-		};
-
-		let len = price.len();
-		let period = vwma_in.get_period();
-
-		if period == 0 || period > len {
-			return Err(VwmaError::InvalidPeriod { period, data_len: len });
-		}
-		if volume.len() != len {
-			return Err(VwmaError::PriceVolumeMismatch {
-				price_len: len,
-				volume_len: volume.len(),
-			});
-		}
-
-		let first = price
-			.iter()
-			.zip(volume.iter())
-			.position(|(&p, &v)| !p.is_nan() && !v.is_nan())
-			.ok_or(VwmaError::AllValuesNaN)?;
-
-		if (len - first) < period {
-			return Err(VwmaError::NotEnoughValidData {
-				needed: period,
-				valid: len - first,
-			});
-		}
-
-		let warm = first + period;
-
-		// Initialize prefix with NaN
-		slice_out[..warm - 1].fill(f64::NAN);
-
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			other => other,
-		};
-
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => vwma_scalar(price, volume, period, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => vwma_avx2(price, volume, period, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => vwma_avx512(price, volume, period, first, slice_out),
-				_ => unreachable!(),
-			}
-		}
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr.into())
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1085,6 +1042,7 @@ pub fn vwma_batch_py<'py>(
 
 	let prices_slice = prices.as_slice()?;
 	let volumes_slice = volumes.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = VwmaBatchRange { period: period_range };
 
@@ -1093,15 +1051,12 @@ pub fn vwma_batch_py<'py>(
 	let rows = combos.len();
 	let cols = prices_slice.len();
 
-	// Pre-allocate NumPy array
+	// Pre-allocate NumPy array for batch operations (acceptable pattern)
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Parse and validate kernel
-	let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
-
 	// Heavy work without the GIL
-	py.allow_threads(|| {
+	let combos = py.allow_threads(|| {
 		let kernel = match kern {
 			Kernel::Auto => detect_best_batch_kernel(),
 			k => k,
@@ -1110,53 +1065,17 @@ pub fn vwma_batch_py<'py>(
 			Kernel::Avx512Batch => Kernel::Avx512,
 			Kernel::Avx2Batch => Kernel::Avx2,
 			Kernel::ScalarBatch => Kernel::Scalar,
-			_ => unreachable!(),
+			// Fallback to scalar for any other case
+			_ => Kernel::Scalar,
 		};
 
-		// Initialize output with NaN and compute
-		let len = prices_slice.len();
-		let first = prices_slice
-			.iter()
-			.zip(volumes_slice.iter())
-			.position(|(&p, &v)| !p.is_nan() && !v.is_nan())
-			.ok_or(VwmaError::AllValuesNaN)?;
-
-		let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-		if len - first < max_p {
-			return Err(VwmaError::NotEnoughValidData {
-				needed: max_p,
-				valid: len - first,
-			});
-		}
-
-		// Initialize matrix prefixes with NaN
-		let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
-
-		// Convert slice_out to MaybeUninit for init_matrix_prefixes
-		let out_uninit =
-			unsafe { std::slice::from_raw_parts_mut(slice_out.as_mut_ptr() as *mut MaybeUninit<f64>, slice_out.len()) };
-
-		unsafe { init_matrix_prefixes(out_uninit, cols, &warm_prefixes) };
-
-		// Process each row
-		for (row, combo) in combos.iter().enumerate() {
-			let period = combo.period.unwrap();
-			let row_start = row * cols;
-			let row_slice = &mut slice_out[row_start..row_start + cols];
-
-			unsafe {
-				match simd {
-					Kernel::Scalar => vwma_row_scalar(prices_slice, volumes_slice, first, period, row_slice),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx2 => vwma_row_avx2(prices_slice, volumes_slice, first, period, row_slice),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx512 => vwma_row_avx512(prices_slice, volumes_slice, first, period, row_slice),
-					_ => unreachable!(),
-				}
-			}
-		}
-
-		Ok::<_, VwmaError>(())
+		// Use the existing batch_inner function which already handles NaN prefixes
+		vwma_batch_inner(prices_slice, volumes_slice, &sweep, simd, true)
+			.and_then(|output| {
+				// Copy the output values to our pre-allocated buffer
+				slice_out.copy_from_slice(&output.values);
+				Ok(output.combos)
+			})
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1181,9 +1100,11 @@ pub fn vwma_js(prices: &[f64], volumes: &[f64], period: usize) -> Result<Vec<f64
 	let params = VwmaParams { period: Some(period) };
 	let input = VwmaInput::from_slice(prices, volumes, params);
 
-	vwma_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut output = vec![0.0; prices.len()];
+	vwma_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1199,8 +1120,18 @@ pub fn vwma_batch_js(
 		period: (period_start, period_end, period_step),
 	};
 
+	// Detect best kernel and convert to appropriate SIMD kernel for batch
+	let kernel = detect_best_batch_kernel();
+	let simd_kernel = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		// Fallback to scalar for any other case
+		_ => Kernel::Scalar,
+	};
+	
 	// Use the existing batch function with parallel=false for WASM
-	vwma_batch_inner(prices, volumes, &sweep, Kernel::Scalar, false)
+	vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1220,4 +1151,234 @@ pub fn vwma_batch_metadata_js(period_start: usize, period_end: usize, period_ste
 	}
 
 	Ok(metadata)
+}
+
+#[inline]
+pub fn vwma_into_slice(dst: &mut [f64], input: &VwmaInput, kern: Kernel) -> Result<(), VwmaError> {
+	let (price, volume): (&[f64], &[f64]) = match &input.data {
+		VwmaData::Candles { candles, source } => (source_type(candles, source), source_type(candles, "volume")),
+		VwmaData::CandlesPlusPrices { candles, prices } => (prices, source_type(candles, "volume")),
+		VwmaData::Slice { prices, volumes } => (prices, volumes),
+	};
+	let len = price.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(VwmaError::InvalidPeriod { period, data_len: len });
+	}
+	if volume.len() != len {
+		return Err(VwmaError::PriceVolumeMismatch {
+			price_len: len,
+			volume_len: volume.len(),
+		});
+	}
+	if dst.len() != len {
+		return Err(VwmaError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+
+	let first = price
+		.iter()
+		.zip(volume.iter())
+		.position(|(&p, &v)| !p.is_nan() && !v.is_nan())
+		.ok_or(VwmaError::AllValuesNaN)?;
+
+	if (len - first) < period {
+		return Err(VwmaError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => vwma_scalar(price, volume, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vwma_avx2(price, volume, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vwma_avx512(price, volume, period, first, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				vwma_scalar(price, volume, period, first, dst)
+			}
+			// Fallback to scalar for any other kernel variant
+			_ => vwma_scalar(price, volume, period, first, dst),
+		}
+	}
+
+	// Fill warmup with NaN
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_into(
+	price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let prices = std::slice::from_raw_parts(price_ptr, len);
+		let volumes = std::slice::from_raw_parts(volume_ptr, len);
+		let params = VwmaParams { period: Some(period) };
+		let input = VwmaInput::from_slice(prices, volumes, params);
+
+		// Check for aliasing - note that VWMA has two input arrays
+		if price_ptr == out_ptr || volume_ptr == out_ptr {
+			// Use temporary buffer if output aliases with either input
+			let mut temp = vec![0.0; len];
+			vwma_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vwma_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VwmaBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VwmaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<VwmaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vwma_batch)]
+pub fn vwma_batch_unified_js(prices: &[f64], volumes: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VwmaBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = VwmaBatchRange {
+		period: config.period_range,
+	};
+
+	// Detect best kernel for batch operations
+	let kernel = detect_best_batch_kernel();
+	let simd_kernel = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		// Fallback to scalar for any other case
+		_ => Kernel::Scalar,
+	};
+	let output = vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = VwmaBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwma_batch_into(
+	price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let prices = std::slice::from_raw_parts(price_ptr, len);
+		let volumes = std::slice::from_raw_parts(volume_ptr, len);
+
+		let sweep = VwmaBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		
+		if price_ptr == out_ptr || volume_ptr == out_ptr {
+			// Use temporary buffer if output aliases with either input
+			let kernel = detect_best_batch_kernel();
+			let simd_kernel = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				// Fallback to scalar for any other case
+				_ => Kernel::Scalar,
+			};
+			let output = vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+			out.copy_from_slice(&output.values);
+		} else {
+			let out_slice = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+			
+			// Process each parameter combination
+			for (i, combo) in combos.iter().enumerate() {
+				let row_start = i * len;
+				let row_end = row_start + len;
+				let row_out = &mut out_slice[row_start..row_end];
+				
+				let input = VwmaInput::from_slice(prices, volumes, combo.clone());
+				vwma_into_slice(row_out, &input, detect_best_kernel())
+					.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			}
+		}
+
+		Ok(rows)
+	}
 }
