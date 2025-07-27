@@ -18,9 +18,25 @@
 //! - **Ok(LrsiOutput)** with `Vec<f64>` matching input
 //! - **Err(LrsiError)** otherwise
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -42,6 +58,7 @@ pub struct LrsiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct LrsiParams {
 	pub alpha: Option<f64>,
 }
@@ -171,15 +188,17 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
 		return Err(LrsiError::InvalidAlpha { alpha });
 	}
 
-	let mut price = Vec::with_capacity(high.len());
+	// Find first valid price without allocating
+	let mut first_valid_idx = None;
 	for i in 0..high.len() {
-		price.push((high[i] + low[i]) / 2.0);
+		let price = (high[i] + low[i]) / 2.0;
+		if !price.is_nan() {
+			first_valid_idx = Some(i);
+			break;
+		}
 	}
-
-	let first_valid_idx = match price.iter().position(|&x| !x.is_nan()) {
-		Some(idx) => idx,
-		None => return Err(LrsiError::AllValuesNaN),
-	};
+	
+	let first_valid_idx = first_valid_idx.ok_or(LrsiError::AllValuesNaN)?;
 	let n = high.len();
 	if n - first_valid_idx < 4 {
 		return Err(LrsiError::NotEnoughValidData {
@@ -188,7 +207,8 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
 		});
 	}
 
-	let mut out = vec![f64::NAN; n];
+	let warmup_period = first_valid_idx + 3;  // Needs at least 4 values
+	let mut out = alloc_with_nan_prefix(n, warmup_period);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -197,11 +217,11 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => lrsi_scalar(&price, alpha, first_valid_idx, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => lrsi_scalar_hl(high, low, alpha, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => lrsi_avx2(&price, alpha, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => lrsi_avx2_hl(high, low, alpha, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => lrsi_avx512(&price, alpha, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => lrsi_avx512_hl(high, low, alpha, first_valid_idx, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -210,51 +230,116 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
 }
 
 #[inline]
-pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
-	let n = price.len();
-	let mut l0 = vec![f64::NAN; n];
-	let mut l1 = vec![f64::NAN; n];
-	let mut l2 = vec![f64::NAN; n];
-	let mut l3 = vec![f64::NAN; n];
-	let gamma = 1.0 - alpha;
+pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Result<(), LrsiError> {
+	let (high, low) = match &input.data {
+		LrsiData::Candles { candles } => {
+			let high = candles.select_candle_field("high").unwrap();
+			let low = candles.select_candle_field("low").unwrap();
+			(high, low)
+		}
+		LrsiData::Slices { high, low } => (*high, *low),
+	};
 
-	l0[first] = price[first];
-	l1[first] = price[first];
-	l2[first] = price[first];
-	l3[first] = price[first];
+	let alpha = input.get_alpha();
+	if !(0.0 < alpha && alpha < 1.0) {
+		return Err(LrsiError::InvalidAlpha { alpha });
+	}
+
+	// Find first valid price without allocating
+	let mut first_valid_idx = None;
+	for i in 0..high.len() {
+		let price = (high[i] + low[i]) / 2.0;
+		if !price.is_nan() {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	
+	let first_valid_idx = first_valid_idx.ok_or(LrsiError::AllValuesNaN)?;
+	let n = high.len();
+	
+	if dst.len() != n {
+		return Err(LrsiError::NotEnoughValidData {
+			needed: n,
+			valid: dst.len(),
+		});
+	}
+	
+	if n - first_valid_idx < 4 {
+		return Err(LrsiError::NotEnoughValidData {
+			needed: 4,
+			valid: n - first_valid_idx,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => lrsi_scalar_hl(high, low, alpha, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => lrsi_avx2_hl(high, low, alpha, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => lrsi_avx512_hl(high, low, alpha, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + 3;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[inline]
+pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+	let gamma = 1.0 - alpha;
+	
+	// Initialize state variables with first valid price
+	let first_price = (high[first] + low[first]) / 2.0;
+	let mut l0 = first_price;
+	let mut l1 = first_price;
+	let mut l2 = first_price;
+	let mut l3 = first_price;
 	out[first] = 0.0;
 
-	for i in (first + 1)..n {
-		let p = price[i];
+	// Process remaining values with rolling state
+	for i in (first + 1)..high.len() {
+		let p = (high[i] + low[i]) / 2.0;
 		if p.is_nan() {
+			out[i] = f64::NAN;
 			continue;
 		}
-		let l0_prev = l0[i - 1];
-		let l1_prev = l1[i - 1];
-		let l2_prev = l2[i - 1];
-		let l3_prev = l3[i - 1];
 
-		l0[i] = alpha * p + gamma * l0_prev;
-		l1[i] = -gamma * l0[i] + l0_prev + gamma * l1_prev;
-		l2[i] = -gamma * l1[i] + l1_prev + gamma * l2_prev;
-		l3[i] = -gamma * l2[i] + l2_prev + gamma * l3_prev;
+		// Update Laguerre filter states
+		let new_l0 = alpha * p + gamma * l0;
+		let new_l1 = -gamma * new_l0 + l0 + gamma * l1;
+		let new_l2 = -gamma * new_l1 + l1 + gamma * l2;
+		let new_l3 = -gamma * new_l2 + l2 + gamma * l3;
 
+		// Calculate RSI-like ratio
 		let mut cu = 0.0;
 		let mut cd = 0.0;
-		if l0[i] >= l1[i] {
-			cu += l0[i] - l1[i];
+		if new_l0 >= new_l1 {
+			cu += new_l0 - new_l1;
 		} else {
-			cd += l1[i] - l0[i];
+			cd += new_l1 - new_l0;
 		}
-		if l1[i] >= l2[i] {
-			cu += l1[i] - l2[i];
+		if new_l1 >= new_l2 {
+			cu += new_l1 - new_l2;
 		} else {
-			cd += l2[i] - l1[i];
+			cd += new_l2 - new_l1;
 		}
-		if l2[i] >= l3[i] {
-			cu += l2[i] - l3[i];
+		if new_l2 >= new_l3 {
+			cu += new_l2 - new_l3;
 		} else {
-			cd += l3[i] - l2[i];
+			cd += new_l3 - new_l2;
 		}
 
 		out[i] = if (cu + cd).abs() < f64::EPSILON {
@@ -262,9 +347,87 @@ pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
 		} else {
 			cu / (cu + cd)
 		};
+
+		// Update state for next iteration
+		l0 = new_l0;
+		l1 = new_l1;
+		l2 = new_l2;
+		l3 = new_l3;
 	}
 }
 
+// Keep old function for compatibility with row functions
+#[inline]
+pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+	let gamma = 1.0 - alpha;
+	
+	// Initialize state variables (no allocation needed)
+	let mut l0 = price[first];
+	let mut l1 = price[first];
+	let mut l2 = price[first];
+	let mut l3 = price[first];
+	out[first] = 0.0;
+
+	// Process remaining values with rolling state
+	for i in (first + 1)..price.len() {
+		let p = price[i];
+		if p.is_nan() {
+			out[i] = f64::NAN;
+			continue;
+		}
+
+		// Update Laguerre filter states
+		let new_l0 = alpha * p + gamma * l0;
+		let new_l1 = -gamma * new_l0 + l0 + gamma * l1;
+		let new_l2 = -gamma * new_l1 + l1 + gamma * l2;
+		let new_l3 = -gamma * new_l2 + l2 + gamma * l3;
+
+		// Calculate RSI-like ratio
+		let mut cu = 0.0;
+		let mut cd = 0.0;
+		if new_l0 >= new_l1 {
+			cu += new_l0 - new_l1;
+		} else {
+			cd += new_l1 - new_l0;
+		}
+		if new_l1 >= new_l2 {
+			cu += new_l1 - new_l2;
+		} else {
+			cd += new_l2 - new_l1;
+		}
+		if new_l2 >= new_l3 {
+			cu += new_l2 - new_l3;
+		} else {
+			cd += new_l3 - new_l2;
+		}
+
+		out[i] = if (cu + cd).abs() < f64::EPSILON {
+			0.0
+		} else {
+			cu / (cu + cd)
+		};
+
+		// Update state for next iteration
+		l0 = new_l0;
+		l1 = new_l1;
+		l2 = new_l2;
+		l3 = new_l3;
+	}
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn lrsi_avx2_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+	lrsi_scalar_hl(high, low, alpha, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn lrsi_avx512_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
+	lrsi_scalar_hl(high, low, alpha, first, out)
+}
+
+// Keep old functions for compatibility with row functions
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn lrsi_avx2(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
@@ -525,12 +688,18 @@ fn lrsi_batch_inner(
 	if high.len() == 0 || low.len() == 0 {
 		return Err(LrsiError::EmptyData);
 	}
-	let mut price = Vec::with_capacity(high.len());
+	
+	// Find first valid price without allocating
+	let mut first = None;
 	for i in 0..high.len() {
-		price.push((high[i] + low[i]) / 2.0);
+		let price = (high[i] + low[i]) / 2.0;
+		if !price.is_nan() {
+			first = Some(i);
+			break;
+		}
 	}
-
-	let first = price.iter().position(|&x| !x.is_nan()).ok_or(LrsiError::AllValuesNaN)?;
+	let first = first.ok_or(LrsiError::AllValuesNaN)?;
+	
 	let rows = combos.len();
 	let cols = high.len();
 	if cols - first < 4 {
@@ -539,15 +708,24 @@ fn lrsi_batch_inner(
 			valid: cols - first,
 		});
 	}
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use helper functions for batch allocation
+	let mut buf_uninit = make_uninit_matrix(rows, cols);
+	let warmup_periods = vec![first + 3; rows];  // Same warmup for all rows
+	init_matrix_prefixes(&mut buf_uninit, cols, &warmup_periods);
+	
+	// Convert to initialized slice
+	let values_ptr = buf_uninit.as_mut_ptr() as *mut f64;
+	let mut values = unsafe { std::slice::from_raw_parts_mut(values_ptr, rows * cols) };
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let alpha = combos[row].alpha.unwrap();
 		match kern {
-			Kernel::Scalar => lrsi_row_scalar(&price, first, alpha, out_row),
+			Kernel::Scalar => lrsi_row_scalar_hl(high, low, first, alpha, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => lrsi_row_avx2(&price, first, alpha, out_row),
+			Kernel::Avx2 => lrsi_row_avx2_hl(high, low, first, alpha, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => lrsi_row_avx512(&price, first, alpha, out_row),
+			Kernel::Avx512 => lrsi_row_avx512_hl(high, low, first, alpha, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -573,6 +751,12 @@ fn lrsi_batch_inner(
 		}
 	}
 
+	// SAFETY: buf_uninit was properly initialized through kernel computations
+	let values = unsafe {
+		let ptr = buf_uninit.into_raw_parts().0;
+		Vec::from_raw_parts(ptr as *mut f64, rows * cols, rows * cols)
+	};
+
 	Ok(LrsiBatchOutput {
 		values,
 		combos,
@@ -581,6 +765,24 @@ fn lrsi_batch_inner(
 	})
 }
 
+#[inline(always)]
+unsafe fn lrsi_row_scalar_hl(high: &[f64], low: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
+	lrsi_scalar_hl(high, low, alpha, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn lrsi_row_avx2_hl(high: &[f64], low: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
+	lrsi_scalar_hl(high, low, alpha, first, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn lrsi_row_avx512_hl(high: &[f64], low: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
+	lrsi_scalar_hl(high, low, alpha, first, out)
+}
+
+// Keep old functions for compatibility
 #[inline(always)]
 unsafe fn lrsi_row_scalar(price: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
 	lrsi_scalar(price, alpha, first, out)
@@ -608,6 +810,112 @@ unsafe fn lrsi_row_avx512_short(price: &[f64], first: usize, alpha: f64, out: &m
 #[inline(always)]
 unsafe fn lrsi_row_avx512_long(price: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
 	lrsi_scalar(price, alpha, first, out)
+}
+
+// WASM Bindings
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn lrsi_js(high: &[f64], low: &[f64], alpha: f64) -> Result<Vec<f64>, JsValue> {
+	let params = LrsiParams { alpha: Some(alpha) };
+	let input = LrsiInput::from_slices(high, low, params);
+	
+	let mut output = vec![0.0; high.len()];
+	lrsi_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct LrsiBatchConfig {
+	pub alpha_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct LrsiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<LrsiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = lrsi_batch)]
+pub fn lrsi_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: LrsiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = LrsiBatchRange {
+		alpha: config.alpha_range,
+	};
+	
+	let result = lrsi_batch_with_kernel(high, low, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let output = LrsiBatchJsOutput {
+		values: result.values,
+		combos: result.combos,
+		rows: result.rows,
+		cols: result.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn lrsi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn lrsi_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn lrsi_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	alpha: f64,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to lrsi_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let params = LrsiParams { alpha: Some(alpha) };
+		let input = LrsiInput::from_slices(high, low, params);
+		
+		// Check if we need to handle aliasing (in-place operation)
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			lrsi_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			lrsi_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
 }
 
 #[cfg(test)]
@@ -821,4 +1129,185 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// Batch function that writes directly to output slice for Python bindings
+#[inline(always)]
+fn lrsi_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &LrsiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<LrsiParams>, LrsiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(LrsiError::EmptyData);
+	}
+	if high.len() == 0 || low.len() == 0 {
+		return Err(LrsiError::EmptyData);
+	}
+	
+	// Find first valid price without allocating
+	let mut first = None;
+	for i in 0..high.len() {
+		let price = (high[i] + low[i]) / 2.0;
+		if !price.is_nan() {
+			first = Some(i);
+			break;
+		}
+	}
+	let first = first.ok_or(LrsiError::AllValuesNaN)?;
+	
+	let rows = combos.len();
+	let cols = high.len();
+	if cols - first < 4 {
+		return Err(LrsiError::NotEnoughValidData {
+			needed: 4,
+			valid: cols - first,
+		});
+	}
+
+	// Fill with NaN prefix
+	for row in 0..rows {
+		let row_start = row * cols;
+		for col in 0..(first + 3) {
+			out[row_start + col] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let alpha = combos[row].alpha.unwrap();
+		match kern {
+			Kernel::Scalar => lrsi_row_scalar_hl(high, low, first, alpha, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => lrsi_row_avx2_hl(high, low, first, alpha, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => lrsi_row_avx512_hl(high, low, first, alpha, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "lrsi")]
+#[pyo3(signature = (high, low, alpha, kernel=None))]
+pub fn lrsi_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	alpha: f64,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = LrsiParams { alpha: Some(alpha) };
+	let input = LrsiInput::from_slices(high_slice, low_slice, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| lrsi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "LrsiStream")]
+pub struct LrsiStreamPy {
+	stream: LrsiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl LrsiStreamPy {
+	#[new]
+	fn new(alpha: f64) -> PyResult<Self> {
+		let params = LrsiParams { alpha: Some(alpha) };
+		let stream = LrsiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(LrsiStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		let price = (high + low) / 2.0;
+		self.stream.update(price)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "lrsi_batch")]
+#[pyo3(signature = (high, low, alpha_range, kernel=None))]
+pub fn lrsi_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	alpha_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	
+	let sweep = LrsiBatchRange { alpha: alpha_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			lrsi_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"alphas",
+		combos
+			.iter()
+			.map(|p| p.alpha.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
 }

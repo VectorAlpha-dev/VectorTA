@@ -19,14 +19,29 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::MaybeUninit;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::{exceptions::PyValueError, pyclass, pyfunction, pymethods, types::PyDict, Bound, PyErr, PyResult, Python};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 // --------- Input Data & Param Structs ---------
 
@@ -52,6 +67,7 @@ pub struct FoscOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct FoscParams {
 	pub period: Option<usize>,
 }
@@ -148,6 +164,8 @@ impl FoscBuilder {
 
 #[derive(Debug, Error)]
 pub enum FoscError {
+	#[error("fosc: Empty input data provided")]
+	EmptyInputData,
 	#[error("fosc: All values are NaN.")]
 	AllValuesNaN,
 	#[error("fosc: Invalid period: period = {period}, data length = {data_len}")]
@@ -166,6 +184,9 @@ pub fn fosc(input: &FoscInput) -> Result<FoscOutput, FoscError> {
 pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput, FoscError> {
 	let data: &[f64] = input.as_ref();
 	let len = data.len();
+	if len == 0 {
+		return Err(FoscError::EmptyInputData);
+	}
 	let period = input.get_period();
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
 	if period == 0 || period > len {
@@ -181,7 +202,7 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, period - 1);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
@@ -193,6 +214,59 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
 		}
 	}
 	Ok(FoscOutput { values: out })
+}
+
+/// Write directly to output slice - no allocations
+#[inline]
+pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Result<(), FoscError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	let period = input.get_period();
+	
+	if len == 0 {
+		return Err(FoscError::EmptyInputData);
+	}
+	
+	if dst.len() != len {
+		return Err(FoscError::InvalidPeriod { 
+			period: dst.len(), 
+			data_len: len 
+		});
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(FoscError::AllValuesNaN)?;
+	if period == 0 || period > len {
+		return Err(FoscError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(FoscError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..period - 1] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 // --------- Scalar Core ---------
@@ -496,7 +570,16 @@ fn fosc_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap_or(5) - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let (prefix, aligned, suffix) = unsafe { buf_mu.as_mut_slice().align_to_mut::<f64>() };
+	assert!(prefix.is_empty() && suffix.is_empty());
+	let values = aligned;
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -531,8 +614,15 @@ fn fosc_batch_inner(
 		}
 	}
 
+	// Convert MaybeUninit to Vec<f64>
+	let values_vec = unsafe {
+		let ptr = buf_mu.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	};
+	std::mem::forget(buf_mu);
+	
 	Ok(FoscBatchOutput {
-		values,
+		values: values_vec,
 		combos,
 		rows,
 		cols,
@@ -572,9 +662,255 @@ unsafe fn fosc_row_avx512_long(data: &[f64], first: usize, period: usize, out: &
 	fosc_avx512_long(data, period, first, out)
 }
 
-#[inline(always)]
-fn expand_grid_fosc(r: &FoscBatchRange) -> Vec<FoscParams> {
-	expand_grid(r)
+
+// --------- Python Bindings ---------
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fosc")]
+#[pyo3(signature = (data, period=5, kernel=None))]
+pub fn fosc_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let data_slice = data.as_slice()?;
+	let kernel_enum = validate_kernel(kernel)?;
+
+	let params = FoscParams { period: Some(period) };
+	let input = FoscInput::from_slice(data_slice, params);
+
+	py.allow_threads(|| {
+		let output = fosc_with_kernel(&input, kernel_enum).map_err(|e| {
+			PyErr::new::<PyValueError, _>(format!("Rust computation error: {}", e))
+		})?;
+		Ok(output)
+	})
+	.map(|result| result.values.into_pyarray_bound(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fosc_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn fosc_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let data_slice = data.as_slice()?;
+	let kernel_enum = validate_kernel(kernel).map(|k| match k {
+		Kernel::Scalar => Kernel::ScalarBatch,
+		Kernel::Avx2 => Kernel::Avx2Batch,
+		Kernel::Avx512 => Kernel::Avx512Batch,
+		Kernel::Auto => Kernel::Auto,
+		_ => k,
+	})?;
+
+	let range = FoscBatchRange { period: period_range };
+
+	// Pre-calculate dimensions
+	let combos = expand_grid(&range);
+	let rows = combos.len();
+	let cols = data_slice.len();
+
+	// Pre-allocate output array
+	let output_array = unsafe { PyArray1::<f64>::new_bound(py, rows * cols) };
+	let output_slice = unsafe { output_array.as_slice_mut()? };
+
+	// Compute directly into the pre-allocated array
+	py.allow_threads(|| {
+		// Copy data_slice to avoid lifetime issues
+		let data_vec = data_slice.to_vec();
+		
+		// Call batch function with a temporary output, then copy
+		let batch_result = fosc_batch_with_kernel(&data_vec, &range, kernel_enum)
+			.map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+		
+		// Copy results to pre-allocated array
+		output_slice.copy_from_slice(&batch_result.values);
+		Ok(batch_result)
+	})
+	.map(|result| {
+		let dict = PyDict::new_bound(py);
+		dict.set_item("values", output_array)?;
+		
+		// Create combos as list of tuples
+		let combos_tuples: Vec<(usize,)> = result
+			.combos
+			.iter()
+			.map(|p| (p.period.unwrap_or(5),))
+			.collect();
+		dict.set_item("combos", combos_tuples)?;
+		dict.set_item("rows", result.rows)?;
+		dict.set_item("cols", result.cols)?;
+		Ok(dict)
+	})?
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "FoscStream")]
+pub struct FoscStreamPy {
+	inner: FoscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl FoscStreamPy {
+	#[new]
+	#[pyo3(signature = (period=5))]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = FoscParams { period: Some(period) };
+		let inner = FoscStream::try_new(params).map_err(|e| {
+			PyErr::new::<PyValueError, _>(format!("Failed to create stream: {}", e))
+		})?;
+		Ok(Self { inner })
+	}
+
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.inner.update(value)
+	}
+}
+
+// --------- WASM Bindings ---------
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fosc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = FoscParams { period: Some(period) };
+	let input = FoscInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	fosc_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fosc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fosc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fosc_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to fosc_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+		
+		let params = FoscParams { period: Some(period) };
+		let input = FoscInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			fosc_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			fosc_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+// Batch API structures
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FoscBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FoscBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<FoscParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = fosc_batch)]
+pub fn fosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: FoscBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let range = FoscBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = FoscBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fosc_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to fosc_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let range = FoscBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		// Call fosc_batch_inner and copy results
+		let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		// Copy results to output pointer
+		let out = std::slice::from_raw_parts_mut(out_ptr, output.values.len());
+		out.copy_from_slice(&output.values);
+		
+		Ok(output.rows)
+	}
 }
 
 #[cfg(test)]

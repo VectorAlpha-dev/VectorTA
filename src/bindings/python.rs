@@ -42,9 +42,29 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::chop::{chop_batch_py, chop_py, ChopStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::cvi::{cvi_batch_py, cvi_py, CviStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::di::{di_batch_py, di_py, DiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::efi::{efi_batch_py, efi_py, EfiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::fosc::{fosc_batch_py, fosc_py, FoscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kst::{kst_batch_py, kst_py, KstStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::lrsi::{lrsi_batch_py, lrsi_py, LrsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::mean_ad::{mean_ad_batch_py, mean_ad_py, MeanAdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::mom::{mom_batch_py, mom_py, MomStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::pivot::{pivot_batch_py, pivot_py, PivotStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
@@ -420,10 +440,35 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
 	m.add_class::<CgStreamPy>()?;
 
+	// Register CHOP functions with their user-facing names
+	m.add_function(wrap_pyfunction!(chop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(chop_batch_py, m)?)?;
+	m.add_class::<ChopStreamPy>()?;
+
 	// Register Correlation Cycle functions with their user-facing names
 	m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
+
+	// Register CVI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cvi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cvi_batch_py, m)?)?;
+	m.add_class::<CviStreamPy>()?;
+
+	// Register DI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(di_py, m)?)?;
+	m.add_function(wrap_pyfunction!(di_batch_py, m)?)?;
+	m.add_class::<DiStreamPy>()?;
+
+	// Register EFI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(efi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(efi_batch_py, m)?)?;
+	m.add_class::<EfiStreamPy>()?;
+
+	// Register FOSC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(fosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(fosc_batch_py, m)?)?;
+	m.add_class::<FoscStreamPy>()?;
 
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;
@@ -450,6 +495,31 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register KST functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kst_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kst_batch_py, m)?)?;
+	m.add_class::<KstStreamPy>()?;
+
+	// Register LRSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(lrsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(lrsi_batch_py, m)?)?;
+	m.add_class::<LrsiStreamPy>()?;
+
+	// Register Mean AD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mean_ad_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mean_ad_batch_py, m)?)?;
+	m.add_class::<MeanAdStreamPy>()?;
+
+	// Register MOM functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mom_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
+	m.add_class::<MomStreamPy>()?;
+
+	// Register Pivot functions with their user-facing names
+	m.add_function(wrap_pyfunction!(pivot_py, m)?)?;
+	m.add_function(wrap_pyfunction!(pivot_batch_py, m)?)?;
+	m.add_class::<PivotStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 
