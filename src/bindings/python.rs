@@ -42,9 +42,29 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::cksp::{cksp_batch_py, cksp_py, CkspStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::damiani_volatmeter::{
+	damiani_volatmeter_batch_py, damiani_volatmeter_py, DamianiVolatmeterStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::emd::{emd_batch_py, emd_py, EmdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::gatorosc::{gatorosc_batch_py, gatorosc_py, GatorOscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kurtosis::{kurtosis_batch_py, kurtosis_py, KurtosisStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::mab::{mab_batch_py, mab_py, MabStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::medprice::{medprice_batch_py, medprice_py, MedpriceStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::msw::{msw_batch_py, msw_py, MswStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::pma::{pma_batch_py, pma_py, PmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
@@ -420,10 +440,25 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
 	m.add_class::<CgStreamPy>()?;
 
+	// Register CKSP functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cksp_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cksp_batch_py, m)?)?;
+	m.add_class::<CkspStreamPy>()?;
+
 	// Register Correlation Cycle functions with their user-facing names
 	m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
+
+	// Register Damiani Volatmeter functions with their user-facing names
+	m.add_function(wrap_pyfunction!(damiani_volatmeter_py, m)?)?;
+	m.add_function(wrap_pyfunction!(damiani_volatmeter_batch_py, m)?)?;
+	m.add_class::<DamianiVolatmeterStreamPy>()?;
+
+	// Register EMD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(emd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(emd_batch_py, m)?)?;
+	m.add_class::<EmdStreamPy>()?;
 
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;
@@ -450,6 +485,36 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register GatorOsc functions with their user-facing names
+	m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(gatorosc_batch_py, m)?)?;
+	m.add_class::<GatorOscStreamPy>()?;
+
+	// Register Kurtosis functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kurtosis_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kurtosis_batch_py, m)?)?;
+	m.add_class::<KurtosisStreamPy>()?;
+
+	// Register MAB functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mab_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mab_batch_py, m)?)?;
+	m.add_class::<MabStreamPy>()?;
+
+	// Register medprice functions
+	m.add_function(wrap_pyfunction!(medprice_py, m)?)?;
+	m.add_function(wrap_pyfunction!(medprice_batch_py, m)?)?;
+	m.add_class::<MedpriceStreamPy>()?;
+
+	// Register MSW functions with their user-facing names
+	m.add_function(wrap_pyfunction!(msw_py, m)?)?;
+	m.add_function(wrap_pyfunction!(msw_batch_py, m)?)?;
+	m.add_class::<MswStreamPy>()?;
+
+	// Register PMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(pma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(pma_batch_py, m)?)?;
+	m.add_class::<PmaStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

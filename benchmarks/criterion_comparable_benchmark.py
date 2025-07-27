@@ -104,11 +104,11 @@ class CriterionComparableBenchmark:
             'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
-            'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
-            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
+            'hwma', 'jma', 'jsa', 'kama', 'kurtosis', 'linreg', 'mab', 'maaq', 'mama', 'medprice', 'msw', 'mwdx',
+            'nma', 'pma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo'  # Added missing indicators
+            'cg', 'cfo', 'damiani_volatmeter', 'emd', 'gatorosc'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -119,7 +119,7 @@ class CriterionComparableBenchmark:
                            'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch']
+                           'damiani_volatmeter_batch', 'emd_batch', 'trendflex_batch', 'gatorosc_batch', 'kurtosis_batch', 'mab_batch', 'msw_batch', 'pma_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -237,6 +237,7 @@ class CriterionComparableBenchmark:
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
             ('alligator', lambda: my_project.alligator((data['high'] + data['low']) / 2)),
+            ('aroon', lambda: my_project.aroon(data['high'], data['low'], 14)),
             ('bollinger_bands', lambda: my_project.bollinger_bands(data['close'], 20, 2.0, 2.0, "sma", 0)),
             ('aroonosc', lambda: my_project.aroonosc(data['high'], data['low'], 14)),
             ('ao', lambda: my_project.ao(data['high'], data['low'], 5, 34)),
@@ -256,6 +257,7 @@ class CriterionComparableBenchmark:
             ('dema', lambda: my_project.dema(data['close'], 14)),
             ('edcf', lambda: my_project.edcf(data['close'], 14)),
             ('ehlers_itrend', lambda: my_project.ehlers_itrend(data['close'], 20, 48)),
+            ('emd', lambda: my_project.emd(data['high'], data['low'], data['close'], data['volume'], 20, 0.5, 0.1)),
             ('ema', lambda: my_project.ema(data['close'], 14)),
             ('epma', lambda: my_project.epma(data['close'], 14, 0)),
             ('frama', lambda: my_project.frama(data['high'], data['low'], data['close'], 14, 1, 198)),
@@ -268,11 +270,16 @@ class CriterionComparableBenchmark:
             ('jma', lambda: my_project.jma(data['close'], 14, 0.0, 2)),
             ('jsa', lambda: my_project.jsa(data['close'], 14)),
             ('kama', lambda: my_project.kama(data['close'], 14)),
+            ('kurtosis', lambda: my_project.kurtosis(data['close'], 5)),
             ('linreg', lambda: my_project.linreg(data['close'], 14)),
+            ('mab', lambda: my_project.mab(data['close'], 10, 50, 1.0, 1.0, "sma", "sma")),
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
+            ('medprice', lambda: my_project.medprice(data['high'], data['low'])),
+            ('msw', lambda: my_project.msw(data['close'], 5)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
             ('nma', lambda: my_project.nma(data['close'], 40)),
+            ('pma', lambda: my_project.pma(data['close'])),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
@@ -296,6 +303,10 @@ class CriterionComparableBenchmark:
             ('cci', lambda: my_project.cci((data['high'] + data['low'] + data['close']) / 3, 14)),
             ('cfo', lambda: my_project.cfo(data['close'], 14, 100.0)),
             ('bop', lambda: my_project.bop(data['open'], data['high'], data['low'], data['close'])),
+            ('cksp', lambda: my_project.cksp(data['high'], data['low'], data['close'], 10, 1.0, 9)),
+            ('damiani_volatmeter', lambda: my_project.damiani_volatmeter(data['close'], 13, 20, 40, 100, 1.4)),
+            ('emd', lambda: my_project.emd(data['high'], data['low'], data['close'], data['volume'], 20, 0.5, 0.1)),
+            ('gatorosc', lambda: my_project.gatorosc(data['close'])),
         ]
         
         # Filter if requested
@@ -343,7 +354,15 @@ class CriterionComparableBenchmark:
             ('cci_batch', lambda: my_project.cci_batch((data['high'] + data['low'] + data['close']) / 3, (14, 14, 1))),
             ('cfo_batch', lambda: my_project.cfo_batch(data['close'], (14, 14, 1), (100.0, 100.0, 0.0))),
             ('bop_batch', lambda: my_project.bop_batch(data['open'], data['high'], data['low'], data['close'])),
+            ('cksp_batch', lambda: my_project.cksp_batch(data['high'], data['low'], data['close'], (10, 10, 0), (1.0, 1.0, 0.0), (9, 9, 0))),
+            ('damiani_volatmeter_batch', lambda: my_project.damiani_volatmeter_batch(data['close'], (13, 40, 1), (20, 40, 1), (40, 40, 0), (100, 100, 0), (1.4, 1.4, 0.0))),
+            ('emd_batch', lambda: my_project.emd_batch(data['high'], data['low'], data['close'], data['volume'], (20, 20, 0), (0.5, 0.5, 0.0), (0.1, 0.1, 0.0))),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
+            ('gatorosc_batch', lambda: my_project.gatorosc_batch(data['close'], (13, 13, 0), (8, 8, 0), (8, 8, 0), (5, 5, 0), (5, 5, 0), (3, 3, 0))),
+            ('kurtosis_batch', lambda: my_project.kurtosis_batch(data['close'], (5, 50, 1))),
+            ('mab_batch', lambda: my_project.mab_batch(data['close'], (10, 12, 1), (50, 50, 0), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0), "sma", "sma")),
+            ('medprice_batch', lambda: my_project.medprice_batch(data['high'], data['low'])),
+            ('msw_batch', lambda: my_project.msw_batch(data['close'], (5, 30, 1))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -416,7 +435,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'gatorosc', 'kurtosis', 'mab', 'msw']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

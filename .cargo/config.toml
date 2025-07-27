@@ -8,15 +8,15 @@ threads = 4
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
   "-C", "target-cpu=native",
-  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
+#  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
 ]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = [
   "-Zdylib-lto",
   "-C", "target-cpu=native",
-  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
-  "-C", "linker=lld-link",
+#  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
+#  "-C", "linker=lld-link",
 ]
 
 [target.wasm32-unknown-unknown]

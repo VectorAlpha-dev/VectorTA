@@ -19,7 +19,9 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +29,22 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for DamianiVolatmeterInput<'a> {
 	#[inline(always)]
@@ -51,6 +69,7 @@ pub struct DamianiVolatmeterOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DamianiVolatmeterParams {
 	pub vis_atr: Option<usize>,
 	pub vis_std: Option<usize>,
@@ -243,22 +262,37 @@ pub fn damiani_volatmeter(input: &DamianiVolatmeterInput) -> Result<DamianiVolat
 	damiani_volatmeter_with_kernel(input, Kernel::Auto)
 }
 
-pub fn damiani_volatmeter_with_kernel(
-	input: &DamianiVolatmeterInput,
+fn damiani_volatmeter_prepare<'a>(
+	input: &'a DamianiVolatmeterInput,
 	kernel: Kernel,
-) -> Result<DamianiVolatmeterOutput, DamianiVolatmeterError> {
+) -> Result<
+	(
+		&'a [f64],  // high
+		&'a [f64],  // low
+		&'a [f64],  // close
+		usize,      // vis_atr
+		usize,      // vis_std
+		usize,      // sed_atr
+		usize,      // sed_std
+		f64,        // threshold
+		usize,      // first
+		usize,      // warmup_period
+		Kernel,     // chosen kernel
+	),
+	DamianiVolatmeterError,
+> {
 	// Extract three parallel slices: high, low, and close
 	let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
 		DamianiVolatmeterData::Candles { candles, source: _ } => {
-			// For Candles, use “high”, “low”, and “close”
+			// For Candles, use "high", "low", and "close"
 			let h = source_type(candles, "high");
 			let l = source_type(candles, "low");
 			let c = source_type(candles, "close");
 			(h, l, c)
 		}
 		DamianiVolatmeterData::Slice(slice) => {
-			// If the user only provided a bare &[f64], treat it as “close”,
-			// and set “high”=“low”=“close” so that true range = 0 on all bars.
+			// If the user only provided a bare &[f64], treat it as "close",
+			// and set "high"="low"="close" so that true range = 0 on all bars.
 			(slice, slice, slice)
 		}
 	};
@@ -293,7 +327,7 @@ pub fn damiani_volatmeter_with_kernel(
 		});
 	}
 
-	// First non‐NaN index in “close”
+	// First non‐NaN index in "close"
 	let first = close
 		.iter()
 		.position(|&x| !x.is_nan())
@@ -312,8 +346,34 @@ pub fn damiani_volatmeter_with_kernel(
 		other => other,
 	};
 
-	let mut vol = vec![f64::NAN; len];
-	let mut anti = vec![f64::NAN; len];
+	// Calculate warmup period
+	let warmup_period = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+
+	Ok((
+		high,
+		low,
+		close,
+		vis_atr,
+		vis_std,
+		sed_atr,
+		sed_std,
+		threshold,
+		first,
+		warmup_period,
+		chosen,
+	))
+}
+
+pub fn damiani_volatmeter_with_kernel(
+	input: &DamianiVolatmeterInput,
+	kernel: Kernel,
+) -> Result<DamianiVolatmeterOutput, DamianiVolatmeterError> {
+	let (high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first, warmup_period, chosen) = 
+		damiani_volatmeter_prepare(input, kernel)?;
+	
+	let len = close.len();
+	let mut vol = alloc_with_nan_prefix(len, warmup_period);
+	let mut anti = alloc_with_nan_prefix(len, warmup_period);
 
 	unsafe {
 		match chosen {
@@ -333,6 +393,55 @@ pub fn damiani_volatmeter_with_kernel(
 	}
 
 	Ok(DamianiVolatmeterOutput { vol, anti })
+}
+
+#[inline]
+pub fn damiani_volatmeter_into_slice(
+	vol_dst: &mut [f64],
+	anti_dst: &mut [f64],
+	input: &DamianiVolatmeterInput,
+	kernel: Kernel,
+) -> Result<(), DamianiVolatmeterError> {
+	let (high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first, warmup_period, chosen) = 
+		damiani_volatmeter_prepare(input, kernel)?;
+
+	let len = close.len();
+
+	// Validate destination slices have correct length
+	if vol_dst.len() != len || anti_dst.len() != len {
+		return Err(DamianiVolatmeterError::InvalidPeriod {
+			data_len: len,
+			vis_atr: vol_dst.len(),
+			vis_std: anti_dst.len(),
+			sed_atr: 0,
+			sed_std: 0,
+		});
+	}
+
+	// Fill warmup period with NaN
+	for i in 0..warmup_period {
+		vol_dst[i] = f64::NAN;
+		anti_dst[i] = f64::NAN;
+	}
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => damiani_volatmeter_scalar(
+				high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first, vol_dst, anti_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => damiani_volatmeter_avx2(
+				high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first, vol_dst, anti_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => damiani_volatmeter_avx512(
+				high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first, vol_dst, anti_dst,
+			),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -762,8 +871,34 @@ fn damiani_volatmeter_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut vol = vec![f64::NAN; rows * cols];
-	let mut anti = vec![f64::NAN; rows * cols];
+	
+	// Allocate uninitialized matrices
+	let mut vol_mu = make_uninit_matrix(rows, cols);
+	let mut anti_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|p| {
+			*[
+				p.vis_atr.unwrap(),
+				p.vis_std.unwrap(),
+				p.sed_atr.unwrap(),
+				p.sed_std.unwrap(),
+				3
+			].iter().max().unwrap()
+		})
+		.collect();
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut vol_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut anti_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slices
+	let mut vol_guard = core::mem::ManuallyDrop::new(vol_mu);
+	let mut anti_guard = core::mem::ManuallyDrop::new(anti_mu);
+	let vol: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(vol_guard.as_mut_ptr() as *mut f64, vol_guard.len()) };
+	let anti: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(anti_guard.as_mut_ptr() as *mut f64, anti_guard.len()) };
 
 	let do_row = |row: usize, out_vol: &mut [f64], out_anti: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -826,6 +961,24 @@ fn damiani_volatmeter_batch_inner(
 			do_row(row, outv, outa);
 		}
 	}
+	
+	// Convert back to owned vectors
+	let vol = unsafe {
+		Vec::from_raw_parts(
+			vol_guard.as_mut_ptr() as *mut f64,
+			vol_guard.len(),
+			vol_guard.capacity(),
+		)
+	};
+	
+	let anti = unsafe {
+		Vec::from_raw_parts(
+			anti_guard.as_mut_ptr() as *mut f64,
+			anti_guard.len(),
+			anti_guard.capacity(),
+		)
+	};
+	
 	Ok(DamianiVolatmeterBatchOutput {
 		vol,
 		anti,
@@ -833,6 +986,111 @@ fn damiani_volatmeter_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+/// Version of batch computation that writes directly to pre-allocated slices for Python bindings
+#[inline(always)]
+fn damiani_volatmeter_batch_inner_into(
+	data: &[f64],
+	sweep: &DamianiVolatmeterBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	vol_out: &mut [f64],
+	anti_out: &mut [f64],
+) -> Result<Vec<DamianiVolatmeterParams>, DamianiVolatmeterError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DamianiVolatmeterError::InvalidPeriod {
+			data_len: 0,
+			vis_atr: 0,
+			vis_std: 0,
+			sed_atr: 0,
+			sed_std: 0,
+		});
+	}
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(DamianiVolatmeterError::AllValuesNaN)?;
+	let max_p = combos
+		.iter()
+		.flat_map(|p| {
+			[
+				p.vis_atr.unwrap_or(13),
+				p.vis_std.unwrap_or(20),
+				p.sed_atr.unwrap_or(40),
+				p.sed_std.unwrap_or(100),
+				3,
+			]
+		})
+		.max()
+		.unwrap_or(100);
+	if (data.len() - first) < max_p {
+		return Err(DamianiVolatmeterError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	let total_size = rows * cols;
+	
+	// Ensure output slices have the correct size
+	if vol_out.len() != total_size || anti_out.len() != total_size {
+		return Err(DamianiVolatmeterError::InvalidPeriod {
+			data_len: data.len(),
+			vis_atr: 0,
+			vis_std: 0,
+			sed_atr: 0,
+			sed_std: 0,
+		});
+	}
+
+	let do_row = |row: usize, out_vol: &mut [f64], out_anti: &mut [f64]| {
+		let p = &combos[row];
+		let input = DamianiVolatmeterInput::from_slice(data, p.clone());
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => scalar::damiani_volatmeter_scalar(
+				&input,
+				out_vol,
+				out_anti,
+			),
+			Kernel::Avx2 | Kernel::Avx2Batch => avx2::damiani_volatmeter_avx2(
+				&input,
+				out_vol,
+				out_anti,
+			),
+			Kernel::Avx512 | Kernel::Avx512Batch => avx512::damiani_volatmeter_avx512(
+				&input,
+				out_vol,
+				out_anti,
+			),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			vol_out.par_chunks_mut(cols)
+				.zip(anti_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (outv, outa))| do_row(row, outv, outa));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (outv, outa)) in vol_out.chunks_mut(cols).zip(anti_out.chunks_mut(cols)).enumerate() {
+				do_row(row, outv, outa);
+			}
+		}
+	} else {
+		for (row, (outv, outa)) in vol_out.chunks_mut(cols).zip(anti_out.chunks_mut(cols)).enumerate() {
+			do_row(row, outv, outa);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -1197,6 +1455,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 	fn check_damiani_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1405,6 +1665,196 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	fn check_damiani_empty_input(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let empty: [f64; 0] = [];
+		let params = DamianiVolatmeterParams::default();
+		let input = DamianiVolatmeterInput::from_slice(&empty, params);
+		let res = damiani_volatmeter_with_kernel(&input, kernel);
+		assert!(
+			matches!(res, Err(DamianiVolatmeterError::EmptyData)),
+			"[{}] should fail with empty input",
+			test_name
+		);
+		Ok(())
+	}
+	
+	fn check_damiani_all_nan(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let data = vec![f64::NAN; 200];
+		let params = DamianiVolatmeterParams::default();
+		let input = DamianiVolatmeterInput::from_slice(&data, params);
+		let res = damiani_volatmeter_with_kernel(&input, kernel);
+		assert!(
+			matches!(res, Err(DamianiVolatmeterError::AllValuesNaN)),
+			"[{}] should fail with all NaN values",
+			test_name
+		);
+		Ok(())
+	}
+	
+	fn check_damiani_invalid_threshold(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Test with NaN threshold
+		let mut params = DamianiVolatmeterParams::default();
+		params.threshold = Some(f64::NAN);
+		let input = DamianiVolatmeterInput::from_candles(&candles, "close", params);
+		let res = damiani_volatmeter_with_kernel(&input, kernel);
+		// Unlike alma which has explicit threshold validation, damiani will compute but produce NaN results
+		// This is acceptable behavior - the indicator doesn't fail but produces NaN outputs
+		assert!(res.is_ok(), "[{}] should not fail with NaN threshold", test_name);
+		
+		// Test with negative threshold (which is mathematically valid for this indicator)
+		params.threshold = Some(-1.0);
+		let input2 = DamianiVolatmeterInput::from_candles(&candles, "close", params);
+		let res2 = damiani_volatmeter_with_kernel(&input2, kernel);
+		assert!(res2.is_ok(), "[{}] should work with negative threshold", test_name);
+		Ok(())
+	}
+	
+	fn check_damiani_invalid_periods(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+		
+		// Test with zero vis_atr
+		let mut params = DamianiVolatmeterParams::default();
+		params.vis_atr = Some(0);
+		let input = DamianiVolatmeterInput::from_slice(&data, params);
+		let res = damiani_volatmeter_with_kernel(&input, kernel);
+		assert!(
+			matches!(res, Err(DamianiVolatmeterError::InvalidPeriod { .. })),
+			"[{}] should fail with zero vis_atr",
+			test_name
+		);
+		
+		// Test with zero vis_std
+		params = DamianiVolatmeterParams::default();
+		params.vis_std = Some(0);
+		let input2 = DamianiVolatmeterInput::from_slice(&data, params);
+		let res2 = damiani_volatmeter_with_kernel(&input2, kernel);
+		assert!(
+			matches!(res2, Err(DamianiVolatmeterError::InvalidPeriod { .. })),
+			"[{}] should fail with zero vis_std",
+			test_name
+		);
+		
+		// Test with period exceeding data length
+		params = DamianiVolatmeterParams::default();
+		params.sed_std = Some(1000);
+		let input3 = DamianiVolatmeterInput::from_slice(&data, params);
+		let res3 = damiani_volatmeter_with_kernel(&input3, kernel);
+		assert!(
+			matches!(res3, Err(DamianiVolatmeterError::InvalidPeriod { .. })),
+			"[{}] should fail with period exceeding length",
+			test_name
+		);
+		Ok(())
+	}
+	
+	fn check_damiani_into_existing_slice(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let params = DamianiVolatmeterParams::default();
+		let input = DamianiVolatmeterInput::from_candles(&candles, "close", params);
+		
+		// Compute using regular function
+		let output1 = damiani_volatmeter_with_kernel(&input, kernel)?;
+		
+		// Compute into existing slices
+		let mut vol2 = vec![0.0; candles.close.len()];
+		let mut anti2 = vec![0.0; candles.close.len()];
+		damiani_volatmeter_into_slice(&mut vol2, &mut anti2, &input, kernel)?;
+		
+		// Compare results
+		assert_eq!(output1.vol.len(), vol2.len());
+		assert_eq!(output1.anti.len(), anti2.len());
+		
+		// Check values match
+		for i in 0..output1.vol.len() {
+			if output1.vol[i].is_nan() && vol2[i].is_nan() {
+				continue;
+			}
+			assert!(
+				(output1.vol[i] - vol2[i]).abs() < 1e-10,
+				"[{}] vol mismatch at index {}: {} vs {}",
+				test_name, i, output1.vol[i], vol2[i]
+			);
+		}
+		
+		for i in 0..output1.anti.len() {
+			if output1.anti[i].is_nan() && anti2[i].is_nan() {
+				continue;
+			}
+			assert!(
+				(output1.anti[i] - anti2[i]).abs() < 1e-10,
+				"[{}] anti mismatch at index {}: {} vs {}",
+				test_name, i, output1.anti[i], anti2[i]
+			);
+		}
+		Ok(())
+	}
+	
+	#[cfg(feature = "proptest")]
+	fn check_damiani_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		proptest!(|(
+			data in prop::collection::vec(any::<f64>().prop_filter("Not NaN", |x| !x.is_nan()), 200..=1000),
+			vis_atr in 5usize..20,
+			vis_std in 10usize..30,
+			sed_atr in 20usize..50,
+			sed_std in 50usize..150,
+			threshold in 0.5f64..3.0,
+		)| {
+			let params = DamianiVolatmeterParams {
+				vis_atr: Some(vis_atr),
+				vis_std: Some(vis_std),
+				sed_atr: Some(sed_atr),
+				sed_std: Some(sed_std),
+				threshold: Some(threshold),
+			};
+			let input = DamianiVolatmeterInput::from_slice(&data, params);
+			
+			// Test that the function doesn't panic and produces output of correct length
+			match damiani_volatmeter_with_kernel(&input, kernel) {
+				Ok(output) => {
+					prop_assert_eq!(output.vol.len(), data.len());
+					prop_assert_eq!(output.anti.len(), data.len());
+					
+					// Check that warmup period is respected
+					let warmup = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+					
+					// Vol values should start appearing after warmup
+					let first_non_nan_vol = output.vol.iter().position(|&x| !x.is_nan());
+					if let Some(idx) = first_non_nan_vol {
+						prop_assert!(idx >= warmup - 1);
+					}
+					
+					// Anti values need both stddev windows filled, so may appear later
+					let first_non_nan_anti = output.anti.iter().position(|&x| !x.is_nan());
+					if let Some(idx) = first_non_nan_anti {
+						prop_assert!(idx >= warmup - 1);
+					}
+				}
+				Err(DamianiVolatmeterError::InvalidPeriod { .. }) => {
+					// This can happen if generated periods exceed data length
+					prop_assert!(sed_std > data.len() || sed_atr > data.len() || 
+					            vis_std > data.len() || vis_atr > data.len());
+				}
+				Err(e) => {
+					panic!("Unexpected error: {:?}", e);
+				}
+			}
+		});
+		
+		Ok(())
+	}
+	
 	macro_rules! generate_all_damiani_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1456,7 +1906,462 @@ mod tests {
 		check_damiani_very_small_dataset,
 		check_damiani_streaming,
 		check_damiani_input_with_default_candles,
-		check_damiani_params_with_defaults
+		check_damiani_params_with_defaults,
+		check_damiani_empty_input,
+		check_damiani_all_nan,
+		check_damiani_invalid_threshold,
+		check_damiani_invalid_periods,
+		check_damiani_into_existing_slice
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_damiani_tests!(check_damiani_property);
+	
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "damiani_volatmeter")]
+#[pyo3(signature = (data, vis_atr, vis_std, sed_atr, sed_std, threshold, kernel=None))]
+pub fn damiani_volatmeter_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	vis_atr: usize,
+	vis_std: usize,
+	sed_atr: usize,
+	sed_std: usize,
+	threshold: f64,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DamianiVolatmeterParams {
+		vis_atr: Some(vis_atr),
+		vis_std: Some(vis_std),
+		sed_atr: Some(sed_atr),
+		sed_std: Some(sed_std),
+		threshold: Some(threshold),
+	};
+	let input = DamianiVolatmeterInput::from_slice(slice_in, params);
+
+	// Get both vectors from Rust function
+	let (vol_vec, anti_vec): (Vec<f64>, Vec<f64>) = py.allow_threads(|| {
+		damiani_volatmeter_with_kernel(&input, kern)
+			.map(|o| (o.vol, o.anti))
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Zero-copy transfer for both outputs
+	Ok((
+		vol_vec.into_pyarray(py),
+		anti_vec.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DamianiVolatmeterStream")]
+pub struct DamianiVolatmeterStreamPy {
+	stream: DamianiVolatmeterStream<'static>,
+	high: Vec<f64>,
+	low: Vec<f64>,
+	close: Vec<f64>,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DamianiVolatmeterStreamPy {
+	#[new]
+	fn new(
+		high: Vec<f64>,
+		low: Vec<f64>,
+		close: Vec<f64>,
+		vis_atr: usize,
+		vis_std: usize,
+		sed_atr: usize,
+		sed_std: usize,
+		threshold: f64,
+	) -> PyResult<Self> {
+		// Store the data in the struct
+		let mut instance = Self { stream: unsafe { std::mem::zeroed() }, high, low, close };
+		
+		// Create candles from the stored data
+		let candles = Candles {
+			open: vec![0.0; instance.close.len()],  // Not used
+			high: instance.high.clone(),
+			low: instance.low.clone(),
+			close: instance.close.clone(),
+			volume: vec![0.0; instance.close.len()],  // Not used
+		};
+		
+		let params = DamianiVolatmeterParams {
+			vis_atr: Some(vis_atr),
+			vis_std: Some(vis_std),
+			sed_atr: Some(sed_atr),
+			sed_std: Some(sed_std),
+			threshold: Some(threshold),
+		};
+		
+		// Use transmute to convert the lifetime
+		let stream: DamianiVolatmeterStream<'static> = unsafe {
+			std::mem::transmute(
+				DamianiVolatmeterStream::new_from_candles(&candles, "close", params)
+					.map_err(|e| PyValueError::new_err(e.to_string()))?
+			)
+		};
+		
+		instance.stream = stream;
+		Ok(instance)
+	}
+
+	fn update(&mut self) -> Option<(f64, f64)> {
+		self.stream.update()
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "damiani_volatmeter_batch")]
+#[pyo3(signature = (data, vis_atr_range, vis_std_range, sed_atr_range, sed_std_range, threshold_range, kernel=None))]
+pub fn damiani_volatmeter_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	vis_atr_range: (usize, usize, usize),
+	vis_std_range: (usize, usize, usize),
+	sed_atr_range: (usize, usize, usize),
+	sed_std_range: (usize, usize, usize),
+	threshold_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?; // Validate before allow_threads
+
+	let sweep = DamianiVolatmeterBatchRange {
+		vis_atr: vis_atr_range,
+		vis_std: vis_std_range,
+		sed_atr: sed_atr_range,
+		sed_std: sed_std_range,
+		threshold: threshold_range,
+	};
+
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Pre-allocate output arrays (OK for batch operations)
+	let vol_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let anti_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let vol_slice = unsafe { vol_arr.as_slice_mut()? };
+	let anti_slice = unsafe { anti_arr.as_slice_mut()? };
+
+	// Compute without GIL
+	let combos = py.allow_threads(|| {
+		// Handle kernel selection for batch operations
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Use the new _into function that writes directly to pre-allocated slices
+		damiani_volatmeter_batch_inner_into(slice_in, &sweep, simd, true, vol_slice, anti_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("vol", vol_arr.reshape((rows, cols))?)?;
+	dict.set_item("anti", anti_arr.reshape((rows, cols))?)?;
+	
+	// Add parameter arrays
+	dict.set_item(
+		"vis_atr",
+		combos.iter()
+			.map(|p| p.vis_atr.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"vis_std",
+		combos.iter()
+			.map(|p| p.vis_std.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"sed_atr",
+		combos.iter()
+			.map(|p| p.sed_atr.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"sed_std",
+		combos.iter()
+			.map(|p| p.sed_std.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"thresholds",
+		combos.iter()
+			.map(|p| p.threshold.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn damiani_volatmeter_js(
+	data: &[f64],
+	vis_atr: usize,
+	vis_std: usize,
+	sed_atr: usize,
+	sed_std: usize,
+	threshold: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let params = DamianiVolatmeterParams {
+		vis_atr: Some(vis_atr),
+		vis_std: Some(vis_std),
+		sed_atr: Some(sed_atr),
+		sed_std: Some(sed_std),
+		threshold: Some(threshold),
+	};
+	let input = DamianiVolatmeterInput::from_slice(data, params);
+
+	// Single allocation for both outputs
+	let mut result = vec![0.0; data.len() * 2];
+	let (vol_part, anti_part) = result.split_at_mut(data.len());
+
+	damiani_volatmeter_into_slice(vol_part, anti_part, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(result)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn damiani_volatmeter_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn damiani_volatmeter_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn damiani_volatmeter_into(
+	in_ptr: *const f64,
+	vol_ptr: *mut f64,
+	anti_ptr: *mut f64,
+	len: usize,
+	vis_atr: usize,
+	vis_std: usize,
+	sed_atr: usize,
+	sed_std: usize,
+	threshold: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || vol_ptr.is_null() || anti_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = DamianiVolatmeterParams {
+			vis_atr: Some(vis_atr),
+			vis_std: Some(vis_std),
+			sed_atr: Some(sed_atr),
+			sed_std: Some(sed_std),
+			threshold: Some(threshold),
+		};
+		let input = DamianiVolatmeterInput::from_slice(data, params);
+
+		// Check for aliasing - need to handle all possible combinations
+		let vol_aliased = in_ptr == vol_ptr;
+		let anti_aliased = in_ptr == anti_ptr;
+		let vol_anti_aliased = vol_ptr == anti_ptr;
+
+		if vol_anti_aliased {
+			return Err(JsValue::from_str("vol_ptr and anti_ptr cannot be the same"));
+		}
+
+		if vol_aliased || anti_aliased {
+			// Need temporary buffer(s) for aliased outputs
+			let mut temp_vol = if vol_aliased { vec![0.0; len] } else { vec![] };
+			let mut temp_anti = if anti_aliased { vec![0.0; len] } else { vec![] };
+
+			let vol_out = if vol_aliased {
+				&mut temp_vol
+			} else {
+				std::slice::from_raw_parts_mut(vol_ptr, len)
+			};
+
+			let anti_out = if anti_aliased {
+				&mut temp_anti
+			} else {
+				std::slice::from_raw_parts_mut(anti_ptr, len)
+			};
+
+			damiani_volatmeter_into_slice(vol_out, anti_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+			// Copy back if aliased
+			if vol_aliased {
+				let vol = std::slice::from_raw_parts_mut(vol_ptr, len);
+				vol.copy_from_slice(&temp_vol);
+			}
+			if anti_aliased {
+				let anti = std::slice::from_raw_parts_mut(anti_ptr, len);
+				anti.copy_from_slice(&temp_anti);
+			}
+		} else {
+			// No aliasing, direct computation
+			let vol = std::slice::from_raw_parts_mut(vol_ptr, len);
+			let anti = std::slice::from_raw_parts_mut(anti_ptr, len);
+			damiani_volatmeter_into_slice(vol, anti, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DamianiVolatmeterBatchConfig {
+	pub vis_atr_range: (usize, usize, usize),
+	pub vis_std_range: (usize, usize, usize),
+	pub sed_atr_range: (usize, usize, usize),
+	pub sed_std_range: (usize, usize, usize),
+	pub threshold_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DamianiVolatmeterBatchJsOutput {
+	pub vol: Vec<f64>,
+	pub anti: Vec<f64>,
+	pub combos: Vec<DamianiVolatmeterParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = damiani_volatmeter_batch)]
+pub fn damiani_volatmeter_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DamianiVolatmeterBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = DamianiVolatmeterBatchRange {
+		vis_atr: config.vis_atr_range,
+		vis_std: config.vis_std_range,
+		sed_atr: config.sed_atr_range,
+		sed_std: config.sed_std_range,
+		threshold: config.threshold_range,
+	};
+
+	let output = damiani_volatmeter_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = DamianiVolatmeterBatchJsOutput {
+		vol: output.vol,
+		anti: output.anti,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn damiani_volatmeter_batch_into(
+	in_ptr: *const f64,
+	vol_ptr: *mut f64,
+	anti_ptr: *mut f64,
+	len: usize,
+	vis_atr_start: usize,
+	vis_atr_end: usize,
+	vis_atr_step: usize,
+	vis_std_start: usize,
+	vis_std_end: usize,
+	vis_std_step: usize,
+	sed_atr_start: usize,
+	sed_atr_end: usize,
+	sed_atr_step: usize,
+	sed_std_start: usize,
+	sed_std_end: usize,
+	sed_std_step: usize,
+	threshold_start: f64,
+	threshold_end: f64,
+	threshold_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || vol_ptr.is_null() || anti_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = DamianiVolatmeterBatchRange {
+			vis_atr: (vis_atr_start, vis_atr_end, vis_atr_step),
+			vis_std: (vis_std_start, vis_std_end, vis_std_step),
+			sed_atr: (sed_atr_start, sed_atr_end, sed_atr_step),
+			sed_std: (sed_std_start, sed_std_end, sed_std_step),
+			threshold: (threshold_start, threshold_end, threshold_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		// Check for aliasing
+		if vol_ptr == anti_ptr {
+			return Err(JsValue::from_str("vol_ptr and anti_ptr cannot be the same"));
+		}
+		
+		if in_ptr == vol_ptr || in_ptr == anti_ptr {
+			// Need temporary buffers for aliasing
+			let result = damiani_volatmeter_batch_inner(data, &sweep, Kernel::Auto, false)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let vol_out = std::slice::from_raw_parts_mut(vol_ptr, rows * cols);
+			let anti_out = std::slice::from_raw_parts_mut(anti_ptr, rows * cols);
+			
+			vol_out.copy_from_slice(&result.vol);
+			anti_out.copy_from_slice(&result.anti);
+		} else {
+			// No aliasing, direct computation
+			let vol_out = std::slice::from_raw_parts_mut(vol_ptr, rows * cols);
+			let anti_out = std::slice::from_raw_parts_mut(anti_ptr, rows * cols);
+			
+			damiani_volatmeter_batch_inner_into(data, &sweep, Kernel::Auto, false, vol_out, anti_out)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(rows)
+	}
 }
