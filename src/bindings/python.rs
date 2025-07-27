@@ -46,6 +46,16 @@ use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::correl_hl::{correl_hl_batch_py, correl_hl_py, CorrelHlStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::deviation::{deviation_batch_py, deviation_py, DeviationStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::eri::{eri_batch_py, eri_py, EriStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kdj::{kdj_batch_py, kdj_py, KdjStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -139,6 +149,18 @@ use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, 
 use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::linearreg_intercept::{
+	linearreg_intercept_batch_py, linearreg_intercept_py, LinearRegInterceptStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::mass::{mass_batch_py, mass_py, MassStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::midprice::{midprice_batch_py, midprice_py, MidpriceStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::obv::{obv_batch_py, obv_py, ObvStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::qstick::{qstick_batch_py, qstick_py, QstickStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -425,6 +447,31 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
 
+	// Register Correl HL functions with their user-facing names
+	m.add_function(wrap_pyfunction!(correl_hl_py, m)?)?;
+	m.add_function(wrap_pyfunction!(correl_hl_batch_py, m)?)?;
+	m.add_class::<CorrelHlStreamPy>()?;
+
+	// Register Deviation functions with their user-facing names
+	m.add_function(wrap_pyfunction!(deviation_py, m)?)?;
+	m.add_function(wrap_pyfunction!(deviation_batch_py, m)?)?;
+	m.add_class::<DeviationStreamPy>()?;
+
+	// Register DTI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dti_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dti_batch_py, m)?)?;
+	m.add_class::<DtiStreamPy>()?;
+
+	// Register ERI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(eri_py, m)?)?;
+	m.add_function(wrap_pyfunction!(eri_batch_py, m)?)?;
+	m.add_class::<EriStreamPy>()?;
+
+	// Register KDJ functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kdj_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kdj_batch_py, m)?)?;
+	m.add_class::<KdjStreamPy>()?;
+
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;
 	m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
@@ -450,6 +497,31 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register Linear Regression Intercept functions with their user-facing names
+	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linearreg_intercept_batch_py, m)?)?;
+	m.add_class::<LinearRegInterceptStreamPy>()?;
+
+	// Register Mass Index functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mass_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mass_batch_py, m)?)?;
+	m.add_class::<MassStreamPy>()?;
+
+	// Register Midprice functions with their user-facing names
+	m.add_function(wrap_pyfunction!(midprice_py, m)?)?;
+	m.add_function(wrap_pyfunction!(midprice_batch_py, m)?)?;
+	m.add_class::<MidpriceStreamPy>()?;
+
+	// Register OBV functions with their user-facing names
+	m.add_function(wrap_pyfunction!(obv_py, m)?)?;
+	m.add_function(wrap_pyfunction!(obv_batch_py, m)?)?;
+	m.add_class::<ObvStreamPy>()?;
+
+	// Register Qstick functions with their user-facing names
+	m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
+	m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
+	m.add_class::<QstickStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

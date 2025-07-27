@@ -18,14 +18,22 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum QstickData<'a> {
@@ -46,6 +54,7 @@ pub struct QstickOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct QstickParams {
 	pub period: Option<usize>,
 }
@@ -190,12 +199,18 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 	if period == 0 || period > len {
 		return Err(QstickError::InvalidPeriod { period, data_len: len });
 	}
-	let diff: Vec<f64> = open.iter().zip(close.iter()).take(len).map(|(&o, &c)| c - o).collect();
 
-	let first = diff
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(QstickError::AllValuesNaN)?;
+	// Find first valid index by checking both open and close
+	let mut first = 0;
+	for i in 0..len {
+		if !open[i].is_nan() && !close[i].is_nan() {
+			first = i;
+			break;
+		}
+		if i == len - 1 {
+			return Err(QstickError::AllValuesNaN);
+		}
+	}
 
 	if (len - first) < period {
 		return Err(QstickError::NotEnoughValidData {
@@ -204,7 +219,7 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 		});
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -213,11 +228,11 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(&diff, period, first, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(open, close, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => qstick_avx2(&diff, period, first, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => qstick_avx2(open, close, period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(&diff, period, first, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(open, close, period, first, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -226,40 +241,44 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 }
 
 #[inline]
-pub fn qstick_scalar(diff: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+pub fn qstick_scalar(open: &[f64], close: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
 	let mut sum = 0.0;
-	for &value in diff[first_valid..first_valid + period].iter() {
-		sum += value;
+	// Compute initial sum of differences
+	for i in first_valid..first_valid + period {
+		sum += close[i] - open[i];
 	}
 	let inv_period = 1.0 / (period as f64);
 	out[first_valid + period - 1] = sum * inv_period;
-	for i in (first_valid + period)..diff.len() {
-		sum += diff[i] - diff[i - period];
+	
+	// Rolling window computation
+	for i in (first_valid + period)..close.len() {
+		sum += (close[i] - open[i]) - (close[i - period] - open[i - period]);
 		out[i] = sum * inv_period;
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn qstick_avx512(diff: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	qstick_scalar(diff, period, first_valid, out)
-}
-
-#[inline]
-pub fn qstick_avx2(diff: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	qstick_scalar(diff, period, first_valid, out)
+pub fn qstick_avx512(open: &[f64], close: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+	qstick_scalar(open, close, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn qstick_avx512_short(diff: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	qstick_avx512(diff, period, first_valid, out)
+pub fn qstick_avx2(open: &[f64], close: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+	qstick_scalar(open, close, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn qstick_avx512_long(diff: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-	qstick_avx512(diff, period, first_valid, out)
+pub fn qstick_avx512_short(open: &[f64], close: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+	qstick_avx512(open, close, period, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn qstick_avx512_long(open: &[f64], close: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+	qstick_avx512(open, close, period, first_valid, out)
 }
 
 #[inline]
@@ -355,16 +374,19 @@ impl QstickBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &QstickBatchRange) -> Vec<QstickParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
+	let (start, end, step) = r.period;
+	if step == 0 || start == end {
+		return vec![QstickParams { period: Some(start) }];
 	}
-	let periods = axis_usize(r.period);
-	let mut out = Vec::with_capacity(periods.len());
-	for &p in &periods {
+	
+	// Pre-calculate capacity to avoid reallocations
+	let count = ((end - start) / step) + 1;
+	let mut out = Vec::with_capacity(count);
+	
+	let mut p = start;
+	while p <= end {
 		out.push(QstickParams { period: Some(p) });
+		p += step;
 	}
 	out
 }
@@ -402,11 +424,19 @@ fn qstick_batch_inner(
 		return Err(QstickError::InvalidPeriod { period: 0, data_len: 0 });
 	}
 	let len = open.len().min(close.len());
-	let mut diffs: Vec<f64> = open.iter().zip(close.iter()).take(len).map(|(&o, &c)| c - o).collect();
-	let first = diffs
-		.iter()
-		.position(|&x| !x.is_nan())
-		.ok_or(QstickError::AllValuesNaN)?;
+	
+	// Find first valid index
+	let mut first = 0;
+	for i in 0..len {
+		if !open[i].is_nan() && !close[i].is_nan() {
+			first = i;
+			break;
+		}
+		if i == len - 1 {
+			return Err(QstickError::AllValuesNaN);
+		}
+	}
+	
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if len - first < max_p {
 		return Err(QstickError::NotEnoughValidData {
@@ -416,38 +446,34 @@ fn qstick_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut values = vec![f64::NAN; rows * cols];
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => qstick_row_scalar(&diffs, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => qstick_row_avx2(&diffs, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => qstick_row_avx512(&diffs, first, period, out_row),
-			_ => unreachable!(),
-		}
+	
+	// Use proper uninitialized memory allocation like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to mutable slice
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	
+	qstick_batch_inner_into(open, close, sweep, kern, parallel, out)?;
+	
+	// Take ownership of the buffer
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity()
+		)
 	};
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
+	core::mem::forget(buf_guard);
+	
 	Ok(QstickBatchOutput {
 		values,
 		combos,
@@ -457,32 +483,92 @@ fn qstick_batch_inner(
 }
 
 #[inline(always)]
-unsafe fn qstick_row_scalar(diff: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	qstick_scalar(diff, period, first, out);
+fn qstick_batch_inner_into(
+	open: &[f64],
+	close: &[f64],
+	sweep: &QstickBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<QstickParams>, QstickError> {
+	let combos = expand_grid(sweep);
+	let len = open.len().min(close.len());
+	let cols = len;
+	
+	// Find first valid index
+	let mut first = 0;
+	for i in 0..len {
+		if !open[i].is_nan() && !close[i].is_nan() {
+			first = i;
+			break;
+		}
+		if i == len - 1 {
+			return Err(QstickError::AllValuesNaN);
+		}
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => qstick_row_scalar(open, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => qstick_row_avx2(open, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => qstick_row_avx512(open, close, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
+unsafe fn qstick_row_scalar(open: &[f64], close: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	qstick_scalar(open, close, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn qstick_row_avx2(diff: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	qstick_avx2(diff, period, first, out);
+unsafe fn qstick_row_avx2(open: &[f64], close: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	qstick_avx2(open, close, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn qstick_row_avx512(diff: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	qstick_avx512(diff, period, first, out);
+unsafe fn qstick_row_avx512(open: &[f64], close: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	qstick_avx512(open, close, period, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn qstick_row_avx512_short(diff: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	qstick_avx512_short(diff, period, first, out)
+unsafe fn qstick_row_avx512_short(open: &[f64], close: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	qstick_avx512_short(open, close, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn qstick_row_avx512_long(diff: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	qstick_avx512_long(diff, period, first, out)
+unsafe fn qstick_row_avx512_long(open: &[f64], close: &[f64], first: usize, period: usize, out: &mut [f64]) {
+	qstick_avx512_long(open, close, period, first, out)
 }
 
 #[derive(Debug, Clone)]
@@ -723,4 +809,336 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "qstick")]
+#[pyo3(signature = (open, close, period, kernel=None))]
+pub fn qstick_py<'py>(
+	py: Python<'py>,
+	open: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let open_slice = open.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = QstickParams {
+		period: Some(period),
+	};
+	let input = QstickInput::from_slices(open_slice, close_slice, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| qstick_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "QstickStream")]
+pub struct QstickStreamPy {
+	stream: QstickStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl QstickStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = QstickParams {
+			period: Some(period),
+		};
+		let stream = QstickStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(QstickStreamPy { stream })
+	}
+	
+	pub fn update(&mut self, open: f64, close: f64) -> Option<f64> {
+		self.stream.update(open, close)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "qstick_batch")]
+#[pyo3(signature = (open, close, period_range, kernel=None))]
+pub fn qstick_batch_py<'py>(
+	py: Python<'py>,
+	open: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let open_slice = open.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = QstickBatchRange {
+		period: period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = open_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Use the optimized batch_inner_into function
+		qstick_batch_inner_into(open_slice, close_slice, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+/// Write qstick directly to output slice - no allocations
+pub fn qstick_into_slice(
+	dst: &mut [f64],
+	open: &[f64],
+	close: &[f64],
+	period: usize,
+	kern: Kernel,
+) -> Result<(), QstickError> {
+	// Validate inputs
+	let len = open.len().min(close.len());
+	if len == 0 {
+		return Err(QstickError::InvalidPeriod { period, data_len: len });
+	}
+	if dst.len() != len {
+		return Err(QstickError::InvalidPeriod { period, data_len: len });
+	}
+	if period == 0 || period > len {
+		return Err(QstickError::InvalidPeriod { period, data_len: len });
+	}
+	
+	// Find first valid index
+	let mut first_valid = 0;
+	for i in 0..len {
+		if !open[i].is_nan() && !close[i].is_nan() {
+			first_valid = i;
+			break;
+		}
+		if i == len - 1 {
+			return Err(QstickError::AllValuesNaN);
+		}
+	}
+	
+	// Check if we have enough valid data
+	if len - first_valid < period {
+		return Err(QstickError::NotEnoughValidData {
+			needed: period,
+			valid: len - first_valid,
+		});
+	}
+	
+	// Compute directly into output
+	let kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	match kernel {
+		Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(open, close, period, first_valid, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => qstick_avx2(open, close, period, first_valid, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(open, close, period, first_valid, dst),
+		_ => unreachable!(),
+	}
+	
+	// Fill warmup with NaN
+	let warmup = first_valid + period - 1;
+	for v in &mut dst[..warmup] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	// Validate minimum inputs
+	let len = open.len();
+	if len != close.len() {
+		return Err(JsValue::from_str("Open and close arrays must have the same length"));
+	}
+	
+	// Single allocation
+	let mut output = vec![0.0; len];
+	
+	qstick_into_slice(&mut output, open, close, period, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn qstick_into(
+	open_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if open_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let open = std::slice::from_raw_parts(open_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		// CRITICAL: Check for aliasing
+		// If either input overlaps with output, we need a temporary buffer
+		if open_ptr == out_ptr || close_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			qstick_into_slice(&mut temp, open, close, period, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			qstick_into_slice(out, open, close, period, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn qstick_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn qstick_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct QstickBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct QstickBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<QstickParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = qstick_batch)]
+pub fn qstick_batch_unified_js(open: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: QstickBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let len = open.len();
+	if len != close.len() {
+		return Err(JsValue::from_str("Open and close arrays must have the same length"));
+	}
+	
+	let sweep = QstickBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = qstick_batch_inner(open, close, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = QstickBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn qstick_batch_into(
+	open_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if open_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let open = std::slice::from_raw_parts(open_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let sweep = QstickBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let total_size = rows * len;
+		
+		// For batch, we write directly to the output - no aliasing check needed
+		// as batch output is different size than input
+		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+		
+		qstick_batch_inner_into(open, close, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

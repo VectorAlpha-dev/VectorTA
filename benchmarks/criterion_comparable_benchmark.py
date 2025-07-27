@@ -102,9 +102,9 @@ class CriterionComparableBenchmark:
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
             'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
-            'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
+            'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'edcf', 'ehlers_itrend', 'ema', 'epma', 'eri',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
-            'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
+            'hwma', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'linreg', 'maaq', 'mama', 'mass', 'midprice', 'mwdx', 'obv',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
@@ -116,10 +116,10 @@ class CriterionComparableBenchmark:
         
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
-                           'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
-                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
+                           'sma_batch', 'ema_batch', 'dema_batch', 'deviation_batch', 'dti_batch', 'edcf_batch', 'ehlers_itrend_batch', 'eri_batch', 'tema_batch', 
+                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch']
+                           'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -254,10 +254,13 @@ class CriterionComparableBenchmark:
             ('vwap', lambda: my_project.vwap(data['timestamps'], data['volume'], data['close'], '1d')),
             ('cwma', lambda: my_project.cwma(data['close'], 14)),
             ('dema', lambda: my_project.dema(data['close'], 14)),
+            ('deviation', lambda: my_project.deviation(data['close'], 20, 0)),
+            ('dti', lambda: my_project.dti(data['high'], data['low'], 14, 10, 5)),
             ('edcf', lambda: my_project.edcf(data['close'], 14)),
             ('ehlers_itrend', lambda: my_project.ehlers_itrend(data['close'], 20, 48)),
             ('ema', lambda: my_project.ema(data['close'], 14)),
             ('epma', lambda: my_project.epma(data['close'], 14, 0)),
+            ('eri', lambda: my_project.eri(data['high'], data['low'], data['close'], 13, "ema")),
             ('frama', lambda: my_project.frama(data['high'], data['low'], data['close'], 14, 1, 198)),
             ('fwma', lambda: my_project.fwma(data['close'], 14)),
             ('gaussian', lambda: my_project.gaussian(data['close'], 14, 4)),
@@ -268,9 +271,15 @@ class CriterionComparableBenchmark:
             ('jma', lambda: my_project.jma(data['close'], 14, 0.0, 2)),
             ('jsa', lambda: my_project.jsa(data['close'], 14)),
             ('kama', lambda: my_project.kama(data['close'], 14)),
+            ('kdj', lambda: my_project.kdj(data['high'], data['low'], data['close'], 9, 3, "sma", 3, "sma")),
+            ('linearreg_intercept', lambda: my_project.linearreg_intercept(data['close'], 14)),
             ('linreg', lambda: my_project.linreg(data['close'], 14)),
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
+            ('mass', lambda: my_project.mass(data['high'], data['low'], 5)),
+            ('midprice', lambda: my_project.midprice(data['high'], data['low'], 14)),
+            ('obv', lambda: my_project.obv(data['close'], data['volume'])),
+            ('qstick', lambda: my_project.qstick(data['open'], data['close'], 5)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
             ('nma', lambda: my_project.nma(data['close'], 40)),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
@@ -295,6 +304,7 @@ class CriterionComparableBenchmark:
             ('cg', lambda: my_project.cg(data['close'], 10)),
             ('cci', lambda: my_project.cci((data['high'] + data['low'] + data['close']) / 3, 14)),
             ('cfo', lambda: my_project.cfo(data['close'], 14, 100.0)),
+            ('correl_hl', lambda: my_project.correl_hl(data['high'], data['low'], 9)),
             ('bop', lambda: my_project.bop(data['open'], data['high'], data['low'], data['close'])),
         ]
         
@@ -325,8 +335,11 @@ class CriterionComparableBenchmark:
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
             ('ema_batch', lambda: my_project.ema_batch(data['close'], (14, 14, 1))),
             ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
+            ('deviation_batch', lambda: my_project.deviation_batch(data['close'], (10, 50, 5), (0, 2, 1))),
+            ('dti_batch', lambda: my_project.dti_batch(data['high'], data['low'], (10, 20, 5), (8, 12, 2), (4, 6, 1))),
             ('edcf_batch', lambda: my_project.edcf_batch(data['close'], (15, 50, 1))),
             ('ehlers_itrend_batch', lambda: my_project.ehlers_itrend_batch(data['close'], (12, 20, 4), (40, 50, 5))),
+            ('eri_batch', lambda: my_project.eri_batch(data['high'], data['low'], data['close'], (10, 20, 1), "ema")),
             ('tema_batch', lambda: my_project.tema_batch(data['close'], (9, 240, 1))),
             ('tilson_batch', lambda: my_project.tilson_batch(data['close'], (5, 40, 1), (0.0, 1.0, 0.1))),
             ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
@@ -342,8 +355,14 @@ class CriterionComparableBenchmark:
             ('cg_batch', lambda: my_project.cg_batch(data['close'], (10, 10, 1))),
             ('cci_batch', lambda: my_project.cci_batch((data['high'] + data['low'] + data['close']) / 3, (14, 14, 1))),
             ('cfo_batch', lambda: my_project.cfo_batch(data['close'], (14, 14, 1), (100.0, 100.0, 0.0))),
+            ('correl_hl_batch', lambda: my_project.correl_hl_batch(data['high'], data['low'], (9, 9, 1))),
             ('bop_batch', lambda: my_project.bop_batch(data['open'], data['high'], data['low'], data['close'])),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
+            ('linearreg_intercept_batch', lambda: my_project.linearreg_intercept_batch(data['close'], (10, 50, 5))),
+            ('mass_batch', lambda: my_project.mass_batch(data['high'], data['low'], (5, 25, 1))),
+            ('midprice_batch', lambda: my_project.midprice_batch(data['high'], data['low'], (10, 20, 5))),
+            ('obv_batch', lambda: my_project.obv_batch(data['close'], data['volume'])),
+            ('qstick_batch', lambda: my_project.qstick_batch(data['open'], data['close'], (5, 20, 5))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -416,7 +435,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'obv', 'qstick']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

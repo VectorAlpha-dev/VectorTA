@@ -17,10 +17,28 @@
 //! - **`Ok(EriOutput)`** on success, containing `bull` and `bear` vectors of length equal to the input.
 //! - **`Err(EriError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -238,8 +256,9 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
 	let full_ma =
 		ma(&ma_type, MaData::Slice(&source_data), period).map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
-	let mut bull = vec![f64::NAN; source_data.len()];
-	let mut bear = vec![f64::NAN; source_data.len()];
+	let warmup_period = first_valid_idx + period - 1;
+	let mut bull = alloc_with_nan_prefix(source_data.len(), warmup_period);
+	let mut bear = alloc_with_nan_prefix(source_data.len(), warmup_period);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -487,8 +506,28 @@ fn eri_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = source.len();
-	let mut bull = vec![f64::NAN; rows * cols];
-	let mut bear = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory for batch processing
+	let mut buf_bull = make_uninit_matrix(rows, cols);
+	let mut buf_bear = make_uninit_matrix(rows, cols);
+	
+	// Initialize prefixes with NaN based on warmup periods
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_bull, cols, &warmup_periods);
+	init_matrix_prefixes(&mut buf_bear, cols, &warmup_periods);
+	
+	// Convert to initialized slices
+	let (mut bull, _) = unsafe {
+		let ptr = buf_bull.as_mut_ptr() as *mut f64;
+		(std::slice::from_raw_parts_mut(ptr, rows * cols), buf_bull)
+	};
+	let (mut bear, _) = unsafe {
+		let ptr = buf_bear.as_mut_ptr() as *mut f64;
+		(std::slice::from_raw_parts_mut(ptr, rows * cols), buf_bear)
+	};
 
 	let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -528,13 +567,117 @@ fn eri_batch_inner(
 		}
 	}
 
+	// Create output with owned data
+	// SAFETY: We're taking ownership of the allocated memory from make_uninit_matrix
+	let bull_vec = unsafe {
+		Vec::from_raw_parts(
+			buf_bull.as_mut_ptr() as *mut f64,
+			rows * cols,
+			rows * cols,
+		)
+	};
+	let bear_vec = unsafe {
+		Vec::from_raw_parts(
+			buf_bear.as_mut_ptr() as *mut f64,
+			rows * cols,
+			rows * cols,
+		)
+	};
+	
+	// Prevent double-free by forgetting the original buffers
+	std::mem::forget(buf_bull);
+	std::mem::forget(buf_bear);
+	
 	Ok(EriBatchOutput {
-		bull,
-		bear,
+		bull: bull_vec,
+		bear: bear_vec,
 		params: combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+pub fn eri_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	source: &[f64],
+	sweep: &EriBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	bull_out: &mut [f64],
+	bear_out: &mut [f64],
+) -> Result<Vec<EriParams>, EriError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(EriError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = source.iter().position(|x| !x.is_nan()).ok_or(EriError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if source.len() - first < max_p {
+		return Err(EriError::NotEnoughValidData {
+			needed: max_p,
+			valid: source.len() - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = source.len();
+	
+	// Verify output slices have correct length
+	if bull_out.len() != rows * cols || bear_out.len() != rows * cols {
+		return Err(EriError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	// Split output slices into row chunks
+	let (bull_chunks, bear_chunks): (Vec<_>, Vec<_>) = bull_out
+		.chunks_mut(cols)
+		.zip(bear_out.chunks_mut(cols))
+		.collect::<Vec<_>>()
+		.into_iter()
+		.unzip();
+	
+	let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let ma_type = combos[row].ma_type.clone().unwrap_or_else(|| "ema".to_string());
+		let ma_vec =
+			ma(&ma_type, MaData::Slice(source), period).map_err(|e| EriError::MaCalculationError(e.to_string()))?;
+		match kern {
+			Kernel::Scalar => eri_row_scalar(high, low, &ma_vec, first, period, bull_row, bear_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => eri_row_avx2(high, low, &ma_vec, first, period, bull_row, bear_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => eri_row_avx512(high, low, &ma_vec, first, period, bull_row, bear_row),
+			_ => unreachable!(),
+		}
+		Ok::<(), EriError>(())
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			bull_chunks
+				.into_par_iter()
+				.zip(bear_chunks.into_par_iter())
+				.enumerate()
+				.for_each(|(row, (bull_row, bear_row))| {
+					let _ = do_row(row, bull_row, bear_row);
+				});
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (bull_row, bear_row)) in bull_chunks.into_iter().zip(bear_chunks.into_iter()).enumerate() {
+				let _ = do_row(row, bull_row, bear_row);
+			}
+		}
+	} else {
+		for (row, (bull_row, bear_row)) in bull_chunks.into_iter().zip(bear_chunks.into_iter()).enumerate() {
+			let _ = do_row(row, bull_row, bear_row);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -663,6 +806,424 @@ impl EriStream {
 		let lo = self.low_buffer[self.idx];
 		Some((hi - ring_ma, lo - ring_ma))
 	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "eri")]
+#[pyo3(signature = (high, low, source, period=13, ma_type="ema", kernel=None))]
+pub fn eri_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	source: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let source_slice = source.as_slice()?;
+
+	// Validate lengths match
+	if high_slice.len() != low_slice.len() || high_slice.len() != source_slice.len() {
+		return Err(PyValueError::new_err("high, low, and source arrays must have the same length"));
+	}
+
+	let kern = validate_kernel(kernel, false)?;
+	let params = EriParams {
+		period: Some(period),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = EriInput::from_slices(high_slice, low_slice, source_slice, params);
+
+	let result = py
+		.allow_threads(|| eri_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Zero-copy transfer to Python
+	Ok((result.bull.into_pyarray(py), result.bear.into_pyarray(py)))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "EriStream")]
+pub struct EriStreamPy {
+	stream: EriStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl EriStreamPy {
+	#[new]
+	fn new(period: usize, ma_type: Option<&str>) -> PyResult<Self> {
+		let params = EriParams {
+			period: Some(period),
+			ma_type: ma_type.map(|s| s.to_string()).or_else(|| Some("ema".to_string())),
+		};
+		let stream = EriStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(EriStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64, source: f64) -> Option<(f64, f64)> {
+		self.stream.update(high, low, source)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "eri_batch")]
+#[pyo3(signature = (high, low, source, period_range=(13, 13, 0), ma_type="ema", kernel=None))]
+pub fn eri_batch_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	source: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let source_slice = source.as_slice()?;
+
+	// Validate lengths match
+	if high_slice.len() != low_slice.len() || high_slice.len() != source_slice.len() {
+		return Err(PyValueError::new_err("high, low, and source arrays must have the same length"));
+	}
+
+	let sweep = EriBatchRange {
+		period: period_range,
+	};
+
+	// 1. Expand grid once to know rows*cols
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	// 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
+	let bull_array: Bound<'py, PyArray1<f64>> =
+		unsafe { PyArray1::<f64>::new_uninitialized(py, rows * cols)? };
+	let bear_array: Bound<'py, PyArray1<f64>> =
+		unsafe { PyArray1::<f64>::new_uninitialized(py, rows * cols)? };
+
+	// 3. Get mutable slices from arrays and initialize NaN prefixes
+	let bull_slice = unsafe { bull_array.as_slice_mut()? };
+	let bear_slice = unsafe { bear_array.as_slice_mut()? };
+	
+	// Initialize NaN prefixes based on warmup periods
+	let first_valid = high_slice.iter()
+		.zip(low_slice.iter())
+		.zip(source_slice.iter())
+		.position(|((h, l), s)| !h.is_nan() && !l.is_nan() && !s.is_nan())
+		.unwrap_or(0);
+	
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup = first_valid + period - 1;
+		let row_start = row * cols;
+		for i in 0..warmup.min(cols) {
+			bull_slice[row_start + i] = f64::NAN;
+			bear_slice[row_start + i] = f64::NAN;
+		}
+	}
+
+	// 4. Run computation with GIL released
+	let kern = validate_kernel(kernel, true)?;
+	let kernel_to_use = match kern {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+	let simd = match kernel_to_use {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+	
+	let combos = py.allow_threads(|| {
+		eri_batch_inner_into(high_slice, low_slice, source_slice, &sweep, simd, true, bull_slice, bear_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// 6. Reshape arrays to 2D
+	let bull_reshaped = bull_array.reshape([rows, cols])?;
+	let bear_reshaped = bear_array.reshape([rows, cols])?;
+
+	// 5. Build parameter arrays  
+	let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+	let ma_types: Vec<&str> = vec![ma_type; combos.len()];
+
+	// 8. Create result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("bull_values", bull_reshaped)?;
+	dict.set_item("bear_values", bear_reshaped)?;
+	dict.set_item("periods", periods.into_pyarray(py))?;
+	dict.set_item("ma_types", ma_types)?;
+
+	Ok(dict.into())
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+/// Write directly to output slices - no allocations
+pub fn eri_into_slice(
+	dst_bull: &mut [f64],
+	dst_bear: &mut [f64],
+	input: &EriInput,
+	kern: Kernel,
+) -> Result<(), EriError> {
+	let (high, low, source_data) = match &input.data {
+		EriData::Candles { candles, source } => {
+			let high = candles.select_candle_field("high").map_err(|_| EriError::EmptyData)?;
+			let low = candles.select_candle_field("low").map_err(|_| EriError::EmptyData)?;
+			let src = source_type(candles, source);
+			(high, low, src)
+		}
+		EriData::Slices { high, low, source } => (*high, *low, *source),
+	};
+
+	if source_data.is_empty() || high.is_empty() || low.is_empty() {
+		return Err(EriError::EmptyData);
+	}
+
+	// Verify output slices have correct length
+	if dst_bull.len() != source_data.len() || dst_bear.len() != source_data.len() {
+		return Err(EriError::InvalidPeriod {
+			period: 0,
+			data_len: source_data.len(),
+		});
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > source_data.len() {
+		return Err(EriError::InvalidPeriod {
+			period,
+			data_len: source_data.len(),
+		});
+	}
+
+	let mut first_valid_idx = None;
+	for i in 0..source_data.len() {
+		if !(source_data[i].is_nan() || high[i].is_nan() || low[i].is_nan()) {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(EriError::AllValuesNaN),
+	};
+
+	if (source_data.len() - first_valid_idx) < period {
+		return Err(EriError::NotEnoughValidData {
+			needed: period,
+			valid: source_data.len() - first_valid_idx,
+		});
+	}
+
+	let ma_type = input.get_ma_type();
+	let full_ma =
+		ma(&ma_type, MaData::Slice(&source_data), period).map_err(|e| EriError::MaCalculationError(e.to_string()))?;
+
+	let warmup_period = first_valid_idx + period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst_bull[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_bear[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				eri_scalar(high, low, &full_ma, period, first_valid_idx, dst_bull, dst_bear)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => eri_avx2(high, low, &full_ma, period, first_valid_idx, dst_bull, dst_bear),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				eri_avx512(high, low, &full_ma, period, first_valid_idx, dst_bull, dst_bear)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn eri_js(
+	high: &[f64],
+	low: &[f64],
+	source: &[f64],
+	period: usize,
+	ma_type: &str,
+) -> Result<Vec<f64>, JsValue> {
+	// Validate lengths match
+	if high.len() != low.len() || high.len() != source.len() {
+		return Err(JsValue::from_str("high, low, and source arrays must have the same length"));
+	}
+	
+	let params = EriParams {
+		period: Some(period),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = EriInput::from_slices(high, low, source, params);
+	
+	// Single allocation for both outputs
+	let mut output = vec![0.0; source.len() * 2];
+	let (bull_part, bear_part) = output.split_at_mut(source.len());
+	
+	eri_into_slice(bull_part, bear_part, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn eri_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	source_ptr: *const f64,
+	bull_ptr: *mut f64,
+	bear_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	ma_type: &str,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || source_ptr.is_null() || 
+	   bull_ptr.is_null() || bear_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let source = std::slice::from_raw_parts(source_ptr, len);
+		
+		let params = EriParams {
+			period: Some(period),
+			ma_type: Some(ma_type.to_string()),
+		};
+		let input = EriInput::from_slices(high, low, source, params);
+		
+		// Check for aliasing - any output pointer matches any input pointer
+		let needs_temp = bull_ptr == high_ptr || bull_ptr == low_ptr || bull_ptr == source_ptr ||
+		                 bear_ptr == high_ptr || bear_ptr == low_ptr || bear_ptr == source_ptr ||
+		                 bull_ptr == bear_ptr;
+		
+		if needs_temp {
+			// Allocate temporary buffers
+			let mut temp_bull = vec![0.0; len];
+			let mut temp_bear = vec![0.0; len];
+			eri_into_slice(&mut temp_bull, &mut temp_bear, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy to output
+			let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
+			let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
+			bull_out.copy_from_slice(&temp_bull);
+			bear_out.copy_from_slice(&temp_bear);
+		} else {
+			// Direct write to output
+			let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
+			let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
+			eri_into_slice(bull_out, bear_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn eri_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn eri_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EriBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub ma_type: String,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EriBatchJsOutput {
+	pub bull_values: Vec<f64>,
+	pub bear_values: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = eri_batch)]
+pub fn eri_batch_js(
+	high: &[f64],
+	low: &[f64],
+	source: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	// Validate lengths match
+	if high.len() != low.len() || high.len() != source.len() {
+		return Err(JsValue::from_str("high, low, and source arrays must have the same length"));
+	}
+	
+	let config: EriBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = EriBatchRange {
+		period: config.period_range,
+	};
+	
+	// Note: ERI doesn't have batch_inner like ALMA, so we use the batch_with_kernel function
+	let output = eri_batch_with_kernel(high, low, source, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Extract periods from params
+	let periods: Vec<usize> = output.params
+		.iter()
+		.map(|p| p.period.unwrap())
+		.collect();
+	
+	let js_output = EriBatchJsOutput {
+		bull_values: output.bull,
+		bear_values: output.bear,
+		periods,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

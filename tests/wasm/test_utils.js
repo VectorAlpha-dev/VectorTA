@@ -410,6 +410,16 @@ const EXPECTED_OUTPUTS = {
             0.3547400611620795,
             -0.5336179295624333
         ]
+    },
+    midprice: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59583.0,
+            59583.0,
+            59583.0,
+            59486.0,
+            58989.0
+        ]
     }
 };
 
