@@ -18,7 +18,11 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,6 +30,18 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 // --- DATA TYPES ---
 
@@ -51,6 +67,7 @@ pub struct MinmaxOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MinmaxParams {
 	pub order: Option<usize>,
 }
@@ -158,6 +175,135 @@ pub fn minmax(input: &MinmaxInput) -> Result<MinmaxOutput, MinmaxError> {
 	minmax_with_kernel(input, Kernel::Auto)
 }
 
+/// Write directly to output slices - no allocations
+#[inline]
+pub fn minmax_into_slice(
+	is_min_dst: &mut [f64],
+	is_max_dst: &mut [f64],
+	last_min_dst: &mut [f64],
+	last_max_dst: &mut [f64],
+	input: &MinmaxInput,
+	kern: Kernel,
+) -> Result<(), MinmaxError> {
+	let (high, low) = match &input.data {
+		MinmaxData::Candles {
+			candles,
+			high_src,
+			low_src,
+		} => {
+			let h = source_type(candles, high_src);
+			let l = source_type(candles, low_src);
+			(h, l)
+		}
+		MinmaxData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(MinmaxError::EmptyData);
+	}
+	
+	let order = input.get_order();
+	let len_data = high.len();
+	
+	// Validate lengths
+	if is_min_dst.len() != len_data || is_max_dst.len() != len_data 
+		|| last_min_dst.len() != len_data || last_max_dst.len() != len_data {
+		return Err(MinmaxError::InvalidOrder {
+			order: is_min_dst.len(),
+			data_len: len_data,
+		});
+	}
+	
+	if order == 0 || order > len_data {
+		return Err(MinmaxError::InvalidOrder {
+			order,
+			data_len: len_data,
+		});
+	}
+	
+	let first_valid_idx = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
+		.ok_or(MinmaxError::AllValuesNaN)?;
+
+	if (len_data - first_valid_idx) < order {
+		return Err(MinmaxError::NotEnoughValidData {
+			needed: order,
+			valid: len_data - first_valid_idx,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => minmax_scalar(
+				high,
+				low,
+				order,
+				first_valid_idx,
+				is_min_dst,
+				is_max_dst,
+				last_min_dst,
+				last_max_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => minmax_avx2(
+				high,
+				low,
+				order,
+				first_valid_idx,
+				is_min_dst,
+				is_max_dst,
+				last_min_dst,
+				last_max_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => minmax_avx512(
+				high,
+				low,
+				order,
+				first_valid_idx,
+				is_min_dst,
+				is_max_dst,
+				last_min_dst,
+				last_max_dst,
+			),
+			_ => minmax_scalar(
+				high,
+				low,
+				order,
+				first_valid_idx,
+				is_min_dst,
+				is_max_dst,
+				last_min_dst,
+				last_max_dst,
+			),
+		}
+	}
+	
+	// Fill warmup with NaN
+	let warmup_period = order;
+	for v in &mut is_min_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut is_max_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut last_min_dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	for v in &mut last_max_dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
 pub fn minmax_with_kernel(input: &MinmaxInput, kernel: Kernel) -> Result<MinmaxOutput, MinmaxError> {
 	let (high, low) = match &input.data {
 		MinmaxData::Candles {
@@ -195,10 +341,12 @@ pub fn minmax_with_kernel(input: &MinmaxInput, kernel: Kernel) -> Result<MinmaxO
 			valid: len_data - first_valid_idx,
 		});
 	}
-	let mut is_min = vec![f64::NAN; len_data];
-	let mut is_max = vec![f64::NAN; len_data];
-	let mut last_min = vec![f64::NAN; len_data];
-	let mut last_max = vec![f64::NAN; len_data];
+	// Use zero-copy allocation for outputs
+	let warmup_period = order;
+	let mut is_min = alloc_with_nan_prefix(len_data, warmup_period);
+	let mut is_max = alloc_with_nan_prefix(len_data, warmup_period);
+	let mut last_min = alloc_with_nan_prefix(len_data, first_valid_idx);
+	let mut last_max = alloc_with_nan_prefix(len_data, first_valid_idx);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -633,10 +781,36 @@ fn minmax_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len_data;
-	let mut is_min = vec![f64::NAN; rows * cols];
-	let mut is_max = vec![f64::NAN; rows * cols];
-	let mut last_min = vec![f64::NAN; rows * cols];
-	let mut last_max = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| c.order.unwrap() + first_valid_idx)
+		.collect();
+	
+	// Use uninitialized memory helpers for batch outputs
+	let mut is_min_buf = make_uninit_matrix(rows, cols);
+	let mut is_max_buf = make_uninit_matrix(rows, cols);
+	let mut last_min_buf = make_uninit_matrix(rows, cols);
+	let mut last_max_buf = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for each row
+	init_matrix_prefixes(&mut is_min_buf, cols, &warmup_periods);
+	init_matrix_prefixes(&mut is_max_buf, cols, &warmup_periods);
+	
+	let first_valid_periods: Vec<usize> = vec![first_valid_idx; rows];
+	init_matrix_prefixes(&mut last_min_buf, cols, &first_valid_periods);
+	init_matrix_prefixes(&mut last_max_buf, cols, &first_valid_periods);
+	
+	// Convert to mutable slices for computation
+	let mut is_min_guard = core::mem::ManuallyDrop::new(is_min_buf);
+	let mut is_max_guard = core::mem::ManuallyDrop::new(is_max_buf);
+	let mut last_min_guard = core::mem::ManuallyDrop::new(last_min_buf);
+	let mut last_max_guard = core::mem::ManuallyDrop::new(last_max_buf);
+	
+	let is_min: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(is_min_guard.as_mut_ptr() as *mut f64, is_min_guard.len()) };
+	let is_max: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(is_max_guard.as_mut_ptr() as *mut f64, is_max_guard.len()) };
+	let last_min: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(last_min_guard.as_mut_ptr() as *mut f64, last_min_guard.len()) };
+	let last_max: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(last_max_guard.as_mut_ptr() as *mut f64, last_max_guard.len()) };
 
 	let do_row = |row: usize,
 	              out_min: &mut [f64],
@@ -712,6 +886,43 @@ fn minmax_batch_inner(
 			do_row(row, min, max, lmin, lmax)
 		}
 	}
+	
+	// Convert back to Vecs
+	let is_min = unsafe {
+		Vec::from_raw_parts(
+			is_min_guard.as_mut_ptr() as *mut f64,
+			is_min_guard.len(),
+			is_min_guard.capacity(),
+		)
+	};
+	let is_max = unsafe {
+		Vec::from_raw_parts(
+			is_max_guard.as_mut_ptr() as *mut f64,
+			is_max_guard.len(),
+			is_max_guard.capacity(),
+		)
+	};
+	let last_min = unsafe {
+		Vec::from_raw_parts(
+			last_min_guard.as_mut_ptr() as *mut f64,
+			last_min_guard.len(),
+			last_min_guard.capacity(),
+		)
+	};
+	let last_max = unsafe {
+		Vec::from_raw_parts(
+			last_max_guard.as_mut_ptr() as *mut f64,
+			last_max_guard.len(),
+			last_max_guard.capacity(),
+		)
+	};
+	
+	// Forget the guards since we've taken ownership
+	core::mem::forget(is_min_guard);
+	core::mem::forget(is_max_guard);
+	core::mem::forget(last_min_guard);
+	core::mem::forget(last_max_guard);
+	
 	Ok(MinmaxBatchOutput {
 		is_min,
 		is_max,
@@ -721,6 +932,120 @@ fn minmax_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+// Direct buffer writing variant for Python/WASM bindings
+#[inline(always)]
+fn minmax_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &MinmaxBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	is_min_out: &mut [f64],
+	is_max_out: &mut [f64],
+	last_min_out: &mut [f64],
+	last_max_out: &mut [f64],
+) -> Result<Vec<MinmaxParams>, MinmaxError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(MinmaxError::InvalidOrder { order: 0, data_len: 0 });
+	}
+	
+	let len_data = high.len();
+	let first_valid_idx = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
+		.ok_or(MinmaxError::AllValuesNaN)?;
+	
+	let max_o = combos.iter().map(|c| c.order.unwrap()).max().unwrap();
+	if (len_data - first_valid_idx) < max_o {
+		return Err(MinmaxError::NotEnoughValidData {
+			needed: max_o,
+			valid: len_data - first_valid_idx,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = len_data;
+	
+	let do_row = |row: usize,
+	              out_min: &mut [f64],
+	              out_max: &mut [f64],
+	              out_last_min: &mut [f64],
+	              out_last_max: &mut [f64]| unsafe {
+		let order = combos[row].order.unwrap();
+		match kern {
+			Kernel::Scalar => minmax_row_scalar(
+				high,
+				low,
+				first_valid_idx,
+				order,
+				out_min,
+				out_max,
+				out_last_min,
+				out_last_max,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => minmax_row_avx2(
+				high,
+				low,
+				first_valid_idx,
+				order,
+				out_min,
+				out_max,
+				out_last_min,
+				out_last_max,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => minmax_row_avx512(
+				high,
+				low,
+				first_valid_idx,
+				order,
+				out_min,
+				out_max,
+				out_last_min,
+				out_last_max,
+			),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			is_min_out
+				.par_chunks_mut(cols)
+				.zip(is_max_out.par_chunks_mut(cols))
+				.zip(last_min_out.par_chunks_mut(cols).zip(last_max_out.par_chunks_mut(cols)))
+				.enumerate()
+				.for_each(|(row, ((min, max), (lmin, lmax)))| do_row(row, min, max, lmin, lmax));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, ((min, max), (lmin, lmax))) in is_min_out
+				.chunks_mut(cols)
+				.zip(is_max_out.chunks_mut(cols))
+				.zip(last_min_out.chunks_mut(cols).zip(last_max_out.chunks_mut(cols)))
+				.enumerate()
+			{
+				do_row(row, min, max, lmin, lmax)
+			}
+		}
+	} else {
+		for (row, ((min, max), (lmin, lmax))) in is_min_out
+			.chunks_mut(cols)
+			.zip(is_max_out.chunks_mut(cols))
+			.zip(last_min_out.chunks_mut(cols).zip(last_max_out.chunks_mut(cols)))
+			.enumerate()
+		{
+			do_row(row, min, max, lmin, lmax)
+		}
+	}
+	
+	Ok(combos)
 }
 
 // --- BATCH ROW VARIANTS ---
@@ -801,6 +1126,389 @@ pub unsafe fn minmax_row_avx512_long(
 	last_max: &mut [f64],
 ) {
 	minmax_row_scalar(high, low, first_valid, order, is_min, is_max, last_min, last_max)
+}
+
+// --- PYTHON BINDINGS ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "minmax")]
+#[pyo3(signature = (high, low, order, kernel=None))]
+pub fn minmax_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	order: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>, 
+              Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = MinmaxParams { order: Some(order) };
+	let input = MinmaxInput::from_slices(high_slice, low_slice, params);
+	
+	let output = py.allow_threads(|| minmax_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok((
+		output.is_min.into_pyarray(py),
+		output.is_max.into_pyarray(py),
+		output.last_min.into_pyarray(py),
+		output.last_max.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MinmaxStream")]
+pub struct MinmaxStreamPy {
+	stream: MinmaxStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MinmaxStreamPy {
+	#[new]
+	fn new(order: usize) -> PyResult<Self> {
+		let params = MinmaxParams { order: Some(order) };
+		let stream = MinmaxStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MinmaxStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64) -> (Option<f64>, Option<f64>, f64, f64) {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "minmax_batch")]
+#[pyo3(signature = (high, low, order_range, kernel=None))]
+pub fn minmax_batch_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	order_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = MinmaxBatchRange { order: order_range };
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	// Pre-allocate arrays for batch operation
+	let is_min_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let is_max_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let last_min_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let last_max_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	
+	let is_min_slice = unsafe { is_min_arr.as_slice_mut()? };
+	let is_max_slice = unsafe { is_max_arr.as_slice_mut()? };
+	let last_min_slice = unsafe { last_min_arr.as_slice_mut()? };
+	let last_max_slice = unsafe { last_max_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Map batch kernels to regular SIMD kernels
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Write directly to pre-allocated buffers
+		minmax_batch_inner_into(
+			high_slice, 
+			low_slice, 
+			&sweep, 
+			simd, 
+			true, 
+			is_min_slice, 
+			is_max_slice,
+			last_min_slice,
+			last_max_slice
+		)
+	}).map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("is_min", is_min_arr.reshape((rows, cols))?)?;
+	dict.set_item("is_max", is_max_arr.reshape((rows, cols))?)?;
+	dict.set_item("last_min", last_min_arr.reshape((rows, cols))?)?;
+	dict.set_item("last_max", last_max_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"orders",
+		combos.iter()
+			.map(|p| p.order.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+// --- WASM BINDINGS ---
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn minmax_js(
+	high: &[f64],
+	low: &[f64],
+	order: usize,
+) -> Result<JsValue, JsValue> {
+	let params = MinmaxParams { order: Some(order) };
+	let input = MinmaxInput::from_slices(high, low, params);
+	
+	// Single allocation for all outputs
+	let len = high.len();
+	let mut is_min = vec![0.0; len];
+	let mut is_max = vec![0.0; len];
+	let mut last_min = vec![0.0; len];
+	let mut last_max = vec![0.0; len];
+	
+	minmax_into_slice(&mut is_min, &mut is_max, &mut last_min, &mut last_max, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let result = js_sys::Object::new();
+	js_sys::Reflect::set(&result, &"is_min".into(), &serde_wasm_bindgen::to_value(&is_min).unwrap()).unwrap();
+	js_sys::Reflect::set(&result, &"is_max".into(), &serde_wasm_bindgen::to_value(&is_max).unwrap()).unwrap();
+	js_sys::Reflect::set(&result, &"last_min".into(), &serde_wasm_bindgen::to_value(&last_min).unwrap()).unwrap();
+	js_sys::Reflect::set(&result, &"last_max".into(), &serde_wasm_bindgen::to_value(&last_max).unwrap()).unwrap();
+	Ok(result.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn minmax_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn minmax_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn minmax_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	is_min_ptr: *mut f64,
+	is_max_ptr: *mut f64,
+	last_min_ptr: *mut f64,
+	last_max_ptr: *mut f64,
+	len: usize,
+	order: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || is_min_ptr.is_null() 
+		|| is_max_ptr.is_null() || last_min_ptr.is_null() || last_max_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to minmax_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+
+		if order == 0 || order > len {
+			return Err(JsValue::from_str("Invalid order"));
+		}
+
+		let params = MinmaxParams { order: Some(order) };
+		let input = MinmaxInput::from_slices(high, low, params);
+
+		// Check for aliasing between any input and output pointers
+		let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8];
+		let output_ptrs = [
+			is_min_ptr as *mut u8,
+			is_max_ptr as *mut u8,
+			last_min_ptr as *mut u8,
+			last_max_ptr as *mut u8,
+		];
+		
+		let mut needs_temp = false;
+		for &inp in &input_ptrs {
+			for &out in &output_ptrs {
+				if inp == out {
+					needs_temp = true;
+					break;
+				}
+			}
+			if needs_temp {
+				break;
+			}
+		}
+
+		if needs_temp {
+			// Use temporary buffers
+			let mut temp_is_min = vec![0.0; len];
+			let mut temp_is_max = vec![0.0; len];
+			let mut temp_last_min = vec![0.0; len];
+			let mut temp_last_max = vec![0.0; len];
+			
+			minmax_into_slice(
+				&mut temp_is_min, 
+				&mut temp_is_max, 
+				&mut temp_last_min, 
+				&mut temp_last_max, 
+				&input, 
+				Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy results to output pointers
+			let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, len);
+			let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, len);
+			let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, len);
+			let last_max_out = std::slice::from_raw_parts_mut(last_max_ptr, len);
+			
+			is_min_out.copy_from_slice(&temp_is_min);
+			is_max_out.copy_from_slice(&temp_is_max);
+			last_min_out.copy_from_slice(&temp_last_min);
+			last_max_out.copy_from_slice(&temp_last_max);
+		} else {
+			// Direct output
+			let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, len);
+			let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, len);
+			let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, len);
+			let last_max_out = std::slice::from_raw_parts_mut(last_max_ptr, len);
+			
+			minmax_into_slice(
+				is_min_out, 
+				is_max_out, 
+				last_min_out, 
+				last_max_out, 
+				&input, 
+				Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MinmaxBatchConfig {
+	pub order_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = minmax_batch)]
+pub fn minmax_batch_unified_js(
+	high: &[f64],
+	low: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: MinmaxBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = MinmaxBatchRange { order: config.order_range };
+	
+	minmax_batch_with_kernel(high, low, &sweep, Kernel::Auto)
+		.map(|output| {
+			let result = js_sys::Object::new();
+			let rows = output.rows;
+			let cols = output.cols;
+			
+			// Create 2D arrays for each output
+			let is_min_2d = js_sys::Array::new();
+			let is_max_2d = js_sys::Array::new();
+			let last_min_2d = js_sys::Array::new();
+			let last_max_2d = js_sys::Array::new();
+			
+			for i in 0..rows {
+				let start = i * cols;
+				let end = start + cols;
+				
+				is_min_2d.push(&serde_wasm_bindgen::to_value(&output.is_min[start..end]).unwrap());
+				is_max_2d.push(&serde_wasm_bindgen::to_value(&output.is_max[start..end]).unwrap());
+				last_min_2d.push(&serde_wasm_bindgen::to_value(&output.last_min[start..end]).unwrap());
+				last_max_2d.push(&serde_wasm_bindgen::to_value(&output.last_max[start..end]).unwrap());
+			}
+			
+			js_sys::Reflect::set(&result, &"is_min".into(), &is_min_2d).unwrap();
+			js_sys::Reflect::set(&result, &"is_max".into(), &is_max_2d).unwrap();
+			js_sys::Reflect::set(&result, &"last_min".into(), &last_min_2d).unwrap();
+			js_sys::Reflect::set(&result, &"last_max".into(), &last_max_2d).unwrap();
+			js_sys::Reflect::set(&result, &"combos".into(), &serde_wasm_bindgen::to_value(&output.combos).unwrap()).unwrap();
+			js_sys::Reflect::set(&result, &"rows".into(), &JsValue::from_f64(rows as f64)).unwrap();
+			js_sys::Reflect::set(&result, &"cols".into(), &JsValue::from_f64(cols as f64)).unwrap();
+			
+			result.into()
+		})
+		.map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn minmax_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	is_min_ptr: *mut f64,
+	is_max_ptr: *mut f64,
+	last_min_ptr: *mut f64,
+	last_max_ptr: *mut f64,
+	len: usize,
+	order_start: usize,
+	order_end: usize,
+	order_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || is_min_ptr.is_null() 
+		|| is_max_ptr.is_null() || last_min_ptr.is_null() || last_max_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to minmax_batch_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+
+		let sweep = MinmaxBatchRange {
+			order: (order_start, order_end, order_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, rows * cols);
+		let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, rows * cols);
+		let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, rows * cols);
+		let last_max_out = std::slice::from_raw_parts_mut(last_max_ptr, rows * cols);
+
+		minmax_batch_inner_into(
+			high, 
+			low, 
+			&sweep, 
+			Kernel::Auto, 
+			false,
+			is_min_out,
+			is_max_out,
+			last_min_out,
+			last_max_out
+		).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }
 
 // --- TESTS ---

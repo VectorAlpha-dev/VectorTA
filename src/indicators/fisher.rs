@@ -16,9 +16,27 @@
 //! - **`Ok(FisherOutput)`** on success, containing `fisher` and `signal` vectors matching input length.
 //! - **`Err(FisherError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,6 +44,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> FisherInput<'a> {
@@ -51,6 +70,7 @@ pub struct FisherOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct FisherParams {
 	pub period: Option<usize>,
 }
@@ -163,6 +183,8 @@ pub enum FisherError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("fisher: All values are NaN.")]
 	AllValuesNaN,
+	#[error("fisher: Invalid output length: expected = {expected}, actual = {actual}")]
+	InvalidLength { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -183,15 +205,16 @@ pub fn fisher_with_kernel(input: &FisherInput, kernel: Kernel) -> Result<FisherO
 		return Err(FisherError::InvalidPeriod { period, data_len });
 	}
 
-	let mut merged = vec![f64::NAN; data_len];
+	// Find first valid index by checking both high and low
+	let mut first = None;
 	for i in 0..data_len {
-		merged[i] = 0.5 * (high[i] + low[i]);
+		if !high[i].is_nan() && !low[i].is_nan() {
+			first = Some(i);
+			break;
+		}
 	}
+	let first = first.ok_or(FisherError::AllValuesNaN)?;
 
-	let first = merged
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(FisherError::AllValuesNaN)?;
 	if (data_len - first) < period {
 		return Err(FisherError::NotEnoughValidData {
 			needed: period,
@@ -204,57 +227,20 @@ pub fn fisher_with_kernel(input: &FisherInput, kernel: Kernel) -> Result<FisherO
 		other => other,
 	};
 
+	// Allocate output arrays with NaN prefix for warmup period
+	let warmup = first + period - 1;
+	let mut fisher_vals = alloc_with_nan_prefix(data_len, warmup);
+	let mut signal_vals = alloc_with_nan_prefix(data_len, warmup);
+
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => fisher_scalar(&merged, period, first, data_len),
+			Kernel::Scalar | Kernel::ScalarBatch => fisher_scalar_into(high, low, period, first, &mut fisher_vals, &mut signal_vals),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => fisher_avx2(&merged, period, first, data_len),
+			Kernel::Avx2 | Kernel::Avx2Batch => fisher_avx2_into(high, low, period, first, &mut fisher_vals, &mut signal_vals),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => fisher_avx512(&merged, period, first, data_len),
+			Kernel::Avx512 | Kernel::Avx512Batch => fisher_avx512_into(high, low, period, first, &mut fisher_vals, &mut signal_vals),
 			_ => unreachable!(),
 		}
-	}
-}
-
-#[inline]
-pub fn fisher_scalar(
-	merged: &[f64],
-	period: usize,
-	first: usize,
-	data_len: usize,
-) -> Result<FisherOutput, FisherError> {
-	let mut fisher_vals = vec![f64::NAN; data_len];
-	let mut signal_vals = vec![f64::NAN; data_len];
-	let mut prev_fish = 0.0;
-	let mut val1 = 0.0;
-
-	for i in first..data_len {
-		if i < first + period - 1 {
-			continue;
-		}
-		let start = i + 1 - period;
-		let window = &merged[start..=i];
-		let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
-		for &v in window {
-			if v < min_val {
-				min_val = v;
-			}
-			if v > max_val {
-				max_val = v;
-			}
-		}
-		let range = (max_val - min_val).max(0.001);
-		let current_hl = merged[i];
-		val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * val1;
-		if val1 > 0.99 {
-			val1 = 0.999;
-		} else if val1 < -0.99 {
-			val1 = -0.999;
-		}
-		signal_vals[i] = prev_fish;
-		let new_fish = 0.5 * ((1.0 + val1) / (1.0 - val1)).ln() + 0.5 * prev_fish;
-		fisher_vals[i] = new_fish;
-		prev_fish = new_fish;
 	}
 
 	Ok(FisherOutput {
@@ -263,44 +249,140 @@ pub fn fisher_scalar(
 	})
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn fisher_avx512(
-	merged: &[f64],
+pub fn fisher_scalar_into(
+	high: &[f64],
+	low: &[f64],
 	period: usize,
 	first: usize,
-	data_len: usize,
-) -> Result<FisherOutput, FisherError> {
+	fisher_out: &mut [f64],
+	signal_out: &mut [f64],
+) {
+	let data_len = high.len().min(low.len());
+	let mut prev_fish = 0.0;
+	let mut val1 = 0.0;
+
+	for i in first..data_len {
+		if i < first + period - 1 {
+			continue;
+		}
+		let start = i + 1 - period;
+		
+		// Calculate min/max directly from high/low arrays
+		let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
+		for j in start..=i {
+			let h = high[j];
+			let l = low[j];
+			if h > max_val {
+				max_val = h;
+			}
+			if l < min_val {
+				min_val = l;
+			}
+		}
+		
+		let range = (max_val - min_val).max(0.001);
+		let current_hl = 0.5 * (high[i] + low[i]);
+		val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * val1;
+		if val1 > 0.99 {
+			val1 = 0.999;
+		} else if val1 < -0.99 {
+			val1 = -0.999;
+		}
+		signal_out[i] = prev_fish;
+		let new_fish = 0.5 * ((1.0 + val1) / (1.0 - val1)).ln() + 0.5 * prev_fish;
+		fisher_out[i] = new_fish;
+		prev_fish = new_fish;
+	}
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+pub fn fisher_avx512_into(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	fisher_out: &mut [f64],
+	signal_out: &mut [f64],
+) {
 	// AVX512 stub: fallback to scalar
-	fisher_scalar(merged, period, first, data_len)
+	fisher_scalar_into(high, low, period, first, fisher_out, signal_out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn fisher_avx2(merged: &[f64], period: usize, first: usize, data_len: usize) -> Result<FisherOutput, FisherError> {
+pub fn fisher_avx2_into(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	first: usize,
+	fisher_out: &mut [f64],
+	signal_out: &mut [f64],
+) {
 	// AVX2 stub: fallback to scalar
-	fisher_scalar(merged, period, first, data_len)
+	fisher_scalar_into(high, low, period, first, fisher_out, signal_out)
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+/// Write Fisher Transform directly to output slices - no allocations
 #[inline]
-pub fn fisher_avx512_short(
-	merged: &[f64],
-	period: usize,
-	first: usize,
-	data_len: usize,
-) -> Result<FisherOutput, FisherError> {
-	fisher_avx512(merged, period, first, data_len)
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn fisher_avx512_long(
-	merged: &[f64],
-	period: usize,
-	first: usize,
-	data_len: usize,
-) -> Result<FisherOutput, FisherError> {
-	fisher_avx512(merged, period, first, data_len)
+pub fn fisher_into_slice(
+	fisher_dst: &mut [f64],
+	signal_dst: &mut [f64],
+	input: &FisherInput,
+	kern: Kernel,
+) -> Result<(), FisherError> {
+	let (high, low) = input.as_ref();
+	let data_len = high.len().min(low.len());
+	let period = input.params.period.unwrap_or(9);
+	
+	// Find first valid index by checking both high and low
+	let mut first = None;
+	for i in 0..data_len {
+		if !high[i].is_nan() && !low[i].is_nan() {
+			first = Some(i);
+			break;
+		}
+	}
+	let first = first.ok_or(FisherError::AllValuesNaN)?;
+
+	// Validate parameters
+	if period == 0 || period > data_len {
+		return Err(FisherError::InvalidPeriod { period, data_len });
+	}
+	if data_len < period {
+		return Err(FisherError::NotEnoughValidData {
+			needed: period,
+			valid: data_len,
+		});
+	}
+	if fisher_dst.len() != data_len || signal_dst.len() != data_len {
+		return Err(FisherError::InvalidLength {
+			expected: data_len,
+			actual: fisher_dst.len(),
+		});
+	}
+
+	let chosen = if kern == Kernel::Auto { detect_best_kernel() } else { kern };
+	
+	// Write results directly to output slices
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => fisher_scalar_into(high, low, period, first, fisher_dst, signal_dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => fisher_avx2_into(high, low, period, first, fisher_dst, signal_dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => fisher_avx512_into(high, low, period, first, fisher_dst, signal_dst),
+		_ => unreachable!(),
+	}
+
+	// Fill warmup period with NaN
+	let warmup_end = first + period - 1;
+	for i in 0..warmup_end {
+		fisher_dst[i] = f64::NAN;
+		signal_dst[i] = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -452,14 +534,17 @@ fn fisher_batch_inner(
 	}
 
 	let data_len = high.len().min(low.len());
-	let mut merged = vec![f64::NAN; data_len];
+	
+	// Find first valid index
+	let mut first = None;
 	for i in 0..data_len {
-		merged[i] = 0.5 * (high[i] + low[i]);
+		if !high[i].is_nan() && !low[i].is_nan() {
+			first = Some(i);
+			break;
+		}
 	}
-	let first = merged
-		.iter()
-		.position(|x| !x.is_nan())
-		.ok_or(FisherError::AllValuesNaN)?;
+	let first = first.ok_or(FisherError::AllValuesNaN)?;
+	
 	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 	if data_len - first < max_p {
 		return Err(FisherError::NotEnoughValidData {
@@ -470,34 +555,78 @@ fn fisher_batch_inner(
 	let rows = combos.len();
 	let cols = data_len;
 
-	let mut fisher = vec![f64::NAN; rows * cols];
-	let mut signal = vec![f64::NAN; rows * cols];
-	let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| unsafe {
+	// Use make_uninit_matrix for zero allocation
+	let mut fisher_mu = make_uninit_matrix(rows, cols);
+	let mut signal_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut fisher_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut signal_mu, cols, &warmup_periods);
+	
+	// Convert to slices for computation
+	let mut fisher_guard = core::mem::ManuallyDrop::new(fisher_mu);
+	let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
+	
+	let fisher_slice: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(fisher_guard.as_mut_ptr() as *mut f64, fisher_guard.len()) 
+	};
+	let signal_slice: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len()) 
+	};
+	
+	let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
 		let period = combos[row].period.unwrap();
-		fisher_row_scalar(&merged, first, period, out_fish, out_signal)
+		fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 	};
 
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			fisher
+			fisher_slice
 				.par_chunks_mut(cols)
-				.zip(signal.par_chunks_mut(cols))
+				.zip(signal_slice.par_chunks_mut(cols))
 				.enumerate()
 				.for_each(|(row, (fish, sig))| do_row(row, fish, sig));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, (fish, sig)) in fisher.chunks_mut(cols).zip(signal.chunks_mut(cols)).enumerate() {
+			for (row, (fish, sig)) in fisher_slice.chunks_mut(cols).zip(signal_slice.chunks_mut(cols)).enumerate() {
 				do_row(row, fish, sig);
 			}
 		}
 	} else {
-		for (row, (fish, sig)) in fisher.chunks_mut(cols).zip(signal.chunks_mut(cols)).enumerate() {
+		for (row, (fish, sig)) in fisher_slice.chunks_mut(cols).zip(signal_slice.chunks_mut(cols)).enumerate() {
 			do_row(row, fish, sig);
 		}
 	}
+	
+	// Convert back to owned vectors
+	let fisher = unsafe {
+		Vec::from_raw_parts(
+			fisher_guard.as_mut_ptr() as *mut f64,
+			fisher_guard.len(),
+			fisher_guard.capacity(),
+		)
+	};
+	let signal = unsafe {
+		Vec::from_raw_parts(
+			signal_guard.as_mut_ptr() as *mut f64,
+			signal_guard.len(),
+			signal_guard.capacity(),
+		)
+	};
+	
+	// Forget the guards to prevent double-free
+	core::mem::forget(fisher_guard);
+	core::mem::forget(signal_guard);
+	
 	Ok(FisherBatchOutput {
 		fisher,
 		signal,
@@ -508,33 +637,47 @@ fn fisher_batch_inner(
 }
 
 #[inline(always)]
-unsafe fn fisher_row_scalar(merged: &[f64], first: usize, period: usize, out_fish: &mut [f64], out_signal: &mut [f64]) {
-	let data_len = merged.len();
+fn fisher_row_scalar_direct(
+	high: &[f64],
+	low: &[f64],
+	first: usize,
+	period: usize,
+	out_fish: &mut [f64],
+	out_signal: &mut [f64],
+) {
+	let data_len = high.len().min(low.len());
 	let mut prev_fish = 0.0;
 	let mut val1 = 0.0;
+	
 	for i in first..data_len {
 		if i < first + period - 1 {
 			continue;
 		}
 		let start = i + 1 - period;
-		let window = &merged[start..=i];
+		
+		// Calculate min/max directly from high/low arrays
 		let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
-		for &v in window {
-			if v < min_val {
-				min_val = v;
+		for j in start..=i {
+			let h = high[j];
+			let l = low[j];
+			if h > max_val {
+				max_val = h;
 			}
-			if v > max_val {
-				max_val = v;
+			if l < min_val {
+				min_val = l;
 			}
 		}
+		
 		let range = (max_val - min_val).max(0.001);
-		let current_hl = merged[i];
+		let current_hl = 0.5 * (high[i] + low[i]);
 		val1 = 0.33 * 2.0 * ((current_hl - min_val) / range - 0.5) + 0.67 * val1;
+		
 		if val1 > 0.99 {
 			val1 = 0.999;
 		} else if val1 < -0.99 {
 			val1 = -0.999;
 		}
+		
 		out_signal[i] = prev_fish;
 		let new_fish = 0.5 * ((1.0 + val1) / (1.0 - val1)).ln() + 0.5 * prev_fish;
 		out_fish[i] = new_fish;
@@ -544,35 +687,30 @@ unsafe fn fisher_row_scalar(merged: &[f64], first: usize, period: usize, out_fis
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn fisher_row_avx2(merged: &[f64], first: usize, period: usize, out_fish: &mut [f64], out_signal: &mut [f64]) {
-	unsafe { fisher_row_scalar(merged, first, period, out_fish, out_signal) }
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn fisher_row_avx512(merged: &[f64], first: usize, period: usize, out_fish: &mut [f64], out_signal: &mut [f64]) {
-	unsafe { fisher_row_scalar(merged, first, period, out_fish, out_signal) }
-}
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn fisher_row_avx512_short(
-	merged: &[f64],
+pub fn fisher_row_avx2_direct(
+	high: &[f64],
+	low: &[f64],
 	first: usize,
 	period: usize,
 	out_fish: &mut [f64],
 	out_signal: &mut [f64],
 ) {
-	fisher_row_avx512(merged, first, period, out_fish, out_signal)
+	// AVX2 stub: fallback to scalar
+	fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 }
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub fn fisher_row_avx512_long(
-	merged: &[f64],
+pub fn fisher_row_avx512_direct(
+	high: &[f64],
+	low: &[f64],
 	first: usize,
 	period: usize,
 	out_fish: &mut [f64],
 	out_signal: &mut [f64],
 ) {
-	fisher_row_avx512(merged, first, period, out_fish, out_signal)
+	// AVX512 stub: fallback to scalar
+	fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 }
 
 #[derive(Debug, Clone)]
@@ -892,4 +1030,380 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fisher")]
+#[pyo3(signature = (high, low, period, kernel=None))]
+pub fn fisher_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = FisherParams { period: Some(period) };
+	let input = FisherInput::from_slices(high_slice, low_slice, params);
+	
+	let (fisher_vec, signal_vec) = py.allow_threads(|| {
+		fisher_with_kernel(&input, kern)
+			.map(|o| (o.fisher, o.signal))
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok((
+		fisher_vec.into_pyarray(py),
+		signal_vec.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "FisherStream")]
+pub struct FisherStreamPy {
+	stream: FisherStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl FisherStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = FisherParams { period: Some(period) };
+		let stream = FisherStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(FisherStreamPy { stream })
+	}
+	
+	pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "fisher_batch")]
+#[pyo3(signature = (high, low, period_range, kernel=None))]
+pub fn fisher_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),  // (start, end, step)
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = FisherBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	// Pre-allocate output arrays for batch operations
+	let fisher_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let fisher_slice = unsafe { fisher_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+	
+	// Compute batch results
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Use the internal batch function that fills the pre-allocated arrays
+		let output = fisher_batch_inner(high_slice, low_slice, &sweep, simd, true)?;
+		
+		// Copy results to the pre-allocated arrays
+		fisher_slice.copy_from_slice(&output.fisher);
+		signal_slice.copy_from_slice(&output.signal);
+		
+		Ok::<Vec<FisherParams>, FisherError>(output.combos)
+	})
+	.map_err(|e: FisherError| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("fisher", fisher_arr.reshape((rows, cols))?)?;
+	dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+// ================== WASM BINDINGS ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = FisherParams { period: Some(period) };
+	let input = FisherInput::from_slices(high, low, params);
+	
+	// Single allocation for both outputs
+	let data_len = high.len().min(low.len());
+	let mut output = vec![0.0; data_len * 2];
+	
+	// Split the output vector into two mutable slices
+	let (fisher_out, signal_out) = output.split_at_mut(data_len);
+	
+	// Compute Fisher Transform directly into the output slices
+	fisher_into_slice(fisher_out, signal_out, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	fisher_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || fisher_ptr.is_null() || signal_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let params = FisherParams { period: Some(period) };
+		let input = FisherInput::from_slices(high, low, params);
+		
+		// Check for aliasing between any pair of pointers
+		let high_addr = high_ptr as usize;
+		let low_addr = low_ptr as usize;
+		let fisher_addr = fisher_ptr as usize;
+		let signal_addr = signal_ptr as usize;
+		
+		// Check if any output pointer aliases with any input or other output pointer
+		let has_aliasing = 
+			high_addr == fisher_addr || high_addr == signal_addr ||
+			low_addr == fisher_addr || low_addr == signal_addr ||
+			fisher_addr == signal_addr;
+		
+		if has_aliasing {
+			// Use single temporary buffer for aliasing case
+			let mut temp = vec![0.0; len * 2];
+			let (temp_fisher, temp_signal) = temp.split_at_mut(len);
+			
+			fisher_into_slice(temp_fisher, temp_signal, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			
+			fisher_out.copy_from_slice(temp_fisher);
+			signal_out.copy_from_slice(temp_signal);
+		} else {
+			// Direct write when no aliasing
+			let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			
+			fisher_into_slice(fisher_out, signal_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FisherBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct FisherBatchJsOutput {
+	pub values: Vec<f64>,  // Flattened [fisher_row1..., signal_row1..., fisher_row2..., signal_row2..., ...]
+	pub combos: Vec<FisherParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = fisher_batch)]
+pub fn fisher_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: FisherBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = FisherBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = fisher_batch_inner(high, low, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Flatten the output: interleave fisher and signal for each row
+	let rows = output.combos.len();
+	let cols = high.len();
+	let mut values = Vec::with_capacity(rows * cols * 2);
+	
+	for i in 0..rows {
+		let start_idx = i * cols;
+		let end_idx = start_idx + cols;
+		values.extend_from_slice(&output.fisher[start_idx..end_idx]);
+		values.extend_from_slice(&output.signal[start_idx..end_idx]);
+	}
+	
+	let js_output = FisherBatchJsOutput {
+		values,
+		combos: output.combos,
+		rows,
+		cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn fisher_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	fisher_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || fisher_ptr.is_null() || signal_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let sweep = FisherBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let total_size = rows * len;
+		
+		let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, total_size);
+		let signal_out = std::slice::from_raw_parts_mut(signal_ptr, total_size);
+		
+		// Compute batch results directly into output buffers
+		let output = fisher_batch_inner(high, low, &sweep, Kernel::Auto, false)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		// Copy results to output buffers
+		fisher_out.copy_from_slice(&output.fisher);
+		signal_out.copy_from_slice(&output.signal);
+		
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(
+	since = "1.0.0",
+	note = "For streaming patterns, use the fast/unsafe API with persistent buffers"
+)]
+pub struct FisherContext {
+	period: usize,
+	kernel: Kernel,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[allow(deprecated)]
+impl FisherContext {
+	#[wasm_bindgen(constructor)]
+	#[deprecated(
+		since = "1.0.0",
+		note = "For streaming patterns, use the fast/unsafe API with persistent buffers"
+	)]
+	pub fn new(period: usize) -> Result<FisherContext, JsValue> {
+		if period == 0 {
+			return Err(JsValue::from_str("Invalid period: 0"));
+		}
+		
+		Ok(FisherContext {
+			period,
+			kernel: detect_best_kernel(),
+		})
+	}
+	
+	pub fn update_into(&self, high_ptr: *const f64, low_ptr: *const f64, fisher_ptr: *mut f64, signal_ptr: *mut f64, len: usize) -> Result<(), JsValue> {
+		if high_ptr.is_null() || low_ptr.is_null() || fisher_ptr.is_null() || signal_ptr.is_null() {
+			return Err(JsValue::from_str("Null pointer provided"));
+		}
+		
+		unsafe {
+			let high = std::slice::from_raw_parts(high_ptr, len);
+			let low = std::slice::from_raw_parts(low_ptr, len);
+			let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			
+			let params = FisherParams { period: Some(self.period) };
+			let input = FisherInput::from_slices(high, low, params);
+			
+			fisher_into_slice(fisher_out, signal_out, &input, self.kernel)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			Ok(())
+		}
+	}
+	
+	pub fn get_period(&self) -> usize {
+		self.period
+	}
+	
+	pub fn get_warmup_period(&self) -> usize {
+		self.period - 1
+	}
 }

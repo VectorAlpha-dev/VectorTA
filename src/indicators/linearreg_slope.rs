@@ -15,9 +15,26 @@
 //! - **`Ok(LinearRegSlopeOutput)`** on success, containing a `Vec<f64>` matching the input length, with leading `NaN`s until the window is filled.
 //! - **`Err(LinearRegSlopeError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +42,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for LinearRegSlopeInput<'a> {
@@ -49,6 +67,7 @@ pub struct LinearRegSlopeOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct LinearRegSlopeParams {
 	pub period: Option<usize>,
 }
@@ -181,7 +200,7 @@ pub fn linearreg_slope_with_kernel(
 			valid: data.len() - first_valid_idx,
 		});
 	}
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), first_valid_idx + period - 1);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -204,28 +223,31 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
 	let n = period as f64;
 	let sum_x = (period - 1) as f64 * n / 2.0;
 	let sum_x2 = (period - 1) as f64 * n * (2.0 * (period - 1) as f64 + 1.0) / 6.0;
-
-	let mut prefix_sum_data = vec![0.0; data.len() + 1];
-	let mut prefix_sum_data_k = vec![0.0; data.len() + 1];
-	for i in 0..data.len() {
-		prefix_sum_data[i + 1] = prefix_sum_data[i] + data[i];
-		prefix_sum_data_k[i + 1] = prefix_sum_data_k[i] + (i as f64) * data[i];
+	let denominator = n * sum_x2 - sum_x * sum_x;
+	
+	if denominator.abs() < f64::EPSILON {
+		// Degenerate case - all slopes are NaN
+		for i in (first + period - 1)..data.len() {
+			out[i] = f64::NAN;
+		}
+		return;
 	}
 
 	for i in (first + period - 1)..data.len() {
-		let end_idx = i + 1;
-		let start_idx = end_idx - period;
-
-		let sum_y = prefix_sum_data[end_idx] - prefix_sum_data[start_idx];
-		let total_kd = prefix_sum_data_k[end_idx] - prefix_sum_data_k[start_idx];
-		let sum_xy = total_kd - (start_idx as f64) * sum_y;
+		let start = i + 1 - period;
+		
+		// Calculate sum_y and sum_xy directly for this window
+		let mut sum_y = 0.0;
+		let mut sum_xy = 0.0;
+		
+		for j in 0..period {
+			let y = data[start + j];
+			sum_y += y;
+			sum_xy += (j as f64) * y;
+		}
+		
 		let numerator = n * sum_xy - sum_x * sum_y;
-		let denominator = n * sum_x2 - sum_x * sum_x;
-		out[i] = if denominator.abs() < f64::EPSILON {
-			f64::NAN
-		} else {
-			numerator / denominator
-		};
+		out[i] = numerator / denominator;
 	}
 }
 
@@ -403,47 +425,100 @@ fn linearreg_slope_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
-
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let period = combos[row].period.unwrap();
-		match kern {
-			Kernel::Scalar => linearreg_slope_row_scalar(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => linearreg_slope_row_avx2(data, first, period, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => linearreg_slope_row_avx512(data, first, period, out_row),
-			_ => unreachable!(),
-		}
+	
+	// Use uninitialized memory with proper warmup periods
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
 	};
-
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			values
-				.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-
+	
+	linearreg_slope_batch_inner_into(data, sweep, kern, parallel, out)?;
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(LinearRegSlopeBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn linearreg_slope_batch_inner_into(
+	data: &[f64],
+	sweep: &LinearRegSlopeBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<LinearRegSlopeParams>, LinearRegSlopeError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(LinearRegSlopeError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(LinearRegSlopeError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(LinearRegSlopeError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = data.len();
+	let out_uninit = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len()) };
+	
+	let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
+		let period = combos[row].period.unwrap();
+		let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+		
+		match kern {
+			Kernel::Scalar => linearreg_slope_row_scalar(data, first, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => linearreg_slope_row_avx2(data, first, period, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => linearreg_slope_row_avx512(data, first, period, dst),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_uninit
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -485,8 +560,6 @@ pub struct LinearRegSlopeStream {
 	buffer: Vec<f64>,
 	head: usize,
 	filled: bool,
-	sum_y: f64,
-	sum_xy: f64,
 	n: f64,
 	sum_x: f64,
 	sum_x2: f64,
@@ -506,8 +579,6 @@ impl LinearRegSlopeStream {
 			buffer: vec![f64::NAN; period],
 			head: 0,
 			filled: false,
-			sum_y: 0.0,
-			sum_xy: 0.0,
 			n,
 			sum_x,
 			sum_x2,
@@ -516,17 +587,8 @@ impl LinearRegSlopeStream {
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		if self.filled {
-			let idx = (self.head + 1) % self.period;
-			let out_val = self.buffer[idx];
-			let old_idx = self.head;
-			self.sum_y -= self.buffer[old_idx];
-			self.sum_xy -= (old_idx as f64) * self.buffer[old_idx];
-		}
-
+		// Update buffer
 		self.buffer[self.head] = value;
-		self.sum_y += value;
-		self.sum_xy += (self.head as f64) * value;
 		self.head = (self.head + 1) % self.period;
 
 		if !self.filled && self.head == 0 {
@@ -536,7 +598,19 @@ impl LinearRegSlopeStream {
 			return None;
 		}
 
-		let numerator = self.n * self.sum_xy - self.sum_x * self.sum_y;
+		// Calculate sum_y and sum_xy for current window
+		let mut sum_y = 0.0;
+		let mut sum_xy = 0.0;
+		let mut idx = self.head;
+		
+		for x in 0..self.period {
+			let y = self.buffer[idx];
+			sum_y += y;
+			sum_xy += (x as f64) * y;
+			idx = (idx + 1) % self.period;
+		}
+
+		let numerator = self.n * sum_xy - self.sum_x * sum_y;
 		let denominator = self.n * self.sum_x2 - self.sum_x * self.sum_x;
 		Some(if denominator.abs() < f64::EPSILON {
 			f64::NAN
@@ -549,6 +623,274 @@ impl LinearRegSlopeStream {
 #[inline(always)]
 fn expand_grid_stream(_r: &LinearRegSlopeBatchRange) -> Vec<LinearRegSlopeParams> {
 	vec![LinearRegSlopeParams::default()]
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "linearreg_slope")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn linearreg_slope_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	let params = LinearRegSlopeParams {
+		period: Some(period),
+	};
+	let linearreg_slope_in = LinearRegSlopeInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| linearreg_slope_with_kernel(&linearreg_slope_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "linearreg_slope_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn linearreg_slope_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let slice_in = data.as_slice()?;
+	
+	let sweep = LinearRegSlopeBatchRange {
+		period: period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			linearreg_slope_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let result = PyDict::new(py);
+	result.set_item("values", out_arr)?;
+	result.set_item("rows", rows)?;
+	result.set_item("cols", cols)?;
+	
+	let combo_list = PyList::empty(py);
+	for combo in combos {
+		let combo_dict = PyDict::new(py);
+		combo_dict.set_item("period", combo.period.unwrap_or(14))?;
+		combo_list.append(combo_dict)?;
+	}
+	result.set_item("combos", combo_list)?;
+	
+	Ok(result.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "LinearRegSlopeStream")]
+pub struct LinearRegSlopeStreamPy {
+	stream: LinearRegSlopeStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl LinearRegSlopeStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = LinearRegSlopeParams {
+			period: Some(period),
+		};
+		let stream = LinearRegSlopeStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(Self { stream })
+	}
+	
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+/// Write directly to output slice - no allocations
+pub fn linearreg_slope_into_slice(
+	dst: &mut [f64],
+	input: &LinearRegSlopeInput,
+	kern: Kernel,
+) -> Result<(), LinearRegSlopeError> {
+	let data: &[f64] = input.as_ref();
+	if data.is_empty() {
+		return Err(LinearRegSlopeError::EmptyData);
+	}
+	let period = input.get_period();
+	if period == 0 || period > data.len() {
+		return Err(LinearRegSlopeError::InvalidPeriod {
+			period,
+			data_len: data.len(),
+		});
+	}
+	if dst.len() != data.len() {
+		return Err(LinearRegSlopeError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+	
+	let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+		Some(idx) => idx,
+		None => return Err(LinearRegSlopeError::AllValuesNaN),
+	};
+	if (data.len() - first_valid_idx) < period {
+		return Err(LinearRegSlopeError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first_valid_idx,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..(first_valid_idx + period - 1)] {
+		*v = f64::NAN;
+	}
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => linearreg_slope_scalar(data, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => linearreg_slope_avx2(data, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => linearreg_slope_avx512(data, period, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linearreg_slope_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = LinearRegSlopeParams { period: Some(period) };
+	let input = LinearRegSlopeInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];
+	linearreg_slope_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linearreg_slope_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = LinearRegSlopeParams { period: Some(period) };
+		let input = LinearRegSlopeInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {
+			// Handle aliasing
+			let mut temp = vec![0.0; len];
+			linearreg_slope_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			linearreg_slope_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linearreg_slope_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn linearreg_slope_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct LinearRegSlopeBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct LinearRegSlopeBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<LinearRegSlopeParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = linearreg_slope_batch)]
+pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: LinearRegSlopeBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = LinearRegSlopeBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = linearreg_slope_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = LinearRegSlopeBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

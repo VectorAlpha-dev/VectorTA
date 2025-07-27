@@ -24,6 +24,11 @@ pub mod cmo;
 pub mod coppock;
 pub mod correl_hl;
 pub mod correlation_cycle;
+pub use correlation_cycle::{
+    correlation_cycle, CorrelationCycleInput, CorrelationCycleOutput, CorrelationCycleParams,
+    CorrelationCycleError, CorrelationCycleBuilder, CorrelationCycleStream,
+    CorrelationCycleBatchBuilder, CorrelationCycleBatchOutput, CorrelationCycleBatchRange,
+};
 pub mod cvi;
 pub mod damiani_volatmeter;
 pub mod dec_osc;
@@ -73,6 +78,7 @@ pub mod mfi;
 pub mod midpoint;
 pub mod midprice;
 pub mod minmax;
+pub use minmax::{minmax, MinmaxInput, MinmaxOutput, MinmaxParams};
 pub mod mom;
 pub mod moving_averages;
 pub mod msw;

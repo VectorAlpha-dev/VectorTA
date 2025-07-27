@@ -16,7 +16,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+	init_matrix_prefixes, make_uninit_matrix
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -24,7 +27,22 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum DxData<'a> {
@@ -44,6 +62,7 @@ pub struct DxOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DxParams {
 	pub period: Option<usize>,
 }
@@ -51,6 +70,22 @@ pub struct DxParams {
 impl Default for DxParams {
 	fn default() -> Self {
 		Self { period: Some(14) }
+	}
+}
+
+impl DxParams {
+	pub fn generate_batch_params(period_range: (usize, usize, usize)) -> Vec<Self> {
+		let (start, end, step) = period_range;
+		let step = if step == 0 { 1 } else { step };
+		let mut params = Vec::new();
+		
+		let mut period = start;
+		while period <= end {
+			params.push(Self { period: Some(period) });
+			period += step;
+		}
+		
+		params
 	}
 }
 
@@ -191,7 +226,8 @@ pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxErr
 			valid: len - first_valid_idx,
 		});
 	}
-	let mut out = vec![f64::NAN; len];
+	let warmup_period = first_valid_idx + period - 1;
+	let mut out = alloc_with_nan_prefix(len, warmup_period);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -435,6 +471,12 @@ impl Default for DxBatchRange {
 	}
 }
 
+impl DxBatchRange {
+	pub fn from_tuple(period: (usize, usize, usize)) -> Self {
+		Self { period }
+	}
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DxBatchBuilder {
 	range: DxBatchRange,
@@ -575,7 +617,20 @@ fn dx_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with proper NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -607,6 +662,16 @@ fn dx_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec from ManuallyDrop
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(DxBatchOutput {
 		values,
 		combos,
@@ -931,4 +996,423 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "dx", signature = (high, low, close, period, kernel=None))]
+pub fn dx_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<f64>,
+	low: PyReadonlyArray1<f64>,
+	close: PyReadonlyArray1<f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high = high.as_slice()?;
+	let low = low.as_slice()?;
+	let close = close.as_slice()?;
+	
+	// Validate kernel parameter if provided
+	let kernel_enum = validate_kernel(kernel, false)?;
+	
+	py.allow_threads(|| {
+		let params = DxParams { period: Some(period) };
+		let input = DxInput::from_hlc_slices(high, low, close, params);
+		let result = dx_with_kernel(&input, kernel_enum)
+			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+		Ok(result.values)
+	})
+	.and_then(|values| Ok(values.into_pyarray(py)))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "dx_batch", signature = (high, low, close, period_range))]
+pub fn dx_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<f64>,
+	low: PyReadonlyArray1<f64>,
+	close: PyReadonlyArray1<f64>,
+	period_range: (usize, usize, usize),
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	
+	// Calculate parameter combinations
+	let (start, end, step) = period_range;
+	let params = expand_grid(&DxBatchRange { period: (start, end, step) });
+	let rows = params.len();
+	let cols = high_slice.len();
+	
+	// Pre-allocate output array for zero-copy
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		// Call the optimized inner function
+		dx_batch_inner_into(high_slice, low_slice, close_slice, &params, slice_out)
+			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+		
+		Ok::<Vec<DxParams>, pyo3::PyErr>(params)
+	})?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
+	
+	// Create parameter list
+	let py_params = PyList::new(py, combos.iter().map(|p| {
+		let param_dict = PyDict::new(py);
+		param_dict.set_item("period", p.period.unwrap_or(14)).unwrap();
+		param_dict
+	}))?;
+	dict.set_item("params", py_params)?;
+	
+	Ok(dict.into())
+}
+
+// Helper function for batch processing that writes directly to pre-allocated buffer
+#[cfg(feature = "python")]
+fn dx_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	params: &[DxParams],
+	out: &mut [f64],
+) -> Result<(), DxError> {
+	let len = high.len().min(low.len()).min(close.len());
+	let kernel = detect_best_kernel();
+	
+	// Find first valid index
+	let first_valid_idx = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.ok_or(DxError::AllValuesNaN)?;
+	
+	// Process each parameter combination
+	for (row, p) in params.iter().enumerate() {
+		let period = p.period.unwrap_or(14);
+		
+		// Validate period
+		if period == 0 || period > len {
+			return Err(DxError::InvalidPeriod { period, data_len: len });
+		}
+		
+		if (len - first_valid_idx) < period {
+			return Err(DxError::NotEnoughValidData {
+				needed: period,
+				valid: len - first_valid_idx,
+			});
+		}
+		
+		// Get the output slice for this row
+		let start_idx = row * len;
+		let out_row = &mut out[start_idx..start_idx + len];
+		
+		// Call the appropriate kernel
+		unsafe {
+			match kernel {
+				Kernel::Scalar | Kernel::ScalarBatch => {
+					dx_scalar(high, low, close, period, first_valid_idx, out_row);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => {
+					dx_avx2(high, low, close, period, first_valid_idx, out_row);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => {
+					dx_avx512(high, low, close, period, first_valid_idx, out_row);
+				}
+				_ => unreachable!(),
+			}
+		}
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DxStream")]
+pub struct DxStreamPy {
+	inner: DxStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DxStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = DxParams { period: Some(period) };
+		let inner = DxStream::try_new(params)
+			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+		Ok(Self { inner })
+	}
+	
+	pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.inner.update(high, low, close)
+	}
+}
+
+// WASM bindings
+
+/// Write directly to output slice - no allocations
+#[inline]
+pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(), DxError> {
+	let (high, low, close) = match &input.data {
+		DxData::Candles { candles } => {
+			let high = candles
+				.select_candle_field("high")
+				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			let low = candles
+				.select_candle_field("low")
+				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			let close = candles
+				.select_candle_field("close")
+				.map_err(|e| DxError::SelectCandleFieldError(e.to_string()))?;
+			(high, low, close)
+		}
+		DxData::HlcSlices { high, low, close } => (*high, *low, *close),
+	};
+	
+	let period = input.params.period.unwrap_or(14);
+	let len = high.len();
+	
+	// Validate inputs
+	if len == 0 || low.len() == 0 || close.len() == 0 {
+		return Err(DxError::EmptyData);
+	}
+	
+	if high.len() != low.len() || high.len() != close.len() {
+		return Err(DxError::EmptyData);
+	}
+	
+	if dst.len() != len {
+		return Err(DxError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+	
+	if period == 0 || period > len {
+		return Err(DxError::InvalidPeriod { period, data_len: len });
+	}
+	
+	let first_valid_idx = high
+		.iter()
+		.zip(low)
+		.zip(close)
+		.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+		.ok_or(DxError::AllValuesNaN)?;
+		
+	let total_required = first_valid_idx + period;
+	if total_required > len {
+		return Err(DxError::NotEnoughValidData {
+			needed: total_required,
+			valid: len - first_valid_idx,
+		});
+	}
+	
+	let warmup_period = first_valid_idx + period - 1;
+	
+	// Select kernel based on whether batch operations are requested
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		_ => kern,
+	};
+	
+	// Compute DX values
+	match chosen {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => dx_avx512(high, low, close, period, first_valid_idx, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => dx_avx2(high, low, close, period, first_valid_idx, dst),
+		_ => dx_scalar(high, low, close, period, first_valid_idx, dst),
+	}
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = DxParams { period: Some(period) };
+	let input = DxInput::from_hlc_slices(high, low, close, params);
+	
+	let mut output = vec![0.0; high.len()];  // Single allocation
+	dx_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dx_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let params = DxParams { period: Some(period) };
+		let input = DxInput::from_hlc_slices(high, low, close, params);
+		
+		// CRITICAL: Check aliasing for ALL input pointers
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// Aliasing detected - use temporary buffer
+			let mut temp = vec![0.0; len];
+			dx_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing - write directly
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			dx_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dx_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dx_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DxBatchConfig {
+	pub period_range: (usize, usize, usize), // (start, end, step)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DxBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<DxParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dx_batch)]
+pub fn dx_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DxBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+		
+	let batch_range = DxBatchRange::from_tuple(config.period_range);
+	let result = dx_batch_with_kernel(high, low, close, &batch_range, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Generate combos for output
+	let combos = DxParams::generate_batch_params(config.period_range);
+		
+	let output = DxBatchJsOutput {
+		values: result.values,
+		combos,
+		rows: result.rows,
+		cols: result.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dx_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let batch_range = DxBatchRange::from_tuple((period_start, period_end, period_step));
+		let combos = DxParams::generate_batch_params((period_start, period_end, period_step));
+		let n_combos = combos.len();
+		
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// Aliasing detected - use temporary buffer
+			let result = dx_batch_with_kernel(high, low, close, &batch_range, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len * n_combos);
+			out.copy_from_slice(&result.values);
+		} else {
+			// No aliasing - write directly
+			// Use the Python-style batch_inner_into function for direct writing
+			let params = combos;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len * n_combos);
+			
+			// Write directly into the output buffer using the pattern from Python bindings
+			let first = high.iter().zip(low).zip(close)
+				.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+				.ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+			
+			let mut buf_uninit = make_uninit_matrix(params.len(), len);
+			let warmup_periods: Vec<usize> = params.iter()
+				.map(|p| first + p.period.unwrap() - 1)
+				.collect();
+			init_matrix_prefixes(&mut buf_uninit, len, &warmup_periods);
+			
+			// Convert to initialized slice
+			let buf_ptr = buf_uninit.as_mut_ptr() as *mut f64;
+			std::mem::forget(buf_uninit);
+			let slice_out = std::slice::from_raw_parts_mut(buf_ptr, params.len() * len);
+			
+			// Process each parameter combination
+			for (i, param) in params.iter().enumerate() {
+				let row_offset = i * len;
+				let row = &mut slice_out[row_offset..row_offset + len];
+				
+				let warmup = first + param.period.unwrap() - 1;
+				dx_scalar(high, low, close, param.period.unwrap(), first, row);
+				
+				// NaN prefix already set by init_matrix_prefixes
+			}
+			
+			// Copy to output
+			out.copy_from_slice(slice_out);
+		}
+		Ok(())
+	}
 }

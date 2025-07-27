@@ -42,9 +42,19 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::chande::{chande_batch_py, chande_py, ChandeStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::dx::{dx_batch_py, dx_py, DxStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::fisher::{fisher_batch_py, fisher_py, FisherStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::keltner::{keltner_batch_py, keltner_py, KeltnerStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
@@ -85,6 +95,12 @@ use crate::indicators::moving_averages::jsa::{jsa_batch_py, jsa_py, JsaStreamPy}
 use crate::indicators::moving_averages::kama::{kama_batch_py, kama_py, KamaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::linreg::{linreg_batch_py, linreg_py, LinRegStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::linearreg_slope::{linearreg_slope_batch_py, linearreg_slope_py, LinearRegSlopeStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::medium_ad::{medium_ad_batch_py, medium_ad_py, MediumAdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::minmax::{minmax_batch_py, minmax_py, MinmaxStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ma::ma_py;
 #[cfg(feature = "python")]
@@ -139,6 +155,8 @@ use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, 
 use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -281,6 +299,21 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(linreg_py, m)?)?;
 	m.add_function(wrap_pyfunction!(linreg_batch_py, m)?)?;
 	m.add_class::<LinRegStreamPy>()?;
+	
+	// Register LinearRegSlope functions with their user-facing names
+	m.add_function(wrap_pyfunction!(linearreg_slope_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linearreg_slope_batch_py, m)?)?;
+	m.add_class::<LinearRegSlopeStreamPy>()?;
+
+	// Register MediumAd functions with their user-facing names
+	m.add_function(wrap_pyfunction!(medium_ad_py, m)?)?;
+	m.add_function(wrap_pyfunction!(medium_ad_batch_py, m)?)?;
+	m.add_class::<MediumAdStreamPy>()?;
+
+	// Register MinMax functions with their user-facing names
+	m.add_function(wrap_pyfunction!(minmax_py, m)?)?;
+	m.add_function(wrap_pyfunction!(minmax_batch_py, m)?)?;
+	m.add_class::<MinmaxStreamPy>()?;
 
 	// Register MAAQ functions with their user-facing names
 	m.add_function(wrap_pyfunction!(maaq_py, m)?)?;
@@ -306,6 +339,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(pwma_batch_py, m)?)?;
 	m.add_class::<PwmaStreamPy>()?;
+
+	// Register PFE functions with their user-facing names
+	m.add_function(wrap_pyfunction!(pfe_py, m)?)?;
+	m.add_function(wrap_pyfunction!(pfe_batch_py, m)?)?;
+	m.add_class::<PfeStreamPy>()?;
 
 	// Register Reflex functions with their user-facing names
 	m.add_function(wrap_pyfunction!(reflex_py, m)?)?;
@@ -425,6 +463,26 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
 
+	// Register DTI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dti_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dti_batch_py, m)?)?;
+	m.add_class::<DtiStreamPy>()?;
+
+	// Register DX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dx_batch_py, m)?)?;
+	m.add_class::<DxStreamPy>()?;
+
+	// Register Fisher functions
+	m.add_function(wrap_pyfunction!(fisher_py, m)?)?;
+	m.add_function(wrap_pyfunction!(fisher_batch_py, m)?)?;
+	m.add_class::<FisherStreamPy>()?;
+
+	// Register Keltner functions
+	m.add_function(wrap_pyfunction!(keltner_py, m)?)?;
+	m.add_function(wrap_pyfunction!(keltner_batch_py, m)?)?;
+	m.add_class::<KeltnerStreamPy>()?;
+
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;
 	m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
@@ -450,6 +508,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register Chande functions with their user-facing names
+	m.add_function(wrap_pyfunction!(chande_py, m)?)?;
+	m.add_function(wrap_pyfunction!(chande_batch_py, m)?)?;
+	m.add_class::<ChandeStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 
