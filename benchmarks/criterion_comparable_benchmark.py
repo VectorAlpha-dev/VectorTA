@@ -104,11 +104,11 @@ class CriterionComparableBenchmark:
             'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
-            'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
+            'hwma', 'ift_rsi', 'jma', 'jsa', 'kama', 'kvo', 'linreg', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo'  # Added missing indicators
+            'cg', 'cfo', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -117,9 +117,9 @@ class CriterionComparableBenchmark:
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
-                           'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
+                           'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch']
+                           'trendflex_batch', 'cfo_batch', 'cmo_batch', 'dec_osc_batch', 'donchian_batch', 'emv_batch', 'macd_batch', 'mfi_batch', 'natr_batch', 'ppo_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -265,10 +265,13 @@ class CriterionComparableBenchmark:
             ('highpass', lambda: my_project.highpass(data['close'], 48)),
             ('hma', lambda: my_project.hma(data['close'], 14)),
             ('hwma', lambda: my_project.hwma(data['close'], 0.2, 0.1, 0.1)),
+            ('ift_rsi', lambda: my_project.ift_rsi(data['close'], 5, 9)),
             ('jma', lambda: my_project.jma(data['close'], 14, 0.0, 2)),
             ('jsa', lambda: my_project.jsa(data['close'], 14)),
             ('kama', lambda: my_project.kama(data['close'], 14)),
+            ('kvo', lambda: my_project.kvo(data['high'], data['low'], data['close'], data['volume'], 2, 5)),
             ('linreg', lambda: my_project.linreg(data['close'], 14)),
+            ('macd', lambda: my_project.macd(data['close'], 12, 26, 9, "ema")),
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
@@ -295,7 +298,14 @@ class CriterionComparableBenchmark:
             ('cg', lambda: my_project.cg(data['close'], 10)),
             ('cci', lambda: my_project.cci((data['high'] + data['low'] + data['close']) / 3, 14)),
             ('cfo', lambda: my_project.cfo(data['close'], 14, 100.0)),
+            ('cmo', lambda: my_project.cmo(data['close'], 14)),
+            ('dec_osc', lambda: my_project.dec_osc(data['close'], 125, 1.0)),
+            ('donchian', lambda: my_project.donchian(data['high'], data['low'], 20)),
+            ('emv', lambda: my_project.emv(data['high'], data['low'], data['close'], data['volume'])),
             ('bop', lambda: my_project.bop(data['open'], data['high'], data['low'], data['close'])),
+            ('mfi', lambda: my_project.mfi((data['high'] + data['low'] + data['close']) / 3.0, data['volume'], 14)),
+            ('natr', lambda: my_project.natr(data['high'], data['low'], data['close'], 14)),
+            ('ppo', lambda: my_project.ppo(data['close'], 12, 26, 'sma')),
         ]
         
         # Filter if requested
@@ -330,6 +340,9 @@ class CriterionComparableBenchmark:
             ('tema_batch', lambda: my_project.tema_batch(data['close'], (9, 240, 1))),
             ('tilson_batch', lambda: my_project.tilson_batch(data['close'], (5, 40, 1), (0.0, 1.0, 0.1))),
             ('hma_batch', lambda: my_project.hma_batch(data['close'], (14, 14, 1))),
+            ('ift_rsi_batch', lambda: my_project.ift_rsi_batch(data['close'], (5, 5, 0), (9, 9, 0))),
+            ('kvo_batch', lambda: my_project.kvo_batch(data['high'], data['low'], data['close'], data['volume'], (2, 2, 0), (5, 5, 0))),
+            ('macd_batch', lambda: my_project.macd_batch(data['close'], (12, 12, 0), (26, 26, 0), (9, 9, 0), "ema")),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
             ('adxr_batch', lambda: my_project.adxr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adx_batch', lambda: my_project.adx_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
@@ -342,8 +355,15 @@ class CriterionComparableBenchmark:
             ('cg_batch', lambda: my_project.cg_batch(data['close'], (10, 10, 1))),
             ('cci_batch', lambda: my_project.cci_batch((data['high'] + data['low'] + data['close']) / 3, (14, 14, 1))),
             ('cfo_batch', lambda: my_project.cfo_batch(data['close'], (14, 14, 1), (100.0, 100.0, 0.0))),
+            ('cmo_batch', lambda: my_project.cmo_batch(data['close'], (10, 30, 2))),
+            ('dec_osc_batch', lambda: my_project.dec_osc_batch(data['close'], (100, 150, 25), (0.5, 1.5, 0.5))),
+            ('donchian_batch', lambda: my_project.donchian_batch(data['high'], data['low'], (10, 30, 10))),
+            ('emv_batch', lambda: my_project.emv_batch(data['high'], data['low'], data['close'], data['volume'])),
             ('bop_batch', lambda: my_project.bop_batch(data['open'], data['high'], data['low'], data['close'])),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
+            ('mfi_batch', lambda: my_project.mfi_batch((data['high'] + data['low'] + data['close']) / 3.0, data['volume'], (10, 20, 5))),
+            ('natr_batch', lambda: my_project.natr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
+            ('ppo_batch', lambda: my_project.ppo_batch(data['close'], (12, 12, 0), (26, 26, 0), 'sma')),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -416,7 +436,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'ift_rsi', 'kvo', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'cmo', 'dec_osc', 'donchian', 'mfi', 'natr', 'ppo']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

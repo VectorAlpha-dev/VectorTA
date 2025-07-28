@@ -3,11 +3,31 @@
 //! Applies Inverse Fisher Transform to a WMA-smoothed RSI series.
 //! API closely matches alma.rs for interface, kernels, builders, batch/grid support, and error handling.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::rsi::{rsi, RsiError, RsiInput, RsiParams};
 use crate::indicators::wma::{wma, WmaError, WmaInput, WmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(target_arch = "wasm32")]
+use crate::utilities::helpers::detect_wasm_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -213,30 +233,38 @@ pub fn ift_rsi_with_kernel(input: &IftRsiInput, kernel: Kernel) -> Result<IftRsi
 		other => other,
 	};
 
+	// Calculate warmup period for IFT RSI (RSI warmup + WMA warmup - 1)
+	let warmup_period = first + rsi_period + wma_period - 2;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				ift_rsi_scalar(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len])
+				ift_rsi_scalar(data, rsi_period, wma_period, first, &mut out)?;
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => ift_rsi_avx2(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len]),
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				ift_rsi_avx2(data, rsi_period, wma_period, first, &mut out)?;
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => {
-				ift_rsi_avx512(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len])
+				ift_rsi_avx512(data, rsi_period, wma_period, first, &mut out)?;
 			}
 			_ => unreachable!(),
 		}
 	}
+
+	Ok(IftRsiOutput { values: out })
 }
 
-#[inline]
-pub fn ift_rsi_scalar(
+#[inline(always)]
+fn ift_rsi_compute_into(
 	data: &[f64],
 	rsi_period: usize,
 	wma_period: usize,
 	first_valid: usize,
 	out: &mut [f64],
-) -> Result<IftRsiOutput, IftRsiError> {
+) -> Result<(), IftRsiError> {
 	let sliced = &data[first_valid..];
 	let mut rsi_values = rsi(&RsiInput::from_slice(
 		sliced,
@@ -270,7 +298,81 @@ pub fn ift_rsi_scalar(
 			out[first_valid + i] = numerator / denominator;
 		}
 	}
+	Ok(())
+}
+
+#[inline]
+pub fn ift_rsi_scalar(
+	data: &[f64],
+	rsi_period: usize,
+	wma_period: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<IftRsiOutput, IftRsiError> {
+	ift_rsi_compute_into(data, rsi_period, wma_period, first_valid, out)?;
 	Ok(IftRsiOutput { values: out.to_vec() })
+}
+
+/// Write directly to output slice - no allocations
+pub fn ift_rsi_into_slice(
+	dst: &mut [f64],
+	input: &IftRsiInput,
+	kern: Kernel,
+) -> Result<(), IftRsiError> {
+	let data: &[f64] = match &input.data {
+		IftRsiData::Candles { candles, source } => source_type(candles, source),
+		IftRsiData::Slice(sl) => sl,
+	};
+
+	if data.is_empty() {
+		return Err(IftRsiError::EmptyData);
+	}
+
+	if dst.len() != data.len() {
+		return Err(IftRsiError::InvalidPeriod {
+			rsi_period: input.get_rsi_period(),
+			wma_period: input.get_wma_period(),
+			data_len: data.len(),
+		});
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(IftRsiError::AllValuesNaN)?;
+	let rsi_period = input.get_rsi_period();
+	let wma_period = input.get_wma_period();
+	
+	if rsi_period == 0 || wma_period == 0 || rsi_period > data.len() || wma_period > data.len() {
+		return Err(IftRsiError::InvalidPeriod {
+			rsi_period,
+			wma_period,
+			data_len: data.len(),
+		});
+	}
+
+	// Compute into dst
+	match kern {
+		Kernel::Scalar | Kernel::ScalarBatch => {
+			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => {
+			// AVX2 is a stub, use scalar
+			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => {
+			// AVX512 is a stub, use scalar
+			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
+		}
+		_ => unreachable!(),
+	}
+
+	// Fill warmup with NaN
+	let warmup_period = first + rsi_period + wma_period - 2;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -503,7 +605,22 @@ fn ift_rsi_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.rsi_period.unwrap() + c.wma_period.unwrap() - 2)
+		.collect();
+	
+	// Use uninitialized memory with proper NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let rsi_p = combos[row].rsi_period.unwrap();
@@ -539,12 +656,87 @@ fn ift_rsi_batch_inner(
 		}
 	}
 
+	// Convert back to Vec for output
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(IftRsiBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn ift_rsi_batch_inner_into(
+	data: &[f64],
+	sweep: &IftRsiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<IftRsiParams>, IftRsiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(IftRsiError::InvalidPeriod {
+			rsi_period: 0,
+			wma_period: 0,
+			data_len: 0,
+		});
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(IftRsiError::AllValuesNaN)?;
+	let max_rsi = combos.iter().map(|c| c.rsi_period.unwrap()).max().unwrap();
+	let max_wma = combos.iter().map(|c| c.wma_period.unwrap()).max().unwrap();
+	let max_p = max_rsi.max(max_wma);
+	if data.len() - first < max_p {
+		return Err(IftRsiError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let rsi_p = combos[row].rsi_period.unwrap();
+		let wma_p = combos[row].wma_period.unwrap();
+		match kern {
+			Kernel::Scalar => ift_rsi_row_scalar(data, first, rsi_p, wma_p, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => ift_rsi_row_avx2(data, first, rsi_p, wma_p, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => ift_rsi_row_avx512(data, first, rsi_p, wma_p, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -907,4 +1099,249 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ift_rsi")]
+#[pyo3(signature = (data, rsi_period, wma_period, kernel=None))]
+pub fn ift_rsi_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	rsi_period: usize,
+	wma_period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = IftRsiParams {
+		rsi_period: Some(rsi_period),
+		wma_period: Some(wma_period),
+	};
+	let input = IftRsiInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| ift_rsi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "IftRsiStream")]
+pub struct IftRsiStreamPy {
+	stream: IftRsiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl IftRsiStreamPy {
+	#[new]
+	fn new(rsi_period: usize, wma_period: usize) -> PyResult<Self> {
+		let params = IftRsiParams {
+			rsi_period: Some(rsi_period),
+			wma_period: Some(wma_period),
+		};
+		let stream = IftRsiStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(IftRsiStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ift_rsi_batch")]
+#[pyo3(signature = (data, rsi_period_range, wma_period_range, kernel=None))]
+pub fn ift_rsi_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	rsi_period_range: (usize, usize, usize),
+	wma_period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = IftRsiBatchRange {
+		rsi_period: rsi_period_range,
+		wma_period: wma_period_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			ift_rsi_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"rsi_periods",
+		combos
+			.iter()
+			.map(|p| p.rsi_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"wma_periods",
+		combos
+			.iter()
+			.map(|p| p.wma_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = IftRsiParams {
+		rsi_period: Some(rsi_period),
+		wma_period: Some(wma_period),
+	};
+	let input = IftRsiInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	
+	#[cfg(target_arch = "wasm32")]
+	let kernel = detect_wasm_kernel();
+	#[cfg(not(target_arch = "wasm32"))]
+	let kernel = Kernel::Scalar;
+	
+	ift_rsi_into_slice(&mut output, &input, kernel)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ift_rsi_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	rsi_period: usize,
+	wma_period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = IftRsiParams {
+			rsi_period: Some(rsi_period),
+			wma_period: Some(wma_period),
+		};
+		let input = IftRsiInput::from_slice(data, params);
+		
+		#[cfg(target_arch = "wasm32")]
+		let kernel = detect_wasm_kernel();
+		#[cfg(not(target_arch = "wasm32"))]
+		let kernel = Kernel::Scalar;
+		
+		if in_ptr == out_ptr as *const f64 {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			ift_rsi_into_slice(&mut temp, &input, kernel)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			ift_rsi_into_slice(out, &input, kernel)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ift_rsi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ift_rsi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct IftRsiBatchConfig {
+	pub rsi_period_range: (usize, usize, usize),
+	pub wma_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct IftRsiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<IftRsiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ift_rsi_batch)]
+pub fn ift_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: IftRsiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = IftRsiBatchRange {
+		rsi_period: config.rsi_period_range,
+		wma_period: config.wma_period_range,
+	};
+	
+	#[cfg(target_arch = "wasm32")]
+	let kernel = detect_wasm_kernel();
+	#[cfg(not(target_arch = "wasm32"))]
+	let kernel = Kernel::Scalar;
+	
+	let output = ift_rsi_batch_inner(data, &sweep, kernel, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = IftRsiBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

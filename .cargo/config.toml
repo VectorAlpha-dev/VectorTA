@@ -15,8 +15,8 @@ rustflags = [
 rustflags = [
   "-Zdylib-lto",
   "-C", "target-cpu=native",
-  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
-  "-C", "linker=lld-link",
+#  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
+#  "-C", "linker=lld-link",
 ]
 
 [target.wasm32-unknown-unknown]

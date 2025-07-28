@@ -42,9 +42,29 @@ use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::cmo::{cmo_batch_py, cmo_py, CmoStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::dec_osc::{dec_osc_batch_py, dec_osc_py, DecOscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::donchian::{donchian_batch_py, donchian_py, DonchianStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::emv::{emv_batch_py, emv_py, EmvStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ift_rsi::{ift_rsi_batch_py, ift_rsi_py, IftRsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kvo::{kvo_batch_py, kvo_py, KvoStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::macd::{macd_batch_py, macd_py, MacdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::mfi::{mfi_batch_py, mfi_py, MfiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::natr::{natr_batch_py, natr_py, NatrStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ppo::{ppo_batch_py, ppo_py, PpoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
@@ -420,10 +440,60 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
 	m.add_class::<CgStreamPy>()?;
 
+	// Register CMO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(cmo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(cmo_batch_py, m)?)?;
+	m.add_class::<CmoStreamPy>()?;
+
 	// Register Correlation Cycle functions with their user-facing names
 	m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
+
+	// Register Decycler Oscillator functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dec_osc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dec_osc_batch_py, m)?)?;
+	m.add_class::<DecOscStreamPy>()?;
+
+	// Register Donchian Channel functions with their user-facing names
+	m.add_function(wrap_pyfunction!(donchian_py, m)?)?;
+	m.add_function(wrap_pyfunction!(donchian_batch_py, m)?)?;
+	m.add_class::<DonchianStreamPy>()?;
+
+	// Register EMV functions with their user-facing names
+	m.add_function(wrap_pyfunction!(emv_py, m)?)?;
+	m.add_function(wrap_pyfunction!(emv_batch_py, m)?)?;
+	m.add_class::<EmvStreamPy>()?;
+
+	// Register IFT RSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ift_rsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ift_rsi_batch_py, m)?)?;
+	m.add_class::<IftRsiStreamPy>()?;
+
+	// Register KVO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kvo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kvo_batch_py, m)?)?;
+	m.add_class::<KvoStreamPy>()?;
+
+	// Register MACD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(macd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(macd_batch_py, m)?)?;
+	m.add_class::<MacdStreamPy>()?;
+
+	// Register MFI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mfi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mfi_batch_py, m)?)?;
+	m.add_class::<MfiStreamPy>()?;
+
+	// Register NATR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(natr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(natr_batch_py, m)?)?;
+	m.add_class::<NatrStreamPy>()?;
+
+	// Register PPO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ppo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ppo_batch_py, m)?)?;
+	m.add_class::<PpoStreamPy>()?;
 
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;

@@ -20,7 +20,8 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, detect_wasm_kernel, init_matrix_prefixes, 
+	make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -30,6 +31,11 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for CmoInput<'a> {
 	#[inline(always)]
@@ -53,6 +59,7 @@ pub struct CmoOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct CmoParams {
 	pub period: Option<usize>,
 }
@@ -91,6 +98,13 @@ impl<'a> CmoInput<'a> {
 	#[inline]
 	pub fn get_period(&self) -> usize {
 		self.params.period.unwrap_or(14)
+	}
+	#[inline]
+	pub fn data_len(&self) -> usize {
+		match &self.data {
+			CmoData::Slice(slice) => slice.len(),
+			CmoData::Candles { candles, .. } => candles.close.len(),
+		}
 	}
 }
 
@@ -210,6 +224,65 @@ pub fn cmo_with_kernel(input: &CmoInput, kernel: Kernel) -> Result<CmoOutput, Cm
 		}
 	}
 	Ok(CmoOutput { values: out })
+}
+
+#[inline]
+pub fn cmo_into_slice(dst: &mut [f64], input: &CmoInput, kern: Kernel) -> Result<(), CmoError> {
+	let data: &[f64] = match &input.data {
+		CmoData::Candles { candles, source } => source_type(candles, source),
+		CmoData::Slice(sl) => sl,
+	};
+
+	if data.is_empty() {
+		return Err(CmoError::EmptyData);
+	}
+
+	let period = input.get_period();
+	let len = data.len();
+
+	if dst.len() != len {
+		return Err(CmoError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+
+	if period == 0 || period > len {
+		return Err(CmoError::InvalidPeriod { period, data_len: len });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
+
+	if (len - first) < period {
+		return Err(CmoError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	let warmup = first + period;
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => cmo_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => cmo_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => cmo_avx512(data, period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -497,6 +570,63 @@ fn cmo_batch_inner(
 }
 
 #[inline(always)]
+fn cmo_batch_inner_into(
+	data: &[f64],
+	sweep: &CmoBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<CmoParams>, CmoError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(CmoError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(CmoError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(CmoError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => cmo_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => cmo_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => cmo_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 unsafe fn cmo_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	cmo_scalar(data, period, first, out);
 }
@@ -603,6 +733,114 @@ impl CmoStream {
 			0.0
 		})
 	}
+}
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cmo")]
+#[pyo3(signature = (data, period=None, kernel=None))]
+pub fn cmo_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: Option<usize>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = CmoParams { period };
+	let input = CmoInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| cmo_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "CmoStream")]
+pub struct CmoStreamPy {
+	stream: CmoStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl CmoStreamPy {
+	#[new]
+	fn new(period: Option<usize>) -> PyResult<Self> {
+		let params = CmoParams { period };
+		let stream = CmoStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(CmoStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "cmo_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn cmo_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	
+	let sweep = CmoBatchRange {
+		period: period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			cmo_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
 }
 
 #[cfg(test)]
@@ -909,4 +1147,141 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cmo_js(data: &[f64], period: Option<usize>) -> Result<Vec<f64>, JsValue> {
+	let params = CmoParams { period };
+	let input = CmoInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	cmo_into_slice(&mut output, &input, detect_wasm_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cmo_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: Option<usize>,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = CmoParams { period };
+		let input = CmoInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			cmo_into_slice(&mut temp, &input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			cmo_into_slice(out, &input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cmo_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cmo_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CmoBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct CmoBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<CmoParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = cmo_batch)]
+pub fn cmo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: CmoBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let (p_start, p_end, p_step) = config.period_range;
+	
+	let batch_range = CmoBatchRange {
+		period: (p_start, p_end, p_step),
+	};
+	
+	let output = cmo_batch_with_kernel(data, &batch_range, detect_wasm_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = CmoBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cmo_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to cmo_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = CmoBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		cmo_batch_inner_into(data, &sweep, detect_wasm_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

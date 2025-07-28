@@ -17,9 +17,29 @@
 //! - **`Ok(MfiOutput)`** on success, containing a `Vec<f64>` matching the input length, with leading `NaN`s until the MFI window is filled.
 //! - **`Err(MfiError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde_wasm_bindgen;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "wasm")]
+use crate::utilities::helpers::detect_wasm_kernel;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,17 +47,17 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum MfiData<'a> {
 	Candles {
 		candles: &'a Candles,
+		source: &'a str,
 	},
 	Slices {
-		high: &'a [f64],
-		low: &'a [f64],
-		close: &'a [f64],
+		typical_price: &'a [f64],
 		volume: &'a [f64],
 	},
 }
@@ -48,6 +68,7 @@ pub struct MfiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MfiParams {
 	pub period: Option<usize>,
 }
@@ -66,26 +87,22 @@ pub struct MfiInput<'a> {
 
 impl<'a> MfiInput<'a> {
 	#[inline]
-	pub fn from_candles(candles: &'a Candles, params: MfiParams) -> Self {
+	pub fn from_candles(candles: &'a Candles, source: &'a str, params: MfiParams) -> Self {
 		Self {
-			data: MfiData::Candles { candles },
+			data: MfiData::Candles { candles, source },
 			params,
 		}
 	}
 
 	#[inline]
 	pub fn from_slices(
-		high: &'a [f64],
-		low: &'a [f64],
-		close: &'a [f64],
+		typical_price: &'a [f64],
 		volume: &'a [f64],
 		params: MfiParams,
 	) -> Self {
 		Self {
 			data: MfiData::Slices {
-				high,
-				low,
-				close,
+				typical_price,
 				volume,
 			},
 			params,
@@ -94,7 +111,7 @@ impl<'a> MfiInput<'a> {
 
 	#[inline]
 	pub fn with_default_candles(candles: &'a Candles) -> Self {
-		Self::from_candles(candles, MfiParams::default())
+		Self::from_candles(candles, "hlc3", MfiParams::default())
 	}
 
 	#[inline]
@@ -121,29 +138,25 @@ pub fn mfi(input: &MfiInput) -> Result<MfiOutput, MfiError> {
 }
 
 pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, MfiError> {
-	let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
-		MfiData::Candles { candles } => (
-			candles.high.as_slice(),
-			candles.low.as_slice(),
-			candles.close.as_slice(),
+	let (typical_price, volume): (&[f64], &[f64]) = match &input.data {
+		MfiData::Candles { candles, source } => (
+			source_type(candles, source),
 			candles.volume.as_slice(),
 		),
 		MfiData::Slices {
-			high,
-			low,
-			close,
+			typical_price,
 			volume,
-		} => (*high, *low, *close, *volume),
+		} => (*typical_price, *volume),
 	};
 
-	let length = high.len();
-	if length == 0 || low.len() != length || close.len() != length || volume.len() != length {
+	let length = typical_price.len();
+	if length == 0 || volume.len() != length {
 		return Err(MfiError::EmptyData);
 	}
 
 	let period = input.get_period();
 	let first_valid_idx =
-		(0..length).find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() && !volume[i].is_nan());
+		(0..length).find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan());
 	let first_valid_idx = match first_valid_idx {
 		Some(idx) => idx,
 		None => return Err(MfiError::AllValuesNaN),
@@ -162,7 +175,8 @@ pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, Mf
 		});
 	}
 
-	let mut out = vec![f64::NAN; length];
+	let warmup_period = first_valid_idx + period - 1;
+	let mut out = alloc_with_nan_prefix(length, warmup_period);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -172,12 +186,12 @@ pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, Mf
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				mfi_scalar(high, low, close, volume, period, first_valid_idx, &mut out)
+				mfi_scalar(typical_price, volume, period, first_valid_idx, &mut out)
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(high, low, close, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(typical_price, volume, period, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(high, low, close, volume, period, first_valid_idx, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(typical_price, volume, period, first_valid_idx, &mut out),
 			_ => unreachable!(),
 		}
 	}
@@ -186,34 +200,27 @@ pub fn mfi_with_kernel(input: &MfiInput, kernel: Kernel) -> Result<MfiOutput, Mf
 
 #[inline]
 pub unsafe fn mfi_scalar(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	period: usize,
 	first: usize,
 	out: &mut [f64],
 ) {
-	let len = high.len();
-	let mut typical = vec![f64::NAN; len];
-	for i in first..len {
-		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
-			typical[i] = (high[i] + low[i] + close[i]) / 3.0;
-		}
-	}
+	let len = typical_price.len();
 
 	let mut pos_buf = vec![0.0; period];
 	let mut neg_buf = vec![0.0; period];
 	let mut pos_sum = 0.0;
 	let mut neg_sum = 0.0;
 
-	let mut prev_typical = typical[first];
+	let mut prev_typical = typical_price[first];
 	let mut ring_idx = 0;
 
+	// Fill the initial period
 	for i in (first + 1)..(first + period) {
-		let diff = typical[i] - prev_typical;
-		prev_typical = typical[i];
-		let flow = typical[i] * volume[i];
+		let diff = typical_price[i] - prev_typical;
+		prev_typical = typical_price[i];
+		let flow = typical_price[i] * volume[i];
 		if diff > 0.0 {
 			pos_buf[ring_idx] = flow;
 			neg_buf[ring_idx] = 0.0;
@@ -229,21 +236,23 @@ pub unsafe fn mfi_scalar(
 		ring_idx = (ring_idx + 1) % period;
 	}
 
+	// Calculate first MFI value
 	let idx_mfi_start = first + period - 1;
 	if idx_mfi_start < len {
 		let total = pos_sum + neg_sum;
 		out[idx_mfi_start] = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
 	}
 
+	// Rolling calculation for remaining values
 	for i in (first + period)..len {
 		let old_pos = pos_buf[ring_idx];
 		let old_neg = neg_buf[ring_idx];
 		pos_sum -= old_pos;
 		neg_sum -= old_neg;
 
-		let diff = typical[i] - prev_typical;
-		prev_typical = typical[i];
-		let flow = typical[i] * volume[i];
+		let diff = typical_price[i] - prev_typical;
+		prev_typical = typical_price[i];
+		let flow = typical_price[i] * volume[i];
 
 		if diff > 0.0 {
 			pos_buf[ring_idx] = flow;
@@ -268,23 +277,19 @@ pub unsafe fn mfi_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn mfi_avx2(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	period: usize,
 	first: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn mfi_avx512(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	period: usize,
 	first: usize,
@@ -292,9 +297,9 @@ pub fn mfi_avx512(
 ) {
 	unsafe {
 		if period <= 32 {
-			mfi_avx512_short(high, low, close, volume, period, first, out)
+			mfi_avx512_short(typical_price, volume, period, first, out)
 		} else {
-			mfi_avx512_long(high, low, close, volume, period, first, out)
+			mfi_avx512_long(typical_price, volume, period, first, out)
 		}
 	}
 }
@@ -302,29 +307,25 @@ pub fn mfi_avx512(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn mfi_avx512_short(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	period: usize,
 	first: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn mfi_avx512_long(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	period: usize,
 	first: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -361,14 +362,14 @@ impl MfiBuilder {
 	#[inline(always)]
 	pub fn apply(self, c: &Candles) -> Result<MfiOutput, MfiError> {
 		let p = MfiParams { period: self.period };
-		let i = MfiInput::from_candles(c, p);
+		let i = MfiInput::from_candles(c, "hlc3", p);
 		mfi_with_kernel(&i, self.kernel)
 	}
 
 	#[inline(always)]
-	pub fn apply_slices(self, high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Result<MfiOutput, MfiError> {
+	pub fn apply_slices(self, typical_price: &[f64], volume: &[f64]) -> Result<MfiOutput, MfiError> {
 		let p = MfiParams { period: self.period };
-		let i = MfiInput::from_slices(high, low, close, volume, p);
+		let i = MfiInput::from_slices(typical_price, volume, p);
 		mfi_with_kernel(&i, self.kernel)
 	}
 
@@ -416,18 +417,17 @@ impl MfiStream {
 	}
 
 	#[inline(always)]
-	pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
-		let typical = (high + low + close) / 3.0;
+	pub fn update(&mut self, typical_price: f64, volume: f64) -> Option<f64> {
 		if self.index == 0 {
-			self.prev_typical = typical;
+			self.prev_typical = typical_price;
 			self.typical_buf.clear();
 			self.volume_buf.clear();
 			self.index += 1;
 			return None;
 		}
-		let diff = typical - self.prev_typical;
-		self.prev_typical = typical;
-		let flow = typical * volume;
+		let diff = typical_price - self.prev_typical;
+		self.prev_typical = typical_price;
+		let flow = typical_price * volume;
 		if diff > 0.0 {
 			self.pos_sum += flow - self.pos_buf[self.head];
 			self.neg_sum -= self.neg_buf[self.head];
@@ -500,16 +500,15 @@ impl MfiBatchBuilder {
 
 	pub fn apply_slices(
 		self,
-		high: &[f64],
-		low: &[f64],
-		close: &[f64],
+		typical_price: &[f64],
 		volume: &[f64],
 	) -> Result<MfiBatchOutput, MfiError> {
-		mfi_batch_with_kernel(high, low, close, volume, &self.range, self.kernel)
+		mfi_batch_with_kernel(typical_price, volume, &self.range, self.kernel)
 	}
 
 	pub fn apply_candles(self, c: &Candles) -> Result<MfiBatchOutput, MfiError> {
-		self.apply_slices(&c.high, &c.low, &c.close, &c.volume)
+		let typical_price = source_type(c, "hlc3");
+		self.apply_slices(typical_price, &c.volume)
 	}
 
 	pub fn with_default_candles(c: &Candles, k: Kernel) -> Result<MfiBatchOutput, MfiError> {
@@ -555,9 +554,7 @@ fn expand_grid(r: &MfiBatchRange) -> Vec<MfiParams> {
 }
 
 pub fn mfi_batch_with_kernel(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	sweep: &MfiBatchRange,
 	k: Kernel,
@@ -573,31 +570,27 @@ pub fn mfi_batch_with_kernel(
 		Kernel::ScalarBatch => Kernel::Scalar,
 		_ => unreachable!(),
 	};
-	mfi_batch_par_slice(high, low, close, volume, sweep, simd)
+	mfi_batch_par_slice(typical_price, volume, sweep, simd)
 }
 
 #[inline(always)]
 pub fn mfi_batch_slice(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	sweep: &MfiBatchRange,
 	kern: Kernel,
 ) -> Result<MfiBatchOutput, MfiError> {
-	mfi_batch_inner(high, low, close, volume, sweep, kern, false)
+	mfi_batch_inner(typical_price, volume, sweep, kern, false)
 }
 
 #[inline(always)]
 pub fn mfi_batch_par_slice(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	sweep: &MfiBatchRange,
 	kern: Kernel,
 ) -> Result<MfiBatchOutput, MfiError> {
-	mfi_batch_inner(high, low, close, volume, sweep, kern, true)
+	mfi_batch_inner(typical_price, volume, sweep, kern, true)
 }
 
 fn round_up8(x: usize) -> usize {
@@ -606,9 +599,7 @@ fn round_up8(x: usize) -> usize {
 
 #[inline(always)]
 fn mfi_batch_inner(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	sweep: &MfiBatchRange,
 	kern: Kernel,
@@ -618,9 +609,9 @@ fn mfi_batch_inner(
 	if combos.is_empty() {
 		return Err(MfiError::InvalidPeriod { period: 0, data_len: 0 });
 	}
-	let length = high.len();
+	let length = typical_price.len();
 	let first = (0..length)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() && !volume[i].is_nan())
+		.find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan())
 		.ok_or(MfiError::AllValuesNaN)?;
 
 	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
@@ -633,15 +624,29 @@ fn mfi_batch_inner(
 
 	let rows = combos.len();
 	let cols = length;
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
-			Kernel::Scalar => mfi_row_scalar(high, low, close, volume, first, period, out_row),
+			Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => mfi_row_avx2(high, low, close, volume, first, period, out_row),
+			Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => mfi_row_avx512(high, low, close, volume, first, period, out_row),
+			Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
 			_ => unreachable!(),
 		}
 	};
@@ -649,23 +654,33 @@ fn mfi_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
-				.par_chunks_mut(cols)
+			out
+				.chunks_mut(cols)
 				.enumerate()
+				.par_bridge()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to owned Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(MfiBatchOutput {
 		values,
@@ -676,76 +691,456 @@ fn mfi_batch_inner(
 }
 
 #[inline(always)]
+fn mfi_batch_inner_into(
+	typical_price: &[f64],
+	volume: &[f64],
+	sweep: &MfiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<MfiParams>, MfiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(MfiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let length = typical_price.len();
+	let first = (0..length)
+		.find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan())
+		.ok_or(MfiError::AllValuesNaN)?;
+
+	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
+	if length - first < max_p {
+		return Err(MfiError::NotEnoughValidData {
+			needed: max_p,
+			valid: length - first,
+		});
+	}
+
+	let cols = length;
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => mfi_row_scalar(typical_price, volume, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => mfi_row_avx2(typical_price, volume, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => mfi_row_avx512(typical_price, volume, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out
+				.chunks_mut(cols)
+				.enumerate()
+				.par_bridge()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 unsafe fn mfi_row_scalar(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	first: usize,
 	period: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn mfi_row_avx2(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	first: usize,
 	period: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn mfi_row_avx512(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	first: usize,
 	period: usize,
 	out: &mut [f64],
 ) {
 	if period <= 32 {
-		mfi_row_avx512_short(high, low, close, volume, first, period, out)
+		mfi_row_avx512_short(typical_price, volume, first, period, out)
 	} else {
-		mfi_row_avx512_long(high, low, close, volume, first, period, out)
+		mfi_row_avx512_long(typical_price, volume, first, period, out)
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn mfi_row_avx512_short(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	first: usize,
 	period: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn mfi_row_avx512_long(
-	high: &[f64],
-	low: &[f64],
-	close: &[f64],
+	typical_price: &[f64],
 	volume: &[f64],
 	first: usize,
 	period: usize,
 	out: &mut [f64],
 ) {
-	mfi_scalar(high, low, close, volume, period, first, out)
+	mfi_scalar(typical_price, volume, period, first, out)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mfi")]
+#[pyo3(signature = (typical_price, volume, period, kernel=None))]
+pub fn mfi_py<'py>(
+	py: Python<'py>,
+	typical_price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let typical_slice = typical_price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = MfiParams { period: Some(period) };
+	let input = MfiInput::from_slices(typical_slice, volume_slice, params);
+	
+	// GOOD: Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		mfi_with_kernel(&input, kern)
+			.map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// GOOD: Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MfiStream")]
+pub struct MfiStreamPy {
+	inner: MfiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MfiStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = MfiParams { period: Some(period) };
+		let inner = MfiStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MfiStreamPy { inner })
+	}
+	
+	pub fn update(&mut self, typical_price: f64, volume: f64) -> Option<f64> {
+		self.inner.update(typical_price, volume)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mfi_batch")]
+#[pyo3(signature = (typical_price, volume, period_range, kernel=None))]
+pub fn mfi_batch_py<'py>(
+	py: Python<'py>,
+	typical_price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let typical_slice = typical_price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?; // true for batch operations
+	
+	let sweep = MfiBatchRange { period: period_range };
+	
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = typical_slice.len();
+	
+	// Pre-allocate output array (OK for batch operations)
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	// Compute without GIL
+	let combos = py.allow_threads(|| {
+		// Handle kernel selection for batch operations
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Map batch kernels to regular kernels
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		mfi_batch_inner_into(typical_slice, volume_slice, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+#[inline]
+pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result<(), MfiError> {
+	let (typical_price, volume): (&[f64], &[f64]) = match &input.data {
+		MfiData::Candles { candles, source } => (
+			source_type(candles, source),
+			candles.volume.as_slice(),
+		),
+		MfiData::Slices {
+			typical_price,
+			volume,
+		} => (*typical_price, *volume),
+	};
+
+	let length = typical_price.len();
+	if length == 0 || volume.len() != length {
+		return Err(MfiError::EmptyData);
+	}
+
+	if dst.len() != length {
+		return Err(MfiError::InvalidPeriod { 
+			period: dst.len(), 
+			data_len: length 
+		});
+	}
+
+	let period = input.get_period();
+	let first_valid_idx =
+		(0..length).find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan());
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(MfiError::AllValuesNaN),
+	};
+
+	if period == 0 || period > length {
+		return Err(MfiError::InvalidPeriod {
+			period,
+			data_len: length,
+		});
+	}
+	if (length - first_valid_idx) < period {
+		return Err(MfiError::NotEnoughValidData {
+			needed: period,
+			valid: length - first_valid_idx,
+		});
+	}
+
+	let warmup_period = first_valid_idx + period - 1;
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				mfi_scalar(typical_price, volume, period, first_valid_idx, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => mfi_avx2(typical_price, volume, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => mfi_avx512(typical_price, volume, period, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mfi_js(typical_price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = MfiParams {
+		period: Some(period),
+	};
+	let input = MfiInput::from_slices(typical_price, volume, params);
+
+	// Get result from the main function which already uses proper allocation
+	let result = mfi_with_kernel(&input, detect_wasm_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(result.values)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mfi_into(
+	typical_price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if typical_price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let typical_price = std::slice::from_raw_parts(typical_price_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		let params = MfiParams {
+			period: Some(period),
+		};
+		let input = MfiInput::from_slices(typical_price, volume, params);
+
+		// Check for aliasing with either input
+		if typical_price_ptr == out_ptr || volume_ptr == out_ptr {
+			// Use main function which handles allocation properly
+			let result = mfi_with_kernel(&input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&result.values);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			mfi_into_slice(out, &input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mfi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mfi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MfiBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MfiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<MfiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = mfi_batch)]
+pub fn mfi_batch_unified_js(typical_price: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: MfiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = MfiBatchRange {
+		period: config.period_range,
+	};
+
+	let output = mfi_batch_inner(typical_price, volume, &sweep, detect_wasm_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = MfiBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mfi_batch_into(
+	typical_price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if typical_price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to mfi_batch_into"));
+	}
+
+	unsafe {
+		let typical_price = std::slice::from_raw_parts(typical_price_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		let sweep = MfiBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		mfi_batch_inner_into(typical_price, volume, &sweep, detect_wasm_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		let combos = expand_grid(&sweep);
+		Ok(combos.len())
+	}
 }
 
 #[cfg(test)]
@@ -760,7 +1155,7 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let default_params = MfiParams { period: None };
-		let input = MfiInput::from_candles(&candles, default_params);
+		let input = MfiInput::from_candles(&candles, "hlc3", default_params);
 		let output = mfi_with_kernel(&input, kernel)?;
 		assert_eq!(output.values.len(), candles.close.len());
 		Ok(())
@@ -771,7 +1166,7 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let params = MfiParams { period: Some(14) };
-		let input = MfiInput::from_candles(&candles, params);
+		let input = MfiInput::from_candles(&candles, "hlc3", params);
 		let mfi_result = mfi_with_kernel(&input, kernel)?;
 		let expected_last_five_mfi = [
 			38.13874339324763,
@@ -810,7 +1205,7 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let params = MfiParams { period: Some(0) };
-		let input = MfiInput::from_candles(&candles, params);
+		let input = MfiInput::from_candles(&candles, "hlc3", params);
 		let result = mfi_with_kernel(&input, kernel);
 		assert!(result.is_err());
 		Ok(())
@@ -822,8 +1217,12 @@ mod tests {
 		let input_low = [0.5, 1.5, 2.5];
 		let input_close = [0.8, 1.8, 2.8];
 		let input_volume = [100.0, 200.0, 300.0];
+		// Calculate typical price (HLC3)
+		let typical_price: Vec<f64> = input_high.iter().zip(&input_low).zip(&input_close)
+			.map(|((h, l), c)| (h + l + c) / 3.0)
+			.collect();
 		let params = MfiParams { period: Some(10) };
-		let input = MfiInput::from_slices(&input_high, &input_low, &input_close, &input_volume, params);
+		let input = MfiInput::from_slices(&typical_price, &input_volume, params);
 		let result = mfi_with_kernel(&input, kernel);
 		assert!(result.is_err());
 		Ok(())
@@ -835,8 +1234,10 @@ mod tests {
 		let input_low = [0.5];
 		let input_close = [0.8];
 		let input_volume = [100.0];
+		// Calculate typical price (HLC3)
+		let typical_price = [(input_high[0] + input_low[0] + input_close[0]) / 3.0];
 		let params = MfiParams { period: Some(14) };
-		let input = MfiInput::from_slices(&input_high, &input_low, &input_close, &input_volume, params);
+		let input = MfiInput::from_slices(&typical_price, &input_volume, params);
 		let result = mfi_with_kernel(&input, kernel);
 		assert!(result.is_err());
 		Ok(())
@@ -847,15 +1248,14 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let first_params = MfiParams { period: Some(7) };
-		let first_input = MfiInput::from_candles(&candles, first_params);
+		let first_input = MfiInput::from_candles(&candles, "hlc3", first_params);
 		let first_result = mfi_with_kernel(&first_input, kernel)?;
 		let second_params = MfiParams { period: Some(7) };
-		let high_values: Vec<f64> = first_result.values.clone();
-		let low_values: Vec<f64> = first_result.values.clone();
-		let close_values: Vec<f64> = first_result.values.clone();
+		// Use the output from first run as typical price for second run
+		let typical_price_values: Vec<f64> = first_result.values.clone();
 		let volume_values: Vec<f64> = vec![10_000.0; first_result.values.len()];
 		let second_input =
-			MfiInput::from_slices(&high_values, &low_values, &close_values, &volume_values, second_params);
+			MfiInput::from_slices(&typical_price_values, &volume_values, second_params);
 		let second_result = mfi_with_kernel(&second_input, kernel)?;
 		assert_eq!(second_result.values.len(), first_result.values.len());
 		Ok(())

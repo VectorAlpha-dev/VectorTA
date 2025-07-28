@@ -20,13 +20,21 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use crate::utilities::helpers::detect_wasm_kernel;
 
 #[derive(Debug, Clone)]
 pub enum DonchianData<'a> {
@@ -193,9 +201,10 @@ pub fn donchian_with_kernel(input: &DonchianInput, kernel: Kernel) -> Result<Don
 		k => k,
 	};
 
-	let mut upperband = vec![f64::NAN; len];
-	let mut middleband = vec![f64::NAN; len];
-	let mut lowerband = vec![f64::NAN; len];
+	let warmup_period = first_valid_idx + period - 1;
+	let mut upperband = alloc_with_nan_prefix(len, warmup_period);
+	let mut middleband = alloc_with_nan_prefix(len, warmup_period);
+	let mut lowerband = alloc_with_nan_prefix(len, warmup_period);
 
 	unsafe {
 		match chosen {
@@ -294,6 +303,109 @@ pub fn donchian_avx2(
 	lower: &mut [f64],
 ) {
 	donchian_scalar(high, low, period, first_valid, upper, middle, lower)
+}
+
+/// Write directly to output slices - no allocations
+pub fn donchian_into_slice(
+	upper_dst: &mut [f64],
+	middle_dst: &mut [f64], 
+	lower_dst: &mut [f64],
+	input: &DonchianInput,
+	kern: Kernel,
+) -> Result<(), DonchianError> {
+	let (high, low): (&[f64], &[f64]) = match &input.data {
+		DonchianData::Candles { candles } => {
+			let high = source_type(candles, "high");
+			let low = source_type(candles, "low");
+			(high, low)
+		}
+		DonchianData::Slices { high, low } => (high, low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(DonchianError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(DonchianError::MismatchedLength);
+	}
+	if upper_dst.len() != high.len() || middle_dst.len() != high.len() || lower_dst.len() != high.len() {
+		return Err(DonchianError::InvalidPeriod {
+			period: upper_dst.len(),
+			data_len: high.len(),
+		});
+	}
+
+	let first_valid_high = high.iter().position(|&x| !x.is_nan());
+	let first_valid_low = low.iter().position(|&x| !x.is_nan());
+	let first_valid_idx = match (first_valid_high, first_valid_low) {
+		(Some(h), Some(l)) => h.min(l),
+		_ => return Err(DonchianError::AllValuesNaN),
+	};
+
+	let period = input.get_period();
+	if period == 0 || period > high.len() {
+		return Err(DonchianError::InvalidPeriod { period, data_len: high.len() });
+	}
+	if (high.len() - first_valid_idx) < period {
+		return Err(DonchianError::NotEnoughValidData {
+			needed: period,
+			valid: high.len() - first_valid_idx,
+		});
+	}
+
+	let chosen = match kern {
+		#[cfg(target_arch = "wasm32")]
+		Kernel::Auto => detect_wasm_kernel(),
+		#[cfg(not(target_arch = "wasm32"))]
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	let warmup_period = first_valid_idx + period - 1;
+
+	// Fill warmup period with NaN
+	for i in 0..warmup_period {
+		upper_dst[i] = f64::NAN;
+		middle_dst[i] = f64::NAN;
+		lower_dst[i] = f64::NAN;
+	}
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => donchian_scalar(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				upper_dst,
+				middle_dst,
+				lower_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => donchian_avx2(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				upper_dst,
+				middle_dst,
+				lower_dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => donchian_avx512(
+				high,
+				low,
+				period,
+				first_valid_idx,
+				upper_dst,
+				middle_dst,
+				lower_dst,
+			),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline(always)]
@@ -464,9 +576,30 @@ fn donchian_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = high.len();
-	let mut upper = vec![f64::NAN; rows * cols];
-	let mut middle = vec![f64::NAN; rows * cols];
-	let mut lower = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Allocate uninitialized memory and set NaN prefixes
+	let mut upper_mu = make_uninit_matrix(rows, cols);
+	let mut middle_mu = make_uninit_matrix(rows, cols);
+	let mut lower_mu = make_uninit_matrix(rows, cols);
+	
+	init_matrix_prefixes(&mut upper_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut middle_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut lower_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slices for computation
+	let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
+	let mut middle_guard = core::mem::ManuallyDrop::new(middle_mu);
+	let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
+	
+	let upper: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(upper_guard.as_mut_ptr() as *mut f64, upper_guard.len()) };
+	let middle: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(middle_guard.as_mut_ptr() as *mut f64, middle_guard.len()) };
+	let lower: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len()) };
 
 	let do_row = |row: usize, out_upper: &mut [f64], out_middle: &mut [f64], out_lower: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -513,6 +646,29 @@ fn donchian_batch_inner(
 		}
 	}
 
+	// Convert back to Vec<f64> from ManuallyDrop
+	let upper = unsafe {
+		Vec::from_raw_parts(
+			upper_guard.as_mut_ptr() as *mut f64,
+			upper_guard.len(),
+			upper_guard.capacity(),
+		)
+	};
+	let middle = unsafe {
+		Vec::from_raw_parts(
+			middle_guard.as_mut_ptr() as *mut f64,
+			middle_guard.len(),
+			middle_guard.capacity(),
+		)
+	};
+	let lower = unsafe {
+		Vec::from_raw_parts(
+			lower_guard.as_mut_ptr() as *mut f64,
+			lower_guard.len(),
+			lower_guard.capacity(),
+		)
+	};
+	
 	Ok(DonchianBatchOutput {
 		upper,
 		middle,
@@ -838,4 +994,472 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+// This file will be appended to donchian.rs
+
+// === Python Bindings ===
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "donchian")]
+#[pyo3(signature = (high, low, period, kernel=None))]
+pub fn donchian_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DonchianParams { period: Some(period) };
+	let input = DonchianInput::from_slices(high_slice, low_slice, params);
+
+	let (upper_vec, middle_vec, lower_vec) = py.allow_threads(|| {
+		donchian_with_kernel(&input, kern)
+			.map(|o| (o.upperband, o.middleband, o.lowerband))
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		upper_vec.into_pyarray(py),
+		middle_vec.into_pyarray(py),
+		lower_vec.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DonchianStream")]
+pub struct DonchianStreamPy {
+	stream: DonchianStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DonchianStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = DonchianParams { period: Some(period) };
+		let stream = DonchianStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(DonchianStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
+		self.stream.update(high, low)
+	}
+}
+
+// Helper function for batch operations that writes directly to pre-allocated memory
+#[inline(always)]
+fn donchian_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &DonchianBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out_upper: &mut [f64],
+	out_middle: &mut [f64],
+	out_lower: &mut [f64],
+) -> Result<Vec<DonchianParams>, DonchianError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DonchianError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	if high.len() != low.len() {
+		return Err(DonchianError::MismatchedLength);
+	}
+	
+	let first = high
+		.iter()
+		.position(|x| !x.is_nan())
+		.zip(low.iter().position(|x| !x.is_nan()))
+		.map(|(a, b)| a.min(b));
+	let first = match first {
+		Some(idx) => idx,
+		None => return Err(DonchianError::AllValuesNaN),
+	};
+	
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if high.len() - first < max_p {
+		return Err(DonchianError::NotEnoughValidData {
+			needed: max_p,
+			valid: high.len() - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = high.len();
+	
+	// Initialize NaN prefixes for each row based on its period
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup = first + period - 1;
+		let row_start = row * cols;
+		for i in 0..warmup {
+			out_upper[row_start + i] = f64::NAN;
+			out_middle[row_start + i] = f64::NAN;
+			out_lower[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_upper: &mut [f64], out_middle: &mut [f64], out_lower: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => donchian_row_scalar(high, low, first, period, out_upper, out_middle, out_lower),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => donchian_row_avx2(high, low, first, period, out_upper, out_middle, out_lower),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => donchian_row_avx512(high, low, first, period, out_upper, out_middle, out_lower),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_upper
+				.par_chunks_mut(cols)
+				.zip(out_middle.par_chunks_mut(cols))
+				.zip(out_lower.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, ((upper, middle), lower))| do_row(row, upper, middle, lower));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (((upper, middle), lower), row) in out_upper
+				.chunks_mut(cols)
+				.zip(out_middle.chunks_mut(cols))
+				.zip(out_lower.chunks_mut(cols))
+				.zip(0..)
+			{
+				do_row(row, upper, middle, lower);
+			}
+		}
+	} else {
+		for (((upper, middle), lower), row) in out_upper
+			.chunks_mut(cols)
+			.zip(out_middle.chunks_mut(cols))
+			.zip(out_lower.chunks_mut(cols))
+			.zip(0..)
+		{
+			do_row(row, upper, middle, lower);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "donchian_batch")]
+#[pyo3(signature = (high, low, period_range, kernel=None))]
+pub fn donchian_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = DonchianBatchRange { period: period_range };
+
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	// Pre-allocate output arrays
+	let upper_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let middle_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let lower_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	
+	let upper_slice = unsafe { upper_arr.as_slice_mut()? };
+	let middle_slice = unsafe { middle_arr.as_slice_mut()? };
+	let lower_slice = unsafe { lower_arr.as_slice_mut()? };
+
+	// Compute without GIL
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Map batch kernels to regular kernels
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		donchian_batch_inner_into(high_slice, low_slice, &sweep, simd, true, upper_slice, middle_slice, lower_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("upper", upper_arr.reshape((rows, cols))?)?;
+	dict.set_item("middle", middle_arr.reshape((rows, cols))?)?;
+	dict.set_item("lower", lower_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+
+	Ok(dict)
+}
+
+// ================== WASM Bindings ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct DonchianResult {
+	values: Vec<f64>, // Flattened as [upper..., middle..., lower...]
+	rows: usize,      // 3 for donchian (upper, middle, lower)
+	cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl DonchianResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn rows(&self) -> usize {
+		self.rows
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn donchian_js(high: &[f64], low: &[f64], period: usize) -> Result<DonchianResult, JsValue> {
+	let params = DonchianParams {
+		period: Some(period),
+	};
+	let input = DonchianInput::from_slices(high, low, params);
+
+	// Single allocation for each output
+	let len = high.len();
+	let mut upper = vec![0.0; len];
+	let mut middle = vec![0.0; len];
+	let mut lower = vec![0.0; len];
+
+	donchian_into_slice(&mut upper, &mut middle, &mut lower, &input, detect_wasm_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// Flatten outputs into single array
+	let mut values = Vec::with_capacity(len * 3);
+	values.extend_from_slice(&upper);
+	values.extend_from_slice(&middle);
+	values.extend_from_slice(&lower);
+
+	Ok(DonchianResult {
+		values,
+		rows: 3,
+		cols: len,
+	})
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn donchian_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	upper_ptr: *mut f64,
+	middle_ptr: *mut f64,
+	lower_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || upper_ptr.is_null() || middle_ptr.is_null() || lower_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let params = DonchianParams {
+			period: Some(period),
+		};
+		let input = DonchianInput::from_slices(high, low, params);
+
+		// Check for aliasing among all pointers
+		let need_temp = high_ptr == upper_ptr as *const f64 || high_ptr == middle_ptr as *const f64 || high_ptr == lower_ptr as *const f64 ||
+						low_ptr == upper_ptr as *const f64 || low_ptr == middle_ptr as *const f64 || low_ptr == lower_ptr as *const f64 ||
+						upper_ptr == middle_ptr || upper_ptr == lower_ptr || middle_ptr == lower_ptr;
+
+		if need_temp {
+			// Use temporary buffers when aliasing detected
+			let mut temp_upper = vec![0.0; len];
+			let mut temp_middle = vec![0.0; len];
+			let mut temp_lower = vec![0.0; len];
+			
+			donchian_into_slice(&mut temp_upper, &mut temp_middle, &mut temp_lower, &input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
+			
+			upper_out.copy_from_slice(&temp_upper);
+			middle_out.copy_from_slice(&temp_middle);
+			lower_out.copy_from_slice(&temp_lower);
+		} else {
+			// Direct write when no aliasing
+			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
+			
+			donchian_into_slice(upper_out, middle_out, lower_out, &input, detect_wasm_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn donchian_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn donchian_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DonchianBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DonchianBatchJsOutput {
+	pub upper: Vec<f64>,
+	pub middle: Vec<f64>,
+	pub lower: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = donchian_batch)]
+pub fn donchian_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DonchianBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = DonchianBatchRange {
+		period: config.period_range,
+	};
+	
+	// Get dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high.len();
+	
+	// Pre-allocate output arrays
+	let mut upper = vec![0.0; rows * cols];
+	let mut middle = vec![0.0; rows * cols];
+	let mut lower = vec![0.0; rows * cols];
+	
+	// Compute batch without parallel processing in WASM
+	donchian_batch_inner_into(high, low, &sweep, detect_wasm_kernel(), false, &mut upper, &mut middle, &mut lower)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = DonchianBatchJsOutput {
+		upper,
+		middle,
+		lower,
+		periods: combos.iter().map(|p| p.period.unwrap()).collect(),
+		rows,
+		cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn donchian_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	upper_ptr: *mut f64,
+	middle_ptr: *mut f64,
+	lower_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || upper_ptr.is_null() || middle_ptr.is_null() || lower_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let sweep = DonchianBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		// Calculate dimensions
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let upper_out = std::slice::from_raw_parts_mut(upper_ptr, rows * cols);
+		let middle_out = std::slice::from_raw_parts_mut(middle_ptr, rows * cols);
+		let lower_out = std::slice::from_raw_parts_mut(lower_ptr, rows * cols);
+		
+		donchian_batch_inner_into(high, low, &sweep, detect_wasm_kernel(), false, upper_out, middle_out, lower_out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

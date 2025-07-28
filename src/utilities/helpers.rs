@@ -35,6 +35,31 @@ pub fn detect_best_batch_kernel() -> Kernel {
 	})
 }
 
+#[cfg(target_arch = "wasm32")]
+static BEST_WASM: OnceLock<Kernel> = OnceLock::new();
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub fn detect_wasm_kernel() -> Kernel {
+	*BEST_WASM.get_or_init(|| {
+		#[cfg(target_feature = "simd128")]
+		{
+			// WASM SIMD128 is available at compile time
+			return Kernel::Scalar; // For now, return Scalar until SIMD128 kernels are implemented
+			// TODO: When SIMD128 implementations are added, return Kernel::Simd128 here
+		}
+		
+		Kernel::Scalar
+	})
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+pub fn detect_wasm_kernel() -> Kernel {
+	// For non-WASM builds, this should not be called, but provide a fallback
+	Kernel::Scalar
+}
+
 #[macro_export]
 macro_rules! skip_if_unsupported {
 	($kernel:expr, $test_name:expr) => {{
