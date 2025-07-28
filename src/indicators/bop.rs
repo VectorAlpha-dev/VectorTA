@@ -105,8 +105,17 @@ pub struct BopOutput {
 pub enum BopError {
 	#[error("bop: Data is empty.")]
 	EmptyData,
+	#[error("bop: Data is empty.")]
+	DataIsEmpty,
 	#[error("bop: Inconsistent lengths.")]
 	InconsistentLengths,
+	#[error("bop: Input lengths mismatch - open: {open_len}, high: {high_len}, low: {low_len}, close: {close_len}")]
+	InputLengthsMismatch {
+		open_len: usize,
+		high_len: usize,
+		low_len: usize,
+		close_len: usize,
+	},
 	#[error("bop: Candle field error: {0}")]
 	CandleFieldError(String),
 }

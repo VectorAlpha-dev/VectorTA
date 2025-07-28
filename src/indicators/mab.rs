@@ -408,7 +408,6 @@ pub unsafe fn mab_scalar(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
-#[inline(always)]
 pub unsafe fn mab_avx2(
 	fast_ma: &[f64],
 	slow_ma: &[f64],
@@ -507,7 +506,6 @@ pub unsafe fn mab_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
-#[inline(always)]
 pub unsafe fn mab_avx512(
 	fast_ma: &[f64],
 	slow_ma: &[f64],

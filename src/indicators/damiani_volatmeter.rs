@@ -1048,24 +1048,63 @@ fn damiani_volatmeter_batch_inner_into(
 
 	let do_row = |row: usize, out_vol: &mut [f64], out_anti: &mut [f64]| {
 		let p = &combos[row];
-		let input = DamianiVolatmeterInput::from_slice(data, p.clone());
-		match kern {
-			Kernel::Scalar | Kernel::ScalarBatch => scalar::damiani_volatmeter_scalar(
-				&input,
-				out_vol,
-				out_anti,
-			),
-			Kernel::Avx2 | Kernel::Avx2Batch => avx2::damiani_volatmeter_avx2(
-				&input,
-				out_vol,
-				out_anti,
-			),
-			Kernel::Avx512 | Kernel::Avx512Batch => avx512::damiani_volatmeter_avx512(
-				&input,
-				out_vol,
-				out_anti,
-			),
-			_ => unreachable!(),
+		// For batch operations, data is always a slice (close prices)
+		// Damiani volatmeter needs high/low/close, so we use the close data for all three
+		let close = data;
+		let high = data;
+		let low = data;
+		
+		let vis_atr = p.vis_atr.unwrap_or(1);
+		let vis_std = p.vis_std.unwrap_or(20);
+		let sed_atr = p.sed_atr.unwrap_or(13);
+		let sed_std = p.sed_std.unwrap_or(40);
+		let threshold = p.threshold.unwrap_or(1.4);
+		
+		unsafe {
+			match kern {
+				Kernel::Scalar | Kernel::ScalarBatch => damiani_volatmeter_scalar(
+					high,
+					low,
+					close,
+					vis_atr,
+					vis_std,
+					sed_atr,
+					sed_std,
+					threshold,
+					0,
+					out_vol,
+					out_anti,
+				),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 | Kernel::Avx2Batch => damiani_volatmeter_avx2(
+					high,
+					low,
+					close,
+					vis_atr,
+					vis_std,
+					sed_atr,
+					sed_std,
+					threshold,
+					0,
+					out_vol,
+					out_anti,
+				),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 | Kernel::Avx512Batch => damiani_volatmeter_avx512(
+					high,
+					low,
+					close,
+					vis_atr,
+					vis_std,
+					sed_atr,
+					sed_std,
+					threshold,
+					0,
+					out_vol,
+					out_anti,
+				),
+				_ => unreachable!(),
+			}
 		}
 	};
 	
@@ -1988,12 +2027,33 @@ impl DamianiVolatmeterStreamPy {
 		let mut instance = Self { stream: unsafe { std::mem::zeroed() }, high, low, close };
 		
 		// Create candles from the stored data
+		let len = instance.close.len();
+		let mut hl2 = Vec::with_capacity(len);
+		let mut hlc3 = Vec::with_capacity(len);
+		let mut ohlc4 = Vec::with_capacity(len);
+		let mut hlcc4 = Vec::with_capacity(len);
+		
+		for i in 0..len {
+			let h = instance.high[i];
+			let l = instance.low[i];
+			let c = instance.close[i];
+			hl2.push((h + l) / 2.0);
+			hlc3.push((h + l + c) / 3.0);
+			ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
+			hlcc4.push((h + l + c + c) / 4.0);
+		}
+		
 		let candles = Candles {
-			open: vec![0.0; instance.close.len()],  // Not used
+			timestamp: vec![0; len],  // Not used
+			open: vec![0.0; len],  // Not used
 			high: instance.high.clone(),
 			low: instance.low.clone(),
 			close: instance.close.clone(),
-			volume: vec![0.0; instance.close.len()],  // Not used
+			volume: vec![0.0; len],  // Not used
+			hl2,
+			hlc3,
+			ohlc4,
+			hlcc4,
 		};
 		
 		let params = DamianiVolatmeterParams {

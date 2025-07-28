@@ -73,6 +73,7 @@ pub struct EmdOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct EmdParams {
 	pub period: Option<usize>,
 	pub delta: Option<f64>,
@@ -236,11 +237,86 @@ pub enum EmdError {
 
 	#[error("emd: Invalid fraction: {fraction}")]
 	InvalidFraction { fraction: f64 },
+
+	#[error("emd: Invalid input length: expected = {expected}, actual = {actual}")]
+	InvalidInputLength { expected: usize, actual: usize },
 }
 
 #[inline]
 pub fn emd(input: &EmdInput) -> Result<EmdOutput, EmdError> {
 	emd_with_kernel(input, Kernel::Auto)
+}
+
+fn emd_prepare<'a>(input: &'a EmdInput<'a>, kernel: Kernel) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64], usize, f64, f64, usize, Kernel), EmdError> {
+	let (high, low, close, volume) = match &input.data {
+		EmdData::Candles { candles } => {
+			let high = source_type(candles, "high");
+			let low = source_type(candles, "low");
+			let close = source_type(candles, "close");
+			let volume = source_type(candles, "volume");
+			(high, low, close, volume)
+		}
+		EmdData::Slices { high, low, close, volume } => {
+			(*high, *low, *close, *volume)
+		}
+	};
+
+	let len = high.len();
+	let period = input.get_period();
+	let delta = input.get_delta();
+	let fraction = input.get_fraction();
+
+	let first = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(EmdError::AllValuesNaN)?;
+
+	if period == 0 || period > len {
+		return Err(EmdError::InvalidPeriod { period, data_len: len });
+	}
+	let needed = (2 * period).max(50);
+	if (len - first) < needed {
+		return Err(EmdError::NotEnoughValidData {
+			needed,
+			valid: len - first,
+		});
+	}
+	if delta.is_nan() || delta.is_infinite() {
+		return Err(EmdError::InvalidDelta { delta });
+	}
+	if fraction.is_nan() || fraction.is_infinite() {
+		return Err(EmdError::InvalidFraction { fraction });
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	let warmup_period = first + 2 * period - 1;
+
+	Ok((high, low, close, volume, period, delta, fraction, warmup_period, chosen))
+}
+
+fn emd_calc(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	delta: f64,
+	fraction: f64,
+	first: usize,
+	len: usize,
+	kernel: Kernel,
+) -> Result<EmdOutput, EmdError> {
+	unsafe {
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => emd_scalar(high, low, period, delta, fraction, first, len),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => emd_avx2(high, low, period, delta, fraction, first, len),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => emd_avx512(high, low, period, delta, fraction, first, len),
+			_ => unreachable!(),
+		}
+	}
 }
 
 pub fn emd_with_kernel(input: &EmdInput, kernel: Kernel) -> Result<EmdOutput, EmdError> {
@@ -1423,7 +1499,7 @@ pub fn emd_into_slice(
 	input: &EmdInput,
 	kern: Kernel,
 ) -> Result<(), EmdError> {
-	let (candle_data, high, low, close, volume, period, delta, fraction, warmup_period, chosen) = emd_prepare(input, kern)?;
+	let (high, low, close, volume, period, delta, fraction, warmup_period, chosen) = emd_prepare(input, kern)?;
 
 	let len = high.len();
 	if upperband_dst.len() != len || middleband_dst.len() != len || lowerband_dst.len() != len {
@@ -1499,12 +1575,32 @@ pub fn emd_js(
 		return Err(JsValue::from_str("All input arrays must have the same length"));
 	}
 
+	let mut hl2 = Vec::with_capacity(len);
+	let mut hlc3 = Vec::with_capacity(len);
+	let mut ohlc4 = Vec::with_capacity(len);
+	let mut hlcc4 = Vec::with_capacity(len);
+	
+	for i in 0..len {
+		let h = high[i];
+		let l = low[i];
+		let c = close[i];
+		hl2.push((h + l) / 2.0);
+		hlc3.push((h + l + c) / 3.0);
+		ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
+		hlcc4.push((h + l + c + c) / 4.0);
+	}
+	
 	let candles = Candles {
+		timestamp: vec![0; len],
 		open: vec![0.0; len], // EMD doesn't use open prices
 		high: high.to_vec(),
 		low: low.to_vec(),
 		close: close.to_vec(),
 		volume: volume.to_vec(),
+		hl2,
+		hlc3,
+		ohlc4,
+		hlcc4,
 	};
 
 	let input = EmdInput::from_candles(&candles, params);
@@ -1577,12 +1673,32 @@ pub fn emd_into(
 			fraction: Some(fraction),
 		};
 
+		let mut hl2 = Vec::with_capacity(len);
+		let mut hlc3 = Vec::with_capacity(len);
+		let mut ohlc4 = Vec::with_capacity(len);
+		let mut hlcc4 = Vec::with_capacity(len);
+		
+		for i in 0..len {
+			let h = high[i];
+			let l = low[i];
+			let c = close[i];
+			hl2.push((h + l) / 2.0);
+			hlc3.push((h + l + c) / 3.0);
+			ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
+			hlcc4.push((h + l + c + c) / 4.0);
+		}
+		
 		let candles = Candles {
+			timestamp: vec![0; len],
 			open: vec![0.0; len],
 			high: high.to_vec(),
 			low: low.to_vec(),
 			close: close.to_vec(),
 			volume: volume.to_vec(),
+			hl2,
+			hlc3,
+			ohlc4,
+			hlcc4,
 		};
 
 		let input = EmdInput::from_candles(&candles, params);
@@ -1660,15 +1776,36 @@ pub fn emd_batch_unified_js(
 		fraction: config.fraction_range,
 	};
 
+	let len = high.len();
+	let mut hl2 = Vec::with_capacity(len);
+	let mut hlc3 = Vec::with_capacity(len);
+	let mut ohlc4 = Vec::with_capacity(len);
+	let mut hlcc4 = Vec::with_capacity(len);
+	
+	for i in 0..len {
+		let h = high[i];
+		let l = low[i];
+		let c = close[i];
+		hl2.push((h + l) / 2.0);
+		hlc3.push((h + l + c) / 3.0);
+		ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
+		hlcc4.push((h + l + c + c) / 4.0);
+	}
+	
 	let candles = Candles {
-		open: vec![0.0; high.len()],
+		timestamp: vec![0; len],
+		open: vec![0.0; len],
 		high: high.to_vec(),
 		low: low.to_vec(),
 		close: close.to_vec(),
 		volume: volume.to_vec(),
+		hl2,
+		hlc3,
+		ohlc4,
+		hlcc4,
 	};
 
-	let output = emd_batch_candles(&candles, &sweep, Kernel::Auto)
+	let output = emd_batch_slice(high, low, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = EmdBatchJsOutput {
@@ -1727,15 +1864,35 @@ pub fn emd_batch_into(
 			fraction: (fraction_start, fraction_end, fraction_step),
 		};
 
+		let mut hl2 = Vec::with_capacity(len);
+		let mut hlc3 = Vec::with_capacity(len);
+		let mut ohlc4 = Vec::with_capacity(len);
+		let mut hlcc4 = Vec::with_capacity(len);
+		
+		for i in 0..len {
+			let h = high[i];
+			let l = low[i];
+			let c = close[i];
+			hl2.push((h + l) / 2.0);
+			hlc3.push((h + l + c) / 3.0);
+			ohlc4.push((0.0 + h + l + c) / 4.0);  // open is 0
+			hlcc4.push((h + l + c + c) / 4.0);
+		}
+		
 		let candles = Candles {
+			timestamp: vec![0; len],
 			open: vec![0.0; len],
 			high: high.to_vec(),
 			low: low.to_vec(),
 			close: close.to_vec(),
 			volume: volume.to_vec(),
+			hl2,
+			hlc3,
+			ohlc4,
+			hlcc4,
 		};
 
-		let output = emd_batch_candles(&candles, &sweep, Kernel::Auto)
+		let output = emd_batch_slice(high, low, &sweep, Kernel::Auto)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		let rows = output.rows;

@@ -54,6 +54,7 @@ pub struct GatorOscOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct GatorOscParams {
 	pub jaws_length: Option<usize>,
 	pub jaws_shift: Option<usize>,
@@ -943,8 +944,7 @@ pub fn gatorosc_batch_with_kernel(
 		Kernel::Avx512Batch => Kernel::Avx512,
 		Kernel::Avx2Batch => Kernel::Avx2,
 		Kernel::ScalarBatch => Kernel::Scalar,
-		Kernel::Simd128Batch => Kernel::Simd128,
-		_ => unreachable!(),
+		_ => kernel,
 	};
 	gatorosc_batch_inner(data, &combos, simd)
 }
@@ -1141,34 +1141,64 @@ pub fn gatorosc_batch_inner_into(
 		return Err(GatorOscError::InvalidSettings);
 	}
 	
-	let do_row = |row: usize| {
-		let prm = &combos[row];
-		let start = row * cols;
-		let end = start + cols;
-		
-		gatorosc_compute_into(
-			data,
-			prm.jaws_length.unwrap(),
-			prm.jaws_shift.unwrap(),
-			prm.teeth_length.unwrap(),
-			prm.teeth_shift.unwrap(),
-			prm.lips_length.unwrap(),
-			prm.lips_shift.unwrap(),
-			first,
-			kernel,
-			&mut upper_out[start..end],
-			&mut lower_out[start..end],
-			&mut upper_change_out[start..end],
-			&mut lower_change_out[start..end],
-		);
-	};
-	
 	#[cfg(not(target_arch = "wasm32"))]
 	if parallel {
-		(0..rows).into_par_iter().for_each(do_row);
+		use rayon::prelude::*;
+		
+		// Split the slices into chunks for parallel processing
+		let chunk_size = cols;
+		let upper_chunks = upper_out.chunks_mut(chunk_size);
+		let lower_chunks = lower_out.chunks_mut(chunk_size);
+		let upper_change_chunks = upper_change_out.chunks_mut(chunk_size);
+		let lower_change_chunks = lower_change_out.chunks_mut(chunk_size);
+		
+		// Zip all chunks together and process in parallel
+		upper_chunks
+			.zip(lower_chunks)
+			.zip(upper_change_chunks)
+			.zip(lower_change_chunks)
+			.enumerate()
+			.par_bridge()
+			.for_each(|(row, (((upper, lower), upper_change), lower_change))| {
+				let prm = &combos[row];
+				
+				gatorosc_compute_into(
+					data,
+					prm.jaws_length.unwrap(),
+					prm.jaws_shift.unwrap(),
+					prm.teeth_length.unwrap(),
+					prm.teeth_shift.unwrap(),
+					prm.lips_length.unwrap(),
+					prm.lips_shift.unwrap(),
+					first,
+					kernel,
+					upper,
+					lower,
+					upper_change,
+					lower_change,
+				);
+			});
 	} else {
 		for row in 0..rows {
-			do_row(row);
+			let prm = &combos[row];
+			let start = row * cols;
+			let end = start + cols;
+			
+			gatorosc_compute_into(
+				data,
+				prm.jaws_length.unwrap(),
+				prm.jaws_shift.unwrap(),
+				prm.teeth_length.unwrap(),
+				prm.teeth_shift.unwrap(),
+				prm.lips_length.unwrap(),
+				prm.lips_shift.unwrap(),
+				first,
+				kernel,
+				&mut upper_out[start..end],
+				&mut lower_out[start..end],
+				&mut upper_change_out[start..end],
+				&mut lower_change_out[start..end],
+			);
 		}
 	}
 	
@@ -1381,11 +1411,29 @@ pub fn gatorosc_batch_par_slice(
 	init_matrix_prefixes(&mut upper_change_buf, cols, &warmup_periods);
 	init_matrix_prefixes(&mut lower_change_buf, cols, &warmup_periods);
 	
-	// Convert to initialized slices
-	let mut upper = unsafe { upper_buf.assume_init().into_vec() };
-	let mut lower = unsafe { lower_buf.assume_init().into_vec() };
-	let mut upper_change = unsafe { upper_change_buf.assume_init().into_vec() };
-	let mut lower_change = unsafe { lower_change_buf.assume_init().into_vec() };
+	// Convert to initialized slices using transmute
+	let mut upper = unsafe {
+		let ptr = upper_buf.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	};
+	let mut lower = unsafe {
+		let ptr = lower_buf.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	};
+	let mut upper_change = unsafe {
+		let ptr = upper_change_buf.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	};
+	let mut lower_change = unsafe {
+		let ptr = lower_change_buf.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, rows * cols, rows * cols)
+	};
+	
+	// Forget the original buffers to avoid double-free
+	std::mem::forget(upper_buf);
+	std::mem::forget(lower_buf);
+	std::mem::forget(upper_change_buf);
+	std::mem::forget(lower_change_buf);
 	#[cfg(not(target_arch = "wasm32"))]
 	use rayon::prelude::*;
 
@@ -2155,7 +2203,6 @@ pub fn gatorosc_batch_py<'py>(
 				Kernel::Avx512Batch => Kernel::Avx512,
 				Kernel::Avx2Batch => Kernel::Avx2,
 				Kernel::ScalarBatch => Kernel::Scalar,
-				Kernel::Simd128Batch => Kernel::Simd128,
 				_ => unreachable!(),
 			};
 			
