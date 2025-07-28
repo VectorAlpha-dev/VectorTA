@@ -1716,7 +1716,12 @@ pub fn kdj_into_slice(
 			let high = source_type(candles, "high");
 			let low = source_type(candles, "low");
 			let close = source_type(candles, "close");
-			let first_valid_idx = candles.first_valid_index()?;
+			// Find first index where all three values are valid
+			let first_valid_idx = high.iter()
+				.zip(low.iter())
+				.zip(close.iter())
+				.position(|((&h, &l), &c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+				.ok_or(KdjError::AllValuesNaN)?;
 			(high, low, close, first_valid_idx)
 		}
 		KdjData::Slices { high, low, close } => {

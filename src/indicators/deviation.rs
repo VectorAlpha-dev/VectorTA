@@ -582,9 +582,9 @@ fn deviation_batch_inner(
 	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 	
 	// Convert to regular Vec for processing
-	let mut values = unsafe {
-		std::mem::ManuallyDrop::new(buf_mu)
-			.assume_init()
+	let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+	let values_slice: &mut [f64] = unsafe {
+		std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
 	};
 	
 	let do_row = |row: usize, out_row: &mut [f64]| {
@@ -611,7 +611,7 @@ fn deviation_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			values_slice
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -619,15 +619,25 @@ fn deviation_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert to owned Vec for output
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(DeviationBatchOutput {
 		values,
 		combos,

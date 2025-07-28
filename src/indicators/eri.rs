@@ -519,14 +519,16 @@ fn eri_batch_inner(
 	init_matrix_prefixes(&mut buf_bull, cols, &warmup_periods);
 	init_matrix_prefixes(&mut buf_bear, cols, &warmup_periods);
 	
+	// Wrap buffers in ManuallyDrop to prevent premature drop
+	let mut buf_bull_guard = std::mem::ManuallyDrop::new(buf_bull);
+	let mut buf_bear_guard = std::mem::ManuallyDrop::new(buf_bear);
+	
 	// Convert to initialized slices
-	let (mut bull, _) = unsafe {
-		let ptr = buf_bull.as_mut_ptr() as *mut f64;
-		(std::slice::from_raw_parts_mut(ptr, rows * cols), buf_bull)
+	let mut bull = unsafe {
+		std::slice::from_raw_parts_mut(buf_bull_guard.as_mut_ptr() as *mut f64, rows * cols)
 	};
-	let (mut bear, _) = unsafe {
-		let ptr = buf_bear.as_mut_ptr() as *mut f64;
-		(std::slice::from_raw_parts_mut(ptr, rows * cols), buf_bear)
+	let mut bear = unsafe {
+		std::slice::from_raw_parts_mut(buf_bear_guard.as_mut_ptr() as *mut f64, rows * cols)
 	};
 
 	let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| unsafe {
@@ -571,22 +573,18 @@ fn eri_batch_inner(
 	// SAFETY: We're taking ownership of the allocated memory from make_uninit_matrix
 	let bull_vec = unsafe {
 		Vec::from_raw_parts(
-			buf_bull.as_mut_ptr() as *mut f64,
+			buf_bull_guard.as_mut_ptr() as *mut f64,
 			rows * cols,
 			rows * cols,
 		)
 	};
 	let bear_vec = unsafe {
 		Vec::from_raw_parts(
-			buf_bear.as_mut_ptr() as *mut f64,
+			buf_bear_guard.as_mut_ptr() as *mut f64,
 			rows * cols,
 			rows * cols,
 		)
 	};
-	
-	// Prevent double-free by forgetting the original buffers
-	std::mem::forget(buf_bull);
-	std::mem::forget(buf_bear);
 	
 	Ok(EriBatchOutput {
 		bull: bull_vec,
