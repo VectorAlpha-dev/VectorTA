@@ -16,9 +16,26 @@
 //! - **`Ok(ErOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(ErError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,6 +43,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for ErInput<'a> {
@@ -175,7 +193,8 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; len];
+	let warmup_period = period - 1;
+	let mut out = alloc_with_nan_prefix(len, warmup_period);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, &mut out),
@@ -187,6 +206,55 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
 		}
 	}
 	Ok(ErOutput { values: out })
+}
+
+#[inline]
+pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(), ErError> {
+	let data: &[f64] = input.as_ref();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(ErError::AllValuesNaN)?;
+	let len = data.len();
+	let period = input.get_period();
+	
+	if period == 0 || period > len {
+		return Err(ErError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(ErError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	if dst.len() != len {
+		return Err(ErError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	let warmup_period = period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => er_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => er_avx512(data, period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
 }
 
 #[inline]
@@ -415,7 +483,23 @@ fn er_batch_inner(data: &[f64], sweep: &ErBatchRange, kern: Kernel, parallel: bo
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| c.period.unwrap() - 1)
+		.collect();
+	
+	// Allocate uninitialized matrix and set NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -447,6 +531,16 @@ fn er_batch_inner(data: &[f64], sweep: &ErBatchRange, kern: Kernel, parallel: bo
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert uninitialized memory back to Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(ErBatchOutput {
 		values,
 		combos,
@@ -486,6 +580,232 @@ unsafe fn er_row_avx512_short(data: &[f64], first: usize, period: usize, out: &m
 #[inline(always)]
 unsafe fn er_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	er_scalar(data, period, first, out)
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "er")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn er_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = ErParams { period: Some(period) };
+	let input = ErInput::from_slice(slice_in, params);
+
+	let result_vec = py
+		.allow_threads(|| er_with_kernel(&input, kern))
+		.map(|result| result.values)
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ErStream")]
+pub struct ErStreamPy {
+	stream: ErStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ErStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = ErParams { period: Some(period) };
+		let stream = ErStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(ErStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "er_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn er_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = ErBatchRange { period: period_range };
+
+	let result = py
+		.allow_threads(|| er_batch_with_kernel(slice_in, &sweep, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let py_dict = PyDict::new(py);
+	
+	let py_periods: Vec<usize> = result.combos.iter().map(|c| c.period.unwrap_or(5)).collect();
+
+	py_dict.set_item("values", result.values.into_pyarray(py))?;
+	py_dict.set_item("periods", py_periods)?;
+	py_dict.set_item("rows", result.rows)?;
+	py_dict.set_item("cols", result.cols)?;
+
+	Ok(py_dict.into())
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn er_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = ErParams { period: Some(period) };
+	let input = ErInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];
+	
+	er_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn er_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn er_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn er_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to er_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+		
+		let params = ErParams { period: Some(period) };
+		let input = ErInput::from_slice(data, params);
+		
+		// Critical: handle aliasing
+		if in_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			er_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			er_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ErBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ErBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<ErParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = er_batch)]
+pub fn er_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: ErBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = ErBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = er_batch_with_kernel(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = ErBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn er_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to er_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = ErBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let output = er_batch_with_kernel(data, &sweep, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		let total_len = output.values.len();
+		if total_len > 0 {
+			let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
+			out.copy_from_slice(&output.values);
+		}
+		
+		Ok(output.rows)
+	}
 }
 
 #[cfg(test)]

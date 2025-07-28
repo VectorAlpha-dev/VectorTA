@@ -267,7 +267,12 @@
       "Bash(touch:*)",
       "Bash(./run_wasm_benchmark.bat --rebuild wma)",
       "Bash(./run_python_benchmark.bat alligator)",
-      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)"
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
+      "Bash(test_bindings.bat atr)",
+      "Bash(test_bindings.bat coppock)",
+      "Bash(rustfmt:*)",
+      "Bash(powershell:*)",
+      "Bash(cargo rustc:*)"
     ],
     "deny": []
   }

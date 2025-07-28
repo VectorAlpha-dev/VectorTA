@@ -123,6 +123,10 @@ pub mod wclprice;
 pub mod willr;
 pub mod zscore;
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
+pub use coppock::{coppock, CoppockInput, CoppockOutput, CoppockParams};
+pub use er::{er, ErInput, ErOutput, ErParams};
+pub use linearreg_angle::{linearreg_angle, Linearreg_angleInput, Linearreg_angleOutput, Linearreg_angleParams};
 pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,

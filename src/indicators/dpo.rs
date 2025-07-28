@@ -16,7 +16,9 @@
 //! - **`Err(DpoError)`** otherwise.
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -159,6 +161,59 @@ pub fn dpo(input: &DpoInput) -> Result<DpoOutput, DpoError> {
 	dpo_with_kernel(input, Kernel::Auto)
 }
 
+#[cfg(any(feature = "python", feature = "wasm"))]
+#[inline]
+pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result<(), DpoError> {
+	let data: &[f64] = input.as_ref();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
+	let len = data.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(DpoError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(DpoError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	if dst.len() != data.len() {
+		return Err(DpoError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Initialize output with NaN for warmup period
+	dst[..period].fill(f64::NAN);
+
+	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+				dpo_simd128(data, period, first, dst);
+				return Ok(());
+			}
+		}
+		
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => dpo_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => dpo_avx512(data, period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
+}
+
 pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, DpoError> {
 	let data: &[f64] = input.as_ref();
 	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
@@ -180,7 +235,7 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, period);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => dpo_scalar(data, period, first, &mut out),
@@ -207,6 +262,76 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
 		}
 		if i >= first_val + period - 1 && i >= back {
 			out[i] = data[i - back] - (sum * scale);
+		}
+	}
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+	use core::arch::wasm32::*;
+	
+	let back = period / 2 + 1;
+	let mut sum = 0.0;
+	let scale = 1.0 / (period as f64);
+	const STEP: usize = 2;
+	
+	// Setup sum for the initial window
+	for i in first_val..first_val + period.min(data.len() - first_val) {
+		sum += data[i];
+	}
+	
+	// Process initial elements until we reach the point where we can produce output
+	let start_idx = first_val + period - 1;
+	
+	// Scalar computation for warmup and edge cases
+	for i in start_idx..data.len().min(start_idx + back) {
+		if i >= back {
+			out[i] = data[i - back] - (sum * scale);
+		}
+		if i + 1 < data.len() {
+			sum += data[i + 1] - data[i + 1 - period];
+		}
+	}
+	
+	// SIMD computation for the main bulk
+	let simd_start = (start_idx + back).max(back);
+	let simd_end = data.len().saturating_sub(STEP - 1);
+	
+	if simd_start < simd_end {
+		let scale_vec = f64x2_splat(scale);
+		
+		for i in (simd_start..simd_end).step_by(STEP) {
+			// Load data[i-back] and data[i-back+1]
+			let data_vec = v128_load(&data[i - back] as *const f64 as *const v128);
+			
+			// Compute current sums for both positions
+			let sum0 = sum;
+			let sum1 = sum + data[i] - data[i - period];
+			
+			// Create two different sum values for the vector
+			let sum_vec = f64x2(sum0, sum1);
+			
+			// Compute DPO: data[i-back] - (sum * scale)
+			let result = f64x2_sub(data_vec, f64x2_mul(sum_vec, scale_vec));
+			
+			// Store result
+			v128_store(result, &mut out[i] as *mut f64 as *mut v128);
+			
+			// Update sum for next iteration
+			if i + STEP < data.len() {
+				sum = sum1 + data[i + 1] - data[i + 1 - period];
+			}
+		}
+		
+		// Handle remaining elements
+		for i in simd_end..data.len() {
+			if i >= back {
+				out[i] = data[i - back] - (sum * scale);
+			}
+			if i + 1 < data.len() {
+				sum += data[i + 1] - data[i + 1 - period];
+			}
 		}
 	}
 }
@@ -351,6 +476,64 @@ pub fn dpo_batch_par_slice(data: &[f64], sweep: &DpoBatchRange, kern: Kernel) ->
 	dpo_batch_inner(data, sweep, kern, true)
 }
 
+#[cfg(any(feature = "python", feature = "wasm"))]
+#[inline(always)]
+pub fn dpo_batch_inner_into(
+	data: &[f64],
+	sweep: &DpoBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<DpoParams>, DpoError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DpoError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(DpoError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(DpoError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => dpo_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => dpo_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => dpo_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
 #[inline(always)]
 fn dpo_batch_inner(
 	data: &[f64],
@@ -372,7 +555,25 @@ fn dpo_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
+	
+	// Allocate uninitialized matrix
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for each row
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to initialized Vec<f64>
+	let mut values = unsafe {
+		// SAFETY: init_matrix_prefixes has initialized the NaN prefixes,
+		// and we'll initialize the rest of the values in do_row
+		let ptr = buf_mu.as_mut_ptr() as *mut f64;
+		let len = buf_mu.len();
+		std::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr, len, len)
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -674,6 +875,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
+                    }
+                )*
             }
         }
     }
@@ -741,4 +949,263 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dpo")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn dpo_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DpoParams { period: Some(period) };
+	let input = DpoInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| dpo_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DpoStream")]
+pub struct DpoStreamPy {
+	stream: DpoStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DpoStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = DpoParams { period: Some(period) };
+		let stream = DpoStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(DpoStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dpo_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn dpo_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = DpoBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			dpo_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dpo_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = DpoParams { period: Some(period) };
+	let input = DpoInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation is OK for safe API
+	
+	dpo_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dpo_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = DpoParams { period: Some(period) };
+		let input = DpoInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {
+			// Handle aliasing - use temporary buffer
+			let mut temp = vec![0.0; len];
+			dpo_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// Direct write to output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			dpo_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dpo_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dpo_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DpoBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DpoBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<DpoParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dpo_batch)]
+pub fn dpo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DpoBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = DpoBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = dpo_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = DpoBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dpo_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = DpoBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		dpo_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

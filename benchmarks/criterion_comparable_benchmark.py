@@ -102,13 +102,13 @@ class CriterionComparableBenchmark:
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
             'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
-            'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
+            'bandpass', 'vwap', 'cwma', 'dema', 'dpo', 'er', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'maaq', 'mama', 'mwdx',
-            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
+            'nma', 'nvi', 'pvi', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo'  # Added missing indicators
+            'cg', 'cfo', 'coppock', 'marketefi', 'midpoint'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -116,10 +116,10 @@ class CriterionComparableBenchmark:
         
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
-                           'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
+                           'sma_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch']
+                           'cg_batch', 'cfo_batch', 'coppock_batch', 'trendflex_batch', 'kaufmanstop_batch', 'marketefi_batch', 'midpoint_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -245,6 +245,8 @@ class CriterionComparableBenchmark:
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
             ('wma', lambda: my_project.wma(data['close'], 14)),
             ('zlema', lambda: my_project.zlema(data['close'], 14)),
+            ('linearreg_angle', lambda: my_project.linearreg_angle(data['close'], 14)),
+            ('marketefi', lambda: my_project.marketefi(data['high'], data['low'], data['volume'])),
             ('ad', lambda: my_project.ad(data['high'], data['low'], data['close'], data['volume'])),
             ('adx', lambda: my_project.adx(data['high'], data['low'], data['close'], 14)),
             ('acosc', lambda: my_project.acosc(data['high'], data['low'])),
@@ -254,6 +256,8 @@ class CriterionComparableBenchmark:
             ('vwap', lambda: my_project.vwap(data['timestamps'], data['volume'], data['close'], '1d')),
             ('cwma', lambda: my_project.cwma(data['close'], 14)),
             ('dema', lambda: my_project.dema(data['close'], 14)),
+            ('dpo', lambda: my_project.dpo(data['close'], 5)),
+            ('er', lambda: my_project.er(data['close'], 5)),
             ('edcf', lambda: my_project.edcf(data['close'], 14)),
             ('ehlers_itrend', lambda: my_project.ehlers_itrend(data['close'], 20, 48)),
             ('ema', lambda: my_project.ema(data['close'], 14)),
@@ -268,11 +272,14 @@ class CriterionComparableBenchmark:
             ('jma', lambda: my_project.jma(data['close'], 14, 0.0, 2)),
             ('jsa', lambda: my_project.jsa(data['close'], 14)),
             ('kama', lambda: my_project.kama(data['close'], 14)),
+            ('kaufmanstop', lambda: my_project.kaufmanstop(data['high'], data['low'], 22, 2.0, "long", "sma")),
             ('linreg', lambda: my_project.linreg(data['close'], 14)),
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
             ('nma', lambda: my_project.nma(data['close'], 40)),
+            ('nvi', lambda: my_project.nvi(data['close'], data['volume'])),
+            ('pvi', lambda: my_project.pvi(data['close'], data['volume'])),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
@@ -295,7 +302,10 @@ class CriterionComparableBenchmark:
             ('cg', lambda: my_project.cg(data['close'], 10)),
             ('cci', lambda: my_project.cci((data['high'] + data['low'] + data['close']) / 3, 14)),
             ('cfo', lambda: my_project.cfo(data['close'], 14, 100.0)),
+            ('coppock', lambda: my_project.coppock(data['close'], 11, 14, 10)),
+            ('decycler', lambda: my_project.decycler(data['close'], 125, 0.707)),
             ('bop', lambda: my_project.bop(data['open'], data['high'], data['low'], data['close'])),
+            ('midpoint', lambda: my_project.midpoint(data['close'], 14)),
         ]
         
         # Filter if requested
@@ -322,9 +332,13 @@ class CriterionComparableBenchmark:
             ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
+            ('linearreg_angle_batch', lambda: my_project.linearreg_angle_batch(data['close'], (14, 14, 1))),
+            ('marketefi_batch', lambda: my_project.marketefi_batch(data['high'], data['low'], data['volume'])),
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
             ('ema_batch', lambda: my_project.ema_batch(data['close'], (14, 14, 1))),
             ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
+            ('dpo_batch', lambda: my_project.dpo_batch(data['close'], (5, 60, 1))),
+            ('er_batch', lambda: my_project.er_batch(data['close'], (5, 60, 1))),
             ('edcf_batch', lambda: my_project.edcf_batch(data['close'], (15, 50, 1))),
             ('ehlers_itrend_batch', lambda: my_project.ehlers_itrend_batch(data['close'], (12, 20, 4), (40, 50, 5))),
             ('tema_batch', lambda: my_project.tema_batch(data['close'], (9, 240, 1))),
@@ -342,8 +356,12 @@ class CriterionComparableBenchmark:
             ('cg_batch', lambda: my_project.cg_batch(data['close'], (10, 10, 1))),
             ('cci_batch', lambda: my_project.cci_batch((data['high'] + data['low'] + data['close']) / 3, (14, 14, 1))),
             ('cfo_batch', lambda: my_project.cfo_batch(data['close'], (14, 14, 1), (100.0, 100.0, 0.0))),
+            ('coppock_batch', lambda: my_project.coppock_batch(data['close'], (11, 11, 1), (14, 14, 1), (10, 10, 1))),
+            ('decycler_batch', lambda: my_project.decycler_batch(data['close'], (100, 150, 10), (0.5, 0.9, 0.1))),
             ('bop_batch', lambda: my_project.bop_batch(data['open'], data['high'], data['low'], data['close'])),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
+            ('kaufmanstop_batch', lambda: my_project.kaufmanstop_batch(data['high'], data['low'], (20, 24, 2), (1.5, 2.5, 0.5), "long", "sma")),
+            ('midpoint_batch', lambda: my_project.midpoint_batch(data['close'], (10, 20, 2))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -416,7 +434,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'midpoint']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]
