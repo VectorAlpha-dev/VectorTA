@@ -28,7 +28,7 @@ use crate::indicators::moving_averages::sma::{sma, SmaData, SmaError, SmaInput, 
 use crate::indicators::roc::{roc, RocData, RocError, RocInput, RocOutput, RocParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -358,7 +358,9 @@ pub unsafe fn kst_scalar(input: &KstInput, _first: usize, _len: usize) -> Result
 	if aroc1.values.is_empty() || aroc2.values.is_empty() || aroc3.values.is_empty() || aroc4.values.is_empty() {
 		return Err(KstError::AllValuesNaN);
 	}
-	let mut line = vec![f64::NAN; data.len()];
+	// Calculate warmup period as the maximum of all ROC periods + SMA periods - 1
+	let warmup = (r1 + s1 - 1).max(r2 + s2 - 1).max(r3 + s3 - 1).max(r4 + s4 - 1);
+	let mut line = alloc_with_nan_prefix(data.len(), warmup);
 	for i in 0..data.len() {
 		let v1 = aroc1.values[i];
 		let v2 = aroc2.values[i];
@@ -649,8 +651,29 @@ fn kst_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut lines = vec![f64::NAN; rows * cols];
-	let mut signals = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| {
+		let r1 = c.roc_period1.unwrap_or(10);
+		let r2 = c.roc_period2.unwrap_or(15);
+		let r3 = c.roc_period3.unwrap_or(20);
+		let r4 = c.roc_period4.unwrap_or(30);
+		let s1 = c.sma_period1.unwrap_or(10);
+		let s2 = c.sma_period2.unwrap_or(10);
+		let s3 = c.sma_period3.unwrap_or(10);
+		let s4 = c.sma_period4.unwrap_or(15);
+		(r1 + s1 - 1).max(r2 + s2 - 1).max(r3 + s3 - 1).max(r4 + s4 - 1)
+	}).collect();
+	
+	// Allocate matrices with proper initialization
+	let mut lines_uninit = make_uninit_matrix(rows, cols);
+	let mut signals_uninit = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut lines_uninit, cols, &warmup_periods);
+	init_matrix_prefixes(&mut signals_uninit, cols, &warmup_periods);
+	
+	// SAFETY: We've initialized the prefixes, now we can transmute to initialized memory
+	let mut lines: Vec<f64> = unsafe { std::mem::transmute(lines_uninit) };
+	let mut signals: Vec<f64> = unsafe { std::mem::transmute(signals_uninit) };
 
 	let do_row = |row: usize, line_row: &mut [f64], sig_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -870,7 +893,261 @@ mod tests {
         }
     }
 
-	generate_all_kst_tests!(check_kst_default_params, check_kst_accuracy, check_kst_nan_handling);
+	#[cfg(debug_assertions)]
+	fn check_kst_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			KstParams::default(),
+			// Minimum viable periods
+			KstParams {
+				sma_period1: Some(2),
+				sma_period2: Some(2),
+				sma_period3: Some(2),
+				sma_period4: Some(2),
+				roc_period1: Some(2),
+				roc_period2: Some(2),
+				roc_period3: Some(2),
+				roc_period4: Some(2),
+				signal_period: Some(2),
+			},
+			// Small periods
+			KstParams {
+				sma_period1: Some(5),
+				sma_period2: Some(5),
+				sma_period3: Some(5),
+				sma_period4: Some(7),
+				roc_period1: Some(5),
+				roc_period2: Some(7),
+				roc_period3: Some(10),
+				roc_period4: Some(15),
+				signal_period: Some(5),
+			},
+			// Mixed small/medium periods
+			KstParams {
+				sma_period1: Some(7),
+				sma_period2: Some(10),
+				sma_period3: Some(12),
+				sma_period4: Some(15),
+				roc_period1: Some(8),
+				roc_period2: Some(12),
+				roc_period3: Some(16),
+				roc_period4: Some(20),
+				signal_period: Some(7),
+			},
+			// Default periods (10, 10, 10, 15, 10, 15, 20, 30, 9)
+			KstParams {
+				sma_period1: Some(10),
+				sma_period2: Some(10),
+				sma_period3: Some(10),
+				sma_period4: Some(15),
+				roc_period1: Some(10),
+				roc_period2: Some(15),
+				roc_period3: Some(20),
+				roc_period4: Some(30),
+				signal_period: Some(9),
+			},
+			// Large periods
+			KstParams {
+				sma_period1: Some(20),
+				sma_period2: Some(25),
+				sma_period3: Some(30),
+				sma_period4: Some(35),
+				roc_period1: Some(25),
+				roc_period2: Some(35),
+				roc_period3: Some(45),
+				roc_period4: Some(60),
+				signal_period: Some(15),
+			},
+			// Very large periods
+			KstParams {
+				sma_period1: Some(30),
+				sma_period2: Some(40),
+				sma_period3: Some(50),
+				sma_period4: Some(60),
+				roc_period1: Some(40),
+				roc_period2: Some(60),
+				roc_period3: Some(80),
+				roc_period4: Some(100),
+				signal_period: Some(21),
+			},
+			// Asymmetric periods
+			KstParams {
+				sma_period1: Some(5),
+				sma_period2: Some(10),
+				sma_period3: Some(20),
+				sma_period4: Some(50),
+				roc_period1: Some(7),
+				roc_period2: Some(14),
+				roc_period3: Some(28),
+				roc_period4: Some(56),
+				signal_period: Some(12),
+			},
+			// Edge case: very small signal period
+			KstParams {
+				sma_period1: Some(10),
+				sma_period2: Some(10),
+				sma_period3: Some(10),
+				sma_period4: Some(15),
+				roc_period1: Some(10),
+				roc_period2: Some(15),
+				roc_period3: Some(20),
+				roc_period4: Some(30),
+				signal_period: Some(2),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = KstInput::from_candles(&candles, "close", params.clone());
+			let output = kst_with_kernel(&input, kernel)?;
+
+			// Check line values
+			for (i, &val) in output.line.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in KST line with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+			}
+
+			// Check signal values
+			for (i, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in KST signal with params: sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), \
+						 signal_period={} (param set {})",
+						test_name, val, bits, i,
+						params.sma_period1.unwrap_or(10),
+						params.sma_period2.unwrap_or(10),
+						params.sma_period3.unwrap_or(10),
+						params.sma_period4.unwrap_or(15),
+						params.roc_period1.unwrap_or(10),
+						params.roc_period2.unwrap_or(15),
+						params.roc_period3.unwrap_or(20),
+						params.roc_period4.unwrap_or(30),
+						params.signal_period.unwrap_or(9),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_kst_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
+	generate_all_kst_tests!(check_kst_default_params, check_kst_accuracy, check_kst_nan_handling, check_kst_no_poison);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -895,5 +1172,186 @@ mod tests {
             }
         };
     }
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations (kept minimal to avoid OOM)
+		let test_configs = vec![
+			// Small periods - single combination
+			(3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 4, 4, 0, 5, 5, 0, 6, 6, 0, 3, 3, 0),
+			// Medium periods - 2x2x2x2 combinations
+			(5, 10, 5, 5, 10, 5, 5, 10, 5, 8, 13, 5, 5, 10, 5, 8, 13, 5, 10, 15, 5, 15, 20, 5, 5, 7, 2),
+			// Default values
+			(10, 10, 0, 10, 10, 0, 10, 10, 0, 15, 15, 0, 10, 10, 0, 15, 15, 0, 20, 20, 0, 30, 30, 0, 9, 9, 0),
+			// Dense small range - limited
+			(2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 3, 4, 1, 4, 5, 1, 5, 6, 1, 2, 3, 1),
+		];
+
+		for (cfg_idx, &(s1_start, s1_end, s1_step, s2_start, s2_end, s2_step, 
+						s3_start, s3_end, s3_step, s4_start, s4_end, s4_step,
+						r1_start, r1_end, r1_step, r2_start, r2_end, r2_step,
+						r3_start, r3_end, r3_step, r4_start, r4_end, r4_step,
+						sig_start, sig_end, sig_step)) in test_configs.iter().enumerate() {
+			
+			let output = KstBatchBuilder::new()
+				.kernel(kernel)
+				.sma_period1_range(s1_start, s1_end, s1_step)
+				.sma_period2_range(s2_start, s2_end, s2_step)
+				.sma_period3_range(s3_start, s3_end, s3_step)
+				.sma_period4_range(s4_start, s4_end, s4_step)
+				.roc_period1_range(r1_start, r1_end, r1_step)
+				.roc_period2_range(r2_start, r2_end, r2_step)
+				.roc_period3_range(r3_start, r3_end, r3_step)
+				.roc_period4_range(r4_start, r4_end, r4_step)
+				.signal_period_range(sig_start, sig_end, sig_step)
+				.apply_candles(&c, "close")?;
+
+			// Check line values
+			for (idx, &val) in output.lines.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST lines with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST lines with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST lines with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+			}
+
+			// Check signal values
+			for (idx, &val) in output.signals.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST signals with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST signals with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in KST signals with params: \
+						 sma_periods=({},{},{},{}), roc_periods=({},{},{},{}), signal_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.sma_period1.unwrap_or(10),
+						combo.sma_period2.unwrap_or(10),
+						combo.sma_period3.unwrap_or(10),
+						combo.sma_period4.unwrap_or(15),
+						combo.roc_period1.unwrap_or(10),
+						combo.roc_period2.unwrap_or(15),
+						combo.roc_period3.unwrap_or(20),
+						combo.roc_period4.unwrap_or(30),
+						combo.signal_period.unwrap_or(9)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
