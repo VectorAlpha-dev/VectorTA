@@ -276,13 +276,13 @@ pub fn bollinger_bands_width_with_kernel(
 	let warmup_period = first_valid_idx + period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
-	bollinger_bands_width_into(data, input, &mut out, kernel)?;
+	bollinger_bands_width_compute_into(data, input, &mut out, kernel)?;
 	Ok(BollingerBandsWidthOutput { values: out })
 }
 
 /// Compute Bollinger Bands Width directly into a pre-allocated buffer.
 /// This is the zero-copy variant used by Python/WASM bindings.
-pub fn bollinger_bands_width_into(
+pub fn bollinger_bands_width_compute_into(
 	data: &[f64],
 	input: &BollingerBandsWidthInput,
 	out: &mut [f64],
@@ -332,6 +332,75 @@ pub fn bollinger_bands_width_into(
 			Kernel::Avx2 | Kernel::Avx2Batch => bollinger_bands_width_avx2_into(data, input, first_valid_idx, out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => bollinger_bands_width_avx512_into(data, input, first_valid_idx, out),
+			_ => unreachable!(),
+		}
+	}
+}
+
+/// Write Bollinger Bands Width directly to output slice - no allocations.
+/// This function follows the alma.rs pattern for WASM bindings.
+#[inline]
+pub fn bollinger_bands_width_into_slice(
+	dst: &mut [f64],
+	input: &BollingerBandsWidthInput,
+	kern: Kernel,
+) -> Result<(), BollingerBandsWidthError> {
+	let data = input.as_ref();
+	
+	if data.is_empty() {
+		return Err(BollingerBandsWidthError::EmptyData);
+	}
+	
+	if dst.len() != data.len() {
+		return Err(BollingerBandsWidthError::InvalidPeriod {
+			period: 0,
+			data_len: data.len(),
+		});
+	}
+	
+	let period = input.get_period();
+	if period == 0 || period > data.len() {
+		return Err(BollingerBandsWidthError::InvalidPeriod {
+			period,
+			data_len: data.len(),
+		});
+	}
+	
+	let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+		Some(idx) => idx,
+		None => return Err(BollingerBandsWidthError::AllValuesNaN),
+	};
+	
+	if (data.len() - first_valid_idx) < period {
+		return Err(BollingerBandsWidthError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first_valid_idx,
+		});
+	}
+	
+	// Calculate warmup period
+	let warmup_period = first_valid_idx + period - 1;
+	
+	// Fill warmup period with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	// Compute the indicator values into the output slice
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				bollinger_bands_width_scalar_into(data, input, first_valid_idx, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => bollinger_bands_width_avx2_into(data, input, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => bollinger_bands_width_avx512_into(data, input, first_valid_idx, dst),
 			_ => unreachable!(),
 		}
 	}
@@ -1269,15 +1338,12 @@ pub fn bollinger_bands_width_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
 	use crate::utilities::kernel_validation::validate_kernel;
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 	use pyo3::exceptions::PyValueError;
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Use kernel validation for safety
+	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 
-	// Build input struct
 	let params = BollingerBandsWidthParams {
 		period: Some(period),
 		devup: Some(devup),
@@ -1287,33 +1353,13 @@ pub fn bollinger_bands_width_py<'py>(
 	};
 	let bbw_in = BollingerBandsWidthInput::from_slice(slice_in, params);
 
-	// SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized.
-	// We MUST write to ALL elements before returning these arrays to Python.
-	// Python/NumPy's memory model requires that all array elements are initialized.
-	// Returning uninitialized memory to Python is undefined behavior and can cause
-	// crashes or expose sensitive data from previous memory contents.
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Get Vec<f64> from Rust function
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| bollinger_bands_width_with_kernel(&bbw_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), BollingerBandsWidthError> {
-		// First, we need to calculate the warmup period and initialize with NaN
-		let first_valid_idx = slice_in.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-		let warmup_period = first_valid_idx + period - 1;
-
-		// Initialize warmup period with NaN
-		for i in 0..warmup_period.min(slice_out.len()) {
-			slice_out[i] = f64::NAN;
-		}
-
-		// SAFETY: Compute directly into the pre-allocated NumPy buffer.
-		// This avoids an extra allocation and copy.
-		bollinger_bands_width_into(slice_in, &bbw_in, slice_out, kern)?;
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1399,6 +1445,7 @@ pub fn bollinger_bands_width_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = BollingerBandsWidthBatchRange {
 		period: period_range,
@@ -1406,16 +1453,12 @@ pub fn bollinger_bands_width_batch_py<'py>(
 		devdn: devdn_range,
 	};
 
-	// Use kernel validation for safety
-	let kern = validate_kernel(kernel, true)?;
-
 	// Expand grid to know dimensions
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = slice_in.len();
 
-	// SAFETY: Pre-allocate NumPy array. The zero-copy functions will handle NaN initialization
-	// for the warmup periods.
+	// Pre-allocate NumPy array for batch operations
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -1432,29 +1475,8 @@ pub fn bollinger_bands_width_batch_py<'py>(
 					k => k,
 				};
 
-				// Calculate warmup periods for each row and initialize NaN prefixes
-				let first_valid = slice_in.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-				let warmup_periods: Vec<usize> = (0..rows)
-					.map(|i| {
-						let period = if period_range.2 == 0 {
-							period_range.0
-						} else {
-							period_range.0 + i * period_range.2
-						};
-						first_valid + period - 1
-					})
-					.collect();
-
-				// Initialize NaN values for warmup periods in each row
-				for (row_idx, &warmup) in warmup_periods.iter().enumerate() {
-					let row_start = row_idx * cols;
-					for col_idx in 0..warmup.min(cols) {
-						slice_out[row_start + col_idx] = f64::NAN;
-					}
-				}
-
-				// SAFETY: Compute directly into the pre-allocated NumPy buffer.
-				// This avoids an extra allocation and copy.
+				// Compute directly into the pre-allocated NumPy buffer
+				// The Rust function handles NaN initialization internally
 				let mut combos = bollinger_bands_width_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)?;
 
 				// Update combos with matype and devtype
@@ -1520,9 +1542,12 @@ pub fn bollinger_bands_width_js(
 	};
 	let input = BollingerBandsWidthInput::from_slice(data, params);
 
-	bollinger_bands_width_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	// Use single allocation pattern
+	let mut output = vec![0.0; data.len()];
+	bollinger_bands_width_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1545,7 +1570,7 @@ pub fn bollinger_bands_width_batch_js(
 		devdn: (devdn_start, devdn_end, devdn_step),
 	};
 
-	bollinger_bands_width_batch_inner(data, &sweep, Kernel::Scalar, false)
+	bollinger_bands_width_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1615,7 +1640,7 @@ pub fn bollinger_bands_width_batch_unified_js(data: &[f64], config: JsValue) -> 
 	};
 
 	// Run the existing core logic
-	let mut output = bollinger_bands_width_batch_inner(data, &sweep, Kernel::Scalar, false)
+	let mut output = bollinger_bands_width_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// Update combos with matype and devtype
@@ -1634,4 +1659,113 @@ pub fn bollinger_bands_width_batch_unified_js(data: &[f64], config: JsValue) -> 
 
 	// Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// Fast API for WASM bindings - handles aliasing
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	devup: f64,
+	devdn: f64,
+	matype: Option<String>,
+	devtype: Option<usize>,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let params = BollingerBandsWidthParams {
+			period: Some(period),
+			devup: Some(devup),
+			devdn: Some(devdn),
+			matype: matype.or_else(|| Some("sma".to_string())),
+			devtype: devtype.or(Some(0)),
+		};
+		let input = BollingerBandsWidthInput::from_slice(data, params);
+		
+		// Handle aliasing case (in-place operation)
+		if in_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			bollinger_bands_width_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			bollinger_bands_width_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+// Memory management functions for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+// Fast batch API for WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_width_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	devup_start: f64,
+	devup_end: f64,
+	devup_step: f64,
+	devdn_start: f64,
+	devdn_end: f64,
+	devdn_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to bollinger_bands_width_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = BollingerBandsWidthBatchRange {
+			period: (period_start, period_end, period_step),
+			devup: (devup_start, devup_end, devup_step),
+			devdn: (devdn_start, devdn_end, devdn_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		bollinger_bands_width_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

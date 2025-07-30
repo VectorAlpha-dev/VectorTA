@@ -205,6 +205,44 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
 	ao_with_kernel(input, Kernel::Auto)
 }
 
+#[inline]
+pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(), AoError> {
+	let (data, short, long, first, len) = ao_prepare(input)?;
+
+	if dst.len() != len {
+		return Err(AoError::InvalidPeriods {
+			short: dst.len(),
+			long: len,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Calculate warmup period
+	let warmup_period = first + long - 1;
+
+	// Initialize NaN prefix
+	if warmup_period > 0 {
+		dst[..warmup_period].fill(f64::NAN);
+	}
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
+}
+
 #[inline(always)]
 fn ao_prepare<'a>(
 	input: &'a AoInput,
@@ -284,6 +322,31 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
 	}
 
 	Ok(AoOutput { values: out })
+}
+
+// Helper function to compute hl2 from high/low arrays with zero-copy allocation
+#[inline]
+pub fn compute_hl2_with_kernel(high: &[f64], low: &[f64], kernel: Kernel) -> Result<Vec<f64>, AoError> {
+	if high.len() != low.len() {
+		return Err(AoError::InvalidPeriods {
+			short: high.len(),
+			long: low.len(),
+		});
+	}
+	
+	if high.is_empty() {
+		return Err(AoError::NoData);
+	}
+
+	// Use zero-copy allocation - no warmup needed for hl2 computation
+	let mut out = alloc_with_nan_prefix(high.len(), 0);
+
+	// Compute hl2 directly into pre-allocated buffer
+	for i in 0..high.len() {
+		out[i] = (high[i] + low[i]) / 2.0;
+	}
+
+	Ok(out)
 }
 
 // Scalar implementation - ensures all elements are written
@@ -898,72 +961,34 @@ pub fn ao_py<'py>(
 	long_period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let high_slice = high.as_slice()?; // zero-copy, read-only view
-	let low_slice = low.as_slice()?; // zero-copy, read-only view
-
-	// Verify slices have same length
-	if high_slice.len() != low_slice.len() {
-		return Err(PyValueError::new_err("High and low arrays must have same length"));
-	}
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
 
 	// Use kernel validation for safety
 	let kern = validate_kernel(kernel, false)?;
 
-	// Compute hl2 (median price)
-	let hl2: Vec<f64> = high_slice
-		.iter()
-		.zip(low_slice.iter())
-		.map(|(&h, &l)| (h + l) / 2.0)
-		.collect();
-
-	// Build input struct
-	let params = AoParams {
-		short_period: Some(short_period),
-		long_period: Some(long_period),
-	};
-	let ao_in = AoInput::from_slice(&hl2, params);
-
-	// Pre-allocate uninitialized NumPy output buffer
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [hl2.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
 	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), AoError> {
-		let (data, short, long, first, _len) = ao_prepare(&ao_in)?;
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| -> Result<Vec<f64>, AoError> {
+			// Compute hl2 using zero-copy allocation
+			let hl2 = compute_hl2_with_kernel(high_slice, low_slice, kern)?;
+			
+			// Build input struct
+			let params = AoParams {
+				short_period: Some(short_period),
+				long_period: Some(long_period),
+			};
+			let ao_in = AoInput::from_slice(&hl2, params);
+			
+			// Compute AO
+			ao_with_kernel(&ao_in, kern).map(|o| o.values)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-		// Calculate warmup period and initialize NaN prefix
-		let warmup_period = first + long - 1;
-		if warmup_period > 0 {
-			slice_out[..warmup_period].fill(f64::NAN);
-		}
-
-		// Resolve Kernel::Auto to a specific kernel
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			other => other,
-		};
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// ao_scalar now only writes values after warmup period
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, slice_out),
-				_ => unreachable!(),
-			}
-		}
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1010,17 +1035,8 @@ pub fn ao_batch_py<'py>(
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 
-	// Verify slices have same length
-	if high_slice.len() != low_slice.len() {
-		return Err(PyValueError::new_err("High and low arrays must have same length"));
-	}
-
-	// Compute hl2 (median price)
-	let hl2: Vec<f64> = high_slice
-		.iter()
-		.zip(low_slice.iter())
-		.map(|(&h, &l)| (h + l) / 2.0)
-		.collect();
+	// Use kernel validation for safety
+	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = AoBatchRange {
 		short_period: short_period_range,
@@ -1030,19 +1046,19 @@ pub fn ao_batch_py<'py>(
 	// 1. Expand grid once to know rows*cols
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
-	let cols = hl2.len();
+	let cols = high_slice.len();
 
 	// 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
 	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Use kernel validation for safety
-	let kern = validate_kernel(kernel, true)?;
-
 	// 3. Heavy work without the GIL
 	let combos = py
 		.allow_threads(|| -> Result<Vec<AoParams>, AoError> {
+			// Compute hl2 using zero-copy allocation
+			let hl2 = compute_hl2_with_kernel(high_slice, low_slice, kern)?;
+			
 			// Initialize NaN prefixes for each row
 			let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
 			let warm: Vec<usize> = combos.iter().map(|c| first + c.long_period.unwrap() - 1).collect();
@@ -1098,13 +1114,8 @@ pub fn ao_batch_py<'py>(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn ao_js(high: &[f64], low: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
-	// Verify arrays have same length
-	if high.len() != low.len() {
-		return Err(JsValue::from_str("High and low arrays must have same length"));
-	}
-
-	// Compute hl2
-	let hl2: Vec<f64> = high.iter().zip(low.iter()).map(|(&h, &l)| (h + l) / 2.0).collect();
+	// Compute hl2 using zero-copy allocation
+	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let params = AoParams {
 		short_period: Some(short_period),
@@ -1112,7 +1123,8 @@ pub fn ao_js(high: &[f64], low: &[f64], short_period: usize, long_period: usize)
 	};
 	let input = AoInput::from_slice(&hl2, params);
 
-	ao_with_kernel(&input, Kernel::Scalar)
+	// Compute AO using the optimal kernel
+	ao_with_kernel(&input, Kernel::Auto)
 		.map(|o| o.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1129,13 +1141,8 @@ pub fn ao_batch_js(
 	long_end: usize,
 	long_step: usize,
 ) -> Result<Vec<f64>, JsValue> {
-	// Verify arrays have same length
-	if high.len() != low.len() {
-		return Err(JsValue::from_str("High and low arrays must have same length"));
-	}
-
-	// Compute hl2
-	let hl2: Vec<f64> = high.iter().zip(low.iter()).map(|(&h, &l)| (h + l) / 2.0).collect();
+	// Compute hl2 using zero-copy allocation
+	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let sweep = AoBatchRange {
 		short_period: (short_start, short_end, short_step),
@@ -1198,13 +1205,8 @@ pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
 	let config: AoBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-	// Verify arrays have same length
-	if high.len() != low.len() {
-		return Err(JsValue::from_str("High and low arrays must have same length"));
-	}
-
-	// Compute hl2
-	let hl2: Vec<f64> = high.iter().zip(low.iter()).map(|(&h, &l)| (h + l) / 2.0).collect();
+	// Compute hl2 using zero-copy allocation
+	let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let sweep = AoBatchRange {
 		short_period: config.short_period_range,
@@ -1224,4 +1226,99 @@ pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
 
 	// 4. Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_into(
+	in_high_ptr: *const f64,
+	in_low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_period: usize,
+	long_period: usize,
+) -> Result<(), JsValue> {
+	if in_high_ptr.is_null() || in_low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(in_high_ptr, len);
+		let low = std::slice::from_raw_parts(in_low_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		// Compute hl2 using zero-copy allocation
+		let hl2 = compute_hl2_with_kernel(high, low, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		let params = AoParams {
+			short_period: Some(short_period),
+			long_period: Some(long_period),
+		};
+		let input = AoInput::from_slice(&hl2, params);
+
+		// Compute AO into output buffer
+		ao_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ao_batch_into(
+	in_high_ptr: *const f64,
+	in_low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_period_start: usize,
+	short_period_end: usize,
+	short_period_step: usize,
+	long_period_start: usize,
+	long_period_end: usize,
+	long_period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_high_ptr.is_null() || in_low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(in_high_ptr, len);
+		let low = std::slice::from_raw_parts(in_low_ptr, len);
+
+		let sweep = AoBatchRange {
+			short_period: (short_period_start, short_period_end, short_period_step),
+			long_period: (long_period_start, long_period_end, long_period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+
+		// Compute hl2 using zero-copy allocation
+		let hl2 = compute_hl2_with_kernel(high, low, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		// Compute batch directly into output
+		ao_batch_inner_into(&hl2, &sweep, Kernel::Scalar, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

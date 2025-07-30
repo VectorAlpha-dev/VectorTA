@@ -4,28 +4,19 @@
   "samples": 10,
   "gc_disabled": true,
   "omp_threads": 1,
-  "data_size": "1M",
+  "data_size": "10k",
   "python_results": {
-    "alligator": 5.90828
+    "keltner": 18.599385,
+    "keltner_batch": 18.339515
   },
-  "rust_results": {
-    "alligator": 3.7730542857142852
-  },
-  "comparisons": [
-    {
-      "indicator": "alligator",
-      "python_ms": 5.90828,
-      "rust_ms": 3.7730542857142852,
-      "overhead_ms": 2.135225714285715,
-      "overhead_pct": 56.59143899334305
-    }
-  ],
+  "rust_results": {},
+  "comparisons": [],
   "batch_comparisons": [
     {
-      "indicator": "adxr",
-      "single_ms": 4.889845,
-      "batch_ms": 4.87616,
-      "overhead_pct": -0.27986572171512236
+      "indicator": "keltner",
+      "single_ms": 18.599385,
+      "batch_ms": 18.339515,
+      "overhead_pct": -1.3971967352684134
     }
   ]
 }

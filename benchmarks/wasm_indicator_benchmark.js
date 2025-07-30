@@ -171,6 +171,146 @@ const INDICATORS = {
             fastFn: 'alma_batch_into'
         }
     },
+    vlma: {
+        name: 'VLMA',
+        // Safe API
+        safe: {
+            fn: 'vlma_js',
+            params: { min_period: 5, max_period: 50, matype: 'sma', devtype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vlma_alloc',
+            freeFn: 'vlma_free',
+            computeFn: 'vlma_into',
+            params: { min_period: 5, max_period: 50, matype: 'sma', devtype: 0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'vlma_batch',
+            config: {
+                small: {
+                    min_period_range: [5, 15, 5],    // 3 values: 5, 10, 15
+                    max_period_range: [30, 50, 10],  // 3 values: 30, 40, 50
+                    devtype_range: [0, 2, 1],        // 3 values: 0, 1, 2
+                    matype: 'sma'
+                    // Total: 27 combinations
+                },
+                medium: {
+                    min_period_range: [5, 25, 5],    // 5 values: 5, 10, 15, 20, 25
+                    max_period_range: [30, 60, 10],  // 4 values: 30, 40, 50, 60
+                    devtype_range: [0, 2, 1],        // 3 values: 0, 1, 2
+                    matype: 'ema'
+                    // Total: 60 combinations
+                }
+            },
+            fastFn: 'vlma_batch_into'
+        }
+    },
+    keltner: {
+        name: 'Keltner Channels',
+        needsMultipleInputs: true,  // Uses high, low, close, source
+        hasMultipleOutputs: 3,      // Returns upper, middle, lower bands
+        // Safe API
+        safe: {
+            fn: 'keltner_js',
+            params: { period: 20, multiplier: 2.0, ma_type: 'ema' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'keltner_alloc',
+            freeFn: 'keltner_free',
+            computeFn: 'keltner_into',
+            params: { period: 20, multiplier: 2.0, ma_type: 'ema' },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 3
+        },
+        // Batch API
+        batch: {
+            fn: 'keltner_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10],        // 3 values: 10, 20, 30
+                    multiplier_range: [1.0, 3.0, 1.0], // 3 values: 1.0, 2.0, 3.0
+                    ma_type: 'ema'
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [10, 50, 10],        // 5 values
+                    multiplier_range: [1.0, 4.0, 0.5], // 7 values  
+                    ma_type: 'ema'
+                    // Total: 35 combinations
+                }
+            }
+        }
+    },
+    fisher: {
+        name: 'Fisher Transform',
+        needsMultipleInputs: true,  // Uses high, low
+        hasMultipleOutputs: 2,      // Returns fisher and signal
+        // Safe API
+        safe: {
+            fn: 'fisher_js',
+            params: { period: 9 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'fisher_alloc',
+            freeFn: 'fisher_free',
+            computeFn: 'fisher_into',
+            params: { period: 9 },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 2
+        },
+        // Batch API
+        batch: {
+            fn: 'fisher_batch',
+            fastFn: 'fisher_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 4]       // 6 values: 5, 9, 13, 17, 21, 25
+                }
+            },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 2
+        }
+    },
+    ao: {
+        name: 'AO',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'ao_js',
+            params: { short_period: 5, long_period: 34 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ao_alloc',
+            freeFn: 'ao_free',
+            computeFn: 'ao_into',
+            params: { short_period: 5, long_period: 34 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'ao_batch',
+            fastFn: 'ao_batch_into',
+            config: {
+                small: {
+                    short_period_range: [3, 7, 2],   // 3 values: 3, 5, 7
+                    long_period_range: [20, 40, 10]  // 3 values: 20, 30, 40 = 9 combinations
+                },
+                medium: {
+                    short_period_range: [3, 11, 2],  // 5 values: 3, 5, 7, 9, 11
+                    long_period_range: [20, 50, 10]  // 4 values: 20, 30, 40, 50 = 20 combinations
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
     adosc: {
         name: 'ADOSC',
         needsMultipleInputs: true,  // Uses high, low, close, volume
@@ -198,6 +338,40 @@ const INDICATORS = {
                 medium: {
                     short_period_range: [2, 6, 1],   // 5 values
                     long_period_range: [8, 16, 2]    // 5 values = 25 combinations
+                }
+            }
+        }
+    },
+    chande: {
+        name: 'Chande',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'chande_js',
+            params: { period: 22, mult: 3.0, direction: 'long' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'chande_alloc',
+            freeFn: 'chande_free',
+            computeFn: 'chande_into',
+            params: { period: 22, mult: 3.0, direction: 'long' },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'chande_batch_js',
+            fastFn: 'chande_batch_into',
+            config: {
+                small: {
+                    period_range: [15, 25, 5],      // 3 values: 15, 20, 25
+                    mult_range: [2.0, 4.0, 1.0],    // 3 values: 2.0, 3.0, 4.0
+                    direction: 'long'               // 9 combinations total
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values: 10, 15, 20, 25, 30
+                    mult_range: [2.0, 5.0, 0.5],    // 7 values: 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0
+                    direction: 'short'              // 35 combinations total
                 }
             }
         }
@@ -330,6 +504,33 @@ const INDICATORS = {
                 },
                 medium: {
                     period_range: [10, 50, 5]   // 9 values: 10, 15, 20, ..., 50
+                }
+            }
+        }
+    },
+    linearreg_slope: {
+        name: 'LinearRegSlope',
+        // Safe API
+        safe: {
+            fn: 'linearreg_slope_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'linearreg_slope_alloc',
+            freeFn: 'linearreg_slope_free',
+            computeFn: 'linearreg_slope_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'linearreg_slope_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]  // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [5, 25, 5]   // 5 values: 5, 10, 15, 20, 25
                 }
             }
         }
@@ -611,6 +812,70 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'mama_batch_into',
             dualOutput: true
+        }
+    },
+    medium_ad: {
+        name: 'Medium AD',
+        // Safe API
+        safe: {
+            fn: 'medium_ad_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'medium_ad_alloc',
+            freeFn: 'medium_ad_free',
+            computeFn: 'medium_ad_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'medium_ad_batch',
+            config: {
+                small: {
+                    period_range: [3, 7, 1]       // 5 values: 3, 4, 5, 6, 7
+                },
+                medium: {
+                    period_range: [3, 15, 1]      // 13 values: 3, 4, 5, ..., 15
+                }
+            },
+            // Fast batch API
+            fastFn: 'medium_ad_batch_into'
+        }
+    },
+    minmax: {
+        name: 'MinMax',
+        needsMultipleInputs: true,  // Uses high, low
+        hasMultipleOutputs: 4,      // Returns is_min, is_max, last_min, last_max
+        // Safe API
+        safe: {
+            fn: 'minmax_js',
+            params: { order: 3 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'minmax_alloc',
+            freeFn: 'minmax_free',
+            computeFn: 'minmax_into',
+            params: { order: 3 },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4
+        },
+        // Batch API
+        batch: {
+            fn: 'minmax_batch',
+            config: {
+                small: {
+                    order_range: [2, 5, 1]       // 4 values: 2, 3, 4, 5
+                },
+                medium: {
+                    order_range: [3, 20, 1]      // 18 values: 3, 4, 5, ..., 20
+                }
+            },
+            needsMultipleInputs: true,
+            hasMultipleOutputs: 4,
+            // Fast batch API
+            fastFn: 'minmax_batch_into'
         }
     },
     reflex: {
@@ -1290,6 +1555,40 @@ const INDICATORS = {
             fastFn: 'trendflex_batch_into'
         }
     },
+    ttm_trend: {
+        name: 'TTM Trend',
+        // Safe API
+        safe: {
+            fn: 'ttm_trend_js',
+            params: { period: 5 }
+        },
+        needsMultipleInputs: true,  // Requires source and close arrays
+        outputIsU8: true,           // Returns Uint8Array instead of Float64Array
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ttm_trend_alloc',
+            allocU8Fn: 'ttm_trend_alloc_u8',  // Special allocator for u8 output
+            freeFn: 'ttm_trend_free',
+            freeU8Fn: 'ttm_trend_free_u8',    // Special free for u8
+            computeFn: 'ttm_trend_into',
+            params: { period: 5 },
+            needsMultipleInputs: true,
+            outputIsU8: true
+        },
+        // Batch API
+        batch: {
+            fn: 'ttm_trend_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 20, 1]       // 16 values
+                }
+            },
+            outputIsU8: true  // Batch also returns u8 values
+        }
+    },
     alligator: {
         name: 'Alligator',
         // Safe API
@@ -1341,6 +1640,36 @@ const INDICATORS = {
                     lips_period_range: [4, 6, 1],       // 3 values
                     lips_offset_range: [2, 4, 1]        // 3 values
                     // Total: 729 combinations (too many, but shows capability)
+                }
+            }
+        }
+    },
+    correlation_cycle: {
+        name: 'Correlation Cycle',
+        // Safe API
+        safe: {
+            fn: 'correlation_cycle_js',
+            params: { period: 20, threshold: 9.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'correlation_cycle_alloc',
+            freeFn: 'correlation_cycle_free',
+            computeFn: 'correlation_cycle_into',
+            params: { period: 20, threshold: 9.0 },
+            outputCount: 4  // 4 outputs: real, imag, angle, state
+        },
+        // Batch API
+        batch: {
+            fn: 'correlation_cycle_batch_js',
+            config: {
+                small: {
+                    period_range: [15, 25, 5],          // 3 values
+                    threshold_range: [8.0, 10.0, 1.0]   // 3 values = 9 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],          // 5 values
+                    threshold_range: [7.0, 11.0, 1.0]   // 5 values = 25 combinations
                 }
             }
         }
@@ -1493,6 +1822,254 @@ const INDICATORS = {
                     period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
                 }
             }
+        }
+    },
+    bollinger_bands_width: {
+        name: 'Bollinger Bands Width',
+        // Safe API
+        safe: {
+            fn: 'bollinger_bands_width_js',
+            params: { period: 20, devup: 2.0, devdn: 2.0, matype: "sma", devtype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'bollinger_bands_width_alloc',
+            freeFn: 'bollinger_bands_width_free',
+            computeFn: 'bollinger_bands_width_into',
+            params: { period: 20, devup: 2.0, devdn: 2.0, matype: "sma", devtype: 0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'bollinger_bands_width_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10],     // 3 values: 10, 20, 30
+                    devup_range: [1.5, 2.5, 0.5],   // 3 values: 1.5, 2.0, 2.5
+                    devdn_range: [2.0, 2.0, 0]      // 1 value: 2.0 = 9 combinations
+                },
+                medium: {
+                    period_range: [10, 40, 10],     // 4 values: 10, 20, 30, 40
+                    devup_range: [1.0, 3.0, 0.5],   // 5 values: 1.0, 1.5, 2.0, 2.5, 3.0
+                    devdn_range: [1.5, 2.5, 0.5]    // 3 values: 1.5, 2.0, 2.5 = 60 combinations
+                }
+            }
+        }
+    },
+    dti: {
+        name: 'DTI',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'dti_js',
+            params: { r: 14, s: 10, u: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dti_alloc',
+            freeFn: 'dti_free',
+            computeFn: 'dti_into',
+            params: { r: 14, s: 10, u: 5 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'dti_batch',
+            fastFn: 'dti_batch_into',
+            config: {
+                small: {
+                    r_range: [10, 20, 5],      // 3 values
+                    s_range: [8, 12, 2],       // 3 values
+                    u_range: [4, 6, 1]         // 3 values = 27 combinations
+                },
+                medium: {
+                    r_range: [10, 30, 5],      // 5 values
+                    s_range: [5, 15, 2],       // 6 values
+                    u_range: [3, 7, 1]         // 5 values = 150 combinations
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    dx: {
+        name: 'DX',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'dx_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dx_alloc',
+            freeFn: 'dx_free',
+            computeFn: 'dx_into',
+            params: { period: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'dx_batch',
+            fastFn: 'dx_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    roc: {
+        name: 'ROC',
+        // Safe API
+        safe: {
+            fn: 'roc_js',
+            params: { period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'roc_alloc',
+            freeFn: 'roc_free',
+            computeFn: 'roc_into',
+            params: { period: 10 }
+        },
+        // Batch API
+        batch: {
+            fn: 'roc_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]  // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]  // 5 values: 5, 10, 15, 20, 25
+                }
+            }
+        }
+    },
+    rvi: {
+        name: 'RVI (Relative Vigor Index)',
+        // Safe API
+        safe: {
+            fn: 'rvi_js',
+            params: { period: 10, ma_len: 14, matype: 1, devtype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rvi_alloc',
+            freeFn: 'rvi_free',
+            computeFn: 'rvi_into',
+            params: { period: 10, ma_len: 14, matype: 1, devtype: 0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rvi_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],    // 3 values: 10, 15, 20
+                    ma_len_range: [10, 14, 4],    // 2 values: 10, 14
+                    matype_range: [0, 1, 1],      // 2 values: 0, 1
+                    devtype_range: [0, 0, 0]      // 1 value: 0
+                    // Total: 3 * 2 * 2 * 1 = 12 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],    // 5 values: 10, 15, 20, 25, 30
+                    ma_len_range: [10, 20, 5],    // 3 values: 10, 15, 20
+                    matype_range: [0, 1, 1],      // 2 values: 0, 1
+                    devtype_range: [0, 2, 1]      // 3 values: 0, 1, 2
+                    // Total: 5 * 3 * 2 * 3 = 90 combinations
+                }
+            }
+        }
+    },
+    stddev: {
+        name: 'StdDev',
+        // Safe API
+        safe: {
+            fn: 'stddev_js',
+            params: { period: 5, nbdev: 1.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'stddev_alloc',
+            freeFn: 'stddev_free',
+            computeFn: 'stddev_into',
+            params: { period: 5, nbdev: 1.0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'stddev_batch',
+            fastFn: 'stddev_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5],      // 3 values: 5, 10, 15
+                    nbdev_range: [1.0, 2.0, 0.5]   // 3 values: 1.0, 1.5, 2.0
+                    // Total: 3 * 3 = 9 combinations
+                },
+                medium: {
+                    period_range: [5, 25, 5],      // 5 values: 5, 10, 15, 20, 25
+                    nbdev_range: [0.5, 2.5, 0.5]   // 5 values: 0.5, 1.0, 1.5, 2.0, 2.5
+                    // Total: 5 * 5 = 25 combinations
+                }
+            }
+        }
+    },
+    vwmacd: {
+        name: 'VWMACD (Volume Weighted MACD)',
+        // Safe API
+        safe: {
+            fn: 'vwmacd_js',
+            params: { 
+                fast_period: 12, 
+                slow_period: 26, 
+                signal_period: 9,
+                fast_ma_type: "sma",
+                slow_ma_type: "sma",
+                signal_ma_type: "ema"
+            },
+            inputs: ['close', 'volume']  // Requires both close and volume
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vwmacd_alloc',
+            freeFn: 'vwmacd_free',
+            computeFn: 'vwmacd_into',
+            params: { 
+                fast_period: 12, 
+                slow_period: 26, 
+                signal_period: 9,
+                fast_ma_type: "sma",
+                slow_ma_type: "sma",
+                signal_ma_type: "ema"
+            },
+            inputs: ['close', 'volume'],  // Requires both close and volume
+            outputCount: 3  // 3 outputs: macd, signal, histogram
+        },
+        // Batch API
+        batch: {
+            fn: 'vwmacd_batch',
+            config: {
+                small: {
+                    fast_range: [10, 14, 2],    // 3 values: 10, 12, 14
+                    slow_range: [24, 28, 2],    // 3 values: 24, 26, 28
+                    signal_range: [8, 10, 1],   // 3 values: 8, 9, 10
+                    fast_ma_type: "sma",
+                    slow_ma_type: "sma",
+                    signal_ma_type: "ema"
+                    // Total: 3 * 3 * 3 = 27 combinations
+                },
+                medium: {
+                    fast_range: [8, 16, 2],     // 5 values: 8, 10, 12, 14, 16
+                    slow_range: [20, 30, 2],    // 6 values: 20, 22, 24, 26, 28, 30
+                    signal_range: [6, 12, 2],   // 4 values: 6, 8, 10, 12
+                    fast_ma_type: "sma",
+                    slow_ma_type: "sma", 
+                    signal_ma_type: "ema"
+                    // Total: 5 * 6 * 4 = 120 combinations
+                }
+            },
+            inputs: ['close', 'volume']  // Batch also requires both inputs
         }
     }
 };
@@ -1734,50 +2311,86 @@ class WasmIndicatorBenchmark {
                     const ohlc = this.ohlcData[sizeName];
                     const inputPtrs = {};
                     
-                    // Allocate buffers for each input
-                    for (const input of indicatorConfig.fast.inputs) {
-                        inputPtrs[input] = this.wasm[allocFn](len);
-                    }
-                    outPtr = this.wasm[allocFn](len);
-                    
-                    // Copy data for each input
-                    for (const input of indicatorConfig.fast.inputs) {
-                        const view = new Float64Array(this.wasm.__wasm.memory.buffer, inputPtrs[input], len);
-                        if (input === 'prices') {
-                            view.set(ohlc.close);
-                        } else if (input === 'volumes') {
-                            view.set(ohlc.volume);
-                        } else if (ohlc[input]) {
-                            view.set(ohlc[input]);
-                        }
-                    }
-                    
-                    const result = this.benchmarkFunction(() => {
-                        // Build parameter array based on inputs
-                        const paramArray = [];
-                        for (const input of indicatorConfig.fast.inputs) {
-                            paramArray.push(inputPtrs[input]);
-                        }
-                        paramArray.push(outPtr);
-                        paramArray.push(len);
+                    // Special handling for VWMACD which has multiple inputs AND outputs
+                    if (indicatorConfig.name === 'VWMACD (Volume Weighted MACD)' && outputCount === 3) {
+                        // Allocate input buffers
+                        closePtr = this.wasm[allocFn](len);
+                        volumePtr = this.wasm[allocFn](len);
                         
-                        // Add other parameters
-                        for (const value of Object.values(params)) {
-                            paramArray.push(value);
-                        }
+                        // Allocate output buffers
+                        outPtr = this.wasm[allocFn](len);    // MACD
+                        outPtr2 = this.wasm[allocFn](len);   // Signal
+                        outPtr3 = this.wasm[allocFn](len);   // Histogram
                         
-                        this.wasm[computeFn].apply(this.wasm, paramArray);
-                    }, benchName, {
-                        dataSize: len,
-                        api: 'fast',
-                        indicator: indicatorKey
-                    });
+                        // Copy input data
+                        const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, closePtr, len);
+                        const volumeView = new Float64Array(this.wasm.__wasm.memory.buffer, volumePtr, len);
+                        closeView.set(ohlc.close);
+                        volumeView.set(ohlc.volume);
+                        
+                        const result = this.benchmarkFunction(() => {
+                            const paramArray = [closePtr, volumePtr, outPtr, outPtr2, outPtr3, len,
+                                params.fast_period, params.slow_period, params.signal_period,
+                                params.fast_ma_type, params.slow_ma_type, params.signal_ma_type];
+                            this.wasm[computeFn].apply(this.wasm, paramArray);
+                        }, benchName, {
+                            dataSize: len,
+                            api: 'fast',
+                            indicator: indicatorKey
+                        });
 
-                    this.results[benchName] = result;
-                    this.printResult(result);
-                    
-                    // Store pointers for cleanup in finally block
-                    Object.assign(this, { inputPtrs, outPtr });
+                        this.results[benchName] = result;
+                        this.printResult(result);
+                        
+                        // Store pointers for cleanup
+                        Object.assign(this, { closePtr, volumePtr, outPtr, outPtr2, outPtr3 });
+                    } else {
+                        // Standard custom inputs handling
+                        // Allocate buffers for each input
+                        for (const input of indicatorConfig.fast.inputs) {
+                            inputPtrs[input] = this.wasm[allocFn](len);
+                        }
+                        outPtr = this.wasm[allocFn](len);
+                        
+                        // Copy data for each input
+                        for (const input of indicatorConfig.fast.inputs) {
+                            const view = new Float64Array(this.wasm.__wasm.memory.buffer, inputPtrs[input], len);
+                            if (input === 'prices') {
+                                view.set(ohlc.close);
+                            } else if (input === 'volumes') {
+                                view.set(ohlc.volume);
+                            } else if (ohlc[input]) {
+                                view.set(ohlc[input]);
+                            }
+                        }
+                        
+                        const result = this.benchmarkFunction(() => {
+                            // Build parameter array based on inputs
+                            const paramArray = [];
+                            for (const input of indicatorConfig.fast.inputs) {
+                                paramArray.push(inputPtrs[input]);
+                            }
+                            paramArray.push(outPtr);
+                            paramArray.push(len);
+                            
+                            // Add other parameters
+                            for (const value of Object.values(params)) {
+                                paramArray.push(value);
+                            }
+                            
+                            this.wasm[computeFn].apply(this.wasm, paramArray);
+                        }, benchName, {
+                            dataSize: len,
+                            api: 'fast',
+                            indicator: indicatorKey
+                        });
+
+                        this.results[benchName] = result;
+                        this.printResult(result);
+                        
+                        // Store pointers for cleanup in finally block
+                        Object.assign(this, { inputPtrs, outPtr });
+                    }
                 }
                 // Handle multiple inputs if needed (legacy)
                 else if (indicatorConfig.fast.needsMultipleInputs) {
@@ -1787,7 +2400,13 @@ class WasmIndicatorBenchmark {
                     highPtr = this.wasm[allocFn](len);
                     lowPtr = this.wasm[allocFn](len);
                     closePtr = this.wasm[allocFn](len);
-                    outPtr = this.wasm[allocFn](len);
+                    
+                    // Special handling for TTM Trend which outputs u8
+                    if (indicatorConfig.fast.outputIsU8 && indicatorConfig.fast.allocU8Fn) {
+                        outPtr = this.wasm[indicatorConfig.fast.allocU8Fn](len);
+                    } else {
+                        outPtr = this.wasm[allocFn](len);
+                    }
                     
                     // Allocate volume buffer for ADOSC
                     if (indicatorConfig.name === 'ADOSC') {
@@ -1795,13 +2414,29 @@ class WasmIndicatorBenchmark {
                     }
                     
                     // Copy data
-                    const highView = new Float64Array(this.wasm.__wasm.memory.buffer, highPtr, len);
-                    const lowView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
-                    const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, closePtr, len);
-                    
-                    highView.set(ohlc.high.slice(0, len));
-                    lowView.set(ohlc.low.slice(0, len));
-                    closeView.set(ohlc.close.slice(0, len));
+                    // Special handling for TTM Trend which needs (source, close) instead of (high, low, close)
+                    if (indicatorConfig.name === 'TTM Trend') {
+                        // For TTM Trend, use HL2 as source
+                        const sourceView = new Float64Array(this.wasm.__wasm.memory.buffer, highPtr, len);
+                        const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
+                        
+                        // Calculate HL2 = (high + low) / 2
+                        const hl2 = new Float64Array(len);
+                        for (let i = 0; i < len; i++) {
+                            hl2[i] = (ohlc.high[i] + ohlc.low[i]) / 2;
+                        }
+                        
+                        sourceView.set(hl2);
+                        closeView.set(ohlc.close.slice(0, len));
+                    } else {
+                        const highView = new Float64Array(this.wasm.__wasm.memory.buffer, highPtr, len);
+                        const lowView = new Float64Array(this.wasm.__wasm.memory.buffer, lowPtr, len);
+                        const closeView = new Float64Array(this.wasm.__wasm.memory.buffer, closePtr, len);
+                        
+                        highView.set(ohlc.high.slice(0, len));
+                        lowView.set(ohlc.low.slice(0, len));
+                        closeView.set(ohlc.close.slice(0, len));
+                    }
                     
                     // Copy volume data for ADOSC
                     if (indicatorConfig.name === 'ADOSC') {
@@ -1884,6 +2519,36 @@ class WasmIndicatorBenchmark {
 
                     this.results[benchName] = result;
                     this.printResult(result);
+                } else if (outputCount === 4) {
+                    // Handle quadruple output indicators (correlation_cycle)
+                    inPtr = this.wasm[allocFn](len);
+                    outPtr = this.wasm[allocFn](len);   // real
+                    outPtr2 = this.wasm[allocFn](len);  // imag
+                    outPtr3 = this.wasm[allocFn](len);  // angle
+                    const outPtr4 = this.wasm[allocFn](len);  // state
+                    
+                    // Copy data once
+                    const inView = new Float64Array(this.wasm.__wasm.memory.buffer, inPtr, len);
+                    inView.set(data);
+                    
+                    const result = this.benchmarkFunction(() => {
+                        const paramArray = [inPtr, outPtr, outPtr2, outPtr3, outPtr4, len];
+                        // Add indicator parameters
+                        for (const value of Object.values(params)) {
+                            paramArray.push(value);
+                        }
+                        this.wasm[computeFn].apply(this.wasm, paramArray);
+                    }, benchName, {
+                        dataSize: len,
+                        api: 'fast',
+                        indicator: indicatorKey
+                    });
+
+                    this.results[benchName] = result;
+                    this.printResult(result);
+                    
+                    // Store outPtr4 for cleanup
+                    this.outPtr4 = outPtr4;
                 } else {
                     // Pre-allocate buffers outside of benchmark
                     inPtr = this.wasm[allocFn](len);
@@ -1923,18 +2588,47 @@ class WasmIndicatorBenchmark {
                         this.wasm[freeFn](this.outPtr, len);
                         delete this.outPtr;
                     }
+                } else if (this.closePtr && this.volumePtr) {
+                    // Clean up VWMACD pointers
+                    if (this.closePtr) this.wasm[freeFn](this.closePtr, len);
+                    if (this.volumePtr) this.wasm[freeFn](this.volumePtr, len);
+                    if (this.outPtr) this.wasm[freeFn](this.outPtr, len);
+                    if (this.outPtr2) this.wasm[freeFn](this.outPtr2, len);
+                    if (this.outPtr3) this.wasm[freeFn](this.outPtr3, len);
+                    delete this.closePtr;
+                    delete this.volumePtr;
+                    delete this.outPtr;
+                    delete this.outPtr2;
+                    delete this.outPtr3;
                 } else if (indicatorConfig.fast.needsMultipleInputs) {
                     if (highPtr) this.wasm[freeFn](highPtr, len);
                     if (lowPtr) this.wasm[freeFn](lowPtr, len);
                     if (closePtr) this.wasm[freeFn](closePtr, len);
                     if (volumePtr) this.wasm[freeFn](volumePtr, len);
-                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                    
+                    // Special handling for TTM Trend which outputs u8
+                    if (outPtr) {
+                        if (indicatorConfig.fast.outputIsU8 && indicatorConfig.fast.freeU8Fn) {
+                            this.wasm[indicatorConfig.fast.freeU8Fn](outPtr, len);
+                        } else {
+                            this.wasm[freeFn](outPtr, len);
+                        }
+                    }
                     if (outPtr2) this.wasm[freeFn](outPtr2, len);
                 } else if (outputCount === 3) {
                     if (inPtr) this.wasm[freeFn](inPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
                     if (outPtr2) this.wasm[freeFn](outPtr2, len);
                     if (outPtr3) this.wasm[freeFn](outPtr3, len);
+                } else if (outputCount === 4) {
+                    if (inPtr) this.wasm[freeFn](inPtr, len);
+                    if (outPtr) this.wasm[freeFn](outPtr, len);
+                    if (outPtr2) this.wasm[freeFn](outPtr2, len);
+                    if (outPtr3) this.wasm[freeFn](outPtr3, len);
+                    if (this.outPtr4) {
+                        this.wasm[freeFn](this.outPtr4, len);
+                        delete this.outPtr4;
+                    }
                 } else {
                     if (inPtr) this.wasm[freeFn](inPtr, len);
                     if (outPtr) this.wasm[freeFn](outPtr, len);
@@ -2000,6 +2694,13 @@ class WasmIndicatorBenchmark {
                     if (indicatorConfig.name === 'ADOSC') {
                         // ADOSC uses the new ergonomic batch API with config object
                         wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, ohlc.volume, batchConfig);
+                    } else if (indicatorConfig.name === 'TTM Trend') {
+                        // TTM Trend needs source (HL2) and close
+                        const hl2 = new Float64Array(ohlc.high.length);
+                        for (let i = 0; i < ohlc.high.length; i++) {
+                            hl2[i] = (ohlc.high[i] + ohlc.low[i]) / 2;
+                        }
+                        wasmFn.call(this.wasm, hl2, ohlc.close, batchConfig);
                     } else {
                         wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
                     }
@@ -2136,6 +2837,24 @@ class WasmIndicatorBenchmark {
                 return result;
             }
             
+            // Special case for TTM Trend which needs source (HL2) and close
+            if (indicatorConfig.name === 'TTM Trend') {
+                // Calculate HL2 = (high + low) / 2
+                const hl2 = new Float64Array(ohlc.high.length);
+                for (let i = 0; i < ohlc.high.length; i++) {
+                    hl2[i] = (ohlc.high[i] + ohlc.low[i]) / 2;
+                }
+                
+                const result = [hl2, ohlc.close];
+                
+                // Add parameters in order
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
             // Default case: high, low, close
             const result = [ohlc.high, ohlc.low, ohlc.close];
             
@@ -2194,6 +2913,10 @@ class WasmIndicatorBenchmark {
             // VWMA uses the new unified batch API with serde config
             const ohlc = this.ohlcData[sizeName];
             return [ohlc.close, ohlc.volume, { period_range: batchConfig.period_range }];
+        } else if (indicatorKey === 'vwmacd') {
+            // VWMACD uses the new unified batch API with serde config
+            const ohlc = this.ohlcData[sizeName];
+            return [ohlc.close, ohlc.volume, batchConfig];
         } else if (batchConfig.period_range) {
             // Most indicators with period ranges
             const period = batchConfig.period_range;
@@ -2250,6 +2973,27 @@ class WasmIndicatorBenchmark {
             // Special case for ADOSC: high_ptr, low_ptr, close_ptr, volume_ptr, out_ptr, len, short_period, long_period
             if (indicatorConfig.name === 'ADOSC') {
                 const result = [highPtr, lowPtr, closePtr, volumePtr, outPtr, len, params.short_period, params.long_period];
+                return result;
+            }
+            
+            // Special case for VWMACD: close_ptr, volume_ptr, macd_ptr, signal_ptr, hist_ptr, len, ...params
+            if (indicatorConfig.name === 'VWMACD (Volume Weighted MACD)') {
+                const result = [closePtr, volumePtr, outPtr, outPtr2, outPtr3, len];
+                
+                // Add indicator parameters in order
+                result.push(params.fast_period);
+                result.push(params.slow_period);
+                result.push(params.signal_period);
+                result.push(params.fast_ma_type);
+                result.push(params.slow_ma_type);
+                result.push(params.signal_ma_type);
+                
+                return result;
+            }
+            
+            // Special case for TTM Trend: source_ptr, close_ptr, out_ptr, len, period
+            if (indicatorConfig.name === 'TTM Trend') {
+                const result = [highPtr, lowPtr, outPtr, len, params.period];  // highPtr is source, lowPtr is close
                 return result;
             }
             

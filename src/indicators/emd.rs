@@ -1089,13 +1089,250 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_emd_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			EmdParams::default(),
+			// Minimum viable parameters
+			EmdParams {
+				period: Some(2),
+				delta: Some(0.1),
+				fraction: Some(0.05),
+			},
+			// Small period variations
+			EmdParams {
+				period: Some(5),
+				delta: Some(0.3),
+				fraction: Some(0.1),
+			},
+			EmdParams {
+				period: Some(10),
+				delta: Some(0.5),
+				fraction: Some(0.15),
+			},
+			// Medium periods
+			EmdParams {
+				period: Some(20),
+				delta: Some(0.4),
+				fraction: Some(0.1),
+			},
+			EmdParams {
+				period: Some(30),
+				delta: Some(0.6),
+				fraction: Some(0.2),
+			},
+			// Large periods
+			EmdParams {
+				period: Some(50),
+				delta: Some(0.7),
+				fraction: Some(0.25),
+			},
+			EmdParams {
+				period: Some(100),
+				delta: Some(0.8),
+				fraction: Some(0.3),
+			},
+			// Edge cases with extreme delta
+			EmdParams {
+				period: Some(15),
+				delta: Some(0.1),
+				fraction: Some(0.1),
+			},
+			EmdParams {
+				period: Some(15),
+				delta: Some(0.9),
+				fraction: Some(0.1),
+			},
+			// Edge cases with extreme fraction
+			EmdParams {
+				period: Some(25),
+				delta: Some(0.5),
+				fraction: Some(0.01),
+			},
+			EmdParams {
+				period: Some(25),
+				delta: Some(0.5),
+				fraction: Some(0.5),
+			},
+			// Additional combinations
+			EmdParams {
+				period: Some(40),
+				delta: Some(0.65),
+				fraction: Some(0.12),
+			},
+			EmdParams {
+				period: Some(7),
+				delta: Some(0.25),
+				fraction: Some(0.08),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = EmdInput::from_candles(&candles, params.clone());
+			let output = emd_with_kernel(&input, kernel)?;
+
+			// Check upperband array
+			for (i, &val) in output.upperband.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+			}
+
+			// Check middleband array
+			for (i, &val) in output.middleband.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+			}
+
+			// Check lowerband array
+			for (i, &val) in output.lowerband.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: period={}, delta={}, fraction={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.delta.unwrap_or(0.5),
+						params.fraction.unwrap_or(0.1),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_emd_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_emd_tests!(
 		check_emd_accuracy,
 		check_emd_empty_data,
 		check_emd_all_nans,
 		check_emd_invalid_period,
 		check_emd_not_enough_valid_data,
-		check_emd_default_candles
+		check_emd_default_candles,
+		check_emd_no_poison
 	);
 	#[cfg(test)]
 	mod batch_tests {
@@ -1214,7 +1451,191 @@ mod tests {
 			};
 		}
 
+		#[cfg(debug_assertions)]
+		fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+			skip_if_unsupported!(kernel, test);
+
+			let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+			let c = read_candles_from_csv(file)?;
+
+			// Test various parameter sweep configurations
+			let test_configs = vec![
+				// (period range, delta range, fraction range)
+				// Small periods with varying delta and fraction
+				(5, 15, 5, 0.1, 0.5, 0.2, 0.05, 0.15, 0.05),
+				// Medium periods
+				(10, 30, 10, 0.3, 0.7, 0.2, 0.1, 0.2, 0.05),
+				// Large periods
+				(20, 50, 15, 0.5, 0.8, 0.15, 0.15, 0.3, 0.075),
+				// Dense small range
+				(8, 12, 1, 0.4, 0.6, 0.1, 0.08, 0.12, 0.02),
+				// Single values (no sweep)
+				(20, 20, 0, 0.5, 0.5, 0.0, 0.1, 0.1, 0.0),
+				// Wide period range with fine delta/fraction
+				(5, 40, 5, 0.2, 0.8, 0.1, 0.05, 0.25, 0.05),
+				// Edge case: minimum periods with varying other params
+				(2, 6, 2, 0.1, 0.9, 0.4, 0.01, 0.5, 0.245),
+			];
+
+			for (cfg_idx, &(p_start, p_end, p_step, d_start, d_end, d_step, f_start, f_end, f_step)) in
+				test_configs.iter().enumerate()
+			{
+				let output = EmdBatchBuilder::new()
+					.kernel(kernel)
+					.period_range(p_start, p_end, p_step)
+					.delta_range(d_start, d_end, d_step)
+					.fraction_range(f_start, f_end, f_step)
+					.apply_candles(&c)?;
+
+				// Check upperband matrix
+				for (idx, &val) in output.upperband.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in upperband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in upperband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in upperband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+				}
+
+				// Check middleband matrix
+				for (idx, &val) in output.middleband.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in middleband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in middleband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in middleband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+				}
+
+				// Check lowerband matrix
+				for (idx, &val) in output.lowerband.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in lowerband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in lowerband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in lowerband \
+							 at row {} col {} (flat index {}) with params: period={}, delta={}, fraction={}",
+							test, cfg_idx, val, bits, row, col, idx,
+							combo.period.unwrap_or(20),
+							combo.delta.unwrap_or(0.5),
+							combo.fraction.unwrap_or(0.1)
+						);
+					}
+				}
+			}
+
+			Ok(())
+		}
+
+		#[cfg(not(debug_assertions))]
+		fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+			Ok(()) // No-op in release builds
+		}
+
 		gen_batch_tests!(check_batch_default_row);
 		gen_batch_tests!(check_batch_param_sweep);
+		gen_batch_tests!(check_batch_no_poison);
 	}
 }

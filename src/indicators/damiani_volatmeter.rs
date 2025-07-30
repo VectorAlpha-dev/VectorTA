@@ -1368,6 +1368,189 @@ mod tests {
 		assert_eq!(default_params.threshold, Some(1.4));
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_damiani_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			DamianiVolatmeterParams::default(),
+			// Minimum viable parameters
+			DamianiVolatmeterParams {
+				vis_atr: Some(2),
+				vis_std: Some(2),
+				sed_atr: Some(2),
+				sed_std: Some(2),
+				threshold: Some(1.4),
+			},
+			// Small periods with low threshold
+			DamianiVolatmeterParams {
+				vis_atr: Some(5),
+				vis_std: Some(10),
+				sed_atr: Some(10),
+				sed_std: Some(20),
+				threshold: Some(0.5),
+			},
+			// Medium periods with various thresholds
+			DamianiVolatmeterParams {
+				vis_atr: Some(13),
+				vis_std: Some(20),
+				sed_atr: Some(40),
+				sed_std: Some(100),
+				threshold: Some(1.0),
+			},
+			DamianiVolatmeterParams {
+				vis_atr: Some(20),
+				vis_std: Some(30),
+				sed_atr: Some(50),
+				sed_std: Some(120),
+				threshold: Some(2.0),
+			},
+			// Large periods
+			DamianiVolatmeterParams {
+				vis_atr: Some(50),
+				vis_std: Some(80),
+				sed_atr: Some(100),
+				sed_std: Some(200),
+				threshold: Some(1.4),
+			},
+			// Edge case: all periods equal
+			DamianiVolatmeterParams {
+				vis_atr: Some(15),
+				vis_std: Some(15),
+				sed_atr: Some(15),
+				sed_std: Some(15),
+				threshold: Some(1.5),
+			},
+			// High threshold
+			DamianiVolatmeterParams {
+				vis_atr: Some(10),
+				vis_std: Some(25),
+				sed_atr: Some(30),
+				sed_std: Some(75),
+				threshold: Some(3.0),
+			},
+			// Unbalanced periods
+			DamianiVolatmeterParams {
+				vis_atr: Some(3),
+				vis_std: Some(50),
+				sed_atr: Some(5),
+				sed_std: Some(150),
+				threshold: Some(1.2),
+			},
+			// Another edge case
+			DamianiVolatmeterParams {
+				vis_atr: Some(25),
+				vis_std: Some(25),
+				sed_atr: Some(80),
+				sed_std: Some(80),
+				threshold: Some(0.8),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DamianiVolatmeterInput::from_candles(&candles, "close", params.clone());
+			let output = damiani_volatmeter_with_kernel(&input, kernel)?;
+
+			// Check vol array
+			for (i, &val) in output.vol.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in vol array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in vol array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in vol array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+			}
+
+			// Check anti array
+			for (i, &val) in output.anti.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in anti array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in anti array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in anti array \
+						 with params: vis_atr={}, vis_std={}, sed_atr={}, sed_std={}, threshold={} (param set {})",
+						test_name, val, bits, i, 
+						params.vis_atr.unwrap(), params.vis_std.unwrap(), 
+						params.sed_atr.unwrap(), params.sed_std.unwrap(), 
+						params.threshold.unwrap(), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_damiani_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 	fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1405,6 +1588,150 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (vis_atr range, vis_std range, sed_atr range, sed_std range, threshold range)
+			// Small periods
+			(2, 10, 2, 2, 10, 2, 5, 15, 5, 10, 30, 10, 0.5, 2.0, 0.5),
+			// Medium periods
+			(10, 20, 5, 15, 35, 10, 30, 60, 15, 80, 120, 20, 1.0, 1.5, 0.25),
+			// Large periods  
+			(30, 60, 15, 50, 100, 25, 60, 120, 30, 150, 250, 50, 1.2, 1.8, 0.3),
+			// Dense small range
+			(5, 8, 1, 10, 15, 1, 15, 20, 1, 40, 50, 2, 1.4, 1.4, 0.0),
+			// Edge case: all equal
+			(10, 10, 0, 10, 10, 0, 10, 10, 0, 10, 10, 0, 1.0, 3.0, 1.0),
+			// Unbalanced ranges
+			(2, 5, 1, 20, 80, 20, 3, 8, 1, 100, 200, 50, 0.8, 2.5, 0.35),
+		];
+
+		for (cfg_idx, &(va_s, va_e, va_st, vs_s, vs_e, vs_st, sa_s, sa_e, sa_st, ss_s, ss_e, ss_st, th_s, th_e, th_st)) in 
+			test_configs.iter().enumerate() 
+		{
+			let output = DamianiVolatmeterBatchBuilder::new()
+				.kernel(kernel)
+				.vis_atr_range(va_s, va_e, va_st)
+				.vis_std_range(vs_s, vs_e, vs_st)
+				.sed_atr_range(sa_s, sa_e, sa_st)
+				.sed_std_range(ss_s, ss_e, ss_st)
+				.threshold_range(th_s, th_e, th_st)
+				.apply_candles(&c, "close")?;
+
+			// Check vol matrix
+			for (idx, &val) in output.vol.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in vol \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in vol \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in vol \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+			}
+
+			// Check anti matrix
+			for (idx, &val) in output.anti.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in anti \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in anti \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in anti \
+						 at row {} col {} (flat index {}) with params: vis_atr={}, vis_std={}, sed_atr={}, \
+						 sed_std={}, threshold={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.vis_atr.unwrap(), combo.vis_std.unwrap(),
+						combo.sed_atr.unwrap(), combo.sed_std.unwrap(),
+						combo.threshold.unwrap()
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_damiani_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1456,7 +1783,9 @@ mod tests {
 		check_damiani_very_small_dataset,
 		check_damiani_streaming,
 		check_damiani_input_with_default_candles,
-		check_damiani_params_with_defaults
+		check_damiani_params_with_defaults,
+		check_damiani_no_poison
 	);
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
