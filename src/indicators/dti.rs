@@ -36,6 +36,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -50,6 +59,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -64,6 +74,7 @@ pub struct DtiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct DtiParams {
 	pub r: Option<usize>,
 	pub s: Option<usize>,
@@ -362,6 +373,77 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
 }
 
 #[inline]
+pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result<(), DtiError> {
+	let (high, low) = match &input.data {
+		DtiData::Candles { candles } => {
+			let high = candles
+				.select_candle_field("high")
+				.map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
+			let low = candles
+				.select_candle_field("low")
+				.map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
+			(high, low)
+		}
+		DtiData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(DtiError::EmptyData);
+	}
+	let len = high.len();
+	if low.len() != len {
+		return Err(DtiError::EmptyData);
+	}
+	if dst.len() != len {
+		return Err(DtiError::InvalidPeriod { period: dst.len(), data_len: len });
+	}
+
+	let first_valid_idx = match (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(DtiError::AllValuesNaN),
+	};
+
+	let r = input.get_r();
+	let s = input.get_s();
+	let u = input.get_u();
+
+	for &period in &[r, s, u] {
+		if period == 0 || period > len {
+			return Err(DtiError::InvalidPeriod { period, data_len: len });
+		}
+		if (len - first_valid_idx) < period {
+			return Err(DtiError::NotEnoughValidData {
+				needed: period,
+				valid: len - first_valid_idx,
+			});
+		}
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => dti_scalar(high, low, r, s, u, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => dti_avx2(high, low, r, s, u, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => dti_avx512(high, low, r, s, u, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill NaN prefix
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[inline]
 pub fn dti_scalar(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
 	let len = high.len();
 	let alpha_r = 2.0 / (r as f64 + 1.0);
@@ -402,6 +484,15 @@ pub fn dti_scalar(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first
 			out[i] = 0.0;
 		}
 	}
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn dti_simd128(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
+	// DTI algorithm requires sequential processing due to EMA dependencies
+	// Each value depends on the previous, making SIMD parallelization ineffective
+	// Fall back to scalar implementation
+	dti_scalar(high, low, r, s, u, first_valid_idx, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1260,6 +1351,15 @@ fn dti_batch_inner(
 	};
 	std::mem::forget(buf_mu);
 	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	mem::forget(buf_guard);
+	
 	Ok(DtiBatchOutput {
 		values,
 		combos,
@@ -1579,6 +1679,110 @@ pub fn dti_batch_into(
 	}
 }
 
+#[inline(always)]
+pub fn dti_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &DtiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<DtiParams>, DtiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DtiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let len = high.len();
+	if low.len() != len {
+		return Err(DtiError::EmptyData);
+	}
+	
+	let first_valid = (0..len)
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(DtiError::AllValuesNaN)?;
+		
+	let max_p = combos
+		.iter()
+		.map(|c| c.r.unwrap().max(c.s.unwrap()).max(c.u.unwrap()))
+		.max()
+		.unwrap();
+		
+	if len - first_valid < max_p {
+		return Err(DtiError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first_valid,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = len;
+	
+	if out.len() != rows * cols {
+		return Err(DtiError::InvalidPeriod { 
+			period: out.len(), 
+			data_len: rows * cols 
+		});
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let prm = &combos[row];
+		match kern {
+			Kernel::Scalar => dti_row_scalar(
+				high,
+				low,
+				prm.r.unwrap(),
+				prm.s.unwrap(),
+				prm.u.unwrap(),
+				first_valid,
+				out_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => dti_row_avx2(
+				high,
+				low,
+				prm.r.unwrap(),
+				prm.s.unwrap(),
+				prm.u.unwrap(),
+				first_valid,
+				out_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => dti_row_avx512(
+				high,
+				low,
+				prm.r.unwrap(),
+				prm.s.unwrap(),
+				prm.u.unwrap(),
+				first_valid,
+				out_row,
+			),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1722,6 +1926,131 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_dti_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			DtiParams::default(), // r: 14, s: 10, u: 5
+			DtiParams {
+				r: Some(1),
+				s: Some(1),
+				u: Some(1),
+			}, // minimum values
+			DtiParams {
+				r: Some(5),
+				s: Some(5),
+				u: Some(5),
+			}, // small values
+			DtiParams {
+				r: Some(20),
+				s: Some(15),
+				u: Some(10),
+			}, // medium values
+			DtiParams {
+				r: Some(50),
+				s: Some(30),
+				u: Some(20),
+			}, // large values
+			DtiParams {
+				r: Some(100),
+				s: Some(50),
+				u: Some(25),
+			}, // very large values
+			DtiParams {
+				r: Some(14),
+				s: Some(5),
+				u: Some(20),
+			}, // asymmetric - u > r
+			DtiParams {
+				r: Some(30),
+				s: Some(10),
+				u: Some(5),
+			}, // asymmetric - r > s > u
+			DtiParams {
+				r: Some(10),
+				s: Some(20),
+				u: Some(15),
+			}, // asymmetric - s > u > r
+			DtiParams {
+				r: Some(2),
+				s: Some(10),
+				u: Some(5),
+			}, // small r, normal s and u
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DtiInput::from_candles(&candles, params.clone());
+			let output = dti_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_dti_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! generate_all_dti_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1760,7 +2089,8 @@ mod tests {
 		check_dti_period_exceeds_length,
 		check_dti_all_nan,
 		check_dti_empty_data,
-		check_dti_streaming
+		check_dti_streaming,
+		check_dti_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1786,6 +2116,111 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)
+			(1, 5, 1, 1, 5, 1, 1, 5, 1),           // Small ranges, all params
+			(5, 15, 5, 5, 15, 5, 5, 15, 5),       // Medium ranges, step 5
+			(10, 30, 10, 10, 20, 10, 5, 15, 5),   // Mixed ranges
+			(14, 14, 0, 10, 10, 0, 1, 10, 1),     // Static r,s, sweep u
+			(1, 20, 5, 10, 10, 0, 5, 5, 0),       // Sweep r, static s,u
+			(20, 50, 15, 15, 30, 15, 10, 20, 10), // Large ranges
+			(2, 6, 2, 8, 12, 2, 3, 9, 3),         // Different steps
+			(50, 100, 25, 30, 60, 30, 20, 40, 20), // Very large ranges
+			(14, 14, 0, 5, 20, 5, 5, 20, 5),      // Default r, sweep s,u
+			(5, 5, 0, 5, 5, 0, 1, 10, 1),         // Static r,s, sweep u only
+		];
+
+		for (cfg_idx, &(r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = DtiBatchBuilder::new()
+				.kernel(kernel)
+				.r_range(r_start, r_end, r_step)
+				.s_range(s_start, s_end, s_step)
+				.u_range(u_start, u_end, u_step)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1808,4 +2243,316 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dti")]
+#[pyo3(signature = (high, low, r, s, u, kernel=None))]
+pub fn dti_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	r: usize,
+	s: usize,
+	u: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DtiParams {
+		r: Some(r),
+		s: Some(s),
+		u: Some(u),
+	};
+	let input = DtiInput::from_slices(high_slice, low_slice, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| dti_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DtiStream")]
+pub struct DtiStreamPy {
+	stream: DtiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DtiStreamPy {
+	#[new]
+	fn new(r: usize, s: usize, u: usize) -> PyResult<Self> {
+		let params = DtiParams {
+			r: Some(r),
+			s: Some(s),
+			u: Some(u),
+		};
+		let stream = DtiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(DtiStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "dti_batch")]
+#[pyo3(signature = (high, low, r_range, s_range, u_range, kernel=None))]
+pub fn dti_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	r_range: (usize, usize, usize),
+	s_range: (usize, usize, usize),
+	u_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+
+	let sweep = DtiBatchRange {
+		r: r_range,
+		s: s_range,
+		u: u_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			dti_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"r_values",
+		combos
+			.iter()
+			.map(|p| p.r.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"s_values",
+		combos
+			.iter()
+			.map(|p| p.s.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"u_values",
+		combos
+			.iter()
+			.map(|p| p.u.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dti_js(high: &[f64], low: &[f64], r: usize, s: usize, u: usize) -> Result<Vec<f64>, JsValue> {
+	let params = DtiParams {
+		r: Some(r),
+		s: Some(s),
+		u: Some(u),
+	};
+	let input = DtiInput::from_slices(high, low, params);
+	
+	let mut output = vec![0.0; high.len()];
+	
+	dti_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dti_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	r: usize,
+	s: usize,
+	u: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let params = DtiParams {
+			r: Some(r),
+			s: Some(s),
+			u: Some(u),
+		};
+		let input = DtiInput::from_slices(high, low, params);
+		
+		// Check for aliasing with either input
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			dti_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			dti_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dti_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dti_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { 
+			let _ = Vec::from_raw_parts(ptr, len, len); 
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DtiBatchConfig {
+	pub r_range: (usize, usize, usize),
+	pub s_range: (usize, usize, usize),
+	pub u_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DtiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<DtiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = dti_batch)]
+pub fn dti_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DtiBatchConfig = 
+		serde_wasm_bindgen::from_value(config)
+			.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = DtiBatchRange {
+		r: config.r_range,
+		s: config.s_range,
+		u: config.u_range,
+	};
+	
+	let output = dti_batch_with_kernel(high, low, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = DtiBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn dti_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	r_start: usize,
+	r_end: usize,
+	r_step: usize,
+	s_start: usize,
+	s_end: usize,
+	s_step: usize,
+	u_start: usize,
+	u_end: usize,
+	u_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to dti_batch_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let sweep = DtiBatchRange {
+			r: (r_start, r_end, r_step),
+			s: (s_start, s_end, s_step),
+			u: (u_start, u_end, u_step),
+		};
+		
+		// Calculate number of combinations
+		let r_count = if r_step == 0 { 1 } else { ((r_end - r_start) / r_step) + 1 };
+		let s_count = if s_step == 0 { 1 } else { ((s_end - s_start) / s_step) + 1 };
+		let u_count = if u_step == 0 { 1 } else { ((u_end - u_start) / u_step) + 1 };
+		let rows = r_count * s_count * u_count;
+		let cols = len;
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		dti_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

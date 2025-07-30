@@ -18,14 +18,32 @@
 //!   with leading `NaN` until the first valid high/low pair is encountered.
 //! - **`Err(MedpriceError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 /// Source data for medprice indicator.
@@ -48,6 +66,7 @@ pub struct MedpriceOutput {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MedpriceParams;
 
 #[derive(Debug, Clone)]
@@ -174,7 +193,7 @@ pub fn medprice_with_kernel(input: &MedpriceInput, kernel: Kernel) -> Result<Med
 		None => return Err(MedpriceError::AllValuesNaN),
 	};
 
-	let mut out = vec![f64::NAN; high.len()];
+	let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -193,6 +212,51 @@ pub fn medprice_with_kernel(input: &MedpriceInput, kernel: Kernel) -> Result<Med
 	}
 
 	Ok(MedpriceOutput { values: out })
+}
+
+#[inline(always)]
+pub fn medprice_compute_into(high: &[f64], low: &[f64], kernel: Kernel, out: &mut [f64]) -> Result<(), MedpriceError> {
+	if high.is_empty() || low.is_empty() {
+		return Err(MedpriceError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	if out.len() != high.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: out.len(),
+		});
+	}
+
+	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(MedpriceError::AllValuesNaN),
+	};
+
+	// Initialize prefix with NaN
+	out[..first_valid_idx].fill(f64::NAN);
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first_valid_idx, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first_valid_idx, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first_valid_idx, out),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -359,12 +423,219 @@ fn medprice_batch_inner(
 
 	let rows = 1;
 	let cols = high.len();
-	let mut values = vec![f64::NAN; rows * cols];
-	unsafe {
-		medprice_row_scalar(high, low, first, &mut values);
-	}
+	
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods = vec![first];
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	medprice_batch_inner_into(high, low, chosen, _parallel, out)?;
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(MedpriceBatchOutput { values, rows, cols })
+}
+
+#[inline(always)]
+fn medprice_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	kern: Kernel,
+	_parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<MedpriceParams>, MedpriceError> {
+	// For medprice, we only have one "parameter set" since it has no parameters
+	let combos = vec![MedpriceParams::default()];
+	
+	if high.is_empty() || low.is_empty() {
+		return Err(MedpriceError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+
+	let first = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(MedpriceError::AllValuesNaN),
+	};
+
+	// Since we only have one row, we can use the kernel directly
+	unsafe {
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first, out),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(combos)
+}
+
+// =============================================================================
+// WASM helper functions
+// =============================================================================
+
+#[inline]
+pub fn medprice_into_slice(dst: &mut [f64], high: &[f64], low: &[f64], kern: Kernel) -> Result<(), MedpriceError> {
+	if high.is_empty() || low.is_empty() {
+		return Err(MedpriceError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	if dst.len() != high.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: dst.len(),
+		});
+	}
+
+	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(MedpriceError::AllValuesNaN),
+	};
+
+	// Initialize prefix with NaN
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
+}
+
+// =============================================================================
+// Python bindings
+// =============================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "medprice")]
+#[pyo3(signature = (high, low, kernel=None))]
+pub fn medprice_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let input = MedpriceInput::from_slices(high_slice, low_slice, MedpriceParams::default());
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| medprice_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MedpriceStream")]
+pub struct MedpriceStreamPy {
+	stream: MedpriceStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MedpriceStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		let stream = MedpriceStream::try_new().map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MedpriceStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "medprice_batch")]
+#[pyo3(signature = (high, low, dummy_range=None, kernel=None))]
+pub fn medprice_batch_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	dummy_range: Option<(usize, usize, usize)>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+
+	// Since medprice has no parameters, we just use a dummy range
+	let _range = dummy_range.unwrap_or((0, 0, 0));
+
+	// Always 1 row for medprice
+	let rows = 1;
+	let cols = high_slice.len();
+
+	// Pre-allocate output array for batch operations
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let _combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			medprice_batch_inner_into(high_slice, low_slice, kernel, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// For medprice, we don't have any parameters to return
+	dict.set_item("params", Vec::<u64>::new().into_pyarray(py))?;
+
+	Ok(dict)
 }
 
 #[cfg(test)]
@@ -576,4 +847,110 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// =============================================================================
+// WASM bindings
+// =============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn medprice_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let mut output = vec![0.0; high.len()];
+	
+	medprice_into_slice(&mut output, high, low, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn medprice_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn medprice_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn medprice_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to medprice_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+
+		// Check if any input pointer equals output pointer (aliasing)
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			medprice_into_slice(&mut temp, high, low, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			medprice_into_slice(out, high, low, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MedpriceBatchConfig {
+	pub dummy_range: (usize, usize, usize), // For API consistency
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MedpriceBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<MedpriceParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = medprice_batch)]
+pub fn medprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	// Since medprice has no parameters, we ignore config and just compute once
+	let _config: Option<MedpriceBatchConfig> = if config.is_object() {
+		serde_wasm_bindgen::from_value(config).ok()
+	} else {
+		None
+	};
+
+	let mut output = vec![0.0; high.len()];
+	medprice_into_slice(&mut output, high, low, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = MedpriceBatchJsOutput {
+		values: output,
+		combos: vec![MedpriceParams::default()], // Single empty params
+		rows: 1,
+		cols: high.len(),
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

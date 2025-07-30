@@ -20,7 +20,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,6 +32,22 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for TrixInput<'a> {
 	#[inline(always)]
@@ -201,28 +220,82 @@ pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput,
 
 #[inline(always)]
 unsafe fn trix_scalar(data: &[f64], period: usize, first: usize) -> Result<TrixOutput, TrixError> {
-	// 1) Build a log‐series of `data`; NaNs propagate automatically.
 	let len = data.len();
-	let mut log_data = Vec::with_capacity(len);
-	for &x in data.iter() {
-		log_data.push(if x.is_nan() { f64::NAN } else { x.ln() });
-	}
-
-	// 2) triple‐EMA on log_data:
-	let ema1 = compute_standard_ema(&log_data, period, first);
-	let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
-	let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
-
-	// 3) Build output array (NaN until (first + 3*(period−1) + 1)), then
-	//    out[i] = (ema3[i] − ema3[i−1]) * 10000.0.
-	let mut out = vec![f64::NAN; len];
 	let triple_ema_start = first + 3 * (period - 1);
-
-	for i in (triple_ema_start + 1)..len {
-		let prev = ema3[i - 1];
-		let curr = ema3[i];
-		if !prev.is_nan() && !curr.is_nan() {
-			out[i] = (curr - prev) * 10000.0;
+	
+	// Allocate output with NaN prefix
+	let mut out = alloc_with_nan_prefix(len, triple_ema_start + 1);
+	
+	// We need to compute triple EMA on log data
+	// For efficiency, we'll compute in stages, reusing buffers where possible
+	
+	// Stage 1: First EMA on log(data)
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let mut ema1_prev = f64::NAN;
+	
+	// Initialize first EMA with SMA
+	let mut sum = 0.0;
+	for i in first..(first + period) {
+		let val = data[i];
+		sum += if val.is_nan() { 0.0 } else { val.ln() };
+	}
+	ema1_prev = sum / (period as f64);
+	
+	// Stage 2: Second EMA - we need to store first EMA values
+	let mut ema1_buffer = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len - first);
+	ema1_buffer.push(ema1_prev);
+	
+	// Continue first EMA
+	for i in (first + period)..len {
+		let log_val = if data[i].is_nan() { f64::NAN } else { data[i].ln() };
+		if !log_val.is_nan() && !ema1_prev.is_nan() {
+			ema1_prev = alpha * log_val + (1.0 - alpha) * ema1_prev;
+		}
+		ema1_buffer.push(ema1_prev);
+	}
+	
+	// Stage 2: Second EMA on first EMA
+	let mut ema2_prev = f64::NAN;
+	if ema1_buffer.len() >= period {
+		sum = 0.0;
+		for i in 0..period {
+			sum += ema1_buffer[i];
+		}
+		ema2_prev = sum / (period as f64);
+	}
+	
+	// Stage 3: Third EMA - we need second EMA values
+	let mut ema2_buffer = AVec::<f64>::with_capacity(CACHELINE_ALIGN, ema1_buffer.len());
+	ema2_buffer.push(ema2_prev);
+	
+	for i in period..ema1_buffer.len() {
+		if !ema1_buffer[i].is_nan() && !ema2_prev.is_nan() {
+			ema2_prev = alpha * ema1_buffer[i] + (1.0 - alpha) * ema2_prev;
+		}
+		ema2_buffer.push(ema2_prev);
+	}
+	
+	// Stage 3: Third EMA on second EMA
+	let mut ema3_prev = f64::NAN;
+	if ema2_buffer.len() >= period {
+		sum = 0.0;
+		for i in 0..period {
+			sum += ema2_buffer[i];
+		}
+		ema3_prev = sum / (period as f64);
+	}
+	
+	// Now compute TRIX (rate of change of third EMA)
+	let mut ema3_curr;
+	for i in period..ema2_buffer.len() {
+		if !ema2_buffer[i].is_nan() && !ema3_prev.is_nan() {
+			ema3_curr = alpha * ema2_buffer[i] + (1.0 - alpha) * ema3_prev;
+			// Calculate TRIX value
+			let out_idx = first + 2 * (period - 1) + i + 1;
+			if out_idx < len && !ema3_prev.is_nan() && !ema3_curr.is_nan() {
+				out[out_idx] = (ema3_curr - ema3_prev) * 10000.0;
+			}
+			ema3_prev = ema3_curr;
 		}
 	}
 
@@ -257,24 +330,6 @@ unsafe fn trix_avx512_long(data: &[f64], period: usize, first: usize) -> Result<
 	trix_scalar(data, period, first)
 }
 
-#[inline]
-fn compute_standard_ema(data: &[f64], period: usize, first_valid_idx: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
-	let alpha = 2.0 / (period as f64 + 1.0);
-	let mut sum = 0.0;
-	for &val in &data[first_valid_idx..(first_valid_idx + period)] {
-		sum += val;
-	}
-	let initial_ema = sum / (period as f64);
-	out[first_valid_idx + period - 1] = initial_ema;
-	for i in (first_valid_idx + period)..data.len() {
-		let prev = out[i - 1];
-		if !prev.is_nan() && !data[i].is_nan() {
-			out[i] = alpha * data[i] + (1.0 - alpha) * prev;
-		}
-	}
-	out
-}
 
 #[derive(Debug, Clone)]
 pub struct TrixStream {
@@ -508,7 +563,23 @@ fn trix_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use make_uninit_matrix and init_matrix_prefixes like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + 3 * (c.period.unwrap() - 1) + 1)
+		.collect();
+	
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -540,6 +611,15 @@ fn trix_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert the uninitialized memory buffer to a Vec for the output
+	let values = unsafe {
+		let ptr = buf_guard.as_mut_ptr() as *mut f64;
+		let len = buf_guard.len();
+		core::mem::forget(buf_guard);
+		Vec::from_raw_parts(ptr, len, len)
+	};
+	
 	Ok(TrixBatchOutput {
 		values,
 		combos,
@@ -550,25 +630,78 @@ fn trix_batch_inner(
 
 #[inline(always)]
 unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	// 1) Build log‐series of data
 	let len = data.len();
-	let mut log_data = Vec::with_capacity(len);
-	for &x in data.iter() {
-		log_data.push(if x.is_nan() { f64::NAN } else { x.ln() });
-	}
-
-	// 2) triple‐EMA on the log series
-	let ema1 = compute_standard_ema(&log_data, period, first);
-	let ema2 = compute_standard_ema(&ema1, period, first + period - 1);
-	let ema3 = compute_standard_ema(&ema2, period, first + 2 * (period - 1));
-
-	// 3) Δ(ema3) * 10000.0
 	let triple_ema_start = first + 3 * (period - 1);
-	for i in (triple_ema_start + 1)..len {
-		let prev = ema3[i - 1];
-		let curr = ema3[i];
-		if !prev.is_nan() && !curr.is_nan() {
-			out[i] = (curr - prev) * 10000.0;
+	
+	// Compute triple EMA on log data in stages, minimizing allocations
+	let alpha = 2.0 / (period as f64 + 1.0);
+	
+	// Stage 1: First EMA on log(data)
+	let mut ema1_prev = f64::NAN;
+	
+	// Initialize first EMA with SMA of log values
+	let mut sum = 0.0;
+	for i in first..(first + period) {
+		let val = data[i];
+		sum += if val.is_nan() { 0.0 } else { val.ln() };
+	}
+	ema1_prev = sum / (period as f64);
+	
+	// We need to store first EMA values for second stage
+	let mut ema1_buffer = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len - first);
+	ema1_buffer.push(ema1_prev);
+	
+	// Continue first EMA
+	for i in (first + period)..len {
+		let log_val = if data[i].is_nan() { f64::NAN } else { data[i].ln() };
+		if !log_val.is_nan() && !ema1_prev.is_nan() {
+			ema1_prev = alpha * log_val + (1.0 - alpha) * ema1_prev;
+		}
+		ema1_buffer.push(ema1_prev);
+	}
+	
+	// Stage 2: Second EMA on first EMA
+	let mut ema2_prev = f64::NAN;
+	if ema1_buffer.len() >= period {
+		sum = 0.0;
+		for i in 0..period {
+			sum += ema1_buffer[i];
+		}
+		ema2_prev = sum / (period as f64);
+	}
+	
+	// We need second EMA values for third stage
+	let mut ema2_buffer = AVec::<f64>::with_capacity(CACHELINE_ALIGN, ema1_buffer.len());
+	ema2_buffer.push(ema2_prev);
+	
+	for i in period..ema1_buffer.len() {
+		if !ema1_buffer[i].is_nan() && !ema2_prev.is_nan() {
+			ema2_prev = alpha * ema1_buffer[i] + (1.0 - alpha) * ema2_prev;
+		}
+		ema2_buffer.push(ema2_prev);
+	}
+	
+	// Stage 3: Third EMA and TRIX calculation
+	let mut ema3_prev = f64::NAN;
+	if ema2_buffer.len() >= period {
+		sum = 0.0;
+		for i in 0..period {
+			sum += ema2_buffer[i];
+		}
+		ema3_prev = sum / (period as f64);
+	}
+	
+	// Compute TRIX (rate of change of third EMA)
+	let mut ema3_curr;
+	for i in period..ema2_buffer.len() {
+		if !ema2_buffer[i].is_nan() && !ema3_prev.is_nan() {
+			ema3_curr = alpha * ema2_buffer[i] + (1.0 - alpha) * ema3_prev;
+			// Calculate TRIX value
+			let out_idx = first + 2 * (period - 1) + i + 1;
+			if out_idx < len && !ema3_prev.is_nan() && !ema3_curr.is_nan() {
+				out[out_idx] = (ema3_curr - ema3_prev) * 10000.0;
+			}
+			ema3_prev = ema3_curr;
 		}
 	}
 }
@@ -599,6 +732,373 @@ unsafe fn trix_row_avx512_short(data: &[f64], first: usize, period: usize, out: 
 #[inline(always)]
 unsafe fn trix_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	trix_row_scalar(data, first, period, out)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trix")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn trix_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = TrixParams {
+		period: Some(period),
+	};
+	let trix_in = TrixInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| trix_with_kernel(&trix_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TrixStream")]
+pub struct TrixStreamPy {
+	stream: TrixStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TrixStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = TrixParams {
+			period: Some(period),
+		};
+		let stream = TrixStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(TrixStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "trix_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn trix_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = TrixBatchRange {
+		period: period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		trix_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict.into())
+}
+
+#[inline(always)]
+fn trix_batch_inner_into(
+	data: &[f64], 
+	sweep: &TrixBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64]
+) -> Result<Vec<TrixParams>, TrixError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(TrixError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TrixError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let needed = 3 * (max_p - 1) + 1;
+	if data.len() - first < needed {
+		return Err(TrixError::NotEnoughValidData {
+			needed,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => trix_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => trix_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => trix_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	Ok(combos)
+}
+
+/// WASM Helper: Write TRIX values directly into output slice - no allocations
+#[inline(always)]
+pub fn trix_into_slice(
+	dst: &mut [f64],
+	input: &TrixInput,
+	kern: Kernel,
+) -> Result<(), TrixError> {
+	// Extract data slice from TrixData enum
+	let data: &[f64] = match &input.data {
+		TrixData::Candles { candles, source } => source_type(candles, source),
+		TrixData::Slice(sl) => sl,
+	};
+	
+	if dst.len() != data.len() {
+		return Err(TrixError::InvalidPeriod { 
+			period: 0, 
+			data_len: data.len() 
+		});
+	}
+	
+	let period = input.params.period.unwrap_or(18);
+	
+	// Validate parameters
+	if period == 0 || period > data.len() {
+		return Err(TrixError::InvalidPeriod {
+			period,
+			data_len: data.len(),
+		});
+	}
+	
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(TrixError::AllValuesNaN)?;
+	
+	// Check if we have enough data
+	let needed = 3 * (period - 1) + 1;
+	if data.len() - first < needed {
+		return Err(TrixError::NotEnoughValidData {
+			needed,
+			valid: data.len() - first,
+		});
+	}
+	
+	// Compute TRIX directly into output
+	let output = match kern {
+		Kernel::Scalar => unsafe { trix_scalar(data, period, first)? },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => unsafe { trix_avx2(data, period, first)? },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => unsafe { trix_avx512(data, period, first)? },
+		_ => return Err(TrixError::InvalidPeriod { period: 0, data_len: 0 }),
+	};
+	
+	// Copy result into destination
+	dst.copy_from_slice(&output.values);
+	
+	Ok(())
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trix_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = TrixParams { period: Some(period) };
+	let input = TrixInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];
+	
+	trix_into_slice(&mut output, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trix_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trix_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trix_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = TrixParams { period: Some(period) };
+		let input = TrixInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {
+			// Aliasing detected - use temporary buffer
+			let mut temp = vec![0.0; len];
+			trix_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			trix_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TrixBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TrixBatchJsOutput {
+	pub values: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = trix_batch)]
+pub fn trix_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TrixBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = TrixBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = trix_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let periods: Vec<usize> = output.combos.iter()
+		.map(|p| p.period.unwrap())
+		.collect();
+	
+	let js_output = TrixBatchJsOutput {
+		values: output.values,
+		periods,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn trix_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = TrixBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		// Calculate output size
+		let combos = expand_grid(&sweep);
+		let num_combos = combos.len();
+		let total_size = num_combos * len;
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+		
+		// Use the existing batch function that writes directly to output
+		trix_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(num_combos)
+	}
 }
 
 #[cfg(test)]

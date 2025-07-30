@@ -19,7 +19,21 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +41,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for MeanAdInput<'a> {
@@ -203,38 +218,63 @@ pub fn mean_ad_with_kernel(input: &MeanAdInput, kernel: Kernel) -> Result<MeanAd
 
 #[inline]
 pub unsafe fn mean_ad_scalar(data: &[f64], period: usize, first: usize) -> Result<MeanAdOutput, MeanAdError> {
-	let mut out = vec![f64::NAN; data.len()];
-	let mut rolling_mean = vec![f64::NAN; data.len()];
+	let warmup_period = first + 2 * period - 2;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 	if first + period > data.len() {
 		return Ok(MeanAdOutput { values: out });
 	}
+	
+	// Use circular buffers for intermediate values
+	let mut mean_buffer = vec![0.0; period];
+	let mut deviation_buffer = vec![0.0; period];
+	let mut mean_idx = 0;
+	let mut dev_idx = 0;
+	
+	// Calculate initial rolling mean
 	let mut sum = 0.0;
 	for &v in &data[first..(first + period)] {
 		sum += v;
 	}
-	rolling_mean[first + period - 1] = sum / (period as f64);
-
-	for i in (first + period)..data.len() {
-		sum += data[i] - data[i - period];
-		rolling_mean[i] = sum / (period as f64);
+	let mut current_mean = sum / (period as f64);
+	
+	// Fill initial deviation buffer
+	for i in 0..period {
+		let deviation = (data[first + i] - current_mean).abs();
+		deviation_buffer[i] = deviation;
 	}
-
-	let mut abs_diff = vec![f64::NAN; data.len()];
-	for i in (first + period - 1)..data.len() {
-		if !rolling_mean[i].is_nan() {
-			abs_diff[i] = (data[i] - rolling_mean[i]).abs();
-		}
-	}
-
+	
+	// Calculate initial MAD
 	let mut mad_sum = 0.0;
-	for &v in &abs_diff[first + period - 1..first + period - 1 + period] {
-		mad_sum += v;
+	for &dev in &deviation_buffer {
+		mad_sum += dev;
 	}
-	out[first + 2 * period - 2] = mad_sum / (period as f64);
-
-	for i in (first + 2 * period - 1)..data.len() {
-		mad_sum += abs_diff[i] - abs_diff[i - period];
-		out[i] = mad_sum / (period as f64);
+	
+	if first + 2 * period - 2 < data.len() {
+		out[first + 2 * period - 2] = mad_sum / (period as f64);
+	}
+	
+	// Process remaining data
+	for i in (first + period)..data.len() {
+		// Update rolling mean
+		sum += data[i] - data[i - period];
+		current_mean = sum / (period as f64);
+		
+		// Calculate deviation for current point
+		let current_deviation = (data[i] - current_mean).abs();
+		
+		// Update MAD if we have enough data
+		if i >= first + 2 * period - 1 {
+			// Remove oldest deviation and add new one
+			mad_sum += current_deviation - deviation_buffer[dev_idx];
+			deviation_buffer[dev_idx] = current_deviation;
+			dev_idx = (dev_idx + 1) % period;
+			
+			out[i] = mad_sum / (period as f64);
+		} else if i >= first + period - 1 {
+			// Still warming up the deviation buffer
+			deviation_buffer[dev_idx] = current_deviation;
+			dev_idx = (dev_idx + 1) % period;
+		}
 	}
 
 	Ok(MeanAdOutput { values: out })
@@ -388,6 +428,64 @@ pub fn mean_ad_batch_par_slice(
 }
 
 #[inline(always)]
+fn mean_ad_batch_inner_into(
+	data: &[f64],
+	sweep: &MeanAdBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<MeanAdParams>, MeanAdError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(MeanAdError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MeanAdError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(MeanAdError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => mean_ad_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => mean_ad_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 fn mean_ad_batch_inner(
 	data: &[f64],
 	sweep: &MeanAdBatchRange,
@@ -408,7 +506,21 @@ fn mean_ad_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + 2 * c.period.unwrap() - 2)
+		.collect();
+	
+	// Allocate uninitialized matrix and initialize NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
+	let values_slice: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(values_ptr, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -424,7 +536,7 @@ fn mean_ad_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			values_slice
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -432,15 +544,25 @@ fn mean_ad_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec<f64>
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(MeanAdBatchOutput {
 		values,
 		combos,
@@ -451,37 +573,59 @@ fn mean_ad_batch_inner(
 
 #[inline(always)]
 pub unsafe fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	let mut rolling_mean = vec![f64::NAN; data.len()];
 	if first + period > data.len() {
 		return;
 	}
+	
+	// Use circular buffers for intermediate values
+	let mut deviation_buffer = vec![0.0; period];
+	let mut dev_idx = 0;
+	
+	// Calculate initial rolling mean
 	let mut sum = 0.0;
 	for &v in &data[first..(first + period)] {
 		sum += v;
 	}
-	rolling_mean[first + period - 1] = sum / (period as f64);
-
-	for i in (first + period)..data.len() {
-		sum += data[i] - data[i - period];
-		rolling_mean[i] = sum / (period as f64);
+	let mut current_mean = sum / (period as f64);
+	
+	// Fill initial deviation buffer
+	for i in 0..period {
+		let deviation = (data[first + i] - current_mean).abs();
+		deviation_buffer[i] = deviation;
 	}
-
-	let mut abs_diff = vec![f64::NAN; data.len()];
-	for i in (first + period - 1)..data.len() {
-		if !rolling_mean[i].is_nan() {
-			abs_diff[i] = (data[i] - rolling_mean[i]).abs();
-		}
-	}
-
+	
+	// Calculate initial MAD
 	let mut mad_sum = 0.0;
-	for &v in &abs_diff[first + period - 1..first + period - 1 + period] {
-		mad_sum += v;
+	for &dev in &deviation_buffer {
+		mad_sum += dev;
 	}
-	out[first + 2 * period - 2] = mad_sum / (period as f64);
-
-	for i in (first + 2 * period - 1)..data.len() {
-		mad_sum += abs_diff[i] - abs_diff[i - period];
-		out[i] = mad_sum / (period as f64);
+	
+	if first + 2 * period - 2 < data.len() {
+		out[first + 2 * period - 2] = mad_sum / (period as f64);
+	}
+	
+	// Process remaining data
+	for i in (first + period)..data.len() {
+		// Update rolling mean
+		sum += data[i] - data[i - period];
+		current_mean = sum / (period as f64);
+		
+		// Calculate deviation for current point
+		let current_deviation = (data[i] - current_mean).abs();
+		
+		// Update MAD if we have enough data
+		if i >= first + 2 * period - 1 {
+			// Remove oldest deviation and add new one
+			mad_sum += current_deviation - deviation_buffer[dev_idx];
+			deviation_buffer[dev_idx] = current_deviation;
+			dev_idx = (dev_idx + 1) % period;
+			
+			out[i] = mad_sum / (period as f64);
+		} else if i >= first + period - 1 {
+			// Still warming up the deviation buffer
+			deviation_buffer[dev_idx] = current_deviation;
+			dev_idx = (dev_idx + 1) % period;
+		}
 	}
 }
 
@@ -711,13 +855,27 @@ mod tests {
 		let input = MeanAdInput::from_candles(&candles, "close", MeanAdParams { period: Some(period) });
 		let batch_output = mean_ad_with_kernel(&input, kernel)?.values;
 		let mut stream = MeanAdStream::try_new(MeanAdParams { period: Some(period) })?;
-		let mut stream_values = Vec::with_capacity(candles.close.len());
-		for &price in &candles.close {
-			match stream.update(price) {
-				Some(mean_ad_val) => stream_values.push(mean_ad_val),
-				None => stream_values.push(f64::NAN),
-			}
+		
+		// Use uninitialized memory for stream values
+		let mut stream_uninit: Vec<MaybeUninit<f64>> = Vec::with_capacity(candles.close.len());
+		unsafe { stream_uninit.set_len(candles.close.len()); }
+		
+		for (i, &price) in candles.close.iter().enumerate() {
+			let val = match stream.update(price) {
+				Some(mean_ad_val) => mean_ad_val,
+				None => f64::NAN,
+			};
+			stream_uninit[i] = MaybeUninit::new(val);
 		}
+		
+		// SAFETY: All elements have been initialized
+		let stream_values = unsafe {
+			let ptr = stream_uninit.as_mut_ptr() as *mut f64;
+			let len = stream_uninit.len();
+			let cap = stream_uninit.capacity();
+			std::mem::forget(stream_uninit);
+			Vec::from_raw_parts(ptr, len, cap)
+		};
 		assert_eq!(batch_output.len(), stream_values.len());
 		for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
 			if b.is_nan() && s.is_nan() {
@@ -822,4 +980,378 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mean_ad")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn mean_ad_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = MeanAdParams { period: Some(period) };
+	let input = MeanAdInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| mean_ad_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mean_ad_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn mean_ad_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = MeanAdBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			mean_ad_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MeanAdStream")]
+pub struct MeanAdStreamPy {
+	stream: MeanAdStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MeanAdStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = MeanAdParams { period: Some(period) };
+		let stream = MeanAdStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MeanAdStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+// ============== WASM Bindings ==============
+
+/// Zero-copy helper for writing directly to output slice - no allocations
+pub fn mean_ad_into_slice(
+	dst: &mut [f64],
+	input: &MeanAdInput,
+	kern: Kernel,
+) -> Result<(), MeanAdError> {
+	let data = input.as_ref();
+	let period = match input.params.period {
+		Some(p) if p > 0 => p,
+		_ => return Err(MeanAdError::InvalidPeriod { 
+			period: input.params.period.unwrap_or(0), 
+			data_len: data.len() 
+		}),
+	};
+	
+	if data.is_empty() {
+		return Err(MeanAdError::EmptyData);
+	}
+	if period > data.len() {
+		return Err(MeanAdError::InvalidPeriod { 
+			period, 
+			data_len: data.len() 
+		});
+	}
+	if dst.len() != data.len() {
+		return Err(MeanAdError::NotEnoughValidData { 
+			needed: data.len(), 
+			valid: dst.len() 
+		});
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(MeanAdError::AllValuesNaN)?;
+	
+	if (data.len() - first) < period {
+		return Err(MeanAdError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	// Compute directly into dst - no intermediate allocation
+	unsafe {
+		let warmup_period = first + 2 * period - 2;
+		
+		// Initialize warmup with NaN
+		for i in 0..warmup_period.min(dst.len()) {
+			dst[i] = f64::NAN;
+		}
+		
+		if first + period > data.len() {
+			return Ok(());
+		}
+		
+		// Use circular buffers for intermediate values
+		let mut mean_buffer = vec![0.0; period];
+		let mut deviation_buffer = vec![0.0; period];
+		let mut mean_idx = 0;
+		let mut dev_idx = 0;
+		
+		// Calculate initial rolling mean
+		let mut sum = 0.0;
+		for &v in &data[first..(first + period)] {
+			sum += v;
+		}
+		
+		// Process data using the appropriate kernel
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				// Inline the scalar implementation to write directly to dst
+				let inv_period = 1.0 / period as f64;
+				
+				// Sliding mean calculation
+				for i in first..data.len() {
+					if i >= first + period {
+						sum -= mean_buffer[mean_idx];
+						sum += data[i];
+					}
+					let mean = sum * inv_period;
+					mean_buffer[mean_idx] = data[i];
+					mean_idx = (mean_idx + 1) % period;
+					
+					// Calculate deviation once we have enough rolling means
+					if i >= first + period - 1 {
+						let mut dev_sum = 0.0;
+						
+						// Second pass: calculate mean absolute deviation
+						if i >= first + 2 * period - 2 {
+							for j in 0..period {
+								let dev_idx_j = (dev_idx + j) % period;
+								dev_sum += deviation_buffer[dev_idx_j];
+							}
+							dst[i] = dev_sum * inv_period;
+						}
+						
+						// Update deviation buffer
+						let idx = (i + 1).saturating_sub(period);
+						let deviation = (data[idx] - mean).abs();
+						deviation_buffer[dev_idx] = deviation;
+						dev_idx = (dev_idx + 1) % period;
+					}
+				}
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				// AVX kernels are stubs, use scalar
+				return mean_ad_into_slice(dst, input, Kernel::Scalar);
+			}
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mean_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = MeanAdParams {
+		period: Some(period),
+	};
+	let input = MeanAdInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()]; // Single allocation
+	mean_ad_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mean_ad_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to mean_ad_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = MeanAdParams {
+			period: Some(period),
+		};
+		let input = MeanAdInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			mean_ad_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			mean_ad_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mean_ad_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mean_ad_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { 
+			let _ = Vec::from_raw_parts(ptr, len, len); 
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MeanAdBatchConfig {
+	pub period_range: (usize, usize, usize), // (start, end, step)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MeanAdBatchJsOutput {
+	pub values: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = mean_ad_batch)]
+pub fn mean_ad_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: MeanAdBatchConfig = 
+		serde_wasm_bindgen::from_value(config)
+			.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = MeanAdBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = mean_ad_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = MeanAdBatchJsOutput {
+		values: output.values,
+		periods: output.combos.iter()
+			.map(|p| p.period.unwrap())
+			.collect(),
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mean_ad_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to mean_ad_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = MeanAdBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		if out_ptr as usize % 8 != 0 {
+			return Err(JsValue::from_str("Output pointer must be 8-byte aligned"));
+		}
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		// Detect kernel
+		let kernel = detect_best_batch_kernel();
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		
+		// Compute batch directly into output
+		mean_ad_batch_inner_into(data, &sweep, simd, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

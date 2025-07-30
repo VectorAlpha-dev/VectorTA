@@ -18,9 +18,27 @@
 //! - `Ok(MacdOutput)` on success, containing MACD, signal, and histogram vectors
 //! - `Err(MacdError)` otherwise
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -43,6 +61,7 @@ pub struct MacdOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MacdParams {
 	pub fast_period: Option<usize>,
 	pub slow_period: Option<usize>,
@@ -261,16 +280,20 @@ pub unsafe fn macd_scalar(
 	let fast_ma = ma(ma_type, MaData::Slice(data), fast).map_err(|_| MacdError::AllValuesNaN)?;
 	let slow_ma = ma(ma_type, MaData::Slice(data), slow).map_err(|_| MacdError::AllValuesNaN)?;
 
-	let mut macd = vec![f64::NAN; len];
-	for i in first..len {
+	// MACD warmup is when we have enough data for the slow MA
+	let warmup = first + slow - 1;
+	let mut macd = alloc_with_nan_prefix(len, warmup);
+	for i in warmup..len {
 		if fast_ma[i].is_nan() || slow_ma[i].is_nan() {
 			continue;
 		}
 		macd[i] = fast_ma[i] - slow_ma[i];
 	}
 	let signal_ma = ma(ma_type, MaData::Slice(&macd), signal).map_err(|_| MacdError::AllValuesNaN)?;
-	let mut signal_vec = vec![f64::NAN; len];
-	let mut hist = vec![f64::NAN; len];
+	// Signal warmup is MACD warmup + signal period - 1
+	let signal_warmup = warmup + signal - 1;
+	let mut signal_vec = alloc_with_nan_prefix(len, signal_warmup);
+	let mut hist = alloc_with_nan_prefix(len, signal_warmup);
 	for i in first..len {
 		if macd[i].is_nan() || signal_ma[i].is_nan() {
 			continue;
@@ -533,21 +556,58 @@ pub fn macd_batch_par_slice(data: &[f64], sweep: &MacdBatchRange, simd: Kernel) 
 	let combos = expand_grid(sweep);
 	let rows = combos.len();
 	let cols = data.len();
+	
+	if cols == 0 {
+		return Err(MacdError::AllValuesNaN);
+	}
+
+	// Use uninitialized memory for optimal performance
+	let mut macd_buf = make_uninit_matrix(rows, cols);
+	let mut signal_buf = make_uninit_matrix(rows, cols);
+	let mut hist_buf = make_uninit_matrix(rows, cols);
+
+	// Calculate warmup periods for each combination
 	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|p| {
+			let slow = p.slow_period.unwrap_or(26);
+			let signal = p.signal_period.unwrap_or(9);
+			// Signal warmup is MACD warmup + signal period - 1
+			first + slow + signal - 2
+		})
+		.collect();
 
-	// Storage for results
-	let mut macd = Vec::with_capacity(rows * cols);
-	let mut signal = Vec::with_capacity(rows * cols);
-	let mut hist = Vec::with_capacity(rows * cols);
+	// Initialize NaN prefixes for warmup periods
+	init_matrix_prefixes(&mut macd_buf, cols, &warmup_periods);
+	init_matrix_prefixes(&mut signal_buf, cols, &warmup_periods);
+	init_matrix_prefixes(&mut hist_buf, cols, &warmup_periods);
 
-	for p in &combos {
-		// Handle Option<usize> (you may want to provide real defaults elsewhere)
+	// Convert to mutable slices for computation
+	let mut macd_guard = core::mem::ManuallyDrop::new(macd_buf);
+	let mut signal_guard = core::mem::ManuallyDrop::new(signal_buf);
+	let mut hist_guard = core::mem::ManuallyDrop::new(hist_buf);
+	
+	let macd_out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len())
+	};
+	let signal_out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
+	};
+	let hist_out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
+	};
+
+	// Process each parameter combination
+	for (idx, p) in combos.iter().enumerate() {
 		let fast = p.fast_period.unwrap_or(12);
 		let slow = p.slow_period.unwrap_or(26);
 		let sig = p.signal_period.unwrap_or(9);
 		let ma_type = p.ma_type.clone().unwrap_or_else(|| "ema".to_string());
-
-		// You may want to check validity here (fast > 0, slow > 0, etc)
+		
+		let row_start = idx * cols;
+		let row_end = row_start + cols;
+		
 		let out = match unsafe {
 			match simd {
 				Kernel::Scalar => macd_scalar(data, fast, slow, sig, &ma_type, first),
@@ -558,17 +618,39 @@ pub fn macd_batch_par_slice(data: &[f64], sweep: &MacdBatchRange, simd: Kernel) 
 				_ => unreachable!(),
 			}
 		} {
-			Ok(out) => out,
-			Err(_) => MacdOutput {
-				macd: vec![f64::NAN; cols],
-				signal: vec![f64::NAN; cols],
-				hist: vec![f64::NAN; cols],
-			},
+			Ok(out) => {
+				macd_out[row_start..row_end].copy_from_slice(&out.macd);
+				signal_out[row_start..row_end].copy_from_slice(&out.signal);
+				hist_out[row_start..row_end].copy_from_slice(&out.hist);
+			}
+			Err(_) => {
+				// Already filled with NaN by init_matrix_prefixes
+			}
 		};
-		macd.extend(out.macd);
-		signal.extend(out.signal);
-		hist.extend(out.hist);
 	}
+
+	// Convert back to Vec for output
+	let macd = unsafe {
+		Vec::from_raw_parts(
+			macd_guard.as_mut_ptr() as *mut f64,
+			macd_guard.len(),
+			macd_guard.capacity(),
+		)
+	};
+	let signal = unsafe {
+		Vec::from_raw_parts(
+			signal_guard.as_mut_ptr() as *mut f64,
+			signal_guard.len(),
+			signal_guard.capacity(),
+		)
+	};
+	let hist = unsafe {
+		Vec::from_raw_parts(
+			hist_guard.as_mut_ptr() as *mut f64,
+			hist_guard.len(),
+			hist_guard.capacity(),
+		)
+	};
 
 	Ok(MacdBatchOutput {
 		macd,
@@ -578,6 +660,485 @@ pub fn macd_batch_par_slice(data: &[f64], sweep: &MacdBatchRange, simd: Kernel) 
 		rows,
 		cols,
 	})
+}
+
+#[cfg(any(feature = "python", feature = "wasm"))]
+pub fn macd_batch_inner_into(
+	data: &[f64],
+	sweep: &MacdBatchRange,
+	simd: Kernel,
+	_fill_invalid: bool,  // Not needed since we pre-fill with NaN
+	macd_out: &mut [f64],
+	signal_out: &mut [f64],
+	hist_out: &mut [f64],
+) -> Result<Vec<MacdParams>, MacdError> {
+	let combos = expand_grid(sweep);
+	let rows = combos.len();
+	let cols = data.len();
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	
+	// Ensure output buffers are correct size
+	if macd_out.len() != rows * cols || signal_out.len() != rows * cols || hist_out.len() != rows * cols {
+		return Err(MacdError::InvalidPeriod {
+			fast: 0,
+			slow: 0,
+			signal: 0,
+			data_len: data.len(),
+		});
+	}
+	
+	// Process each parameter combination
+	for (idx, p) in combos.iter().enumerate() {
+		let fast = p.fast_period.unwrap_or(12);
+		let slow = p.slow_period.unwrap_or(26);
+		let sig = p.signal_period.unwrap_or(9);
+		let ma_type = p.ma_type.clone().unwrap_or_else(|| "ema".to_string());
+		
+		let row_start = idx * cols;
+		let row_end = row_start + cols;
+		
+		match unsafe {
+			match simd {
+				Kernel::Scalar => macd_scalar(data, fast, slow, sig, &ma_type, first),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 => macd_avx2(data, fast, slow, sig, &ma_type, first),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 => macd_avx512(data, fast, slow, sig, &ma_type, first),
+				_ => unreachable!(),
+			}
+		} {
+			Ok(out) => {
+				macd_out[row_start..row_end].copy_from_slice(&out.macd);
+				signal_out[row_start..row_end].copy_from_slice(&out.signal);
+				hist_out[row_start..row_end].copy_from_slice(&out.hist);
+			}
+			Err(_) => {
+				// Output buffers should already be pre-filled with NaN by the caller
+				// for the appropriate warmup periods, so we don't need to do anything here
+			}
+		};
+	}
+	
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "macd")]
+#[pyo3(signature = (data, fast_period, slow_period, signal_period, ma_type, kernel=None))]
+pub fn macd_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = MacdParams {
+		fast_period: Some(fast_period),
+		slow_period: Some(slow_period),
+		signal_period: Some(signal_period),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = MacdInput::from_slice(slice_in, params);
+
+	let (macd_vec, signal_vec, hist_vec) = py
+		.allow_threads(|| {
+			macd_with_kernel(&input, kern)
+				.map(|o| (o.macd, o.signal, o.hist))
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		macd_vec.into_pyarray(py),
+		signal_vec.into_pyarray(py),
+		hist_vec.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MacdStream")]
+pub struct MacdStreamPy {
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	ma_type: String,
+	data_buffer: Vec<f64>,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MacdStreamPy {
+	#[new]
+	fn new(fast_period: usize, slow_period: usize, signal_period: usize, ma_type: &str) -> PyResult<Self> {
+		Ok(MacdStreamPy {
+			fast_period,
+			slow_period,
+			signal_period,
+			ma_type: ma_type.to_string(),
+			data_buffer: Vec::new(),
+		})
+	}
+
+	fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+		self.data_buffer.push(value);
+		
+		// Need at least slow_period + signal_period - 1 values
+		let min_needed = self.slow_period + self.signal_period - 1;
+		if self.data_buffer.len() < min_needed {
+			return None;
+		}
+		
+		// Calculate MACD on the buffer
+		let params = MacdParams {
+			fast_period: Some(self.fast_period),
+			slow_period: Some(self.slow_period),
+			signal_period: Some(self.signal_period),
+			ma_type: Some(self.ma_type.clone()),
+		};
+		let input = MacdInput::from_slice(&self.data_buffer, params);
+		
+		match macd(&input) {
+			Ok(output) => {
+				let last_idx = output.macd.len() - 1;
+				Some((output.macd[last_idx], output.signal[last_idx], output.hist[last_idx]))
+			}
+			Err(_) => None,
+		}
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "macd_batch")]
+#[pyo3(signature = (data, fast_period_range, slow_period_range, signal_period_range, ma_type, kernel=None))]
+pub fn macd_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	fast_period_range: (usize, usize, usize),
+	slow_period_range: (usize, usize, usize),
+	signal_period_range: (usize, usize, usize),
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = MacdBatchRange {
+		fast_period: fast_period_range,
+		slow_period: slow_period_range,
+		signal_period: signal_period_range,
+		ma_type: (ma_type.to_string(), ma_type.to_string(), String::new()),
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Pre-allocate output arrays
+	let macd_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let hist_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	
+	let macd_slice = unsafe { macd_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+	let hist_slice = unsafe { hist_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			macd_batch_inner_into(slice_in, &sweep, simd, true, macd_slice, signal_slice, hist_slice)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("macd", macd_arr.reshape((rows, cols))?)?;
+	dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
+	dict.set_item("hist", hist_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"fast_periods",
+		combos.iter().map(|p| p.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"slow_periods",
+		combos.iter().map(|p| p.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"signal_periods",
+		combos.iter().map(|p| p.signal_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+// =============================================================================
+// WASM BINDINGS
+// =============================================================================
+
+#[cfg(feature = "wasm")]
+/// Write MACD directly to output slices - no allocations
+pub fn macd_into_slices(
+	macd_dst: &mut [f64],
+	signal_dst: &mut [f64], 
+	hist_dst: &mut [f64],
+	input: &MacdInput,
+	kern: Kernel,
+) -> Result<(), MacdError> {
+	// Get data from input
+	let data: &[f64] = match &input.data {
+		MacdData::Candles { candles, source } => source_type(candles, source),
+		MacdData::Slice(sl) => sl,
+	};
+	
+	let len = data.len();
+	
+	// Validate output slice lengths
+	if macd_dst.len() != len || signal_dst.len() != len || hist_dst.len() != len {
+		return Err(MacdError::InvalidPeriod {
+			fast: 0,
+			slow: 0, 
+			signal: 0,
+			data_len: len,
+		});
+	}
+	
+	// Compute MACD values
+	let result = macd_with_kernel(input, kern)?;
+	
+	// Copy results to output slices
+	macd_dst.copy_from_slice(&result.macd);
+	signal_dst.copy_from_slice(&result.signal);
+	hist_dst.copy_from_slice(&result.hist);
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[derive(Serialize, Deserialize)]
+pub struct MacdResult {
+	values: Vec<f64>, // [macd..., signal..., hist...]
+	rows: usize,      // 3 for MACD
+	cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl MacdResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+	
+	#[wasm_bindgen(getter)]
+	pub fn rows(&self) -> usize {
+		self.rows
+	}
+	
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn macd_js(
+	data: &[f64],
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	ma_type: &str,
+) -> Result<MacdResult, JsValue> {
+	let params = MacdParams {
+		fast_period: Some(fast_period),
+		slow_period: Some(slow_period),
+		signal_period: Some(signal_period),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = MacdInput::from_slice(data, params);
+	
+	// Single allocation for all outputs
+	let mut values = vec![0.0; data.len() * 3];
+	let (macd_slice, rest) = values.split_at_mut(data.len());
+	let (signal_slice, hist_slice) = rest.split_at_mut(data.len());
+	
+	macd_into_slices(macd_slice, signal_slice, hist_slice, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(MacdResult {
+		values,
+		rows: 3,
+		cols: data.len(),
+	})
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn macd_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn macd_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn macd_into(
+	in_ptr: *const f64,
+	macd_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	hist_ptr: *mut f64,
+	len: usize,
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	ma_type: &str,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || macd_ptr.is_null() || signal_ptr.is_null() || hist_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = MacdParams {
+			fast_period: Some(fast_period),
+			slow_period: Some(slow_period),
+			signal_period: Some(signal_period),
+			ma_type: Some(ma_type.to_string()),
+		};
+		let input = MacdInput::from_slice(data, params);
+		
+		// Check for aliasing with ALL output pointers
+		let needs_temp = in_ptr == macd_ptr as *const f64 || 
+						 in_ptr == signal_ptr as *const f64 || 
+						 in_ptr == hist_ptr as *const f64;
+		
+		if needs_temp {
+			// Use temporary buffers for all outputs
+			let mut temp_macd = vec![0.0; len];
+			let mut temp_signal = vec![0.0; len];
+			let mut temp_hist = vec![0.0; len];
+			
+			macd_into_slices(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy results to output pointers
+			let macd_out = std::slice::from_raw_parts_mut(macd_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
+			
+			macd_out.copy_from_slice(&temp_macd);
+			signal_out.copy_from_slice(&temp_signal);
+			hist_out.copy_from_slice(&temp_hist);
+		} else {
+			// Direct write to output slices
+			let macd_out = std::slice::from_raw_parts_mut(macd_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
+			
+			macd_into_slices(macd_out, signal_out, hist_out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+// Batch processing structures
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MacdBatchConfig {
+	pub fast_period_range: (usize, usize, usize),
+	pub slow_period_range: (usize, usize, usize),
+	pub signal_period_range: (usize, usize, usize),
+	pub ma_type: String,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MacdBatchJsResult {
+	pub macd: Vec<f64>,
+	pub signal: Vec<f64>,
+	pub hist: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+	pub fast_periods: Vec<usize>,
+	pub slow_periods: Vec<usize>,
+	pub signal_periods: Vec<usize>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = macd_batch)]
+pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: MacdBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = MacdBatchRange {
+		fast_period: config.fast_period_range,
+		slow_period: config.slow_period_range,
+		signal_period: config.signal_period_range,
+		ma_type: (config.ma_type.clone(), config.ma_type.clone(), String::new()),
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Allocate output arrays
+	let mut macd = vec![0.0; rows * cols];
+	let mut signal = vec![0.0; rows * cols];
+	let mut hist = vec![0.0; rows * cols];
+	
+	// Use the shared batch function
+	let kernel = detect_best_batch_kernel();
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => Kernel::Scalar,
+	};
+	
+	let result_combos = macd_batch_inner_into(data, &sweep, simd, true, &mut macd, &mut signal, &mut hist)
+		.map_err(|e| JsValue::from_str(&format!("Batch computation error: {}", e)))?;
+	
+	let js_output = MacdBatchJsResult {
+		macd,
+		signal,
+		hist,
+		rows,
+		cols,
+		fast_periods: result_combos.iter().map(|p| p.fast_period.unwrap()).collect(),
+		slow_periods: result_combos.iter().map(|p| p.slow_period.unwrap()).collect(),
+		signal_periods: result_combos.iter().map(|p| p.signal_period.unwrap()).collect(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

@@ -21,14 +21,33 @@
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum KaufmanstopData<'a> {
@@ -42,6 +61,7 @@ pub struct KaufmanstopOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct KaufmanstopParams {
 	pub period: Option<usize>,
 	pub mult: Option<f64>,
@@ -100,6 +120,20 @@ impl<'a> KaufmanstopInput<'a> {
 	#[inline]
 	pub fn get_ma_type(&self) -> &str {
 		self.params.ma_type.as_deref().unwrap_or("sma")
+	}
+}
+
+impl<'a> AsRef<[f64]> for KaufmanstopInput<'a> {
+	#[inline(always)]
+	fn as_ref(&self) -> &[f64] {
+		// Since kaufmanstop uses two data series (high and low), 
+		// we'll return the high series as the primary reference
+		match &self.data {
+			KaufmanstopData::Candles { candles } => {
+				candles.select_candle_field("high").unwrap_or(&[])
+			}
+			KaufmanstopData::Slices { high, .. } => high,
+		}
 	}
 }
 
@@ -201,6 +235,13 @@ pub enum KaufmanstopError {
 	AllValuesNaN,
 }
 
+#[cfg(feature = "wasm")]
+impl From<KaufmanstopError> for JsValue {
+	fn from(err: KaufmanstopError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 #[inline]
 pub fn kaufmanstop(input: &KaufmanstopInput) -> Result<KaufmanstopOutput, KaufmanstopError> {
 	kaufmanstop_with_kernel(input, Kernel::Auto)
@@ -257,8 +298,8 @@ pub fn kaufmanstop_with_kernel(
 		});
 	}
 
-	let mut hl_diff = AVec::<f64>::with_capacity(CACHELINE_ALIGN, high.len());
-	hl_diff.resize(high.len(), f64::NAN);
+	// Use helper function to allocate with NaN prefix
+	let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
 	for i in first_valid_idx..high.len() {
 		if high[i].is_nan() || low[i].is_nan() {
 			hl_diff[i] = f64::NAN;
@@ -270,7 +311,8 @@ pub fn kaufmanstop_with_kernel(
 	let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
 	let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
 
-	let mut out = vec![f64::NAN; high.len()];
+	// Use alloc_with_nan_prefix instead of vec![f64::NAN; ...]
+	let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -470,6 +512,8 @@ impl KaufmanstopStream {
 pub struct KaufmanstopBatchRange {
 	pub period: (usize, usize, usize),
 	pub mult: (f64, f64, f64),
+	// String parameters use (start, end, step) tuple for consistency,
+	// but step is always 0.0 and ignored since strings don't have numeric steps
 	pub direction: (String, String, f64),
 	pub ma_type: (String, String, f64),
 }
@@ -596,7 +640,9 @@ fn expand_grid(r: &KaufmanstopBatchRange) -> Vec<KaufmanstopParams> {
 		}
 		v
 	}
-	fn axis_string((start, end, step): (String, String, f64)) -> Vec<String> {
+	fn axis_string((start, end, _step): (String, String, f64)) -> Vec<String> {
+		// For string parameters, we only support single values or start/end pairs
+		// The step parameter is ignored for strings
 		if start == end {
 			return vec![start.clone()];
 		}
@@ -691,8 +737,8 @@ fn kaufmanstop_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = high.len();
-	let mut range_buf = AVec::<f64>::with_capacity(CACHELINE_ALIGN, high.len());
-	range_buf.resize(high.len(), f64::NAN);
+	// Use helper function to allocate with NaN prefix
+	let mut range_buf = alloc_with_nan_prefix(high.len(), first);
 	for i in first..high.len() {
 		if high[i].is_nan() || low[i].is_nan() {
 			range_buf[i] = f64::NAN;
@@ -700,7 +746,23 @@ fn kaufmanstop_batch_inner(
 			range_buf[i] = high[i] - low[i];
 		}
 	}
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use make_uninit_matrix and init_matrix_prefixes instead of vec![f64::NAN; ...]
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
 		let period = prm.period.unwrap();
@@ -729,7 +791,7 @@ fn kaufmanstop_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -737,15 +799,25 @@ fn kaufmanstop_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec from ManuallyDrop
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity() * core::mem::size_of::<std::mem::MaybeUninit<f64>>() / core::mem::size_of::<f64>(),
+		)
+	};
+	
 	Ok(KaufmanstopBatchOutput {
 		values,
 		combos,
@@ -835,6 +907,487 @@ pub unsafe fn kaufmanstop_row_avx512_long(
 #[inline(always)]
 pub fn expand_grid_wrapper(r: &KaufmanstopBatchRange) -> Vec<KaufmanstopParams> {
 	expand_grid(r)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "kaufmanstop")]
+#[pyo3(signature = (high, low, period=22, mult=2.0, direction="long", ma_type="sma", kernel=None))]
+pub fn kaufmanstop_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	mult: f64,
+	direction: &str,
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	
+	if high_slice.len() != low_slice.len() {
+		return Err(PyValueError::new_err("High and low arrays must have the same length"));
+	}
+	
+	let kern = validate_kernel(kernel, false)?;
+	let params = KaufmanstopParams {
+		period: Some(period),
+		mult: Some(mult),
+		direction: Some(direction.to_string()),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = KaufmanstopInput::from_slices(high_slice, low_slice, params);
+
+	// Perform computation within allow_threads for better performance
+	let result = py.allow_threads(|| kaufmanstop_with_kernel(&input, kern));
+
+	match result {
+		Ok(output) => Ok(output.values.into_pyarray(py)),
+		Err(e) => Err(PyValueError::new_err(e.to_string())),
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "KaufmanstopStream")]
+pub struct KaufmanstopStreamPy {
+	stream: KaufmanstopStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl KaufmanstopStreamPy {
+	#[new]
+	fn new(period: usize, mult: f64, direction: &str, ma_type: &str) -> PyResult<Self> {
+		let params = KaufmanstopParams {
+			period: Some(period),
+			mult: Some(mult),
+			direction: Some(direction.to_string()),
+			ma_type: Some(ma_type.to_string()),
+		};
+		let stream = KaufmanstopStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(KaufmanstopStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "kaufmanstop_batch")]
+#[pyo3(signature = (high, low, period_range, mult_range=(2.0, 2.0, 0.0), direction="long", ma_type="sma", kernel=None))]
+pub fn kaufmanstop_batch_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	mult_range: (f64, f64, f64),
+	direction: &str,
+	ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	
+	if high_slice.len() != low_slice.len() {
+		return Err(PyValueError::new_err("High and low arrays must have the same length"));
+	}
+
+	let sweep = KaufmanstopBatchRange {
+		period: period_range,
+		mult: mult_range,
+		direction: (direction.to_string(), direction.to_string(), 0.0),
+		ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
+	};
+
+	let kern = validate_kernel(kernel, true)?;
+	
+	// Perform computation within allow_threads for better performance
+	let result = py.allow_threads(|| kaufmanstop_batch_with_kernel(high_slice, low_slice, &sweep, kern));
+
+	match result {
+		Ok(output) => {
+			let dict = PyDict::new(py);
+			
+			// Convert values to numpy array
+			dict.set_item("values", output.values.into_pyarray(py))?;
+			
+			// Convert combos to list of dicts
+			let combos_list = PyList::empty(py);
+			for combo in output.combos {
+				let combo_dict = PyDict::new(py);
+				combo_dict.set_item("period", combo.period.unwrap_or(22))?;
+				combo_dict.set_item("mult", combo.mult.unwrap_or(2.0))?;
+				combo_dict.set_item("direction", combo.direction.unwrap_or_else(|| "long".to_string()))?;
+				combo_dict.set_item("ma_type", combo.ma_type.unwrap_or_else(|| "sma".to_string()))?;
+				combos_list.append(combo_dict)?;
+			}
+			dict.set_item("combos", combos_list)?;
+			dict.set_item("rows", output.rows)?;
+			dict.set_item("cols", output.cols)?;
+			
+			Ok(dict)
+		}
+		Err(e) => Err(PyValueError::new_err(e.to_string())),
+	}
+}
+
+// ================== WASM Bindings ==================
+#[cfg(feature = "wasm")]
+/// Core helper that writes directly to an output slice with no allocations.
+/// This is the foundation for all WASM APIs.
+pub fn kaufmanstop_into_slice(
+	dst: &mut [f64],
+	input: &KaufmanstopInput,
+	kern: Kernel,
+) -> Result<(), KaufmanstopError> {
+	// Get data slices from input
+	let (high, low) = match &input.data {
+		KaufmanstopData::Candles { candles } => {
+			let high = candles.select_candle_field("high")
+				.map_err(|_| KaufmanstopError::EmptyData)?;
+			let low = candles.select_candle_field("low")
+				.map_err(|_| KaufmanstopError::EmptyData)?;
+			(high, low)
+		}
+		KaufmanstopData::Slices { high, low } => (*high, *low),
+	};
+
+	// Validate inputs
+	if high.is_empty() || low.is_empty() {
+		return Err(KaufmanstopError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(KaufmanstopError::InvalidPeriod {
+			period: 0,
+			data_len: high.len(),
+		});
+	}
+	if dst.len() != high.len() {
+		return Err(KaufmanstopError::InvalidPeriod {
+			period: 0,
+			data_len: high.len(),
+		});
+	}
+
+	// Compute the indicator
+	let result = kaufmanstop_with_kernel(input, kern)?;
+	
+	// Copy result to destination slice
+	dst.copy_from_slice(&result.values);
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Safe API that allocates a new vector and returns it.
+/// `high` and `low` are JavaScript Float64Arrays
+pub fn kaufmanstop_js(
+	high: &[f64],
+	low: &[f64],
+	period: usize,
+	mult: f64,
+	direction: &str,
+	ma_type: &str,
+) -> Result<Vec<f64>, JsError> {
+	let params = KaufmanstopParams {
+		period: Some(period),
+		mult: Some(mult),
+		direction: Some(direction.to_string()),
+		ma_type: Some(ma_type.to_string()),
+	};
+	let input = KaufmanstopInput::from_slices(high, low, params);
+	
+	match kaufmanstop(&input) {
+		Ok(output) => Ok(output.values),
+		Err(e) => Err(JsError::new(&e.to_string())),
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Fast API that writes directly to pre-allocated memory.
+/// Performs aliasing checks between input and output pointers.
+pub fn kaufmanstop_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	mult: f64,
+	direction: &str,
+	ma_type: &str,
+) -> Result<(), JsError> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsError::new("Null pointer passed to kaufmanstop_into"));
+	}
+
+	// SAFETY: We verify pointers are non-null and trust the caller for:
+	// 1. Valid memory allocation
+	// 2. Proper length
+	// 3. No data races
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		// Aliasing detection: Check if output overlaps with either input
+		let high_start = high_ptr as usize;
+		let high_end = high_start + len * std::mem::size_of::<f64>();
+		let low_start = low_ptr as usize;
+		let low_end = low_start + len * std::mem::size_of::<f64>();
+		let out_start = out_ptr as usize;
+		let out_end = out_start + len * std::mem::size_of::<f64>();
+
+		// Check if output overlaps with high
+		let overlaps_high = (out_start < high_end) && (high_start < out_end);
+		// Check if output overlaps with low
+		let overlaps_low = (out_start < low_end) && (low_start < out_end);
+
+		if overlaps_high || overlaps_low {
+			// Overlap detected, use safe path with allocation
+			let params = KaufmanstopParams {
+				period: Some(period),
+				mult: Some(mult),
+				direction: Some(direction.to_string()),
+				ma_type: Some(ma_type.to_string()),
+			};
+			let input = KaufmanstopInput::from_slices(high, low, params);
+			let result = kaufmanstop(&input)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+			out.copy_from_slice(&result.values);
+		} else {
+			// No overlap, use direct write
+			let params = KaufmanstopParams {
+				period: Some(period),
+				mult: Some(mult),
+				direction: Some(direction.to_string()),
+				ma_type: Some(ma_type.to_string()),
+			};
+			let input = KaufmanstopInput::from_slices(high, low, params);
+			kaufmanstop_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+		}
+	}
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Allocates memory for a f64 array of the given length.
+/// Returns a pointer that must be freed with kaufmanstop_free.
+pub fn kaufmanstop_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Frees memory allocated by kaufmanstop_alloc.
+/// SAFETY: ptr must have been allocated by kaufmanstop_alloc with the same length.
+pub unsafe fn kaufmanstop_free(ptr: *mut f64, len: usize) {
+	if ptr.is_null() {
+		return;
+	}
+	Vec::from_raw_parts(ptr, len, len);
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct KaufmanstopBatchMeta {
+	pub combos: Vec<KaufmanstopParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Batch computation with parameter sweep.
+/// Returns JavaScript object with { values: Float64Array, combos: Array, rows: number, cols: number }
+pub fn kaufmanstop_batch_js(
+	high: &[f64],
+	low: &[f64],
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	mult_start: f64,
+	mult_end: f64,
+	mult_step: f64,
+	direction: &str,
+	ma_type: &str,
+) -> Result<JsValue, JsError> {
+	let sweep = KaufmanstopBatchRange {
+		period: (period_start, period_end, period_step),
+		mult: (mult_start, mult_end, mult_step),
+		direction: (direction.to_string(), direction.to_string(), 0.0),
+		ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
+	};
+	
+	match kaufmanstop_batch_slice(high, low, &sweep, Kernel::Auto) {
+		Ok(output) => {
+			let meta = KaufmanstopBatchMeta {
+				combos: output.combos,
+				rows: output.rows,
+				cols: output.cols,
+			};
+			
+			// Create JS object manually
+			let js_object = js_sys::Object::new();
+			
+			// Add values as Float64Array
+			let values_array = js_sys::Float64Array::from(&output.values[..]);
+			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
+				.map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
+			
+			// Add metadata
+			let meta_value = serde_wasm_bindgen::to_value(&meta)?;
+			let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
+				.map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"combos".into(), &combos)
+				.map_err(|e| JsError::new(&format!("Failed to set combos: {:?}", e)))?;
+			
+			let rows = js_sys::Reflect::get(&meta_value, &"rows".into())
+				.map_err(|e| JsError::new(&format!("Failed to get rows: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"rows".into(), &rows)
+				.map_err(|e| JsError::new(&format!("Failed to set rows: {:?}", e)))?;
+			
+			let cols = js_sys::Reflect::get(&meta_value, &"cols".into())
+				.map_err(|e| JsError::new(&format!("Failed to get cols: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"cols".into(), &cols)
+				.map_err(|e| JsError::new(&format!("Failed to set cols: {:?}", e)))?;
+			
+			Ok(js_object.into())
+		}
+		Err(e) => Err(JsError::new(&e.to_string())),
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Unified batch API that accepts a config object with ranges.
+pub fn kaufmanstop_batch_unified_js(
+	high: &[f64],
+	low: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsError> {
+	#[derive(Deserialize)]
+	struct BatchConfig {
+		period_range: Option<(usize, usize, usize)>,
+		mult_range: Option<(f64, f64, f64)>,
+		direction: Option<String>,
+		ma_type: Option<String>,
+	}
+	
+	let config: BatchConfig = serde_wasm_bindgen::from_value(config)?;
+	
+	let sweep = KaufmanstopBatchRange {
+		period: config.period_range.unwrap_or((22, 22, 0)),
+		mult: config.mult_range.unwrap_or((2.0, 2.0, 0.0)),
+		direction: config.direction
+			.map(|d| (d.clone(), d, 0.0))
+			.unwrap_or(("long".to_string(), "long".to_string(), 0.0)),
+		ma_type: config.ma_type
+			.map(|t| (t.clone(), t, 0.0))
+			.unwrap_or(("sma".to_string(), "sma".to_string(), 0.0)),
+	};
+	
+	match kaufmanstop_batch_slice(high, low, &sweep, Kernel::Auto) {
+		Ok(output) => {
+			let meta = KaufmanstopBatchMeta {
+				combos: output.combos,
+				rows: output.rows,
+				cols: output.cols,
+			};
+			
+			// Create JS object
+			let js_object = js_sys::Object::new();
+			
+			// Add values as Float64Array
+			let values_array = js_sys::Float64Array::from(&output.values[..]);
+			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
+				.map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
+			
+			// Add metadata
+			let meta_value = serde_wasm_bindgen::to_value(&meta)?;
+			let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
+				.map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"combos".into(), &combos)
+				.map_err(|e| JsError::new(&format!("Failed to set combos: {:?}", e)))?;
+			
+			let rows = js_sys::Reflect::get(&meta_value, &"rows".into())
+				.map_err(|e| JsError::new(&format!("Failed to get rows: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"rows".into(), &rows)
+				.map_err(|e| JsError::new(&format!("Failed to set rows: {:?}", e)))?;
+			
+			let cols = js_sys::Reflect::get(&meta_value, &"cols".into())
+				.map_err(|e| JsError::new(&format!("Failed to get cols: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"cols".into(), &cols)
+				.map_err(|e| JsError::new(&format!("Failed to set cols: {:?}", e)))?;
+			
+			Ok(js_object.into())
+		}
+		Err(e) => Err(JsError::new(&e.to_string())),
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+/// Fast batch API that writes to pre-allocated memory.
+pub fn kaufmanstop_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	mult_start: f64,
+	mult_end: f64,
+	mult_step: f64,
+	direction: &str,
+	ma_type: &str,
+) -> Result<JsValue, JsError> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsError::new("Null pointer passed to kaufmanstop_batch_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let sweep = KaufmanstopBatchRange {
+			period: (period_start, period_end, period_step),
+			mult: (mult_start, mult_end, mult_step),
+			direction: (direction.to_string(), direction.to_string(), 0.0),
+			ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
+		};
+		
+		let output = kaufmanstop_batch_slice(high, low, &sweep, Kernel::Auto)
+			.map_err(|e| JsError::new(&e.to_string()))?;
+		
+		// Calculate expected output size
+		let expected_size = output.rows * output.cols;
+		let out = std::slice::from_raw_parts_mut(out_ptr, expected_size);
+		
+		// Copy results to output buffer
+		out.copy_from_slice(&output.values);
+		
+		// Return metadata
+		let meta = KaufmanstopBatchMeta {
+			combos: output.combos,
+			rows: output.rows,
+			cols: output.cols,
+		};
+		
+		serde_wasm_bindgen::to_value(&meta).map_err(Into::into)
+	}
 }
 
 #[cfg(test)]
@@ -952,6 +1505,138 @@ mod tests {
 		}
 		Ok(())
 	}
+	fn check_kaufmanstop_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let high = candles.select_candle_field("high").unwrap();
+		let low = candles.select_candle_field("low").unwrap();
+		
+		// Create stream
+		let params = KaufmanstopParams {
+			period: Some(22),
+			mult: Some(2.0),
+			direction: Some("long".to_string()),
+			ma_type: Some("sma".to_string()),
+		};
+		let mut stream = KaufmanstopStream::try_new(params)?;
+		
+		// Feed data to stream
+		let mut stream_results = Vec::new();
+		for i in 0..high.len() {
+			if let Some(val) = stream.update(high[i], low[i]) {
+				stream_results.push(val);
+			} else {
+				stream_results.push(f64::NAN);
+			}
+		}
+		
+		// Compare with batch computation
+		let input = KaufmanstopInput::with_default_candles(&candles);
+		let batch_result = kaufmanstop_with_kernel(&input, kernel)?;
+		
+		// Stream should match batch after warmup period
+		let warmup = 22 + 21; // period + (period - 1)
+		for i in warmup..high.len() {
+			let diff = (stream_results[i] - batch_result.values[i]).abs();
+			assert!(
+				diff < 1e-10 || (stream_results[i].is_nan() && batch_result.values[i].is_nan()),
+				"[{}] Stream vs batch mismatch at index {}: {} vs {}",
+				test_name,
+				i,
+				stream_results[i],
+				batch_result.values[i]
+			);
+		}
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_kaufmanstop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations for Kaufmanstop
+		let test_params = vec![
+			KaufmanstopParams::default(),                                              // period: 22, mult: 2.0, direction: "long", ma_type: "sma"
+			KaufmanstopParams { period: Some(2), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },    // minimum period
+			KaufmanstopParams { period: Some(5), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },    // small period
+			KaufmanstopParams { period: Some(10), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // small-medium period
+			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // default period
+			KaufmanstopParams { period: Some(50), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // medium period
+			KaufmanstopParams { period: Some(100), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },  // large period
+			KaufmanstopParams { period: Some(22), mult: Some(0.5), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // small multiplier
+			KaufmanstopParams { period: Some(22), mult: Some(1.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // multiplier 1.0
+			KaufmanstopParams { period: Some(22), mult: Some(3.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // large multiplier
+			KaufmanstopParams { period: Some(22), mult: Some(5.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // very large multiplier
+			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("short".to_string()), ma_type: Some("sma".to_string()) },  // short direction
+			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("ema".to_string()) },   // ema type
+			KaufmanstopParams { period: Some(14), mult: Some(1.5), direction: Some("short".to_string()), ma_type: Some("ema".to_string()) },  // mixed params 1
+			KaufmanstopParams { period: Some(30), mult: Some(2.5), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // mixed params 2
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = KaufmanstopInput::from_candles(&candles, params.clone());
+			let output = kaufmanstop_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, direction={}, ma_type={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(22), 
+						params.mult.unwrap_or(2.0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, direction={}, ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(22),
+						params.mult.unwrap_or(2.0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, direction={}, ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(22),
+						params.mult.unwrap_or(2.0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_kaufmanstop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 
 	macro_rules! generate_all_kaufmanstop_tests {
         ($($test_fn:ident),*) => {
@@ -983,7 +1668,9 @@ mod tests {
 		check_kaufmanstop_zero_period,
 		check_kaufmanstop_period_exceeds_length,
 		check_kaufmanstop_very_small_dataset,
-		check_kaufmanstop_nan_handling
+		check_kaufmanstop_nan_handling,
+		check_kaufmanstop_streaming,
+		check_kaufmanstop_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1032,4 +1719,103 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations for Kaufmanstop
+		let test_configs = vec![
+			// (period_start, period_end, period_step, mult_start, mult_end, mult_step, direction)
+			(2, 10, 2, 2.0, 2.0, 0.0, "long"),       // Small periods, fixed mult
+			(10, 50, 10, 2.0, 2.0, 0.0, "long"),     // Medium periods, fixed mult
+			(20, 100, 20, 2.0, 2.0, 0.0, "long"),    // Large periods, fixed mult
+			(22, 22, 0, 0.5, 3.0, 0.5, "long"),      // Fixed period, varying mult
+			(22, 22, 0, 1.0, 5.0, 1.0, "short"),     // Fixed period, varying mult, short
+			(5, 20, 5, 1.0, 3.0, 1.0, "long"),       // Mixed period and mult sweep
+			(10, 30, 10, 1.5, 2.5, 0.5, "short"),    // Mixed sweep, short direction
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, dir)) in test_configs.iter().enumerate() {
+			let mut builder = KaufmanstopBatchBuilder::new()
+				.kernel(kernel)
+				.direction_static(dir)
+				.ma_type_static("sma");
+			
+			// Configure period range
+			if p_step > 0 {
+				builder = builder.period_range(p_start, p_end, p_step);
+			} else {
+				builder = builder.period_static(p_start);
+			}
+			
+			// Configure mult range
+			if m_step > 0.0 {
+				builder = builder.mult_range(m_start, m_end, m_step);
+			} else {
+				builder = builder.mult_static(m_start);
+			}
+			
+			let output = builder.apply_candles(&c)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}, ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}, ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}, ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 }

@@ -19,7 +19,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,6 +28,22 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 // --- Data Types ---
 
@@ -43,6 +59,7 @@ pub struct RocOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct RocParams {
 	pub period: Option<usize>,
 }
@@ -187,7 +204,7 @@ pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, Ro
 		});
 	}
 
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), first + period);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -354,6 +371,7 @@ pub struct RocStream {
 	buffer: Vec<f64>,
 	head: usize,
 	filled: bool,
+	count: usize,
 }
 
 impl RocStream {
@@ -367,23 +385,37 @@ impl RocStream {
 			buffer: vec![f64::NAN; period],
 			head: 0,
 			filled: false,
+			count: 0,
 		})
 	}
 
 	#[inline(always)]
 	pub fn update(&mut self, value: f64) -> Option<f64> {
-		let prev = self.buffer[self.head];
-		self.buffer[self.head] = value;
-		self.head = (self.head + 1) % self.period;
-		if !self.filled && self.head == 0 {
-			self.filled = true;
+		self.count += 1;
+		
+		// We need at least period+1 values before we can calculate ROC
+		// (current value plus period previous values)
+		if self.count <= self.period {
+			// Store the new value and advance
+			self.buffer[self.head] = value;
+			self.head = (self.head + 1) % self.period;
+			return None;
 		}
-		if !self.filled || prev.is_nan() {
-			None
-		} else if prev == 0.0 {
+		
+		// Get the value that's about to be replaced (period values ago)
+		let old_value = self.buffer[self.head];
+		
+		// Store the new value
+		self.buffer[self.head] = value;
+		
+		// Move head forward
+		self.head = (self.head + 1) % self.period;
+		
+		// Calculate ROC
+		if old_value.is_nan() || old_value == 0.0 {
 			Some(0.0)
 		} else {
-			Some(((value / prev) - 1.0) * 100.0)
+			Some(((value / old_value) - 1.0) * 100.0)
 		}
 	}
 }
@@ -477,7 +509,7 @@ impl RocBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &RocBatchRange) -> Vec<RocParams> {
+pub(crate) fn expand_grid(r: &RocBatchRange) -> Vec<RocParams> {
 	let (start, end, step) = r.period;
 	if step == 0 || start == end {
 		return vec![RocParams { period: Some(start) }];
@@ -518,7 +550,20 @@ fn roc_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory for better performance
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap())
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -535,7 +580,7 @@ fn roc_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -543,21 +588,364 @@ fn roc_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert uninitialized memory to Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(RocBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn roc_batch_inner_into(
+	data: &[f64],
+	sweep: &RocBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<RocParams>, RocError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RocError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(RocError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Initialize warmup periods with NaN
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let warmup_end = first + period;
+		let row_start = row * cols;
+		for i in 0..warmup_end {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => roc_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+// --- Python Bindings ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "roc")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn roc_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = RocParams { period: Some(period) };
+	let input = RocInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		roc_with_kernel(&input, kern).map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "roc_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn roc_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = RocBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		
+		roc_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods", 
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "RocStream")]
+pub struct RocStreamPy {
+	inner: RocStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl RocStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = RocParams { period: Some(period) };
+		let inner = RocStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(RocStreamPy { inner })
+	}
+	
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.inner.update(value)
+	}
+}
+
+// --- WASM Bindings ---
+
+/// Write ROC values directly to output slice - no allocations
+#[inline]
+pub fn roc_into_slice(dst: &mut [f64], input: &RocInput, kern: Kernel) -> Result<(), RocError> {
+	let data = input.as_ref();
+	let period = input.get_period();
+	
+	if dst.len() != data.len() {
+		return Err(RocError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+	
+	// Find first non-NaN value
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(RocError::AllValuesNaN)?;
+	
+	// Validate period
+	if period == 0 || period > data.len() - first {
+		return Err(RocError::InvalidPeriod { period, data_len: data.len() });
+	}
+	
+	// Check if we have enough valid data
+	if data.len() - first < period {
+		return Err(RocError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first,
+		});
+	}
+	
+	// Calculate ROC values
+	let warmup_end = first + period;
+	
+	// Fill warmup period with NaN
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
+	// Calculate ROC for valid range
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	// Use the appropriate kernel
+	unsafe {
+		match chosen {
+			Kernel::Scalar => roc_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => roc_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn roc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = RocParams { period: Some(period) };
+	let input = RocInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];
+	
+	roc_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn roc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn roc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn roc_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = RocParams { period: Some(period) };
+		let input = RocInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {
+			// Handle aliasing - use temporary buffer
+			let mut temp = vec![0.0; len];
+			roc_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			roc_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RocBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RocBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<RocParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn roc_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: RocBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let batch_range = RocBatchRange {
+		period: config.period_range,
+	};
+	
+	let result = roc_batch_with_kernel(data, &batch_range, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let output = RocBatchJsOutput {
+		values: result.values,
+		combos: result.combos,
+		rows: result.rows,
+		cols: result.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // --- Tests ---

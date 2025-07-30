@@ -15,9 +15,28 @@
 //! ## Returns
 //! - **`Ok(PviOutput)`** on success, with a Vec<f64> of PVI values matching the input length.
 //! - **`Err(PviError)`** otherwise.
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -57,6 +76,7 @@ pub struct PviOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct PviParams {
 	pub initial_value: Option<f64>,
 }
@@ -210,7 +230,7 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
 		return Err(PviError::NotEnoughValidData);
 	}
 
-	let mut out = vec![f64::NAN; close.len()];
+	let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -230,6 +250,70 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
 		}
 	}
 	Ok(PviOutput { values: out })
+}
+
+#[inline]
+pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result<(), PviError> {
+	let (close, volume) = match &input.data {
+		PviData::Candles {
+			candles,
+			close_source,
+			volume_source,
+		} => {
+			let c = source_type(candles, close_source);
+			let v = source_type(candles, volume_source);
+			(c, v)
+		}
+		PviData::Slices { close, volume } => (*close, *volume),
+	};
+	
+	if close.is_empty() || volume.is_empty() {
+		return Err(PviError::EmptyData);
+	}
+	if close.len() != volume.len() {
+		return Err(PviError::MismatchedLength);
+	}
+	if dst.len() != close.len() {
+		return Err(PviError::MismatchedLength);
+	}
+
+	let first_valid_idx = close
+		.iter()
+		.zip(volume.iter())
+		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+		.ok_or(PviError::AllValuesNaN)?;
+	if (close.len() - first_valid_idx) < 2 {
+		return Err(PviError::NotEnoughValidData);
+	}
+
+	// Fill warmup period with NaN
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	let initial_value = input.get_initial_value();
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				pvi_scalar(close, volume, first_valid_idx, initial_value, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => pvi_avx2(close, volume, first_valid_idx, initial_value, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				pvi_avx512(close, volume, first_valid_idx, initial_value, dst)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -502,7 +586,31 @@ fn pvi_batch_inner(
 
 	let rows = combos.len();
 	let cols = close.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// PVI uses the same warmup period for all rows
+	// For small row counts, use stack allocation to avoid heap allocation
+	if rows <= 32 {
+		let mut warmup_array = [0usize; 32];
+		for i in 0..rows {
+			warmup_array[i] = first_valid_idx;
+		}
+		init_matrix_prefixes(&mut buf_mu, cols, &warmup_array[..rows]);
+	} else {
+		// For larger row counts, we need a Vec (but this is still O(rows) not O(data))
+		let warmup_periods = vec![first_valid_idx; rows];
+		init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	}
+	
+	// Convert to initialized slice
+	let values_guard = unsafe {
+		core::mem::ManuallyDrop::new(
+			Vec::from_raw_parts(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len(), buf_mu.capacity())
+		)
+	};
+	let values = unsafe {
+		core::slice::from_raw_parts_mut(values_guard.as_ptr() as *mut f64, values_guard.len())
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let iv = combos[row].initial_value.unwrap_or(1000.0);
@@ -535,12 +643,94 @@ fn pvi_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			values_guard.as_ptr() as *mut f64,
+			values_guard.len(),
+			values_guard.capacity()
+		)
+	};
+	core::mem::forget(values_guard);
+	
 	Ok(PviBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn pvi_batch_inner_into(
+	close: &[f64],
+	volume: &[f64],
+	sweep: &PviBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<PviParams>, PviError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(PviError::EmptyData);
+	}
+	if close.is_empty() || volume.is_empty() {
+		return Err(PviError::EmptyData);
+	}
+	if close.len() != volume.len() {
+		return Err(PviError::MismatchedLength);
+	}
+	let first_valid_idx = close
+		.iter()
+		.zip(volume.iter())
+		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+		.ok_or(PviError::AllValuesNaN)?;
+	if (close.len() - first_valid_idx) < 2 {
+		return Err(PviError::NotEnoughValidData);
+	}
+
+	let rows = combos.len();
+	let cols = close.len();
+	
+	// Ensure output slice is correct size
+	if out.len() != rows * cols {
+		return Err(PviError::MismatchedLength);
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let iv = combos[row].initial_value.unwrap_or(1000.0);
+		match kern {
+			Kernel::Scalar => pvi_row_scalar(close, volume, first_valid_idx, iv, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => pvi_row_avx2(close, volume, first_valid_idx, iv, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => pvi_row_avx512(close, volume, first_valid_idx, iv, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -767,4 +957,263 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pvi")]
+#[pyo3(signature = (close, volume, initial_value=None, kernel=None))]
+pub fn pvi_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	initial_value: Option<f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = PviParams { initial_value };
+	let input = PviInput::from_slices(close_slice, volume_slice, params);
+	
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		pvi_with_kernel(&input, kern).map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pvi_batch")]
+#[pyo3(signature = (close, volume, initial_value_range, kernel=None))]
+pub fn pvi_batch_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	initial_value_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	
+	let sweep = PviBatchRange {
+		initial_value: initial_value_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		pvi_batch_inner_into(close_slice, volume_slice, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"initial_values",
+		combos
+			.iter()
+			.map(|p| p.initial_value.unwrap_or(1000.0))
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "PviStream")]
+pub struct PviStreamPy {
+	stream: PviStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PviStreamPy {
+	#[new]
+	#[pyo3(signature = (initial_value=None))]
+	fn new(initial_value: Option<f64>) -> PyResult<Self> {
+		let params = PviParams { initial_value };
+		let stream = PviStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(PviStreamPy { stream })
+	}
+	
+	fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
+		self.stream.update(close, volume)
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pvi_js(close: &[f64], volume: &[f64], initial_value: f64) -> Result<Vec<f64>, JsValue> {
+	let params = PviParams {
+		initial_value: Some(initial_value),
+	};
+	let input = PviInput::from_slices(close, volume, params);
+	
+	let mut output = vec![0.0; close.len()];
+	pvi_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pvi_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	initial_value: f64,
+) -> Result<(), JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let params = PviParams {
+			initial_value: Some(initial_value),
+		};
+		let input = PviInput::from_slices(close, volume, params);
+		
+		// Check for aliasing
+		if close_ptr == out_ptr || volume_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			pvi_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			pvi_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pvi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pvi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PviBatchConfig {
+	pub initial_value_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PviBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<PviParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = pvi_batch)]
+pub fn pvi_batch_js(close: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: PviBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = PviBatchRange {
+		initial_value: config.initial_value_range,
+	};
+	
+	let output = pvi_batch_with_kernel(close, volume, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = PviBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pvi_batch_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	initial_value_start: f64,
+	initial_value_end: f64,
+	initial_value_step: f64,
+) -> Result<usize, JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to pvi_batch_into"));
+	}
+	
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let sweep = PviBatchRange {
+			initial_value: (initial_value_start, initial_value_end, initial_value_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
+		
+		let kernel = detect_best_batch_kernel();
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		
+		pvi_batch_inner_into(close, volume, &sweep, simd, true, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

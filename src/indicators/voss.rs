@@ -17,9 +17,27 @@
 //! - **`Ok(VossOutput)`** on success, containing filtered output vectors matching input length.
 //! - **`Err(VossError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -51,6 +69,7 @@ pub struct VossOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VossParams {
 	pub period: Option<usize>,
 	pub predict: Option<usize>,
@@ -199,7 +218,11 @@ pub fn voss(input: &VossInput) -> Result<VossOutput, VossError> {
 	voss_with_kernel(input, Kernel::Auto)
 }
 
-pub fn voss_with_kernel(input: &VossInput, kernel: Kernel) -> Result<VossOutput, VossError> {
+#[inline(always)]
+fn voss_prepare<'a>(
+	input: &'a VossInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, f64, usize, usize, Kernel), VossError> {
 	let data: &[f64] = match &input.data {
 		VossData::Candles { candles, source } => source_type(candles, source),
 		VossData::Slice(sl) => sl,
@@ -233,22 +256,84 @@ pub fn voss_with_kernel(input: &VossInput, kernel: Kernel) -> Result<VossOutput,
 		other => other,
 	};
 
-	let mut voss = vec![f64::NAN; len];
-	let mut filt = vec![f64::NAN; len];
+	Ok((data, period, predict, bandwidth, first, min_index, chosen))
+}
 
+#[inline(always)]
+fn voss_compute_into(
+	data: &[f64],
+	period: usize,
+	predict: usize,
+	bandwidth: f64,
+	first: usize,
+	min_index: usize,
+	kernel: Kernel,
+	voss: &mut [f64],
+	filt: &mut [f64],
+) {
 	unsafe {
-		match chosen {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+				voss_simd128(data, period, predict, bandwidth, first, min_index, voss, filt);
+				return;
+			}
+		}
+
+		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				voss_scalar(data, period, predict, bandwidth, first, &mut voss, &mut filt)
+				voss_scalar(data, period, predict, bandwidth, first, voss, filt)
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => voss_avx2(data, period, predict, bandwidth, first, &mut voss, &mut filt),
+			Kernel::Avx2 | Kernel::Avx2Batch => voss_avx2(data, period, predict, bandwidth, first, voss, filt),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => voss_avx512(data, period, predict, bandwidth, first, &mut voss, &mut filt),
+			Kernel::Avx512 | Kernel::Avx512Batch => voss_avx512(data, period, predict, bandwidth, first, voss, filt),
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn voss_with_kernel(input: &VossInput, kernel: Kernel) -> Result<VossOutput, VossError> {
+	let (data, period, predict, bandwidth, first, min_index, chosen) = voss_prepare(input, kernel)?;
+	
+	// Use alloc_with_nan_prefix for proper memory allocation
+	let warmup_period = first + min_index;
+	let mut voss = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut filt = alloc_with_nan_prefix(data.len(), warmup_period);
+	
+	voss_compute_into(data, period, predict, bandwidth, first, min_index, chosen, &mut voss, &mut filt);
+	
 	Ok(VossOutput { voss, filt })
+}
+
+#[inline]
+pub fn voss_into_slice(
+	voss_dst: &mut [f64],
+	filt_dst: &mut [f64],
+	input: &VossInput,
+	kern: Kernel,
+) -> Result<(), VossError> {
+	let (data, period, predict, bandwidth, first, min_index, chosen) = voss_prepare(input, kern)?;
+	
+	if voss_dst.len() != data.len() || filt_dst.len() != data.len() {
+		return Err(VossError::InvalidPeriod { 
+			period: voss_dst.len(), 
+			data_len: data.len() 
+		});
+	}
+	
+	voss_compute_into(data, period, predict, bandwidth, first, min_index, chosen, voss_dst, filt_dst);
+	
+	// Fill warmup period with NaN
+	let warmup_end = first + min_index;
+	for v in &mut voss_dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	for v in &mut filt_dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 #[inline]
@@ -292,6 +377,88 @@ pub unsafe fn voss_scalar(
 			sumc += ((count + 1) as f64 / order as f64) * voss[idx];
 		}
 		voss[i] = ((3 + order) as f64 / 2.0) * filt[i] - sumc;
+	}
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn voss_simd128(
+	data: &[f64],
+	period: usize,
+	predict: usize,
+	bandwidth: f64,
+	first: usize,
+	min_index: usize,
+	voss: &mut [f64],
+	filt: &mut [f64],
+) {
+	use core::arch::wasm32::*;
+	use std::f64::consts::PI;
+	
+	let order = 3 * predict;
+	let min_idx = period.max(5).max(order);
+	
+	let f1 = (2.0 * PI / period as f64).cos();
+	let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
+	let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
+	
+	// Initialize filt values
+	for i in first..(first + min_idx) {
+		filt[i] = 0.0;
+	}
+	
+	// First pass: compute filt values (scalar for dependencies)
+	let coeff1 = 0.5 * (1.0 - s1);
+	let coeff2 = f1 * (1.0 + s1);
+	let coeff3 = -s1;
+	
+	for i in (first + min_idx)..data.len() {
+		let current = data[i];
+		let prev_2 = data[i - 2];
+		let prev_filt_1 = filt[i - 1];
+		let prev_filt_2 = filt[i - 2];
+		filt[i] = coeff1 * (current - prev_2) + coeff2 * prev_filt_1 + coeff3 * prev_filt_2;
+	}
+	
+	// Initialize voss values
+	for i in first..(first + min_idx) {
+		voss[i] = 0.0;
+	}
+	
+	// Second pass: compute voss values
+	let scale = (3 + order) as f64 / 2.0;
+	let inv_order = 1.0 / order as f64;
+	
+	for i in (first + min_idx)..data.len() {
+		// SIMD sum for the weighted voss values
+		let mut sum = 0.0;
+		let base_idx = i - order;
+		
+		// Process pairs with SIMD
+		let pairs = order / 2;
+		for j in 0..pairs {
+			let idx1 = base_idx + j * 2;
+			let idx2 = base_idx + j * 2 + 1;
+			
+			let v1 = v128_load64_splat(&voss[idx1]);
+			let v2 = v128_load64_splat(&voss[idx2]);
+			let vals = f64x2_replace_lane::<1>(v1, f64x2_extract_lane::<0>(v2));
+			
+			let w1 = (j * 2 + 1) as f64 * inv_order;
+			let w2 = (j * 2 + 2) as f64 * inv_order;
+			let weights = f64x2(w1, w2);
+			
+			let prod = f64x2_mul(vals, weights);
+			sum += f64x2_extract_lane::<0>(prod) + f64x2_extract_lane::<1>(prod);
+		}
+		
+		// Handle odd order
+		if order % 2 != 0 {
+			let idx = base_idx + order - 1;
+			sum += order as f64 * inv_order * voss[idx];
+		}
+		
+		voss[i] = scale * filt[i] - sum;
 	}
 }
 
@@ -597,8 +764,33 @@ fn voss_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut voss_vec = vec![f64::NAN; rows * cols];
-	let mut filt_vec = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each combination
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| {
+			let period = c.period.unwrap();
+			let predict = c.predict.unwrap();
+			let order = 3 * predict;
+			let min_index = period.max(5).max(order);
+			first + min_index
+		})
+		.collect();
+	
+	// Use make_uninit_matrix and init_matrix_prefixes for proper memory allocation
+	let mut voss_mu = make_uninit_matrix(rows, cols);
+	let mut filt_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut voss_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut filt_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slices
+	let mut voss_guard = core::mem::ManuallyDrop::new(voss_mu);
+	let mut filt_guard = core::mem::ManuallyDrop::new(filt_mu);
+	let voss_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(voss_guard.as_mut_ptr() as *mut f64, voss_guard.len())
+	};
+	let filt_slice: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(filt_guard.as_mut_ptr() as *mut f64, filt_guard.len())
+	};
 
 	let do_row = |row: usize, out_voss: &mut [f64], out_filt: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -618,24 +810,44 @@ fn voss_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			voss_vec
+			voss_slice
 				.par_chunks_mut(cols)
-				.zip(filt_vec.par_chunks_mut(cols))
+				.zip(filt_slice.par_chunks_mut(cols))
 				.enumerate()
 				.for_each(|(row, (vo, fo))| do_row(row, vo, fo));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, (vo, fo)) in voss_vec.chunks_mut(cols).zip(filt_vec.chunks_mut(cols)).enumerate() {
+			for (row, (vo, fo)) in voss_slice.chunks_mut(cols).zip(filt_slice.chunks_mut(cols)).enumerate() {
 				do_row(row, vo, fo);
 			}
 		}
 	} else {
-		for (row, (vo, fo)) in voss_vec.chunks_mut(cols).zip(filt_vec.chunks_mut(cols)).enumerate() {
+		for (row, (vo, fo)) in voss_slice.chunks_mut(cols).zip(filt_slice.chunks_mut(cols)).enumerate() {
 			do_row(row, vo, fo);
 		}
 	}
+
+	// Convert back to Vec for output
+	let voss_vec = unsafe {
+		let raw_vec = Vec::from_raw_parts(
+			voss_guard.as_mut_ptr() as *mut f64,
+			voss_guard.len(),
+			voss_guard.capacity()
+		);
+		core::mem::forget(voss_guard);
+		raw_vec
+	};
+	let filt_vec = unsafe {
+		let raw_vec = Vec::from_raw_parts(
+			filt_guard.as_mut_ptr() as *mut f64,
+			filt_guard.len(),
+			filt_guard.capacity()
+		);
+		core::mem::forget(filt_guard);
+		raw_vec
+	};
 
 	Ok(VossBatchOutput {
 		voss: voss_vec,
@@ -1029,4 +1241,376 @@ mod tests {
 	gen_batch_tests!(check_batch_param_grid);
 	gen_batch_tests!(check_batch_nan_propagation);
 	gen_batch_tests!(check_batch_invalid_range);
+}
+
+// ============================================================================
+// Python Bindings
+// ============================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "voss")]
+#[pyo3(signature = (data, period=None, predict=None, bandwidth=None, kernel=None))]
+pub fn voss_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: Option<usize>,
+	predict: Option<usize>,
+	bandwidth: Option<f64>,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VossParams {
+		period,
+		predict,
+		bandwidth,
+	};
+	let input = VossInput::from_slice(slice_in, params);
+	
+	// Get the output containing both voss and filt vectors
+	let (voss_vec, filt_vec) = py
+		.allow_threads(|| voss_with_kernel(&input, kern).map(|o| (o.voss, o.filt)))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Return tuple using zero-copy transfer
+	Ok((
+		voss_vec.into_pyarray(py),
+		filt_vec.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VossStream")]
+pub struct VossStreamPy {
+	stream: VossStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VossStreamPy {
+	#[new]
+	#[pyo3(signature = (period=None, predict=None, bandwidth=None))]
+	fn new(period: Option<usize>, predict: Option<usize>, bandwidth: Option<f64>) -> PyResult<Self> {
+		let params = VossParams {
+			period,
+			predict,
+			bandwidth,
+		};
+		let stream = VossStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VossStreamPy { stream })
+	}
+	
+	/// Updates the stream with a new value and returns (voss, filt) or None if not ready
+	fn update(&mut self, value: f64) -> Option<(f64, f64)> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "voss_batch")]
+#[pyo3(signature = (data, period_range=(20, 100, 1), predict_range=(3, 3, 0), bandwidth_range=(0.25, 0.25, 0.0), kernel=None))]
+pub fn voss_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	predict_range: (usize, usize, usize),
+	bandwidth_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	
+	let sweep = VossBatchRange {
+		period: period_range,
+		predict: predict_range,
+		bandwidth: bandwidth_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	// Pre-allocate output arrays for batch operations
+	let voss_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let filt_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_voss = unsafe { voss_arr.as_slice_mut()? };
+	let slice_filt = unsafe { filt_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	// Compute without GIL
+	let combos_result = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Get the corresponding SIMD kernel for batch operations
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Compute batch operations
+		let output = voss_batch_par_slice(slice_in, &sweep, simd)?;
+		
+		// Copy results to pre-allocated arrays
+		slice_voss.copy_from_slice(&output.voss);
+		slice_filt.copy_from_slice(&output.filt);
+		
+		Ok::<Vec<VossParams>, VossError>(output.combos)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("voss", voss_arr.reshape((rows, cols))?)?;
+	dict.set_item("filt", filt_arr.reshape((rows, cols))?)?;
+	
+	// Add parameter arrays using zero-copy transfer
+	dict.set_item(
+		"periods",
+		combos_result.iter()
+			.map(|p| p.period.unwrap_or(20) as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"predicts",
+		combos_result.iter()
+			.map(|p| p.predict.unwrap_or(3) as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"bandwidths",
+		combos_result.iter()
+			.map(|p| p.bandwidth.unwrap_or(0.25))
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+// ================== WASM Bindings ==================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_js(
+	data: &[f64],
+	period: usize,
+	predict: usize,
+	bandwidth: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let params = VossParams {
+		period: Some(period),
+		predict: Some(predict),
+		bandwidth: Some(bandwidth),
+	};
+	let input = VossInput::from_slice(data, params);
+	
+	// Single allocation for both outputs
+	let mut voss_out = vec![0.0; data.len()];
+	let mut filt_out = vec![0.0; data.len()];
+	
+	voss_into_slice(&mut voss_out, &mut filt_out, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Flatten: [voss..., filt...]
+	voss_out.extend(filt_out);
+	Ok(voss_out)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_into(
+	in_ptr: *const f64,
+	voss_ptr: *mut f64,
+	filt_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	predict: usize,
+	bandwidth: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || voss_ptr.is_null() || filt_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = VossParams {
+			period: Some(period),
+			predict: Some(predict),
+			bandwidth: Some(bandwidth),
+		};
+		let input = VossInput::from_slice(data, params);
+		
+		// Check for aliasing between all pointers
+		let in_aliased = in_ptr == voss_ptr as *const f64 || in_ptr == filt_ptr as *const f64;
+		let out_aliased = voss_ptr == filt_ptr;
+		
+		if in_aliased || out_aliased {
+			// Use temporary buffers if any aliasing detected
+			let mut temp_voss = vec![0.0; len];
+			let mut temp_filt = vec![0.0; len];
+			voss_into_slice(&mut temp_voss, &mut temp_filt, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let voss_out = std::slice::from_raw_parts_mut(voss_ptr, len);
+			let filt_out = std::slice::from_raw_parts_mut(filt_ptr, len);
+			voss_out.copy_from_slice(&temp_voss);
+			filt_out.copy_from_slice(&temp_filt);
+		} else {
+			// Direct computation without allocations
+			let voss_out = std::slice::from_raw_parts_mut(voss_ptr, len);
+			let filt_out = std::slice::from_raw_parts_mut(filt_ptr, len);
+			voss_into_slice(voss_out, filt_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+// New ergonomic WASM batch API types
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VossBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub predict_range: (usize, usize, usize),
+	pub bandwidth_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VossBatchJsOutput {
+	pub voss: Vec<f64>,
+	pub filt: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub predicts: Vec<usize>,
+	pub bandwidths: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "voss_batch")]
+pub fn voss_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VossBatchConfig = serde_wasm_bindgen::from_value(config)?;
+	
+	let sweep = VossBatchRange {
+		period: config.period_range,
+		predict: config.predict_range,
+		bandwidth: config.bandwidth_range,
+	};
+	
+	let output = voss_batch_par_slice(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let result = VossBatchJsOutput {
+		voss: output.voss,
+		filt: output.filt,
+		periods: output.combos.iter().map(|c| c.period.unwrap_or(20)).collect(),
+		predicts: output.combos.iter().map(|c| c.predict.unwrap_or(3)).collect(),
+		bandwidths: output.combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect(),
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_batch_metadata_js(
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	predict_start: usize,
+	predict_end: usize,
+	predict_step: usize,
+	bandwidth_start: f64,
+	bandwidth_end: f64,
+	bandwidth_step: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let sweep = VossBatchRange {
+		period: (period_start, period_end, period_step),
+		predict: (predict_start, predict_end, predict_step),
+		bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
+	};
+	
+	let combos = expand_grid(&sweep);
+	let mut metadata = Vec::with_capacity(combos.len() * 3);
+	
+	for combo in combos {
+		metadata.push(combo.period.unwrap_or(20) as f64);
+		metadata.push(combo.predict.unwrap_or(3) as f64);
+		metadata.push(combo.bandwidth.unwrap_or(0.25));
+	}
+	
+	Ok(metadata)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn voss_batch_into(
+	in_ptr: *const f64,
+	voss_ptr: *mut f64,
+	filt_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	predict_start: usize,
+	predict_end: usize,
+	predict_step: usize,
+	bandwidth_start: f64,
+	bandwidth_end: f64,
+	bandwidth_step: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || voss_ptr.is_null() || filt_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = VossBatchRange {
+			period: (period_start, period_end, period_step),
+			predict: (predict_start, predict_end, predict_step),
+			bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
+		};
+		
+		let output = voss_batch_par_slice(data, &sweep, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		let total_size = output.rows * output.cols;
+		if total_size > 0 {
+			let voss_out = std::slice::from_raw_parts_mut(voss_ptr, total_size);
+			let filt_out = std::slice::from_raw_parts_mut(filt_ptr, total_size);
+			voss_out.copy_from_slice(&output.voss);
+			filt_out.copy_from_slice(&output.filt);
+		}
+		
+		Ok(())
+	}
 }

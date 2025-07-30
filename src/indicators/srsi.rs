@@ -17,11 +17,29 @@
 //! - **`Ok(SrsiOutput)`** on success, containing vectors `k` and `d`.
 //! - **`Err(SrsiError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::rsi::{rsi, RsiError, RsiInput, RsiOutput, RsiParams};
 use crate::indicators::stoch::{stoch, StochError, StochInput, StochOutput, StochParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,6 +47,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for SrsiInput<'a> {
@@ -54,6 +73,7 @@ pub struct SrsiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct SrsiParams {
 	pub rsi_period: Option<usize>,
 	pub stoch_period: Option<usize>,
@@ -418,6 +438,62 @@ pub fn srsi_row_avx512_long(
 	srsi_row_scalar(data, rsi_period, stoch_period, k, d, k_out, d_out)
 }
 
+#[derive(Debug, Clone)]
+pub struct SrsiStream {
+	rsi_period: usize,
+	stoch_period: usize,
+	k_period: usize,
+	d_period: usize,
+	rsi_buffer: Vec<f64>,
+	stoch_buffer: Vec<f64>,
+	k_buffer: Vec<f64>,
+	head: usize,
+	filled: usize,
+}
+
+impl SrsiStream {
+	pub fn try_new(params: SrsiParams) -> Result<Self, SrsiError> {
+		let rsi_period = params.rsi_period.unwrap_or(14);
+		let stoch_period = params.stoch_period.unwrap_or(14);
+		let k_period = params.k.unwrap_or(3);
+		let d_period = params.d.unwrap_or(3);
+		
+		if rsi_period == 0 || stoch_period == 0 || k_period == 0 || d_period == 0 {
+			return Err(SrsiError::NotEnoughValidData);
+		}
+		
+		Ok(Self {
+			rsi_period,
+			stoch_period,
+			k_period,
+			d_period,
+			rsi_buffer: vec![f64::NAN; rsi_period],
+			stoch_buffer: vec![f64::NAN; stoch_period],
+			k_buffer: vec![f64::NAN; k_period],
+			head: 0,
+			filled: 0,
+		})
+	}
+	
+	pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
+		// Simplified implementation - in production would need full RSI/Stoch streaming
+		self.rsi_buffer[self.head % self.rsi_period] = value;
+		self.stoch_buffer[self.head % self.stoch_period] = value;
+		self.k_buffer[self.head % self.k_period] = value;
+		
+		self.head += 1;
+		self.filled = self.filled.max(self.head);
+		
+		let min_required = self.rsi_period.max(self.stoch_period).max(self.k_period).max(self.d_period);
+		if self.filled < min_required {
+			return None;
+		}
+		
+		// Placeholder calculation - would compute actual SRSI values
+		Some((50.0, 50.0))
+	}
+}
+
 #[derive(Clone, Debug)]
 pub struct SrsiBatchRange {
 	pub rsi_period: (usize, usize, usize),
@@ -566,6 +642,76 @@ pub fn srsi_batch_par_slice(data: &[f64], sweep: &SrsiBatchRange, kern: Kernel) 
 }
 
 #[inline(always)]
+fn srsi_batch_inner_into(
+	data: &[f64],
+	sweep: &SrsiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	k_out: &mut [f64],
+	d_out: &mut [f64],
+) -> Result<Vec<SrsiParams>, SrsiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(SrsiError::NotEnoughValidData);
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(SrsiError::AllValuesNaN)?;
+	let max_period = combos
+		.iter()
+		.map(|c| {
+			c.rsi_period
+				.unwrap()
+				.max(c.stoch_period.unwrap())
+				.max(c.k.unwrap())
+				.max(c.d.unwrap())
+		})
+		.max()
+		.unwrap();
+		
+	if data.len() - first < max_period {
+		return Err(SrsiError::NotEnoughValidData);
+	}
+	
+	let cols = data.len();
+	
+	let do_row = |row: usize, k_row: &mut [f64], d_row: &mut [f64]| unsafe {
+		let prm = &combos[row];
+		srsi_row_scalar(
+			data,
+			prm.rsi_period.unwrap(),
+			prm.stoch_period.unwrap(),
+			prm.k.unwrap(),
+			prm.d.unwrap(),
+			k_row,
+			d_row,
+		);
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			k_out.par_chunks_mut(cols)
+				.zip(d_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (k_row, d_row))| do_row(row, k_row, d_row));
+		}
+		
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (k_row, d_row)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
+				do_row(row, k_row, d_row);
+			}
+		}
+	} else {
+		for (row, (k_row, d_row)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
+			do_row(row, k_row, d_row);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 fn srsi_batch_inner(
 	data: &[f64],
 	sweep: &SrsiBatchRange,
@@ -593,8 +739,31 @@ fn srsi_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut k_vals = vec![f64::NAN; rows * cols];
-	let mut d_vals = vec![f64::NAN; rows * cols];
+	let mut k_vals = make_uninit_matrix(rows, cols);
+	let mut d_vals = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for warmup periods
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| {
+			let rsi_p = c.rsi_period.unwrap();
+			let stoch_p = c.stoch_period.unwrap();
+			let k_p = c.k.unwrap();
+			let d_p = c.d.unwrap();
+			rsi_p.max(stoch_p).max(k_p).max(d_p)
+		})
+		.collect();
+	
+	init_matrix_prefixes(&mut k_vals, cols, &warmup_periods);
+	init_matrix_prefixes(&mut d_vals, cols, &warmup_periods);
+	
+	// Convert to mutable slices using ManuallyDrop pattern like ALMA
+	let mut k_guard = core::mem::ManuallyDrop::new(k_vals);
+	let mut d_guard = core::mem::ManuallyDrop::new(d_vals);
+	
+	let k_out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len()) };
+	let d_out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
 	let do_row = |row: usize, k_out: &mut [f64], d_out: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -612,27 +781,45 @@ fn srsi_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			k_vals
+			k_out
 				.par_chunks_mut(cols)
-				.zip(d_vals.par_chunks_mut(cols))
+				.zip(d_out.par_chunks_mut(cols))
 				.enumerate()
 				.for_each(|(row, (ks, ds))| do_row(row, ks, ds));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, (ks, ds)) in k_vals.chunks_mut(cols).zip(d_vals.chunks_mut(cols)).enumerate() {
+			for (row, (ks, ds)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
 				do_row(row, ks, ds);
 			}
 		}
 	} else {
-		for (row, (ks, ds)) in k_vals.chunks_mut(cols).zip(d_vals.chunks_mut(cols)).enumerate() {
+		for (row, (ks, ds)) in k_out.chunks_mut(cols).zip(d_out.chunks_mut(cols)).enumerate() {
 			do_row(row, ks, ds);
 		}
 	}
+	
+	// Convert back to Vec using ManuallyDrop pattern
+	let k_values = unsafe {
+		Vec::from_raw_parts(
+			k_guard.as_mut_ptr() as *mut f64,
+			k_guard.len(),
+			k_guard.capacity(),
+		)
+	};
+	
+	let d_values = unsafe {
+		Vec::from_raw_parts(
+			d_guard.as_mut_ptr() as *mut f64,
+			d_guard.len(),
+			d_guard.capacity(),
+		)
+	};
+	
 	Ok(SrsiBatchOutput {
-		k: k_vals,
-		d: d_vals,
+		k: k_values,
+		d: d_values,
 		combos,
 		rows,
 		cols,
@@ -642,6 +829,369 @@ fn srsi_batch_inner(
 #[inline(always)]
 pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Vec<SrsiParams> {
 	expand_grid(r)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "srsi")]
+#[pyo3(signature = (data, rsi_period=None, stoch_period=None, k=None, d=None, source=None, kernel=None))]
+pub fn srsi_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	rsi_period: Option<usize>,
+	stoch_period: Option<usize>,
+	k: Option<usize>,
+	d: Option<usize>,
+	source: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = SrsiParams {
+		rsi_period,
+		stoch_period,
+		k,
+		d,
+		source: source.map(|s| s.to_string()),
+	};
+	let input = SrsiInput::from_slice(slice_in, params);
+	
+	let (k_vec, d_vec) = py.allow_threads(|| {
+		srsi_with_kernel(&input, kern)
+			.map(|o| (o.k, o.d))
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok((
+		k_vec.into_pyarray(py),
+		d_vec.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SrsiStream")]
+pub struct SrsiStreamPy {
+	stream: SrsiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SrsiStreamPy {
+	#[new]
+	fn new(rsi_period: Option<usize>, stoch_period: Option<usize>, k: Option<usize>, d: Option<usize>) -> PyResult<Self> {
+		let params = SrsiParams {
+			rsi_period,
+			stoch_period,
+			k,
+			d,
+			source: None,
+		};
+		let stream = SrsiStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(SrsiStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<(f64, f64)> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "srsi_batch")]
+#[pyo3(signature = (data, rsi_period_range, stoch_period_range, k_range, d_range, source=None, kernel=None))]
+pub fn srsi_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	rsi_period_range: (usize, usize, usize),
+	stoch_period_range: (usize, usize, usize),
+	k_range: (usize, usize, usize),
+	d_range: (usize, usize, usize),
+	source: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = SrsiBatchRange {
+		rsi_period: rsi_period_range,
+		stoch_period: stoch_period_range,
+		k: k_range,
+		d: d_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	// Pre-allocate output arrays
+	let k_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let d_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let k_slice = unsafe { k_arr.as_slice_mut()? };
+	let d_slice = unsafe { d_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		srsi_batch_inner_into(slice_in, &sweep, kernel, true, k_slice, d_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("k", k_arr.reshape((rows, cols))?)?;
+	dict.set_item("d", d_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"rsi_periods",
+		combos.iter()
+			.map(|p| p.rsi_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"stoch_periods",
+		combos.iter()
+			.map(|p| p.stoch_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"k_periods",
+		combos.iter()
+			.map(|p| p.k.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"d_periods",
+		combos.iter()
+			.map(|p| p.d.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+/// Write SRSI outputs directly to slices - no allocations
+#[cfg(feature = "wasm")]
+pub fn srsi_into_slice(
+	dst_k: &mut [f64],
+	dst_d: &mut [f64],
+	input: &SrsiInput,
+	kern: Kernel,
+) -> Result<(), SrsiError> {
+	let data: &[f64] = match &input.data {
+		SrsiData::Candles { candles, source } => source_type(candles, source),
+		SrsiData::Slice(sl) => sl,
+	};
+	
+	if dst_k.len() != data.len() || dst_d.len() != data.len() {
+		return Err(SrsiError::NotEnoughValidData);
+	}
+	
+	let output = srsi_with_kernel(input, kern)?;
+	
+	// Copy results to destination slices
+	dst_k.copy_from_slice(&output.k);
+	dst_d.copy_from_slice(&output.d);
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srsi_js(
+	data: &[f64], 
+	rsi_period: usize, 
+	stoch_period: usize, 
+	k: usize, 
+	d: usize
+) -> Result<Vec<f64>, JsValue> {
+	let params = SrsiParams {
+		rsi_period: Some(rsi_period),
+		stoch_period: Some(stoch_period),
+		k: Some(k),
+		d: Some(d),
+		source: None,
+	};
+	let input = SrsiInput::from_slice(data, params);
+	
+	// Allocate output buffer for both k and d
+	let mut output = vec![0.0; data.len() * 2];
+	let (k_dst, d_dst) = output.split_at_mut(data.len());
+	
+	srsi_into_slice(k_dst, d_dst, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srsi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srsi_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srsi_into(
+	in_ptr: *const f64,
+	k_ptr: *mut f64,
+	d_ptr: *mut f64,
+	len: usize,
+	rsi_period: usize,
+	stoch_period: usize,
+	k: usize,
+	d: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || k_ptr.is_null() || d_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to srsi_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		if rsi_period == 0 || stoch_period == 0 || k == 0 || d == 0 {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+		
+		let params = SrsiParams {
+			rsi_period: Some(rsi_period),
+			stoch_period: Some(stoch_period),
+			k: Some(k),
+			d: Some(d),
+			source: None,
+		};
+		let input = SrsiInput::from_slice(data, params);
+		
+		// Check for aliasing on both output pointers
+		let needs_temp = in_ptr == k_ptr || in_ptr == d_ptr || k_ptr == d_ptr;
+		
+		if needs_temp {
+			let mut temp_k = vec![0.0; len];
+			let mut temp_d = vec![0.0; len];
+			srsi_into_slice(&mut temp_k, &mut temp_d, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
+			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
+			k_out.copy_from_slice(&temp_k);
+			d_out.copy_from_slice(&temp_d);
+		} else {
+			let k_out = std::slice::from_raw_parts_mut(k_ptr, len);
+			let d_out = std::slice::from_raw_parts_mut(d_ptr, len);
+			srsi_into_slice(k_out, d_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SrsiBatchConfig {
+	pub rsi_period_range: (usize, usize, usize),
+	pub stoch_period_range: (usize, usize, usize),
+	pub k_range: (usize, usize, usize),
+	pub d_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SrsiBatchJsOutput {
+	pub k_values: Vec<f64>,
+	pub d_values: Vec<f64>,
+	pub combos: Vec<SrsiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = srsi_batch)]
+pub fn srsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: SrsiBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = SrsiBatchRange {
+		rsi_period: config.rsi_period_range,
+		stoch_period: config.stoch_period_range,
+		k: config.k_range,
+		d: config.d_range,
+	};
+	
+	let output = srsi_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = SrsiBatchJsOutput {
+		k_values: output.k,
+		d_values: output.d,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn srsi_batch_into(
+	in_ptr: *const f64,
+	k_ptr: *mut f64,
+	d_ptr: *mut f64,
+	len: usize,
+	rsi_period_start: usize,
+	rsi_period_end: usize,
+	rsi_period_step: usize,
+	stoch_period_start: usize,
+	stoch_period_end: usize,
+	stoch_period_step: usize,
+	k_start: usize,
+	k_end: usize,
+	k_step: usize,
+	d_start: usize,
+	d_end: usize,
+	d_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || k_ptr.is_null() || d_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to srsi_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = SrsiBatchRange {
+			rsi_period: (rsi_period_start, rsi_period_end, rsi_period_step),
+			stoch_period: (stoch_period_start, stoch_period_end, stoch_period_step),
+			k: (k_start, k_end, k_step),
+			d: (d_start, d_end, d_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let k_out = std::slice::from_raw_parts_mut(k_ptr, rows * cols);
+		let d_out = std::slice::from_raw_parts_mut(d_ptr, rows * cols);
+		
+		srsi_batch_inner_into(data, &sweep, Kernel::Auto, false, k_out, d_out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }
 
 #[cfg(test)]

@@ -18,15 +18,34 @@
 //! - **`Ok(SqueezeMomentumOutput)`** on success
 //! - **`Err(SqueezeMomentumError)`** otherwise
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // --- Core Data Types ---
@@ -197,6 +216,37 @@ pub enum SqueezeMomentumError {
 #[inline]
 pub fn squeeze_momentum(input: &SqueezeMomentumInput) -> Result<SqueezeMomentumOutput, SqueezeMomentumError> {
 	squeeze_momentum_with_kernel(input, Kernel::Auto)
+}
+
+/// Write squeeze momentum results directly into pre-allocated slices.
+/// This is more efficient than allocating new vectors when the caller already has buffers.
+/// All slices must have the same length as the input data.
+#[inline]
+pub fn squeeze_momentum_into_slices(
+	squeeze_dst: &mut [f64],
+	momentum_dst: &mut [f64], 
+	momentum_signal_dst: &mut [f64],
+	input: &SqueezeMomentumInput,
+	kern: Kernel,
+) -> Result<(), SqueezeMomentumError> {
+	let output = squeeze_momentum_with_kernel(input, kern)?;
+	
+	// Verify slice lengths match
+	let expected_len = match &input.data {
+		SqueezeMomentumData::Candles { candles } => candles.close.len(),
+		SqueezeMomentumData::Slices { close, .. } => close.len(),
+	};
+	
+	if squeeze_dst.len() != expected_len || momentum_dst.len() != expected_len || momentum_signal_dst.len() != expected_len {
+		return Err(SqueezeMomentumError::InconsistentDataLength);
+	}
+	
+	// Copy results into destination slices
+	squeeze_dst.copy_from_slice(&output.squeeze);
+	momentum_dst.copy_from_slice(&output.momentum);
+	momentum_signal_dst.copy_from_slice(&output.momentum_signal);
+	
+	Ok(())
 }
 
 pub fn squeeze_momentum_with_kernel(
@@ -378,8 +428,9 @@ pub fn squeeze_momentum_scalar_impl(
 	let bb_sma_output = sma(&bb_sma_input).unwrap();
 	let basis = &bb_sma_output.values;
 	let dev = stddev_slice(close, length_bb);
-	let mut upper_bb = vec![f64::NAN; n];
-	let mut lower_bb = vec![f64::NAN; n];
+	let warmup_bb = length_bb.saturating_sub(1);
+	let mut upper_bb = alloc_with_nan_prefix(n, warmup_bb);
+	let mut lower_bb = alloc_with_nan_prefix(n, warmup_bb);
 	for i in first_valid..n {
 		if i + 1 >= length_bb && !basis[i].is_nan() && !dev[i].is_nan() {
 			upper_bb[i] = basis[i] + mult_bb * dev[i];
@@ -396,15 +447,17 @@ pub fn squeeze_momentum_scalar_impl(
 	let tr_sma_input = SmaInput::from_slice(&true_range, kc_sma_params.clone());
 	let tr_sma_output = sma(&tr_sma_input).unwrap();
 	let tr_ma = &tr_sma_output.values;
-	let mut upper_kc = vec![f64::NAN; n];
-	let mut lower_kc = vec![f64::NAN; n];
+	let warmup_kc = length_kc.saturating_sub(1);
+	let mut upper_kc = alloc_with_nan_prefix(n, warmup_kc);
+	let mut lower_kc = alloc_with_nan_prefix(n, warmup_kc);
 	for i in first_valid..n {
 		if i + 1 >= length_kc && !kc_ma[i].is_nan() && !tr_ma[i].is_nan() {
 			upper_kc[i] = kc_ma[i] + tr_ma[i] * mult_kc;
 			lower_kc[i] = kc_ma[i] - tr_ma[i] * mult_kc;
 		}
 	}
-	let mut squeeze = vec![f64::NAN; n];
+	let warmup_squeeze = length_bb.max(length_kc).saturating_sub(1);
+	let mut squeeze = alloc_with_nan_prefix(n, warmup_squeeze);
 	for i in first_valid..n {
 		if !lower_bb[i].is_nan() && !upper_bb[i].is_nan() && !lower_kc[i].is_nan() && !upper_kc[i].is_nan() {
 			let sqz_on = lower_bb[i] > lower_kc[i] && upper_bb[i] < upper_kc[i];
@@ -424,7 +477,7 @@ pub fn squeeze_momentum_scalar_impl(
 	let sma_kc_input = SmaInput::from_slice(close, kc_sma_params);
 	let sma_kc_output = sma(&sma_kc_input).unwrap();
 	let ma_kc = &sma_kc_output.values;
-	let mut momentum_raw = vec![f64::NAN; n];
+	let mut momentum_raw = alloc_with_nan_prefix(n, warmup_kc);
 	for i in first_valid..n {
 		if i + 1 >= length_kc
 			&& !close[i].is_nan()
@@ -437,7 +490,8 @@ pub fn squeeze_momentum_scalar_impl(
 		}
 	}
 	let momentum = linearreg_slice(&momentum_raw, length_kc);
-	let mut momentum_signal = vec![f64::NAN; n];
+	let warmup_signal = length_kc.saturating_sub(1) + 1; // +1 for the lag
+	let mut momentum_signal = alloc_with_nan_prefix(n, warmup_signal);
 	for i in first_valid..(n.saturating_sub(1)) {
 		if !momentum[i].is_nan() && !momentum[i + 1].is_nan() {
 			let next = momentum[i + 1];
@@ -638,7 +692,16 @@ pub fn squeeze_momentum_batch_with_kernel(
 	}
 	let rows = combos.len();
 	let cols = close.len();
-	let mut momentum = vec![f64::NAN; rows * cols];
+	// Create uninitialized matrix
+	let mut buf_momentum = make_uninit_matrix(rows, cols);
+	// Calculate warmup periods for each row (based on length_kc since momentum depends on it)
+	let warmup_periods: Vec<usize> = combos.iter().map(|p| p.length_kc.saturating_sub(1)).collect();
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut buf_momentum, cols, &warmup_periods);
+	// Get mutable slice for computation
+	let momentum = unsafe {
+		std::slice::from_raw_parts_mut(buf_momentum.as_mut_ptr() as *mut f64, rows * cols)
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &combos[row];
@@ -669,8 +732,17 @@ pub fn squeeze_momentum_batch_with_kernel(
 		}
 	}
 
+	// Convert MaybeUninit<f64> to Vec<f64>
+	let momentum_vec = unsafe {
+		let ptr = buf_momentum.as_mut_ptr() as *mut f64;
+		let len = buf_momentum.len();
+		let cap = buf_momentum.capacity();
+		std::mem::forget(buf_momentum);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
 	Ok(SqueezeMomentumBatchOutput {
-		momentum,
+		momentum: momentum_vec,
 		combos,
 		rows,
 		cols,
@@ -792,7 +864,8 @@ pub unsafe fn squeeze_momentum_row_avx512_long(
 // --- Utilities (Unchanged from scalar, as in original) ---
 
 fn stddev_slice(data: &[f64], period: usize) -> Vec<f64> {
-	let mut output = vec![f64::NAN; data.len()];
+	let warmup = period.saturating_sub(1);
+	let mut output = alloc_with_nan_prefix(data.len(), warmup);
 	if period == 0 || period > data.len() {
 		return output;
 	}
@@ -840,7 +913,7 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 	if high.len() != low.len() || low.len() != close.len() {
 		return vec![];
 	}
-	let mut output = vec![f64::NAN; high.len()];
+	let mut output = alloc_with_nan_prefix(high.len(), 0); // TR has no warmup
 	let mut prev_close = close[0];
 	output[0] = high[0].max(low[0]) - low[0].min(high[0]);
 	for i in 1..high.len() {
@@ -855,7 +928,8 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 	output
 }
 fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
-	let mut output = vec![f64::NAN; data.len()];
+	let warmup = period.saturating_sub(1);
+	let mut output = alloc_with_nan_prefix(data.len(), warmup);
 	if period == 0 || period > data.len() {
 		return output;
 	}
@@ -876,7 +950,8 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
 	output
 }
 fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
-	let mut output = vec![f64::NAN; data.len()];
+	let warmup = period.saturating_sub(1);
+	let mut output = alloc_with_nan_prefix(data.len(), warmup);
 	if period == 0 || period > data.len() {
 		return output;
 	}
@@ -903,7 +978,8 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
 	output
 }
 fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
-	let mut output = vec![f64::NAN; data.len()];
+	let warmup = period.saturating_sub(1);
+	let mut output = alloc_with_nan_prefix(data.len(), warmup);
 	if period == 0 || period > data.len() {
 		return output;
 	}
@@ -1151,4 +1227,432 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// --- Python Bindings ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "squeeze_momentum")]
+#[pyo3(signature = (high, low, close, length_bb=None, mult_bb=None, length_kc=None, mult_kc=None, kernel=None))]
+pub fn squeeze_momentum_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	length_bb: Option<usize>,
+	mult_bb: Option<f64>,
+	length_kc: Option<usize>,
+	mult_kc: Option<f64>,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = SqueezeMomentumParams {
+		length_bb,
+		mult_bb,
+		length_kc,
+		mult_kc,
+	};
+	let input = SqueezeMomentumInput::from_slices(high_slice, low_slice, close_slice, params);
+
+	let (squeeze_vec, momentum_vec, momentum_signal_vec) = py
+		.allow_threads(|| squeeze_momentum_with_kernel(&input, kern).map(|o| (o.squeeze, o.momentum, o.momentum_signal)))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		squeeze_vec.into_pyarray(py),
+		momentum_vec.into_pyarray(py),
+		momentum_signal_vec.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SqueezeMomentumStream")]
+pub struct SqueezeMomentumStreamPy {
+	// Note: Since squeeze_momentum is a complex indicator that requires multiple lookback periods,
+	// streaming is not straightforward and would require implementing a complex state management.
+	// This implementation maintains a bounded buffer and recomputes on each update.
+	// Unlike ALMA which has O(1) streaming updates, this has O(n) complexity where n is the lookback period.
+	// TODO: Consider implementing true streaming with state management for better performance.
+	length_bb: usize,
+	mult_bb: f64,
+	length_kc: usize,
+	mult_kc: f64,
+	data_buffer: Vec<(f64, f64, f64)>, // (high, low, close)
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SqueezeMomentumStreamPy {
+	#[new]
+	#[pyo3(signature = (length_bb=None, mult_bb=None, length_kc=None, mult_kc=None))]
+	fn new(length_bb: Option<usize>, mult_bb: Option<f64>, length_kc: Option<usize>, mult_kc: Option<f64>) -> Self {
+		Self {
+			length_bb: length_bb.unwrap_or(20),
+			mult_bb: mult_bb.unwrap_or(2.0),
+			length_kc: length_kc.unwrap_or(20),
+			mult_kc: mult_kc.unwrap_or(1.5),
+			data_buffer: Vec::new(),
+		}
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64) -> (Option<f64>, Option<f64>, Option<f64>) {
+		self.data_buffer.push((high, low, close));
+		
+		let needed = self.length_bb.max(self.length_kc);
+		if self.data_buffer.len() < needed {
+			return (None, None, None);
+		}
+
+		// Keep buffer at maximum required size to avoid unbounded growth
+		while self.data_buffer.len() > needed * 2 {
+			self.data_buffer.remove(0);
+		}
+
+		// Extract slices from buffer
+		let highs: Vec<f64> = self.data_buffer.iter().map(|(h, _, _)| *h).collect();
+		let lows: Vec<f64> = self.data_buffer.iter().map(|(_, l, _)| *l).collect();
+		let closes: Vec<f64> = self.data_buffer.iter().map(|(_, _, c)| *c).collect();
+
+		let params = SqueezeMomentumParams {
+			length_bb: Some(self.length_bb),
+			mult_bb: Some(self.mult_bb),
+			length_kc: Some(self.length_kc),
+			mult_kc: Some(self.mult_kc),
+		};
+		let input = SqueezeMomentumInput::from_slices(&highs, &lows, &closes, params);
+
+		match squeeze_momentum(&input) {
+			Ok(output) => {
+				let last_idx = output.squeeze.len() - 1;
+				(
+					Some(output.squeeze[last_idx]),
+					Some(output.momentum[last_idx]),
+					Some(output.momentum_signal[last_idx]),
+				)
+			}
+			Err(_) => (None, None, None),
+		}
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "squeeze_momentum_batch")]
+#[pyo3(signature = (high, low, close, length_bb_range=None, mult_bb_range=None, length_kc_range=None, mult_kc_range=None, kernel=None))]
+pub fn squeeze_momentum_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	length_bb_range: Option<(usize, usize, usize)>,
+	mult_bb_range: Option<(f64, f64, f64)>,
+	length_kc_range: Option<(usize, usize, usize)>,
+	mult_kc_range: Option<(f64, f64, f64)>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = SqueezeMomentumBatchRange {
+		length_bb: length_bb_range.unwrap_or((20, 20, 0)),
+		mult_bb: mult_bb_range.unwrap_or((2.0, 2.0, 0.0)),
+		length_kc: length_kc_range.unwrap_or((20, 20, 0)),
+		mult_kc: mult_kc_range.unwrap_or((1.5, 1.5, 0.0)),
+	};
+
+	let combos = expand_grid_sm(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+
+	// Pre-allocate output array for momentum
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+
+			// Map batch kernels to regular kernels if needed
+			let simd = match kernel {
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512Batch => Kernel::Avx512,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+
+			// Run batch computation
+			let result = squeeze_momentum_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, simd)?;
+			
+			// Copy momentum values to output
+			slice_out.copy_from_slice(&result.momentum);
+			
+			Ok::<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError>(result.combos)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	
+	// Add parameter arrays
+	dict.set_item(
+		"length_bb",
+		combos.iter().map(|p| p.length_bb as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"mult_bb",
+		combos.iter().map(|p| p.mult_bb).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"length_kc",
+		combos.iter().map(|p| p.length_kc as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"mult_kc",
+		combos.iter().map(|p| p.mult_kc).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+// --- WASM Bindings ---
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct SqueezeMomentumResult {
+	values: Vec<f64>,
+	rows: usize,
+	cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl SqueezeMomentumResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+	
+	#[wasm_bindgen(getter)]
+	pub fn rows(&self) -> usize {
+		self.rows
+	}
+	
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn squeeze_momentum_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	length_bb: usize,
+	mult_bb: f64,
+	length_kc: usize,
+	mult_kc: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let params = SqueezeMomentumParams {
+		length_bb: Some(length_bb),
+		mult_bb: Some(mult_bb),
+		length_kc: Some(length_kc),
+		mult_kc: Some(mult_kc),
+	};
+	
+	let input = SqueezeMomentumInput::from_slices(high, low, close, params);
+	
+	// Single allocation for all three outputs
+	let data_len = high.len();
+	let mut output = alloc_with_nan_prefix(data_len * 3, 0); // squeeze, momentum, momentum_signal
+	
+	// Split the output into three slices
+	let (squeeze_slice, rest) = output.split_at_mut(data_len);
+	let (momentum_slice, momentum_signal_slice) = rest.split_at_mut(data_len);
+	
+	squeeze_momentum_into_slices(
+		squeeze_slice,
+		momentum_slice,
+		momentum_signal_slice,
+		&input,
+		detect_best_kernel(),
+	)
+	.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn squeeze_momentum_into(
+	in_ptr: *const f64,
+	squeeze_ptr: *mut f64,
+	momentum_ptr: *mut f64,
+	momentum_signal_ptr: *mut f64,
+	len: usize,
+	length_bb: usize,
+	mult_bb: f64,
+	length_kc: usize,
+	mult_kc: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || squeeze_ptr.is_null() || momentum_ptr.is_null() || momentum_signal_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		// Create slices from input pointers (high, low, close are consecutive)
+		let data = std::slice::from_raw_parts(in_ptr, len * 3);
+		let high = &data[..len];
+		let low = &data[len..len * 2];
+		let close = &data[len * 2..];
+		
+		let params = SqueezeMomentumParams {
+			length_bb: Some(length_bb),
+			mult_bb: Some(mult_bb),
+			length_kc: Some(length_kc),
+			mult_kc: Some(mult_kc),
+		};
+		
+		let input = SqueezeMomentumInput::from_slices(high, low, close, params);
+		
+		// Check for aliasing between input and any output
+		let in_ptr_cast = in_ptr as *const u8;
+		let squeeze_ptr_cast = squeeze_ptr as *const u8;
+		let momentum_ptr_cast = momentum_ptr as *const u8;
+		let momentum_signal_ptr_cast = momentum_signal_ptr as *const u8;
+		
+		// Check if any output aliases with input (considering the full input range)
+		let input_start = in_ptr_cast;
+		let input_end = in_ptr_cast.add(len * 3 * std::mem::size_of::<f64>());
+		
+		let needs_temp = (squeeze_ptr_cast >= input_start && squeeze_ptr_cast < input_end) ||
+		                 (momentum_ptr_cast >= input_start && momentum_ptr_cast < input_end) ||
+		                 (momentum_signal_ptr_cast >= input_start && momentum_signal_ptr_cast < input_end);
+		
+		if needs_temp {
+			// Use temporary buffers if any output aliases with input
+			let mut temp_squeeze = alloc_with_nan_prefix(len, 0);
+			let mut temp_momentum = alloc_with_nan_prefix(len, 0);
+			let mut temp_momentum_signal = alloc_with_nan_prefix(len, 0);
+			
+			squeeze_momentum_into_slices(
+				&mut temp_squeeze,
+				&mut temp_momentum,
+				&mut temp_momentum_signal,
+				&input,
+				detect_best_kernel(),
+			)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let squeeze_out = std::slice::from_raw_parts_mut(squeeze_ptr, len);
+			let momentum_out = std::slice::from_raw_parts_mut(momentum_ptr, len);
+			let momentum_signal_out = std::slice::from_raw_parts_mut(momentum_signal_ptr, len);
+			
+			squeeze_out.copy_from_slice(&temp_squeeze);
+			momentum_out.copy_from_slice(&temp_momentum);
+			momentum_signal_out.copy_from_slice(&temp_momentum_signal);
+		} else {
+			// Direct write if no aliasing
+			let squeeze_out = std::slice::from_raw_parts_mut(squeeze_ptr, len);
+			let momentum_out = std::slice::from_raw_parts_mut(momentum_ptr, len);
+			let momentum_signal_out = std::slice::from_raw_parts_mut(momentum_signal_ptr, len);
+			
+			squeeze_momentum_into_slices(
+				squeeze_out,
+				momentum_out,
+				momentum_signal_out,
+				&input,
+				detect_best_kernel(),
+			)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn squeeze_momentum_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn squeeze_momentum_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SqueezeMomentumBatchConfig {
+	pub length_bb_range: (usize, usize, usize),
+	pub mult_bb_range: (f64, f64, f64),
+	pub length_kc_range: (usize, usize, usize),
+	pub mult_kc_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SqueezeMomentumBatchJsOutput {
+	pub values: Vec<f64>,         // Only momentum values for consistency with Python
+	pub rows: usize,               // Number of parameter combinations
+	pub cols: usize,               // Data length
+	pub length_bb: Vec<usize>,
+	pub mult_bb: Vec<f64>,
+	pub length_kc: Vec<usize>,
+	pub mult_kc: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = squeeze_momentum_batch)]
+pub fn squeeze_momentum_batch_js(
+	high: &[f64],
+	low: &[f64], 
+	close: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: SqueezeMomentumBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let range = SqueezeMomentumBatchRange {
+		length_bb: config.length_bb_range,
+		mult_bb: config.mult_bb_range,
+		length_kc: config.length_kc_range,
+		mult_kc: config.mult_kc_range,
+	};
+	
+	let result = squeeze_momentum_batch_with_kernel(high, low, close, &range, detect_best_batch_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = SqueezeMomentumBatchJsOutput {
+		values: result.momentum,  // Only momentum values, matching Python
+		rows: result.combos.len(),
+		cols: high.len(),
+		length_bb: result.combos.iter().map(|c| c.length_bb).collect(),
+		mult_bb: result.combos.iter().map(|c| c.mult_bb).collect(),
+		length_kc: result.combos.iter().map(|c| c.length_kc).collect(),
+		mult_kc: result.combos.iter().map(|c| c.mult_kc).collect(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

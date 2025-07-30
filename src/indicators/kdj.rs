@@ -1420,6 +1420,280 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_kdj_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			KdjParams::default(),
+			KdjParams {
+				fast_k_period: Some(2),
+				slow_k_period: Some(2),
+				slow_k_ma_type: Some("sma".to_string()),
+				slow_d_period: Some(2),
+				slow_d_ma_type: Some("sma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(3),
+				slow_k_period: Some(3),
+				slow_k_ma_type: Some("ema".to_string()),
+				slow_d_period: Some(3),
+				slow_d_ma_type: Some("ema".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(5),
+				slow_k_period: Some(2),
+				slow_k_ma_type: Some("sma".to_string()),
+				slow_d_period: Some(2),
+				slow_d_ma_type: Some("sma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(10),
+				slow_k_period: Some(5),
+				slow_k_ma_type: Some("wma".to_string()),
+				slow_d_period: Some(5),
+				slow_d_ma_type: Some("wma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(14),
+				slow_k_period: Some(3),
+				slow_k_ma_type: Some("sma".to_string()),
+				slow_d_period: Some(3),
+				slow_d_ma_type: Some("sma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(20),
+				slow_k_period: Some(4),
+				slow_k_ma_type: Some("ema".to_string()),
+				slow_d_period: Some(6),
+				slow_d_ma_type: Some("ema".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(30),
+				slow_k_period: Some(6),
+				slow_k_ma_type: Some("hma".to_string()),
+				slow_d_period: Some(8),
+				slow_d_ma_type: Some("hma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(50),
+				slow_k_period: Some(10),
+				slow_k_ma_type: Some("sma".to_string()),
+				slow_d_period: Some(10),
+				slow_d_ma_type: Some("sma".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(100),
+				slow_k_period: Some(20),
+				slow_k_ma_type: Some("ema".to_string()),
+				slow_d_period: Some(20),
+				slow_d_ma_type: Some("ema".to_string()),
+			},
+			KdjParams {
+				fast_k_period: Some(200),
+				slow_k_period: Some(30),
+				slow_k_ma_type: Some("sma".to_string()),
+				slow_d_period: Some(30),
+				slow_d_ma_type: Some("sma".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = KdjInput::from_candles(&candles, params.clone());
+			let output = kdj_with_kernel(&input, kernel)?;
+
+			// Check K values
+			for (i, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in K \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in K \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+
+			// Check D values
+			for (i, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in D \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in D \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in D \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+
+			// Check J values
+			for (i, &val) in output.j.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in J \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in J \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in J \
+						 with params: fast_k_period={}, slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_k_period.unwrap_or(9),
+						params.slow_k_period.unwrap_or(3),
+						params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_d_period.unwrap_or(3),
+						params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_kdj_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_kdj_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {

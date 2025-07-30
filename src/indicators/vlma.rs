@@ -12,11 +12,29 @@
 //! ## Returns
 //! - **Ok(VlmaOutput)** on success, containing a Vec<f64> of indicator values
 //! - **Err(VlmaError)** on failure
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -48,6 +66,7 @@ pub struct VlmaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VlmaParams {
 	pub min_period: Option<usize>,
 	pub max_period: Option<usize>,
@@ -259,16 +278,86 @@ pub fn vlma_with_kernel(input: &VlmaInput, kernel: Kernel) -> Result<VlmaOutput,
 		k => k,
 	};
 
+	let mut out = alloc_with_nan_prefix(data.len(), first + max_period - 1);
+	
+	vlma_compute_into(data, min_period, max_period, &matype, devtype, first, chosen, &mut out)?;
+	
+	Ok(VlmaOutput { values: out })
+}
+
+#[inline(always)]
+fn vlma_prepare<'a>(
+	input: &'a VlmaInput,
+	kernel: Kernel,
+) -> Result<(&'a [f64], usize, usize, String, usize, usize, Kernel), VlmaError> {
+	let data: &[f64] = input.as_ref();
+
+	if data.is_empty() {
+		return Err(VlmaError::EmptyData);
+	}
+
+	let min_period = input.get_min_period();
+	let max_period = input.get_max_period();
+	if min_period > max_period {
+		return Err(VlmaError::InvalidPeriodRange { min_period, max_period });
+	}
+
+	if max_period == 0 || max_period > data.len() {
+		return Err(VlmaError::InvalidPeriod {
+			min_period,
+			max_period,
+			data_len: data.len(),
+		});
+	}
+
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(VlmaError::AllValuesNaN)?;
+
+	if (data.len() - first) < max_period {
+		return Err(VlmaError::NotEnoughValidData {
+			needed: max_period,
+			valid: data.len() - first,
+		});
+	}
+
+	let matype = input.get_matype();
+	let devtype = input.get_devtype();
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	Ok((data, min_period, max_period, matype, devtype, first, chosen))
+}
+
+#[inline(always)]
+fn vlma_compute_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first: usize,
+	kernel: Kernel,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
 	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => vlma_scalar(data, min_period, max_period, matype, devtype, first),
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				vlma_scalar_into(data, min_period, max_period, matype, devtype, first, out)?;
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => vlma_avx2(data, min_period, max_period, matype, devtype, first),
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				vlma_avx2_into(data, min_period, max_period, matype, devtype, first, out)?;
+			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => vlma_avx512(data, min_period, max_period, matype, devtype, first),
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				vlma_avx512_into(data, min_period, max_period, matype, devtype, first, out)?;
+			}
 			_ => unreachable!(),
 		}
 	}
+	Ok(())
 }
 
 #[inline(always)]
@@ -280,7 +369,23 @@ unsafe fn vlma_scalar(
 	devtype: usize,
 	first_valid: usize,
 ) -> Result<VlmaOutput, VlmaError> {
-	let mean = ma(&matype, MaData::Slice(data), max_period).map_err(|e| VlmaError::MaError(e.to_string()))?;
+	let warmup_period = first_valid + max_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	vlma_scalar_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
+	Ok(VlmaOutput { values: out })
+}
+
+#[inline(always)]
+unsafe fn vlma_scalar_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	let mean = ma(matype, MaData::Slice(data), max_period).map_err(|e| VlmaError::MaError(e.to_string()))?;
 
 	let dev_params = DevParams {
 		period: Some(max_period),
@@ -289,10 +394,11 @@ unsafe fn vlma_scalar(
 	let dev_input = DevInput::from_slice(data, dev_params);
 	let dev = deviation(&dev_input).map_err(|e| VlmaError::DevError(e.to_string()))?;
 
-	let mut a = vec![f64::NAN; data.len()];
-	let mut b = vec![f64::NAN; data.len()];
-	let mut c = vec![f64::NAN; data.len()];
-	let mut d = vec![f64::NAN; data.len()];
+	let warmup_period = first_valid + max_period - 1;
+	let mut a = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut b = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut c = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut d = alloc_with_nan_prefix(data.len(), warmup_period);
 
 	for i in 0..data.len() {
 		if !mean[i].is_nan() && !dev[i].is_nan() {
@@ -303,16 +409,15 @@ unsafe fn vlma_scalar(
 		}
 	}
 
-	let mut vlma_values = vec![f64::NAN; data.len()];
-	let mut periods = vec![0.0; data.len()];
+	let mut periods = vec![0.0; data.len()];  // OK: This tracks the adaptive period and is not output
 
 	let mut last_val = data[first_valid];
-	vlma_values[first_valid] = last_val;
+	out[first_valid] = last_val;
 	periods[first_valid] = max_period as f64;
 
 	for i in (first_valid + 1)..data.len() {
 		if data[i].is_nan() {
-			vlma_values[i] = f64::NAN;
+			out[i] = f64::NAN;
 			continue;
 		}
 		let prev_period = if periods[i - 1] == 0.0 {
@@ -345,11 +450,24 @@ unsafe fn vlma_scalar(
 		last_val = new_val;
 
 		if i >= first_valid + max_period - 1 {
-			vlma_values[i] = new_val;
+			out[i] = new_val;
 		}
 	}
 
-	Ok(VlmaOutput { values: vlma_values })
+	Ok(())
+}
+
+#[inline(always)]
+unsafe fn vlma_row_scalar(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	vlma_scalar_into(data, min_period, max_period, matype, devtype, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -362,7 +480,39 @@ unsafe fn vlma_avx2(
 	devtype: usize,
 	first_valid: usize,
 ) -> Result<VlmaOutput, VlmaError> {
-	vlma_scalar(data, min_period, max_period, matype, devtype, first_valid)
+	let warmup_period = first_valid + max_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	vlma_avx2_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
+	Ok(VlmaOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_avx2_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	// For now, delegate to scalar implementation
+	vlma_scalar_into(data, min_period, max_period, matype, devtype, first_valid, out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_row_avx2(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	vlma_avx2_into(data, min_period, max_period, matype, devtype, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -375,11 +525,42 @@ unsafe fn vlma_avx512(
 	devtype: usize,
 	first_valid: usize,
 ) -> Result<VlmaOutput, VlmaError> {
+	let warmup_period = first_valid + max_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	vlma_avx512_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
+	Ok(VlmaOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_avx512_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
 	if max_period <= 32 {
-		vlma_avx512_short(data, min_period, max_period, matype, devtype, first_valid)
+		vlma_avx512_short_into(data, min_period, max_period, matype, devtype, first_valid, out)
 	} else {
-		vlma_avx512_long(data, min_period, max_period, matype, devtype, first_valid)
+		vlma_avx512_long_into(data, min_period, max_period, matype, devtype, first_valid, out)
 	}
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_row_avx512(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	vlma_avx512_into(data, min_period, max_period, matype, devtype, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -392,7 +573,25 @@ unsafe fn vlma_avx512_short(
 	devtype: usize,
 	first_valid: usize,
 ) -> Result<VlmaOutput, VlmaError> {
-	vlma_scalar(data, min_period, max_period, matype, devtype, first_valid)
+	let warmup_period = first_valid + max_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	vlma_avx512_short_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
+	Ok(VlmaOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_avx512_short_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	// For now, delegate to scalar implementation
+	vlma_scalar_into(data, min_period, max_period, matype, devtype, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -405,7 +604,25 @@ unsafe fn vlma_avx512_long(
 	devtype: usize,
 	first_valid: usize,
 ) -> Result<VlmaOutput, VlmaError> {
-	vlma_scalar(data, min_period, max_period, matype, devtype, first_valid)
+	let warmup_period = first_valid + max_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	vlma_avx512_long_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
+	Ok(VlmaOutput { values: out })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn vlma_avx512_long_into(
+	data: &[f64],
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+	first_valid: usize,
+	out: &mut [f64],
+) -> Result<(), VlmaError> {
+	// For now, delegate to scalar implementation
+	vlma_scalar_into(data, min_period, max_period, matype, devtype, first_valid, out)
 }
 
 #[derive(Debug, Clone)]
@@ -730,26 +947,34 @@ fn vlma_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	let mut uninit_values = make_uninit_matrix(rows, cols);
+	
+	// Initialize warmup periods for each row
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|p| first + p.max_period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut uninit_values, cols, &warmup_periods);
+	
+	// Convert to initialized slice for computation
+	let values_ptr = uninit_values.as_mut_ptr() as *mut f64;
+	let values = unsafe { std::slice::from_raw_parts_mut(values_ptr, rows * cols) };
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let min_period = combos[row].min_period.unwrap();
 		let max_period = combos[row].max_period.unwrap();
-		let matype = combos[row].matype.as_ref().unwrap().clone();
+		let matype = combos[row].matype.as_ref().unwrap();
 		let devtype = combos[row].devtype.unwrap();
 		match kern {
 			Kernel::Scalar => {
-				let out = vlma_scalar(data, min_period, max_period, matype, devtype, first).unwrap();
-				out_row.copy_from_slice(&out.values[..cols]);
+				vlma_row_scalar(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx2 => {
-				let out = vlma_avx2(data, min_period, max_period, matype, devtype, first).unwrap();
-				out_row.copy_from_slice(&out.values[..cols]);
+				vlma_row_avx2(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => {
-				let out = vlma_avx512(data, min_period, max_period, matype, devtype, first).unwrap();
-				out_row.copy_from_slice(&out.values[..cols]);
+				vlma_row_avx512(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
 			}
 			_ => unreachable!(),
 		}
@@ -774,8 +999,16 @@ fn vlma_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert initialized MaybeUninit<f64> back to Vec<f64>
+	let values_vec = unsafe {
+		let ptr = uninit_values.as_ptr() as *const f64;
+		Vec::from_raw_parts(ptr as *mut f64, rows * cols, rows * cols)
+	};
+	std::mem::forget(uninit_values);
+	
 	Ok(VlmaBatchOutput {
-		values,
+		values: values_vec,
 		combos,
 		rows,
 		cols,
@@ -783,82 +1016,414 @@ fn vlma_batch_inner(
 }
 
 #[inline(always)]
+pub fn vlma_batch_inner_into(
+	data: &[f64],
+	sweep: &VlmaBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VlmaParams>, VlmaError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(VlmaError::InvalidPeriod {
+			min_period: 0,
+			max_period: 0,
+			data_len: 0,
+		});
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VlmaError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.max_period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(VlmaError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let min_period = combos[row].min_period.unwrap();
+		let max_period = combos[row].max_period.unwrap();
+		let matype = combos[row].matype.as_ref().unwrap();
+		let devtype = combos[row].devtype.unwrap();
+		match kern {
+			Kernel::Scalar => {
+				vlma_row_scalar(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => {
+				vlma_row_avx2(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => {
+				vlma_row_avx512(data, min_period, max_period, matype, devtype, first, out_row).unwrap();
+			}
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 pub fn expand_grid_vlma(r: &VlmaBatchRange) -> Vec<VlmaParams> {
 	expand_grid(r)
 }
 
-#[inline(always)]
-pub fn vlma_row_scalar(
-	data: &[f64],
-	first: usize,
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vlma")]
+#[pyo3(signature = (data, min_period=5, max_period=50, matype="sma", devtype=0, kernel=None))]
+pub fn vlma_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
 	min_period: usize,
 	max_period: usize,
 	matype: &str,
 	devtype: usize,
-	out: &mut [f64],
-) {
-	let res = unsafe { vlma_scalar(data, min_period, max_period, matype.to_string(), devtype, first) }.unwrap();
-	out.copy_from_slice(&res.values);
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VlmaParams {
+		min_period: Some(min_period),
+		max_period: Some(max_period),
+		matype: Some(matype.to_string()),
+		devtype: Some(devtype),
+	};
+	let input = VlmaInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| vlma_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn vlma_row_avx2(
-	data: &[f64],
-	first: usize,
-	min_period: usize,
-	max_period: usize,
-	matype: &str,
-	devtype: usize,
-	out: &mut [f64],
-) {
-	let res = unsafe { vlma_avx2(data, min_period, max_period, matype.to_string(), devtype, first) }.unwrap();
-	out.copy_from_slice(&res.values);
+#[cfg(feature = "python")]
+#[pyclass(name = "VlmaStream")]
+pub struct VlmaStreamPy {
+	stream: VlmaStream,
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn vlma_row_avx512(
-	data: &[f64],
-	first: usize,
-	min_period: usize,
-	max_period: usize,
-	matype: &str,
-	devtype: usize,
-	out: &mut [f64],
-) {
-	let res = unsafe { vlma_avx512(data, min_period, max_period, matype.to_string(), devtype, first) }.unwrap();
-	out.copy_from_slice(&res.values);
+#[cfg(feature = "python")]
+#[pymethods]
+impl VlmaStreamPy {
+	#[new]
+	fn new(min_period: usize, max_period: usize, matype: &str, devtype: usize) -> PyResult<Self> {
+		let params = VlmaParams {
+			min_period: Some(min_period),
+			max_period: Some(max_period),
+			matype: Some(matype.to_string()),
+			devtype: Some(devtype),
+		};
+		let stream = VlmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VlmaStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn vlma_row_avx512_short(
-	data: &[f64],
-	first: usize,
-	min_period: usize,
-	max_period: usize,
+#[cfg(feature = "python")]
+#[pyfunction(name = "vlma_batch")]
+#[pyo3(signature = (data, min_period_range=(5, 5, 0), max_period_range=(50, 50, 0), devtype_range=(0, 0, 0), matype="sma", kernel=None))]
+pub fn vlma_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	min_period_range: (usize, usize, usize),
+	max_period_range: (usize, usize, usize),
+	devtype_range: (usize, usize, usize),
 	matype: &str,
-	devtype: usize,
-	out: &mut [f64],
-) {
-	let res = unsafe { vlma_avx512_short(data, min_period, max_period, matype.to_string(), devtype, first) }.unwrap();
-	out.copy_from_slice(&res.values);
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	
+	let sweep = VlmaBatchRange {
+		min_period: min_period_range,
+		max_period: max_period_range,
+		matype: (matype.to_string(), matype.to_string(), "".to_string()),
+		devtype: devtype_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			vlma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"min_periods",
+		combos
+			.iter()
+			.map(|p| p.min_period.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"max_periods",
+		combos
+			.iter()
+			.map(|p| p.max_period.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"devtypes",
+		combos
+			.iter()
+			.map(|p| p.devtype.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-pub fn vlma_row_avx512_long(
+// WASM bindings following ALMA pattern
+
+/// Helper function to write directly to output slice - no allocations
+#[inline]
+pub fn vlma_into_slice(
+	dst: &mut [f64],
+	input: &VlmaInput,
+	kern: Kernel,
+) -> Result<(), VlmaError> {
+	// This is a placeholder implementation that still allocates internally
+	// A proper zero-allocation implementation would require refactoring vlma_scalar
+	// to accept an output slice parameter
+	let data: &[f64] = input.as_ref();
+	
+	if dst.len() != data.len() {
+		return Err(VlmaError::InvalidPeriod {
+			min_period: 0,
+			max_period: 0,
+			data_len: dst.len(),
+		});
+	}
+	
+	let output = vlma_with_kernel(input, kern)?;
+	dst.copy_from_slice(&output.values);
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vlma_js(
 	data: &[f64],
-	first: usize,
 	min_period: usize,
 	max_period: usize,
 	matype: &str,
 	devtype: usize,
-	out: &mut [f64],
-) {
-	let res = unsafe { vlma_avx512_long(data, min_period, max_period, matype.to_string(), devtype, first) }.unwrap();
-	out.copy_from_slice(&res.values);
+) -> Result<Vec<f64>, JsValue> {
+	let params = VlmaParams {
+		min_period: Some(min_period),
+		max_period: Some(max_period),
+		matype: Some(matype.to_string()),
+		devtype: Some(devtype),
+	};
+	let input = VlmaInput::from_slice(data, params);
+	
+	// Safe API is allowed one allocation - directly call the main function
+	vlma_with_kernel(&input, Kernel::Auto)
+		.map(|o| o.values)
+		.map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vlma_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	min_period: usize,
+	max_period: usize,
+	matype: &str,
+	devtype: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = VlmaParams {
+			min_period: Some(min_period),
+			max_period: Some(max_period),
+			matype: Some(matype.to_string()),
+			devtype: Some(devtype),
+		};
+		let input = VlmaInput::from_slice(data, params);
+		
+		// Check for aliasing
+		if in_ptr == out_ptr as *const f64 {
+			// Use temporary buffer for in-place operation
+			let mut temp = vec![0.0; len];
+			vlma_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vlma_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vlma_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vlma_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VlmaBatchConfig {
+	pub min_period_range: (usize, usize, usize),
+	pub max_period_range: (usize, usize, usize),
+	pub devtype_range: (usize, usize, usize),
+	pub matype: String,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VlmaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<VlmaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vlma_batch)]
+pub fn vlma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VlmaBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = VlmaBatchRange {
+		min_period: config.min_period_range,
+		max_period: config.max_period_range,
+		matype: (config.matype.clone(), config.matype.clone(), "".to_string()),
+		devtype: config.devtype_range,
+	};
+	
+	let output = vlma_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = VlmaBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vlma_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	min_period_start: usize,
+	min_period_end: usize,
+	min_period_step: usize,
+	max_period_start: usize,
+	max_period_end: usize,
+	max_period_step: usize,
+	devtype_start: usize,
+	devtype_end: usize,
+	devtype_step: usize,
+	matype: &str,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to vlma_batch_into"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = VlmaBatchRange {
+			min_period: (min_period_start, min_period_end, min_period_step),
+			max_period: (max_period_start, max_period_end, max_period_step),
+			matype: (matype.to_string(), matype.to_string(), "".to_string()),
+			devtype: (devtype_start, devtype_end, devtype_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let total_len = combos.len() * len;
+		let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_len);
+		
+		let _ = vlma_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(combos.len())
+	}
 }
 
 #[cfg(test)]

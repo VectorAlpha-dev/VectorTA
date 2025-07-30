@@ -20,9 +20,27 @@
 //! - **Ok(RviOutput)** with `Vec<f64>` of same length as input.
 //! - **Err(RviError)** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -52,6 +70,7 @@ pub struct RviOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct RviParams {
 	pub period: Option<usize>,
 	pub ma_len: Option<usize>,
@@ -243,7 +262,8 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
 			valid: data.len() - first,
 		});
 	}
-	let mut out = vec![f64::NAN; data.len()];
+	let warmup_period = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -259,6 +279,68 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
 		}
 	}
 	Ok(RviOutput { values: out })
+}
+
+#[inline]
+pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result<(), RviError> {
+	let data: &[f64] = input.as_ref();
+	if data.is_empty() {
+		return Err(RviError::EmptyData);
+	}
+	let period = input.get_period();
+	let ma_len = input.get_ma_len();
+	let matype = input.get_matype();
+	let devtype = input.get_devtype();
+	
+	if period == 0 || ma_len == 0 || period > data.len() || ma_len > data.len() {
+		return Err(RviError::InvalidPeriod {
+			period,
+			ma_len,
+			data_len: data.len(),
+		});
+	}
+	
+	if dst.len() != data.len() {
+		return Err(RviError::InvalidPeriod {
+			period: dst.len(),
+			ma_len: 0,
+			data_len: data.len(),
+		});
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	let max_needed = period.saturating_sub(1) + ma_len.saturating_sub(1);
+	if (data.len() - first) <= max_needed {
+		return Err(RviError::NotEnoughValidData {
+			needed: max_needed + 1,
+			valid: data.len() - first,
+		});
+	}
+	
+	let warmup_period = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => rvi_scalar(data, period, ma_len, matype, devtype, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => rvi_avx2(data, period, ma_len, matype, devtype, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => rvi_avx512(data, period, ma_len, matype, devtype, first, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
 }
 
 #[inline]
@@ -604,7 +686,21 @@ fn rvi_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use make_uninit_matrix for proper memory allocation like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap().saturating_sub(1) + c.ma_len.unwrap().saturating_sub(1))
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
 		match kern {
@@ -619,7 +715,7 @@ fn rvi_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -627,21 +723,91 @@ fn rvi_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Reconstruct Vec from raw parts like ALMA
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(RviBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn rvi_batch_inner_into(
+	data: &[f64],
+	sweep: &RviBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	output: &mut [f64],
+) -> Result<Vec<RviParams>, RviError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RviError::InvalidPeriod {
+			period: 0,
+			ma_len: 0,
+			data_len: 0,
+		});
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RviError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let max_m = combos.iter().map(|c| c.ma_len.unwrap()).max().unwrap();
+	if data.len() - first < max_p.saturating_add(max_m) {
+		return Err(RviError::NotEnoughValidData {
+			needed: max_p + max_m,
+			valid: data.len() - first,
+		});
+	}
+	let cols = data.len();
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let prm = &combos[row];
+		match kern {
+			Kernel::Scalar => rvi_row_scalar(data, first, prm, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => rvi_row_avx2(data, first, prm, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => rvi_row_avx512(data, first, prm, out_row),
+			_ => unreachable!(),
+		}
+	};
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			output
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in output.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in output.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -716,7 +882,8 @@ unsafe fn rvi_row_avx512_long(data: &[f64], first: usize, params: &RviParams, ou
 // ========== Indicator utility functions (unchanged) ==========
 
 fn compute_diff_same_length(data: &[f64]) -> Vec<f64> {
-	let mut diff = vec![0.0; data.len()];
+	let mut diff = alloc_with_nan_prefix(data.len(), 0);
+	diff[0] = 0.0;
 	for i in 1..data.len() {
 		let prev = data[i - 1];
 		let curr = data[i];
@@ -729,7 +896,7 @@ fn compute_diff_same_length(data: &[f64]) -> Vec<f64> {
 	diff
 }
 fn compute_up_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
-	let mut up = vec![f64::NAN; diff.len()];
+	let mut up = alloc_with_nan_prefix(diff.len(), 0);
 	for i in 0..diff.len() {
 		let d = diff[i];
 		let dv = dev[i];
@@ -744,7 +911,7 @@ fn compute_up_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
 	up
 }
 fn compute_down_array(diff: &[f64], dev: &[f64]) -> Vec<f64> {
-	let mut down = vec![f64::NAN; diff.len()];
+	let mut down = alloc_with_nan_prefix(diff.len(), 0);
 	for i in 0..diff.len() {
 		let d = diff[i];
 		let dv = dev[i];
@@ -766,7 +933,7 @@ fn compute_dev(data: &[f64], period: usize, devtype: usize) -> Vec<f64> {
 	}
 }
 fn rolling_std_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
 	if period == 0 || period > data.len() {
 		return out;
 	}
@@ -803,7 +970,7 @@ fn rolling_std_dev(data: &[f64], period: usize) -> Vec<f64> {
 	out
 }
 fn rolling_mean_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
 	if period == 0 || period > data.len() {
 		return out;
 	}
@@ -837,7 +1004,7 @@ fn rolling_mean_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
 	out
 }
 fn rolling_median_abs_dev(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
 	if period == 0 || period > data.len() {
 		return out;
 	}
@@ -878,7 +1045,7 @@ fn compute_rolling_ma(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
 	}
 }
 fn rolling_sma(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
 	if period == 0 || period > data.len() {
 		return out;
 	}
@@ -911,7 +1078,7 @@ fn rolling_sma(data: &[f64], period: usize) -> Vec<f64> {
 	out
 }
 fn rolling_ema(data: &[f64], period: usize) -> Vec<f64> {
-	let mut out = vec![f64::NAN; data.len()];
+	let mut out = alloc_with_nan_prefix(data.len(), period.saturating_sub(1));
 	if period == 0 || period > data.len() {
 		return out;
 	}
@@ -1155,4 +1322,264 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rvi_js(data: &[f64], period: usize, ma_len: usize, matype: usize, devtype: usize) -> Result<Vec<f64>, JsValue> {
+	let params = RviParams {
+		period: Some(period),
+		ma_len: Some(ma_len),
+		matype: Some(matype),
+		devtype: Some(devtype),
+	};
+	let input = RviInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];
+	rvi_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rvi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rvi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rvi_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	ma_len: usize,
+	matype: usize,
+	devtype: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = RviParams {
+			period: Some(period),
+			ma_len: Some(ma_len),
+			matype: Some(matype),
+			devtype: Some(devtype),
+		};
+		let input = RviInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {
+			// Handle aliasing case
+			let mut temp = vec![0.0; len];
+			rvi_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			rvi_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RviBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub ma_len_range: (usize, usize, usize),
+	pub matype_range: (usize, usize, usize),
+	pub devtype_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = rvi_batch)]
+pub fn rvi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: RviBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = RviBatchRange {
+		period: config.period_range,
+		ma_len: config.ma_len_range,
+		matype: config.matype_range,
+		devtype: config.devtype_range,
+	};
+	
+	let output = rvi_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Convert output to JS-friendly format
+	let js_output = serde_wasm_bindgen::to_value(&serde_json::json!({
+		"values": output.values,
+		"periods": output.combos.iter().map(|c| c.period.unwrap()).collect::<Vec<_>>(),
+		"ma_lens": output.combos.iter().map(|c| c.ma_len.unwrap()).collect::<Vec<_>>(),
+		"matypes": output.combos.iter().map(|c| c.matype.unwrap()).collect::<Vec<_>>(),
+		"devtypes": output.combos.iter().map(|c| c.devtype.unwrap()).collect::<Vec<_>>(),
+		"rows": output.rows,
+		"cols": output.cols,
+	})).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
+	
+	Ok(js_output)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rvi")]
+#[pyo3(signature = (data, period, ma_len, matype, devtype, kernel=None))]
+pub fn rvi_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	ma_len: usize,
+	matype: usize,
+	devtype: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = RviParams {
+		period: Some(period),
+		ma_len: Some(ma_len),
+		matype: Some(matype),
+		devtype: Some(devtype),
+	};
+	let input = RviInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| rvi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rvi_batch")]
+#[pyo3(signature = (data, period_range, ma_len_range, matype_range, devtype_range, kernel=None))]
+pub fn rvi_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	ma_len_range: (usize, usize, usize),
+	matype_range: (usize, usize, usize),
+	devtype_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = RviBatchRange {
+		period: period_range,
+		ma_len: ma_len_range,
+		matype: matype_range,
+		devtype: devtype_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			rvi_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"ma_lens",
+		combos
+			.iter()
+			.map(|p| p.ma_len.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"matypes",
+		combos
+			.iter()
+			.map(|p| p.matype.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"devtypes",
+		combos
+			.iter()
+			.map(|p| p.devtype.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "RviStream")]
+pub struct RviStreamPy {
+	stream: RviStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl RviStreamPy {
+	#[new]
+	fn new(period: usize, ma_len: usize, matype: usize, devtype: usize) -> PyResult<Self> {
+		let params = RviParams {
+			period: Some(period),
+			ma_len: Some(ma_len),
+			matype: Some(matype),
+			devtype: Some(devtype),
+		};
+		let stream = RviStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(RviStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
 }

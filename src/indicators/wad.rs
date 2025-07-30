@@ -17,9 +17,26 @@
 //! - **`Ok(WadOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(WadError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -141,7 +158,7 @@ pub fn wad_with_kernel(input: &WadInput, kernel: Kernel) -> Result<WadOutput, Wa
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut out = vec![0.0; len];
+	let mut out = alloc_with_nan_prefix(len, 0);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => wad_scalar(high, low, close, &mut out),
@@ -339,7 +356,11 @@ impl WadBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid(_r: &WadBatchRange) -> Vec<WadParams> {
-	vec![WadParams]
+	// WAD has no parameters, so always return single element
+	// Using with_capacity to avoid reallocation
+	let mut result = Vec::with_capacity(1);
+	result.push(WadParams);
+	result
 }
 
 #[inline(always)]
@@ -369,7 +390,7 @@ fn wad_batch_inner(
 	if high.iter().all(|x| x.is_nan()) || low.iter().all(|x| x.is_nan()) || close.iter().all(|x| x.is_nan()) {
 		return Err(WadError::AllValuesNaN);
 	}
-	let mut values = vec![0.0; len];
+	let mut values = alloc_with_nan_prefix(len, 0);
 	unsafe {
 		match kern {
 			Kernel::Scalar | Kernel::ScalarBatch => wad_row_scalar(high, low, close, &mut values),
@@ -560,4 +581,254 @@ mod tests {
 		check_wad_streaming,
 		check_wad_small_example
 	);
+}
+
+// Helper functions for WASM zero-copy optimization
+#[inline(always)]
+fn wad_prepare<'a>(
+	input: &'a WadInput,
+	_kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, Kernel), WadError> {
+	let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
+		WadData::Candles { candles } => (
+			source_type(candles, "high"),
+			source_type(candles, "low"),
+			source_type(candles, "close"),
+		),
+		WadData::Slices { high, low, close } => (*high, *low, *close),
+	};
+	
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(WadError::EmptyData);
+	}
+	let len = high.len();
+	if len != low.len() || len != close.len() {
+		return Err(WadError::EmptyData);
+	}
+	if high.iter().all(|x| x.is_nan()) || low.iter().all(|x| x.is_nan()) || close.iter().all(|x| x.is_nan()) {
+		return Err(WadError::AllValuesNaN);
+	}
+	
+	let chosen = match _kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	Ok((high, low, close, len, chosen))
+}
+
+#[inline]
+pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result<(), WadError> {
+	let (high, low, close, len, chosen) = wad_prepare(input, kern)?;
+	
+	if dst.len() != len {
+		return Err(WadError::EmptyData);
+	}
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => wad_scalar(high, low, close, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => wad_avx2(high, low, close, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => wad_avx512(high, low, close, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wad")]
+#[pyo3(signature = (high, low, close, kernel=None))]
+pub fn wad_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let input = WadInput::from_slices(high_slice, low_slice, close_slice);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| wad_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "WadStream")]
+pub struct WadStreamPy {
+	stream: WadStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl WadStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		let stream = WadStream::try_new()
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(WadStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64, close: f64) -> f64 {
+		self.stream.update(high, low, close)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wad_batch")]
+#[pyo3(signature = (high, low, close, kernel=None))]
+pub fn wad_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	// WAD has no parameters, so this is simplified
+	let cols = high_slice.len();
+	let rows = 1; // Only one combination since no parameters
+	
+	// Pre-allocate output array
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		
+		// Call the batch function directly
+		wad_batch_with_kernel(high_slice, low_slice, close_slice, kernel)
+			.map(|output| {
+				slice_out.copy_from_slice(&output.values);
+			})
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// No parameter arrays since WAD has no parameters
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wad_js(high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let input = WadInput::from_slices(high, low, close);
+	
+	let mut output = vec![0.0; high.len()];
+	
+	wad_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wad_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wad_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wad_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to wad_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let input = WadInput::from_slices(high, low, close);
+		
+		// Check for aliasing - if any input pointer equals output pointer
+		if high_ptr as *const f64 == out_ptr as *const f64 
+			|| low_ptr as *const f64 == out_ptr as *const f64
+			|| close_ptr as *const f64 == out_ptr as *const f64 {
+			// Handle aliasing by using temp buffer
+			let mut temp = vec![0.0; len];
+			wad_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			wad_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WadBatchConfig {
+	// WAD has no parameters, but we keep the structure for consistency
+	pub dummy: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WadBatchJsOutput {
+	pub values: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = wad_batch)]
+pub fn wad_batch_js(high: &[f64], low: &[f64], close: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
+	// WAD has no parameters, so batch processing returns single row
+	let result = wad_js(high, low, close)?;
+	
+	let js_output = WadBatchJsOutput {
+		values: result,
+		rows: 1,
+		cols: high.len(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

@@ -17,9 +17,27 @@
 //! - **Ok(StdDevOutput)** on success (output vector of length == input).
 //! - **Err(StdDevError)** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -27,6 +45,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for StdDevInput<'a> {
@@ -202,7 +221,8 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 		});
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let warmup = first + period - 1;
+	let mut out = alloc_with_nan_prefix(len, warmup);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -221,6 +241,61 @@ pub fn stddev_with_kernel(input: &StdDevInput, kernel: Kernel) -> Result<StdDevO
 	}
 
 	Ok(StdDevOutput { values: out })
+}
+
+/// Write StdDev directly to output slice - no allocations (WASM optimization)
+#[inline]
+pub fn stddev_into_slice(dst: &mut [f64], input: &StdDevInput, kern: Kernel) -> Result<(), StdDevError> {
+	let data: &[f64] = match &input.data {
+		StdDevData::Candles { candles, source } => source_type(candles, source),
+		StdDevData::Slice(sl) => sl,
+	};
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
+
+	let len = data.len();
+	let period = input.get_period();
+	let nbdev = input.get_nbdev();
+
+	if period == 0 || period > len {
+		return Err(StdDevError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(StdDevError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	
+	// Check output slice length
+	if dst.len() != len {
+		return Err(StdDevError::InvalidPeriod { period, data_len: len });
+	}
+
+	let warmup = first + period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup] {
+		*v = f64::NAN;
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => stddev_scalar(data, period, first, nbdev, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => stddev_avx2(data, period, first, nbdev, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => stddev_avx512(data, period, first, nbdev, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -513,7 +588,26 @@ fn stddev_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each row
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Allocate uninitialized matrix and set NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to initialized slice
+	let mut values = unsafe {
+		Vec::from_raw_parts(
+			buf_mu.as_mut_ptr() as *mut f64,
+			buf_mu.len(),
+			buf_mu.capacity(),
+		)
+	};
+	std::mem::forget(buf_mu);
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -591,8 +685,367 @@ unsafe fn stddev_row_avx512_long(data: &[f64], first: usize, period: usize, nbde
 }
 
 #[inline(always)]
+pub fn stddev_batch_inner_into(
+	data: &[f64],
+	sweep: &StdDevBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<StdDevParams>, StdDevError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(StdDevError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(StdDevError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(StdDevError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Initialize warmup periods
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let nbdev = combos[row].nbdev.unwrap();
+		match kern {
+			Kernel::Scalar => stddev_row_scalar(data, first, period, nbdev, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => stddev_row_avx2(data, first, period, nbdev, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => stddev_row_avx512(data, first, period, nbdev, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
 pub fn expand_grid_stddev(r: &StdDevBatchRange) -> Vec<StdDevParams> {
 	expand_grid(r)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "stddev")]
+#[pyo3(signature = (data, period, nbdev, kernel=None))]
+pub fn stddev_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	nbdev: f64,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = StdDevParams {
+		period: Some(period),
+		nbdev: Some(nbdev),
+	};
+	let input = StdDevInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| stddev_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "StdDevStream")]
+pub struct StdDevStreamPy {
+	stream: StdDevStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl StdDevStreamPy {
+	#[new]
+	fn new(period: usize, nbdev: f64) -> PyResult<Self> {
+		let params = StdDevParams {
+			period: Some(period),
+			nbdev: Some(nbdev),
+		};
+		let stream = StdDevStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(StdDevStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "stddev_batch")]
+#[pyo3(signature = (data, period_range, nbdev_range, kernel=None))]
+pub fn stddev_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	nbdev_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = StdDevBatchRange {
+		period: period_range,
+		nbdev: nbdev_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			stddev_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	dict.set_item(
+		"nbdevs",
+		combos.iter()
+			.map(|p| p.nbdev.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+// ============================
+// WASM Bindings
+// ============================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, JsValue> {
+	let params = StdDevParams {
+		period: Some(period),
+		nbdev: Some(nbdev),
+	};
+	let input = StdDevInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	stddev_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	nbdev: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = StdDevParams {
+			period: Some(period),
+			nbdev: Some(nbdev),
+		};
+		let input = StdDevInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			stddev_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			stddev_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct StdDevBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub nbdev_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct StdDevBatchJsOutput {
+	pub values: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub nbdevs: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = stddev_batch)]
+pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: StdDevBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let sweep = StdDevBatchRange {
+		period: config.period_range,
+		nbdev: config.nbdev_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	if combos.is_empty() {
+		return Err(JsValue::from_str("No parameter combinations generated"));
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	let total = rows * cols;
+
+	let mut output = vec![0.0; total];
+	let params = stddev_batch_inner_into(data, &sweep, Kernel::Auto, false, &mut output)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let result = StdDevBatchJsOutput {
+		values: output,
+		periods: params.iter().map(|p| p.period.unwrap()).collect(),
+		nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
+		rows,
+		cols,
+	};
+
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn stddev_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	let config: StdDevBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let sweep = StdDevBatchRange {
+		period: config.period_range,
+		nbdev: config.nbdev_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	if combos.is_empty() {
+		return Err(JsValue::from_str("No parameter combinations generated"));
+	}
+
+	let rows = combos.len();
+	let cols = len;
+	let total = rows * cols;
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, total);
+
+		let params = stddev_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		let result = StdDevBatchJsOutput {
+			values: vec![],  // Empty, data is already in out_ptr
+			periods: params.iter().map(|p| p.period.unwrap()).collect(),
+			nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
+			rows,
+			cols,
+		};
+
+		serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+	}
 }
 
 #[cfg(test)]

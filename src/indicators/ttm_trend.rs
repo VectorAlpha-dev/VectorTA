@@ -18,7 +18,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+	init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,7 +29,93 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::{self, MaybeUninit};
 use thiserror::Error;
+
+// Boolean-specific helper functions for uninitialized memory operations
+#[inline(always)]
+pub fn alloc_with_false_prefix(len: usize, warm: usize) -> Vec<bool> {
+	let warm = warm.min(len);
+	
+	// Allocate with capacity
+	let mut buf: Vec<MaybeUninit<bool>> = Vec::with_capacity(len);
+	
+	// In release mode, just set length after filling warmup
+	#[cfg(not(debug_assertions))]
+	{
+		unsafe {
+			buf.set_len(len);
+		}
+		for i in 0..warm {
+			buf[i].write(false);
+		}
+	}
+	
+	// In debug mode, initialize all values to avoid any UB window
+	#[cfg(debug_assertions)]
+	{
+		// Extend to full length with poison values
+		for _ in 0..warm {
+			buf.push(MaybeUninit::new(false));
+		}
+		for _ in warm..len {
+			buf.push(MaybeUninit::new(true)); // Use true as poison for debugging
+		}
+	}
+	
+	// Convert to Vec<bool>
+	let ptr = buf.as_mut_ptr() as *mut bool;
+	let cap = buf.capacity();
+	mem::forget(buf);
+	unsafe { Vec::from_raw_parts(ptr, len, cap) }
+}
+
+#[inline]
+pub fn make_uninit_bool_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<bool>> {
+	let total = rows.checked_mul(cols).expect("rows * cols overflowed usize");
+	
+	let mut v: Vec<MaybeUninit<bool>> = Vec::new();
+	v.try_reserve_exact(total).expect("OOM in make_uninit_bool_matrix");
+	
+	// In release mode, just set length
+	#[cfg(not(debug_assertions))]
+	{
+		unsafe {
+			v.set_len(total);
+		}
+	}
+	
+	// DEBUG ONLY: poison all cells
+	#[cfg(debug_assertions)]
+	{
+		for _ in 0..total {
+			v.push(MaybeUninit::new(true)); // Use true as poison
+		}
+	}
+	v
+}
+
+#[inline]
+pub fn init_bool_matrix_prefixes(buf: &mut [MaybeUninit<bool>], cols: usize, warm_prefixes: &[usize]) {
+	assert!(
+		cols != 0 && buf.len() % cols == 0,
+		"`buf` length must be a multiple of `cols`"
+	);
+	let rows = buf.len() / cols;
+	assert_eq!(
+		rows,
+		warm_prefixes.len(),
+		"`warm_prefixes` length must equal number of rows"
+	);
+	
+	// Write false values to warm prefixes
+	buf.chunks_exact_mut(cols).zip(warm_prefixes).for_each(|(row, &warm)| {
+		assert!(warm <= cols, "warm prefix exceeds row width");
+		for cell in &mut row[..warm] {
+			cell.write(false);
+		}
+	});
+}
 
 #[derive(Debug, Clone)]
 pub enum TtmTrendData<'a> {
@@ -192,7 +281,8 @@ pub fn ttm_trend_with_kernel(input: &TtmTrendInput, kernel: Kernel) -> Result<Tt
 		other => other,
 	};
 
-	let mut out = vec![false; len];
+	let warmup_period = first + period - 1;
+	let mut out = alloc_with_false_prefix(len, warmup_period);
 
 	unsafe {
 		match chosen {
@@ -448,7 +538,21 @@ fn ttm_trend_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut values = vec![false; rows * cols];
+	
+	// Use uninitialized memory
+	let mut buf_mu = make_uninit_bool_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_bool_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to bool slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let buf_ptr = buf_guard.as_mut_ptr() as *mut bool;
+	let values = unsafe { std::slice::from_raw_parts_mut(buf_ptr, rows * cols) };
 
 	let do_row = |row: usize, out_row: &mut [bool]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -482,6 +586,16 @@ fn ttm_trend_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec<bool>
+	let values = unsafe {
+		let buf_mu = core::mem::ManuallyDrop::into_inner(buf_guard);
+		let ptr = buf_mu.as_ptr() as *const bool;
+		let len = buf_mu.len();
+		let cap = buf_mu.capacity();
+		core::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr as *mut bool, len, cap)
+	};
 
 	Ok(TtmTrendBatchOutput {
 		values,
@@ -489,6 +603,77 @@ fn ttm_trend_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn ttm_trend_batch_inner_into(
+	source: &[f64],
+	close: &[f64],
+	sweep: &TtmTrendBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [bool],
+) -> Result<Vec<TtmTrendParams>, TtmTrendError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(TtmTrendError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let len = source.len().min(close.len());
+	let first = source
+		.iter()
+		.zip(close.iter())
+		.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+		.ok_or(TtmTrendError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p {
+		return Err(TtmTrendError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = len;
+	if out.len() != rows * cols {
+		return Err(TtmTrendError::InvalidPeriod {
+			period: rows * cols,
+			data_len: out.len(),
+		});
+	}
+
+	let do_row = |row: usize, out_row: &mut [bool]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => ttm_trend_row_scalar(source, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => ttm_trend_row_avx2(source, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => ttm_trend_row_avx512(source, close, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -711,4 +896,446 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// ============================
+// ==== Python Bindings =======
+// ============================
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ttm_trend")]
+#[pyo3(signature = (source, close, period, kernel=None))]
+pub fn ttm_trend_py<'py>(
+	py: Python<'py>,
+	source: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let source_slice = source.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = TtmTrendParams { period: Some(period) };
+	let input = TtmTrendInput::from_slices(source_slice, close_slice, params);
+
+	let result_vec: Vec<bool> = py
+		.allow_threads(|| ttm_trend_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TtmTrendStream")]
+pub struct TtmTrendStreamPy {
+	stream: TtmTrendStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TtmTrendStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = TtmTrendParams { period: Some(period) };
+		let stream = TtmTrendStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(TtmTrendStreamPy { stream })
+	}
+
+	fn update(&mut self, source_val: f64, close_val: f64) -> Option<bool> {
+		self.stream.update(source_val, close_val)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ttm_trend_batch")]
+#[pyo3(signature = (source, close, period_range, kernel=None))]
+pub fn ttm_trend_batch_py<'py>(
+	py: Python<'py>,
+	source: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let source_slice = source.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = TtmTrendBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = source_slice.len().min(close_slice.len());
+	
+	// Pre-allocate output array
+	let out_arr = unsafe { PyArray1::<bool>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			ttm_trend_batch_inner_into(source_slice, close_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+// ================================
+// WASM Bindings
+// ================================
+
+/// Write TTM Trend values directly to output slice - no allocations
+/// Note: This writes boolean values, but for WASM we'll convert to u8 (0/1)
+#[inline]
+pub fn ttm_trend_into_slice(
+	dst: &mut [bool],
+	input: &TtmTrendInput,
+	kern: Kernel,
+) -> Result<(), TtmTrendError> {
+	let (source, close) = input.as_slices();
+	let len = source.len().min(close.len());
+	let period = input.get_period();
+	
+	if dst.len() != len {
+		return Err(TtmTrendError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+	
+	let first = source
+		.iter()
+		.zip(close.iter())
+		.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+		.ok_or(TtmTrendError::AllValuesNaN)?;
+		
+	if period == 0 || period > len {
+		return Err(TtmTrendError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(TtmTrendError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => ttm_trend_scalar(source, close, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => ttm_trend_avx2(source, close, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => ttm_trend_avx512(source, close, period, first, dst),
+			_ => ttm_trend_scalar(source, close, period, first, dst),
+		}
+	}
+	
+	// The warmup should already be filled by alloc_with_false_prefix when called properly
+	// But ensure it's false just in case this is called with a regular slice
+	let warmup_end = first.saturating_add(period.saturating_sub(1));
+	let dst_len = dst.len();
+	for v in &mut dst[..warmup_end.min(dst_len)] {
+		*v = false;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_js(
+	source: &[f64],
+	close: &[f64],
+	period: usize,
+) -> Result<Vec<u8>, JsValue> {
+	let params = TtmTrendParams { period: Some(period) };
+	let input = TtmTrendInput::from_slices(source, close, params);
+	
+	let len = source.len().min(close.len());
+	
+	// Find first valid index for warmup calculation
+	let first = source
+		.iter()
+		.zip(close.iter())
+		.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+		.ok_or(JsValue::from_str("All values are NaN"))?;
+	
+	let warmup_period = first + period - 1;
+	let mut bool_output = alloc_with_false_prefix(len, warmup_period);
+	
+	ttm_trend_into_slice(&mut bool_output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Convert bool array to u8 array for WASM - more efficient iteration
+	let mut output = Vec::with_capacity(len);
+	output.extend(bool_output.iter().map(|&b| if b { 1u8 } else { 0u8 }));
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_into(
+	source_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut u8,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if source_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let source = std::slice::from_raw_parts(source_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+		
+		let params = TtmTrendParams { period: Some(period) };
+		let input = TtmTrendInput::from_slices(source, close, params);
+		
+		// Check if output pointer aliases with either input
+		let source_ptr_u8 = source_ptr as *const u8;
+		let close_ptr_u8 = close_ptr as *const u8;
+		let out_ptr_const = out_ptr as *const u8;
+		let source_overlaps = (out_ptr_const >= source_ptr_u8 && out_ptr_const < source_ptr_u8.add(len * 8)) ||
+							  (source_ptr_u8 >= out_ptr_const && source_ptr_u8 < out_ptr_const.add(len));
+		let close_overlaps = (out_ptr_const >= close_ptr_u8 && out_ptr_const < close_ptr_u8.add(len * 8)) ||
+							 (close_ptr_u8 >= out_ptr_const && close_ptr_u8 < out_ptr_const.add(len));
+		
+		if source_overlaps || close_overlaps {
+			// Use temporary buffer if aliasing detected
+			// Find first valid index
+			let first_idx = source
+				.iter()
+				.zip(close.iter())
+				.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+				.ok_or(JsValue::from_str("All values are NaN"))?;
+			
+			let warmup_period = first_idx.saturating_add(period.saturating_sub(1));
+			let mut temp_bool = alloc_with_false_prefix(len, warmup_period);
+			ttm_trend_into_slice(&mut temp_bool, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			for (i, &b) in temp_bool.iter().enumerate() {
+				out[i] = if b { 1 } else { 0 };
+			}
+		} else {
+			// Direct computation without intermediate bool allocation
+			// We need to compute directly into u8 output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			
+			// First, find the first valid index
+			let first = source
+				.iter()
+				.zip(close.iter())
+				.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+				.ok_or(JsValue::from_str("All values are NaN"))?;
+			
+			// Fill warmup with 0 (false)
+			let warmup_end = first.saturating_add(period.saturating_sub(1));
+			for v in &mut out[..warmup_end.min(len)] {
+				*v = 0;
+			}
+			
+			// Direct computation into u8 buffer
+			let mut sum = 0.0;
+			// Initialize sum with first period values
+			for &val in &source[first..first + period] {
+				sum += val;
+			}
+			
+			// Compute TTM Trend directly into u8
+			for i in first + period - 1..len {
+				let avg = sum / period as f64;
+				out[i] = if close[i] > avg { 1 } else { 0 };
+				
+				// Update rolling sum
+				if i + 1 < len {
+					sum += source[i + 1] - source[i + 1 - period];
+				}
+			}
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_alloc_u8(len: usize) -> *mut u8 {
+	let mut vec = Vec::<u8>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ttm_trend_free_u8(ptr: *mut u8, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TtmTrendBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TtmTrendBatchJsOutput {
+	pub values: Vec<u8>,  // Flattened boolean array as u8
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ttm_trend_batch)]
+pub fn ttm_trend_batch_js(
+	source: &[f64],
+	close: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: TtmTrendBatchConfig = 
+		serde_wasm_bindgen::from_value(config)
+			.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = TtmTrendBatchRange { period: config.period_range };
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = source.len().min(close.len());
+	
+	// Find first valid index
+	let first = source
+		.iter()
+		.zip(close.iter())
+		.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+		.ok_or(JsValue::from_str("All values are NaN"))?;
+	
+	// Use uninitialized memory
+	let mut buf_mu = make_uninit_bool_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_bool_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to bool slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let buf_ptr = buf_guard.as_mut_ptr() as *mut bool;
+	let bool_buffer = unsafe { std::slice::from_raw_parts_mut(buf_ptr, rows * cols) };
+	
+	let kernel = detect_best_batch_kernel();
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => kernel,
+	};
+	
+	let periods = ttm_trend_batch_inner_into(source, close, &sweep, simd, false, bool_buffer)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Convert to Vec<bool> and then to u8
+	let bool_vec = unsafe {
+		let buf_mu = core::mem::ManuallyDrop::into_inner(buf_guard);
+		let ptr = buf_mu.as_ptr() as *const bool;
+		let len = buf_mu.len();
+		let cap = buf_mu.capacity();
+		core::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr as *mut bool, len, cap)
+	};
+	
+	// Convert boolean buffer to u8 more efficiently
+	let mut values = Vec::with_capacity(rows * cols);
+	values.extend(bool_vec.iter().map(|&b| if b { 1u8 } else { 0u8 }));
+	
+	let output = TtmTrendBatchJsOutput {
+		values,
+		periods: periods.iter().map(|p| p.period.unwrap()).collect(),
+		rows,
+		cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

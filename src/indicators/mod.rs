@@ -24,6 +24,11 @@ pub mod cmo;
 pub mod coppock;
 pub mod correl_hl;
 pub mod correlation_cycle;
+pub use correlation_cycle::{
+    correlation_cycle, CorrelationCycleInput, CorrelationCycleOutput, CorrelationCycleParams,
+    CorrelationCycleError, CorrelationCycleBuilder, CorrelationCycleStream,
+    CorrelationCycleBatchBuilder, CorrelationCycleBatchOutput, CorrelationCycleBatchRange,
+};
 pub mod cvi;
 pub mod damiani_volatmeter;
 pub mod dec_osc;
@@ -73,6 +78,7 @@ pub mod mfi;
 pub mod midpoint;
 pub mod midprice;
 pub mod minmax;
+pub use minmax::{minmax, MinmaxInput, MinmaxOutput, MinmaxParams};
 pub mod mom;
 pub mod moving_averages;
 pub mod msw;
@@ -86,6 +92,7 @@ pub mod ppo;
 pub mod pvi;
 pub mod qstick;
 pub mod roc;
+pub use roc::{roc, RocInput, RocOutput, RocParams, RocError, RocBuilder, RocStream, RocBatchBuilder, RocBatchOutput, RocBatchRange};
 pub mod rocp;
 pub mod rocr;
 pub mod rsi;
@@ -122,7 +129,30 @@ pub mod wavetrend;
 pub mod wclprice;
 pub mod willr;
 pub mod zscore;
+pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
+pub use coppock::{coppock, CoppockInput, CoppockOutput, CoppockParams};
+pub use er::{er, ErInput, ErOutput, ErParams};
+pub use linearreg_angle::{linearreg_angle, Linearreg_angleInput, Linearreg_angleOutput, Linearreg_angleParams};
+pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
+pub use squeeze_momentum::{
+	squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams, 
+	SqueezeMomentumBuilder, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams
+};
+#[cfg(feature = "python")]
+pub use squeeze_momentum::{squeeze_momentum_py, squeeze_momentum_batch_py, SqueezeMomentumStreamPy};
+#[cfg(feature = "wasm")]
+pub use squeeze_momentum::{
+	squeeze_momentum_js, squeeze_momentum_into, squeeze_momentum_alloc, squeeze_momentum_free,
+	squeeze_momentum_batch_js, SqueezeMomentumResult
+};
+pub use trix::{trix, TrixInput, TrixOutput, TrixParams, TrixStream, TrixBatchOutput};
+#[cfg(feature = "python")]
+pub use trix::{trix_py, trix_batch_py, TrixStreamPy};
+pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
+pub use mom::{mom, MomInput, MomOutput, MomParams};
+pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,

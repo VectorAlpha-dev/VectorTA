@@ -13,9 +13,21 @@
 //! - **`Ok(NviOutput)`** on success, containing a `Vec<f64>` matching input length.
 //! - **`Err(NviError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -187,44 +199,111 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
 			valid: close.len() - first_valid_idx,
 		});
 	}
-	let mut out = vec![f64::NAN; close.len()];
+	let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first_valid_idx, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first_valid_idx, &mut out),
 			_ => unreachable!(),
 		}
 	}
 	Ok(NviOutput { values: out })
 }
 
-pub fn nvi_scalar(close: &[f64], volume: &[f64], out: &mut [f64]) {
+#[inline]
+pub fn nvi_into_slice(
+	dst: &mut [f64],
+	close: &[f64],
+	volume: &[f64],
+	kern: Kernel,
+) -> Result<(), NviError> {
+	if close.is_empty() || volume.is_empty() {
+		return Err(NviError::EmptyData);
+	}
+	
+	if dst.len() != close.len() || dst.len() != volume.len() {
+		return Err(NviError::NotEnoughValidData {
+			needed: close.len(),
+			valid: dst.len(),
+		});
+	}
+	
+	let first_valid_idx = close
+		.iter()
+		.zip(volume.iter())
+		.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+		.ok_or_else(|| {
+			if close.iter().all(|&c| c.is_nan()) {
+				NviError::AllCloseValuesNaN
+			} else {
+				NviError::AllVolumeValuesNaN
+			}
+		})?;
+		
+	if (close.len() - first_valid_idx) < 2 {
+		return Err(NviError::NotEnoughValidData {
+			needed: 2,
+			valid: close.len() - first_valid_idx,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	// Fill warmup period with NaN
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
 	assert!(
 		close.len() == volume.len() && volume.len() == out.len(),
 		"Input slices must all have the same length."
 	);
 	let len = close.len();
-	if len == 0 {
+	if len == 0 || first_valid >= len {
 		return;
 	}
 
-	// 1) Seed at index 0
+	// Start NVI at first valid index
 	let mut nvi_val = 1000.0;
-	out[0] = nvi_val; // :contentReference[oaicite:3]{index=3}
+	if first_valid < len {
+		out[first_valid] = nvi_val;
+	}
+	
+	if first_valid + 1 >= len {
+		return;
+	}
 
-	// 2) Track previous day’s close & volume for bar-to-bar comparison
-	let mut prev_close = close[0];
-	let mut prev_volume = volume[0];
+	// Track previous day's close & volume for bar-to-bar comparison
+	let mut prev_close = close[first_valid];
+	let mut prev_volume = volume[first_valid];
 
-	// 3) For each subsequent bar i = 1..len-1
-	for i in 1..len {
+	// For each subsequent bar
+	for i in (first_valid + 1)..len {
 		// 3a) Only update when volume has decreased from the prior bar
 		if volume[i] < prev_volume {
 			// Percentage change in price from yesterday --> today
@@ -243,24 +322,24 @@ pub fn nvi_scalar(close: &[f64], volume: &[f64], out: &mut [f64]) {
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn nvi_avx2(close: &[f64], volume: &[f64], out: &mut [f64]) {
-	nvi_scalar(close, volume, out)
+pub unsafe fn nvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
+	nvi_scalar(close, volume, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
-pub unsafe fn nvi_avx512(close: &[f64], volume: &[f64], out: &mut [f64]) {
-	nvi_scalar(close, volume, out)
+pub unsafe fn nvi_avx512(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
+	nvi_scalar(close, volume, first_valid, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512_short(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-	nvi_scalar(close, volume, out)
+	nvi_scalar(close, volume, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nvi_avx512_long(close: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-	nvi_scalar(close, volume, out)
+	nvi_scalar(close, volume, first, out)
 }
 
 #[cfg(test)]
@@ -341,11 +420,20 @@ mod tests {
 		let input = NviInput::from_slices(close, volume, NviParams);
 		let batch_output = nvi_with_kernel(&input, kernel)?.values;
 		let mut stream = NviStream::try_new()?;
-		let mut stream_values = Vec::with_capacity(close.len());
-		for (&c, &v) in close.iter().zip(volume.iter()) {
-			match stream.update(c, v) {
-				Some(nvi_val) => stream_values.push(nvi_val),
-				None => stream_values.push(f64::NAN),
+		
+		// Find first valid index for proper comparison
+		let first_valid = close
+			.iter()
+			.zip(volume.iter())
+			.position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+			.unwrap_or(0);
+		
+		// Use alloc_with_nan_prefix for zero-copy allocation
+		let mut stream_values = alloc_with_nan_prefix(close.len(), first_valid);
+		
+		for (i, (&c, &v)) in close.iter().zip(volume.iter()).enumerate() {
+			if let Some(nvi_val) = stream.update(c, v) {
+				stream_values[i] = nvi_val;
 			}
 		}
 		assert_eq!(batch_output.len(), stream_values.len());
@@ -386,4 +474,112 @@ mod tests {
 		check_nvi_not_enough_valid_data,
 		check_nvi_streaming
 	);
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "NviStream")]
+pub struct NviStreamPy {
+	stream: NviStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl NviStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		let stream = NviStream::try_new()
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(NviStreamPy { stream })
+	}
+
+	fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
+		self.stream.update(close, volume)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "nvi")]
+#[pyo3(signature = (close, volume, kernel=None))]
+pub fn nvi_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let input = NviInput::from_slices(close_slice, volume_slice, NviParams);
+	
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		nvi_with_kernel(&input, kern)
+			.map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nvi_js(close: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let mut output = vec![0.0; close.len()];
+	
+	nvi_into_slice(&mut output, close, volume, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nvi_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		// Check for aliasing with either input pointer
+		if close_ptr == out_ptr as *const f64 || volume_ptr == out_ptr as *const f64 {
+			// Handle aliasing by using a temporary buffer
+			let mut temp = vec![0.0; len];
+			nvi_into_slice(&mut temp, close, volume, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			nvi_into_slice(out, close, volume, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nvi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn nvi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
 }

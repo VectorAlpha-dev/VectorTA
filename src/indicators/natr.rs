@@ -21,7 +21,9 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -29,6 +31,21 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub enum NatrData<'a> {
@@ -48,6 +65,7 @@ pub struct NatrOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct NatrParams {
 	pub period: Option<usize>,
 }
@@ -151,6 +169,8 @@ pub enum NatrError {
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("natr: All values are NaN.")]
 	AllValuesNaN,
+	#[error("natr: Mismatched lengths: expected = {expected}, actual = {actual}")]
+	MismatchedLength { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -202,7 +222,7 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
 		});
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -534,7 +554,17 @@ fn natr_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -551,7 +581,7 @@ fn natr_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -559,21 +589,106 @@ fn natr_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(NatrBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn natr_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &NatrBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<NatrParams>, NatrError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(NatrError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = high
+		.iter()
+		.position(|x| !x.is_nan())
+		.unwrap_or(0)
+		.max(low.iter().position(|x| !x.is_nan()).unwrap_or(0))
+		.max(close.iter().position(|x| !x.is_nan()).unwrap_or(0));
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let len = high.len().min(low.len()).min(close.len());
+	if len - first < max_p {
+		return Err(NatrError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = len;
+	
+	// Initialize NaN prefixes directly in the provided buffer
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup {
+			out[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => natr_row_scalar(high, low, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => natr_row_avx2(high, low, close, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => natr_row_avx512(high, low, close, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -871,6 +986,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
+                    }
+                )*
             }
         }
     }
@@ -910,4 +1032,340 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "natr")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+pub fn natr_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = NatrParams { period: Some(period) };
+	let input = NatrInput::from_slices(high_slice, low_slice, close_slice, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| natr_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "natr_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn natr_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = NatrBatchRange { period: period_range };
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len().min(low_slice.len()).min(close_slice.len());
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			natr_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "NatrStream")]
+pub struct NatrStreamPy {
+	stream: NatrStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl NatrStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = NatrParams { period: Some(period) };
+		let stream = NatrStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(NatrStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.stream.update(high, low, close)
+	}
+}
+
+/// Write directly to output slice - no allocations
+pub fn natr_into_slice(
+	dst: &mut [f64], 
+	input: &NatrInput, 
+	kern: Kernel
+) -> Result<(), NatrError> {
+	let (high, low, close, period) = match &input.data {
+		NatrData::Candles { candles } => (
+			candles.high.as_slice(),
+			candles.low.as_slice(),
+			candles.close.as_slice(),
+			input.params.period.unwrap_or(14),
+		),
+		NatrData::Slices { high, low, close } => (
+			*high,
+			*low,
+			*close,
+			input.params.period.unwrap_or(14),
+		),
+	};
+
+	let len = high.len().min(low.len()).min(close.len());
+	
+	if dst.len() != len {
+		return Err(NatrError::MismatchedLength { 
+			expected: len, 
+			actual: dst.len() 
+		});
+	}
+
+	// Validate parameters
+	if len == 0 {
+		return Err(NatrError::EmptyData);
+	}
+	if period == 0 {
+		return Err(NatrError::InvalidPeriod { period, data_len: len });
+	}
+	if period > len {
+		return Err(NatrError::InvalidPeriod { period, data_len: len });
+	}
+
+	// Find first valid index
+	let first_valid_idx = {
+		let first_valid_idx_h = high.iter().position(|&x| !x.is_nan());
+		let first_valid_idx_l = low.iter().position(|&x| !x.is_nan());
+		let first_valid_idx_c = close.iter().position(|&x| !x.is_nan());
+
+		match (first_valid_idx_h, first_valid_idx_l, first_valid_idx_c) {
+			(Some(h), Some(l), Some(c)) => Some(h.max(l).max(c)),
+			_ => None,
+		}
+	};
+
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(NatrError::AllValuesNaN),
+	};
+
+	if (len - first_valid_idx) < period {
+		return Err(NatrError::NotEnoughValidData {
+			needed: period,
+			valid: len - first_valid_idx,
+		});
+	}
+
+	// Choose kernel
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Compute NATR directly into dst
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => natr_scalar(high, low, close, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => natr_avx2(high, low, close, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => natr_avx512(high, low, close, period, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..(first_valid_idx + period - 1)] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn natr_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = NatrParams { period: Some(period) };
+	let input = NatrInput::from_slices(high, low, close, params);
+	
+	let mut output = vec![0.0; high.len().min(low.len()).min(close.len())];
+	natr_into_slice(&mut output, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn natr_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let params = NatrParams { period: Some(period) };
+		let input = NatrInput::from_slices(high, low, close, params);
+		
+		// Check if any input pointer equals output pointer (aliasing)
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			natr_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			natr_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn natr_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn natr_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct NatrBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct NatrBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<NatrParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = natr_batch)]
+pub fn natr_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: NatrBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = NatrBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = natr_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = NatrBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn natr_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to natr_batch_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let sweep = NatrBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		natr_batch_inner_into(high, low, close, &sweep, detect_best_kernel(), false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

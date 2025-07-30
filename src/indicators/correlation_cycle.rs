@@ -3,19 +3,36 @@
 //! Computes real, imag, angle, and market state outputs based on correlation phasor analysis.
 //! Parity with alma.rs structure, SIMD feature gating, and batch/stream/builder APIs included.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::alloc::{alloc, dealloc, Layout};
 use std::convert::AsRef;
 use std::error::Error;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for CorrelationCycleInput<'a> {
@@ -184,6 +201,7 @@ pub fn correlation_cycle(input: &CorrelationCycleInput) -> Result<CorrelationCyc
 	correlation_cycle_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
 pub fn correlation_cycle_with_kernel(
 	input: &CorrelationCycleInput,
 	kernel: Kernel,
@@ -228,7 +246,8 @@ pub fn correlation_cycle_with_kernel(
 	let mut real = alloc_with_nan_prefix(data.len(), warmup_period);
 	let mut imag = alloc_with_nan_prefix(data.len(), warmup_period);
 	let mut angle = alloc_with_nan_prefix(data.len(), warmup_period);
-	let mut state = vec![0.0; data.len()]; // state doesn't need NaN prefix, it's 0.0 initialized
+	// State array: use alloc_with_nan_prefix with period+1 warmup since that's where we start writing
+	let mut state = alloc_with_nan_prefix(data.len(), period + 1);
 
 	unsafe {
 		match chosen {
@@ -487,9 +506,15 @@ pub struct CorrelationCycleStream {
 	buffer: Vec<f64>,
 	head: usize,
 	filled: bool,
-	/// Holds the (real, imag, angle, state) computed for the “previous” window,
+	/// Holds the (real, imag, angle, state) computed for the "previous" window,
 	/// so that we emit it one tick later.  
 	last: Option<(f64, f64, f64, f64)>,
+	// Pre-allocated working buffers to avoid allocations in update()
+	work_data: Vec<f64>,
+	work_real: Vec<f64>,
+	work_imag: Vec<f64>,
+	work_angle: Vec<f64>,
+	work_state: Vec<f64>,
 }
 
 impl CorrelationCycleStream {
@@ -507,6 +532,12 @@ impl CorrelationCycleStream {
 			head: 0,
 			filled: false,
 			last: None,
+			// Pre-allocate working buffers
+			work_data: vec![0.0; period + 1],
+			work_real: alloc_with_nan_prefix(period + 1, period),
+			work_imag: alloc_with_nan_prefix(period + 1, period),
+			work_angle: alloc_with_nan_prefix(period + 1, period),
+			work_state: alloc_with_nan_prefix(period + 1, period + 1),
 		})
 	}
 
@@ -526,43 +557,31 @@ impl CorrelationCycleStream {
 		if !self.filled && self.head == 0 {
 			self.filled = true;
 
-			// Build a slice of length = period+1
-			// ‣ first `period` entries = chronological window of the last `period` values
-			// ‣ extra slot at index `period` can be any dummy (we won't actually use it in sums)
-			let mut small = Vec::with_capacity(self.period + 1);
+			// Copy circular buffer to work_data in chronological order
 			for k in 0..self.period {
 				let idx = (self.head + k) % self.period;
-				small.push(self.buffer[idx]);
+				self.work_data[k] = self.buffer[idx];
 			}
-			// Push one dummy at the end (to make length = period+1)
-			small.push(0.0);
+			self.work_data[self.period] = 0.0; // dummy value
 
-			// Prepare tiny result arrays of length = period+1
-			// Use alloc_with_nan_prefix with warmup = period (computation starts at index period)
-			let mut real_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-			let mut imag_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-			let mut angle_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-			let mut state_arr = vec![0.0; self.period + 1];
-
-			// Call the scalar routine on small[0..(period+1)]
-			// — it will compute at index i = period exactly once, using indices [0..(period-1)]
+			// Call the scalar routine on work buffers
 			unsafe {
 				correlation_cycle_scalar(
-					&small,
+					&self.work_data,
 					self.period,
 					self.threshold,
-					&mut real_arr,
-					&mut imag_arr,
-					&mut angle_arr,
-					&mut state_arr,
+					&mut self.work_real,
+					&mut self.work_imag,
+					&mut self.work_angle,
+					&mut self.work_state,
 				);
 			}
 
-			// The “batch‐aligned” result is stored at index = period
-			let first_r = real_arr[self.period];
-			let first_i = imag_arr[self.period];
-			let first_a = angle_arr[self.period];
-			let first_s = state_arr[self.period];
+			// The "batch‐aligned" result is stored at index = period
+			let first_r = self.work_real[self.period];
+			let first_i = self.work_imag[self.period];
+			let first_a = self.work_angle[self.period];
+			let first_s = self.work_state[self.period];
 
 			self.last = Some((first_r, first_i, first_a, first_s));
 			return None;
@@ -583,39 +602,32 @@ impl CorrelationCycleStream {
 		// a) Grab the previously‐computed tuple:
 		let to_emit = self.last.take().unwrap();
 
-		// b) Build the next (period+1)-long slice
-		let mut small = Vec::with_capacity(self.period + 1);
+		// b) Copy circular buffer to work_data in chronological order
 		for k in 0..self.period {
 			let idx = (self.head + k) % self.period;
-			small.push(self.buffer[idx]);
+			self.work_data[k] = self.buffer[idx];
 		}
-		// Add one dummy at index = period
-		small.push(0.0);
+		self.work_data[self.period] = 0.0; // dummy value
 
-		// c) Compute correlation_cycle_scalar on that length=(period+1) slice
-		// Use alloc_with_nan_prefix with warmup = period (computation starts at index period)
-		let mut real_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-		let mut imag_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-		let mut angle_arr = alloc_with_nan_prefix(self.period + 1, self.period);
-		let mut state_arr = vec![0.0; self.period + 1];
+		// c) Compute correlation_cycle_scalar on work buffers
 		unsafe {
 			correlation_cycle_scalar(
-				&small,
+				&self.work_data,
 				self.period,
 				self.threshold,
-				&mut real_arr,
-				&mut imag_arr,
-				&mut angle_arr,
-				&mut state_arr,
+				&mut self.work_real,
+				&mut self.work_imag,
+				&mut self.work_angle,
+				&mut self.work_state,
 			);
 		}
-		let next_r = real_arr[self.period];
-		let next_i = imag_arr[self.period];
-		let next_a = angle_arr[self.period];
-		let next_s = state_arr[self.period];
+		let next_r = self.work_real[self.period];
+		let next_i = self.work_imag[self.period];
+		let next_a = self.work_angle[self.period];
+		let next_s = self.work_state[self.period];
 		self.last = Some((next_r, next_i, next_a, next_s));
 
-		// d) Return the “previous‐window” result:
+		// d) Return the "previous‐window" result:
 		Some(to_emit)
 	}
 }
@@ -692,6 +704,7 @@ impl CorrelationCycleBatchBuilder {
 	}
 }
 
+#[inline(always)]
 pub fn correlation_cycle_batch_with_kernel(
 	data: &[f64],
 	sweep: &CorrelationCycleBatchRange,
@@ -828,7 +841,7 @@ fn correlation_cycle_batch_inner(
 	let mut real_mu = make_uninit_matrix(rows, cols);
 	let mut imag_mu = make_uninit_matrix(rows, cols);
 	let mut angle_mu = make_uninit_matrix(rows, cols);
-	let mut state = vec![0.0; rows * cols]; // state doesn't need NaN prefix
+	let mut state_mu = make_uninit_matrix(rows, cols);
 
 	// Step 2: Calculate warmup periods for each row (each parameter combination)
 	let warm: Vec<usize> = combos
@@ -840,11 +853,18 @@ fn correlation_cycle_batch_inner(
 	init_matrix_prefixes(&mut real_mu, cols, &warm);
 	init_matrix_prefixes(&mut imag_mu, cols, &warm);
 	init_matrix_prefixes(&mut angle_mu, cols, &warm);
+	// State needs different warmup periods (period+1 for each row)
+	let state_warm: Vec<usize> = combos
+		.iter()
+		.map(|c| c.period.unwrap() + 1)
+		.collect();
+	init_matrix_prefixes(&mut state_mu, cols, &state_warm);
 
 	// Step 4: Convert to mutable slices for computation
 	let mut real_guard = ManuallyDrop::new(real_mu);
 	let mut imag_guard = ManuallyDrop::new(imag_mu);
 	let mut angle_guard = ManuallyDrop::new(angle_mu);
+	let mut state_guard = ManuallyDrop::new(state_mu);
 
 	let real: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(real_guard.as_mut_ptr() as *mut f64, real_guard.len()) };
@@ -852,6 +872,8 @@ fn correlation_cycle_batch_inner(
 		unsafe { core::slice::from_raw_parts_mut(imag_guard.as_mut_ptr() as *mut f64, imag_guard.len()) };
 	let angle: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(angle_guard.as_mut_ptr() as *mut f64, angle_guard.len()) };
+	let state: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(state_guard.as_mut_ptr() as *mut f64, state_guard.len()) };
 
 	let do_row =
 		|row: usize, out_real: &mut [f64], out_imag: &mut [f64], out_angle: &mut [f64], out_state: &mut [f64]| unsafe {
@@ -882,27 +904,25 @@ fn correlation_cycle_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (((r, im), an), st) in real
+			for (row, (((r, im), an), st)) in real
 				.chunks_mut(cols)
 				.zip(imag.chunks_mut(cols))
 				.zip(angle.chunks_mut(cols))
 				.zip(state.chunks_mut(cols))
 				.enumerate()
-				.map(|(_, x)| x)
 			{
-				do_row(0, r, im, an, st); // fix: row tracking if needed, otherwise just keep as 0
+				do_row(row, r, im, an, st);
 			}
 		}
 	} else {
-		for (((r, im), an), st) in real
+		for (row, (((r, im), an), st)) in real
 			.chunks_mut(cols)
 			.zip(imag.chunks_mut(cols))
 			.zip(angle.chunks_mut(cols))
 			.zip(state.chunks_mut(cols))
 			.enumerate()
-			.map(|(_, x)| x)
 		{
-			do_row(0, r, im, an, st); // fix: row tracking if needed, otherwise just keep as 0
+			do_row(row, r, im, an, st);
 		}
 	}
 
@@ -926,6 +946,13 @@ fn correlation_cycle_batch_inner(
 			angle_guard.as_mut_ptr() as *mut f64,
 			angle_guard.len(),
 			angle_guard.capacity(),
+		)
+	};
+	let state = unsafe {
+		Vec::from_raw_parts(
+			state_guard.as_mut_ptr() as *mut f64,
+			state_guard.len(),
+			state_guard.capacity(),
 		)
 	};
 
@@ -1420,15 +1447,6 @@ mod tests {
 }
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
-#[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python")]
-use pyo3::types::{PyDict, PyList};
-
-#[cfg(feature = "python")]
 #[pyfunction(name = "correlation_cycle")]
 #[pyo3(signature = (data, period=None, threshold=None, kernel=None))]
 pub fn correlation_cycle_py<'py>(
@@ -1438,27 +1456,29 @@ pub fn correlation_cycle_py<'py>(
 	threshold: Option<f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 	use pyo3::types::PyDict;
 
 	let data_slice = data.as_slice()?;
-
-	let params = CorrelationCycleParams { period, threshold };
-	let input = CorrelationCycleInput::from_slice(data_slice, params);
-
-	let chosen_kernel = match kernel {
+	let kern = match kernel {
 		Some(k) => crate::utilities::kernel_validation::validate_kernel(Some(k), false)?,
 		None => Kernel::Auto,
 	};
 
-	let output =
-		correlation_cycle_with_kernel(&input, chosen_kernel).map_err(|e| PyValueError::new_err(e.to_string()))?;
+	let params = CorrelationCycleParams { period, threshold };
+	let input = CorrelationCycleInput::from_slice(data_slice, params);
 
+	// Compute without GIL for better performance
+	let output = py
+		.allow_threads(|| correlation_cycle_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Create output dictionary with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("real", PyArray1::from_vec(py, output.real))?;
-	dict.set_item("imag", PyArray1::from_vec(py, output.imag))?;
-	dict.set_item("angle", PyArray1::from_vec(py, output.angle))?;
-	dict.set_item("state", PyArray1::from_vec(py, output.state))?;
+	dict.set_item("real", output.real.into_pyarray(py))?;
+	dict.set_item("imag", output.imag.into_pyarray(py))?;
+	dict.set_item("angle", output.angle.into_pyarray(py))?;
+	dict.set_item("state", output.state.into_pyarray(py))?;
 
 	Ok(dict)
 }
@@ -1557,11 +1577,6 @@ impl CorrelationCycleStreamPy {
 }
 
 #[cfg(feature = "wasm")]
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-
-#[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct CorrelationCycleJsOutput {
 	pub real: Vec<f64>,
@@ -1576,14 +1591,20 @@ pub fn correlation_cycle_js(data: &[f64], period: Option<usize>, threshold: Opti
 	let params = CorrelationCycleParams { period, threshold };
 	let input = CorrelationCycleInput::from_slice(data, params);
 
-	let output =
-		correlation_cycle_with_kernel(&input, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Single allocation for each output
+	let mut real = vec![0.0; data.len()];
+	let mut imag = vec![0.0; data.len()];
+	let mut angle = vec![0.0; data.len()];
+	let mut state = vec![0.0; data.len()];
+
+	correlation_cycle_into_slice(&mut real, &mut imag, &mut angle, &mut state, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = CorrelationCycleJsOutput {
-		real: output.real,
-		imag: output.imag,
-		angle: output.angle,
-		state: output.state,
+		real,
+		imag,
+		angle,
+		state,
 	};
 
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
@@ -1617,7 +1638,7 @@ pub fn correlation_cycle_batch_js(
 		threshold: (threshold_start, threshold_end, threshold_step),
 	};
 
-	let output = correlation_cycle_batch_inner(data, &sweep, Kernel::Scalar, false)
+	let output = correlation_cycle_batch_inner(data, &sweep, Kernel::Auto, false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = CorrelationCycleBatchJsOutput {
@@ -1661,4 +1682,188 @@ pub fn correlation_cycle_batch_metadata_js(
 	});
 
 	serde_wasm_bindgen::to_value(&metadata).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+/// Write directly to output slices - no allocations
+#[inline]
+pub fn correlation_cycle_into_slice(
+	dst_real: &mut [f64],
+	dst_imag: &mut [f64],
+	dst_angle: &mut [f64],
+	dst_state: &mut [f64],
+	input: &CorrelationCycleInput,
+	kern: Kernel,
+) -> Result<(), CorrelationCycleError> {
+	let data: &[f64] = match &input.data {
+		CorrelationCycleData::Candles { candles, source } => source_type(candles, source),
+		CorrelationCycleData::Slice(sl) => sl,
+	};
+
+	if data.is_empty() {
+		return Err(CorrelationCycleError::EmptyData);
+	}
+	if data.iter().all(|&x| x.is_nan()) {
+		return Err(CorrelationCycleError::AllValuesNaN);
+	}
+
+	// Validate all output slices have the same length as input
+	if dst_real.len() != data.len() || dst_imag.len() != data.len() 
+		|| dst_angle.len() != data.len() || dst_state.len() != data.len() {
+		return Err(CorrelationCycleError::InvalidPeriod {
+			period: dst_real.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > data.len() {
+		return Err(CorrelationCycleError::InvalidPeriod {
+			period,
+			data_len: data.len(),
+		});
+	}
+	let valid_count = data.iter().filter(|&&x| !x.is_nan()).count();
+	if valid_count < period {
+		return Err(CorrelationCycleError::NotEnoughValidData {
+			needed: period,
+			valid: valid_count,
+		});
+	}
+	let threshold = input.get_threshold();
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Calculate warmup periods
+	let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+	let warmup_period = first_valid + period;
+
+	// Compute directly into output slices
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				correlation_cycle_scalar(data, period, threshold, dst_real, dst_imag, dst_angle, dst_state)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				correlation_cycle_avx2(data, period, threshold, dst_real, dst_imag, dst_angle, dst_state)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				correlation_cycle_avx512(data, period, threshold, dst_real, dst_imag, dst_angle, dst_state)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst_real[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_imag[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_angle[..warmup_period] {
+		*v = f64::NAN;
+	}
+	// State has different warmup
+	for v in &mut dst_state[..(period + 1)] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn correlation_cycle_into(
+	in_ptr: *const f64,
+	real_ptr: *mut f64,
+	imag_ptr: *mut f64,
+	angle_ptr: *mut f64,
+	state_ptr: *mut f64,
+	len: usize,
+	period: Option<usize>,
+	threshold: Option<f64>,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || real_ptr.is_null() || imag_ptr.is_null() 
+		|| angle_ptr.is_null() || state_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = CorrelationCycleParams { period, threshold };
+		let input = CorrelationCycleInput::from_slice(data, params);
+
+		// Check for aliasing - if ANY output pointer matches input, we need temp buffers
+		let has_aliasing = in_ptr == real_ptr as *const f64 
+			|| in_ptr == imag_ptr as *const f64
+			|| in_ptr == angle_ptr as *const f64 
+			|| in_ptr == state_ptr as *const f64;
+
+		if has_aliasing {
+			// Use temporary buffers for all outputs
+			let mut temp_real = vec![0.0; len];
+			let mut temp_imag = vec![0.0; len];
+			let mut temp_angle = vec![0.0; len];
+			let mut temp_state = vec![0.0; len];
+
+			correlation_cycle_into_slice(
+				&mut temp_real, 
+				&mut temp_imag, 
+				&mut temp_angle, 
+				&mut temp_state, 
+				&input, 
+				Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+			// Copy results to output pointers
+			let real_out = std::slice::from_raw_parts_mut(real_ptr, len);
+			let imag_out = std::slice::from_raw_parts_mut(imag_ptr, len);
+			let angle_out = std::slice::from_raw_parts_mut(angle_ptr, len);
+			let state_out = std::slice::from_raw_parts_mut(state_ptr, len);
+
+			real_out.copy_from_slice(&temp_real);
+			imag_out.copy_from_slice(&temp_imag);
+			angle_out.copy_from_slice(&temp_angle);
+			state_out.copy_from_slice(&temp_state);
+		} else {
+			// Direct computation into output buffers
+			let real_out = std::slice::from_raw_parts_mut(real_ptr, len);
+			let imag_out = std::slice::from_raw_parts_mut(imag_ptr, len);
+			let angle_out = std::slice::from_raw_parts_mut(angle_ptr, len);
+			let state_out = std::slice::from_raw_parts_mut(state_ptr, len);
+
+			correlation_cycle_into_slice(
+				real_out, 
+				imag_out, 
+				angle_out, 
+				state_out, 
+				&input, 
+				Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
 }

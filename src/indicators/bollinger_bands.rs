@@ -988,6 +988,97 @@ fn bollinger_bands_batch_inner(
 	})
 }
 
+/// Compute Bollinger Bands batch operation directly into pre-allocated buffers.
+/// 
+/// This function is optimized for Python/WASM bindings where we want to avoid
+/// intermediate allocations. The output buffer must have size rows * cols where
+/// rows is the number of parameter combinations and cols is the data length.
+/// 
+/// Returns the parameter combinations that were successfully computed.
+#[inline(always)]
+pub fn bollinger_bands_batch_inner_into(
+	data: &[f64],
+	sweep: &BollingerBandsBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out_upper: &mut [f64],
+	out_middle: &mut [f64],
+	out_lower: &mut [f64],
+) -> Result<Vec<BollingerBandsParams>, BollingerBandsError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(BollingerBandsError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(BollingerBandsError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(BollingerBandsError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let cols = data.len();
+
+	let do_row = |row: usize, out_u: &mut [f64], out_m: &mut [f64], out_l: &mut [f64]| unsafe {
+		let p = combos[row].period.unwrap();
+		let du = combos[row].devup.unwrap();
+		let dd = combos[row].devdn.unwrap();
+		let mt = combos[row].matype.clone().unwrap();
+		let dt = combos[row].devtype.unwrap();
+
+		// Fill NaN prefix
+		if first + p > 0 {
+			let nan_end = (first + p - 1).min(data.len());
+			out_u[..nan_end].fill(f64::NAN);
+			out_m[..nan_end].fill(f64::NAN);
+			out_l[..nan_end].fill(f64::NAN);
+		}
+
+		// Compute into buffers
+		let _ = bollinger_bands_compute_into(data, p, du, dd, &mt, dt, first, kern, out_u, out_m, out_l);
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_upper
+				.par_chunks_mut(cols)
+				.zip(out_middle.par_chunks_mut(cols))
+				.zip(out_lower.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, ((u, m), l))| do_row(row, u, m, l));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, ((u, m), l)) in out_upper
+				.chunks_mut(cols)
+				.zip(out_middle.chunks_mut(cols))
+				.zip(out_lower.chunks_mut(cols))
+				.enumerate()
+			{
+				do_row(row, u, m, l);
+			}
+		}
+	} else {
+		for (row, ((u, m), l)) in out_upper
+			.chunks_mut(cols)
+			.zip(out_middle.chunks_mut(cols))
+			.zip(out_lower.chunks_mut(cols))
+			.enumerate()
+		{
+			do_row(row, u, m, l);
+		}
+	}
+
+	Ok(combos)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1530,14 +1621,11 @@ pub fn bollinger_bands_py<'py>(
 	Bound<'py, PyArray1<f64>>,
 	Bound<'py, PyArray1<f64>>,
 )> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Use kernel validation for safety
+	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 
-	// ---------- build params & prepare once -----------------------------------------
 	let params = BollingerBandsParams {
 		period: Some(period),
 		devup: Some(devup),
@@ -1547,49 +1635,20 @@ pub fn bollinger_bands_py<'py>(
 	};
 	let bb_in = BollingerBandsInput::from_slice(slice_in, params);
 
-	// Get prepared values without kernel dispatch repetition
-	let (d, per, du, dd, mt, dt, first, chosen) =
-		bb_prepare(&bb_in, kern).map_err(|e| PyValueError::new_err(e.to_string()))?;
+	// Get the output struct with Vec<f64> fields
+	let (upper_vec, middle_vec, lower_vec) = py
+		.allow_threads(|| {
+			bollinger_bands_with_kernel(&bb_in, kern)
+				.map(|o| (o.upper_band, o.middle_band, o.lower_band))
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// ---------- allocate uninitialized NumPy output buffers -------------------------
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let upper_arr = unsafe { PyArray1::<f64>::new(py, [d.len()], false) };
-	let middle_arr = unsafe { PyArray1::<f64>::new(py, [d.len()], false) };
-	let lower_arr = unsafe { PyArray1::<f64>::new(py, [d.len()], false) };
-
-	let slice_upper = unsafe { upper_arr.as_slice_mut()? };
-	let slice_middle = unsafe { middle_arr.as_slice_mut()? };
-	let slice_lower = unsafe { lower_arr.as_slice_mut()? };
-
-	// ---------- heavy lifting without the GIL --------------------------------------
-	py.allow_threads(|| -> Result<(), BollingerBandsError> {
-		// SAFETY: We must write to ALL elements before returning to Python
-		// 1. Write the NaN prefix once
-		if first + per > 0 {
-			let nan_end = (first + per - 1).min(d.len());
-			slice_upper[..nan_end].fill(f64::NAN);
-			slice_middle[..nan_end].fill(f64::NAN);
-			slice_lower[..nan_end].fill(f64::NAN);
-		}
-
-		// 2. Compute directly into NumPy buffers
-		bollinger_bands_compute_into(
-			d,
-			per,
-			du,
-			dd,
-			&mt,
-			dt,
-			first,
-			chosen,
-			slice_upper,
-			slice_middle,
-			slice_lower,
-		)
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok((upper_arr, middle_arr, lower_arr))
+	// Zero-copy transfer to NumPy arrays
+	Ok((
+		upper_vec.into_pyarray(py),
+		middle_vec.into_pyarray(py),
+		lower_vec.into_pyarray(py),
+	))
 }
 
 #[cfg(feature = "python")]
@@ -1681,66 +1740,16 @@ pub fn bollinger_bands_batch_py<'py>(
 				_ => unreachable!(),
 			};
 
-			// Process each row directly into the output buffers
-			let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
-
-			#[cfg(not(target_arch = "wasm32"))]
-			{
-				use rayon::prelude::*;
-				slice_upper
-					.par_chunks_mut(cols)
-					.zip(slice_middle.par_chunks_mut(cols))
-					.zip(slice_lower.par_chunks_mut(cols))
-					.zip(combos.par_iter())
-					.for_each(|(((out_u, out_m), out_l), combo)| {
-						let p = combo.period.unwrap();
-						let du = combo.devup.unwrap();
-						let dd = combo.devdn.unwrap();
-						let mt = combo.matype.as_ref().unwrap();
-						let dt = combo.devtype.unwrap();
-
-						// Fill NaN prefix
-						if first + p > 0 {
-							let nan_end = (first + p - 1).min(slice_in.len());
-							out_u[..nan_end].fill(f64::NAN);
-							out_m[..nan_end].fill(f64::NAN);
-							out_l[..nan_end].fill(f64::NAN);
-						}
-
-						// Compute into buffers
-						let _ =
-							bollinger_bands_compute_into(slice_in, p, du, dd, mt, dt, first, simd, out_u, out_m, out_l);
-					});
-			}
-
-			#[cfg(target_arch = "wasm32")]
-			{
-				for (i, combo) in combos.iter().enumerate() {
-					let row_start = i * cols;
-					let out_u = &mut slice_upper[row_start..row_start + cols];
-					let out_m = &mut slice_middle[row_start..row_start + cols];
-					let out_l = &mut slice_lower[row_start..row_start + cols];
-
-					let p = combo.period.unwrap();
-					let du = combo.devup.unwrap();
-					let dd = combo.devdn.unwrap();
-					let mt = combo.matype.as_ref().unwrap();
-					let dt = combo.devtype.unwrap();
-
-					// Fill NaN prefix
-					if first + p > 0 {
-						let nan_end = (first + p - 1).min(slice_in.len());
-						out_u[..nan_end].fill(f64::NAN);
-						out_m[..nan_end].fill(f64::NAN);
-						out_l[..nan_end].fill(f64::NAN);
-					}
-
-					// Compute into buffers
-					let _ = bollinger_bands_compute_into(slice_in, p, du, dd, mt, dt, first, simd, out_u, out_m, out_l);
-				}
-			}
-
-			Ok(combos)
+			// Use the new function that writes directly to output buffers
+			bollinger_bands_batch_inner_into(
+				slice_in,
+				&sweep,
+				simd,
+				true, // parallel
+				slice_upper,
+				slice_middle,
+				slice_lower,
+			)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1792,6 +1801,38 @@ pub fn bollinger_bands_batch_py<'py>(
 	Ok(dict)
 }
 
+/// Write Bollinger Bands directly to output slices - no allocations
+pub fn bollinger_bands_into_slice(
+	dst_upper: &mut [f64],
+	dst_middle: &mut [f64], 
+	dst_lower: &mut [f64],
+	input: &BollingerBandsInput,
+	kern: Kernel,
+) -> Result<(), BollingerBandsError> {
+	let (data, period, devup, devdn, matype, devtype, first, chosen) = bb_prepare(input, kern)?;
+	
+	// Verify output slice lengths match input data
+	if dst_upper.len() != data.len() || dst_middle.len() != data.len() || dst_lower.len() != data.len() {
+		return Err(BollingerBandsError::InvalidPeriod {
+			period: dst_upper.len(),
+			data_len: data.len(),
+		});
+	}
+	
+	// Compute directly into the provided slices
+	bollinger_bands_compute_into(data, period, devup, devdn, &matype, devtype, first, chosen, dst_upper, dst_middle, dst_lower)?;
+	
+	// Fill warmup period with NaN
+	let warmup_end = first + period - 1;
+	for i in 0..warmup_end {
+		dst_upper[i] = f64::NAN;
+		dst_middle[i] = f64::NAN;
+		dst_lower[i] = f64::NAN;
+	}
+	
+	Ok(())
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn bollinger_bands_js(
@@ -1802,7 +1843,6 @@ pub fn bollinger_bands_js(
 	matype: &str,
 	devtype: usize,
 ) -> Result<Vec<f64>, JsValue> {
-	// prepare once
 	let params = BollingerBandsParams {
 		period: Some(period),
 		devup: Some(devup),
@@ -1810,25 +1850,17 @@ pub fn bollinger_bands_js(
 		matype: Some(matype.to_string()),
 		devtype: Some(devtype),
 	};
-	let bb_in = BollingerBandsInput::from_slice(data, params);
-	let (d, per, du, dd, mt, dt, first, chosen) =
-		bb_prepare(&bb_in, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	// Allocate with proper warmup period
-	let warmup_period = first + per - 1;
-	let mut up = alloc_with_nan_prefix(data.len(), warmup_period);
-	let mut mid = alloc_with_nan_prefix(data.len(), warmup_period);
-	let mut low = alloc_with_nan_prefix(data.len(), warmup_period);
-
-	// Compute into pre-allocated vectors
-	bollinger_bands_compute_into(d, per, du, dd, &mt, dt, first, chosen, &mut up, &mut mid, &mut low)
+	let input = BollingerBandsInput::from_slice(data, params);
+	
+	// Single allocation for all three bands [upper..., middle..., lower...]
+	let mut output = vec![0.0; data.len() * 3];
+	let (upper, rest) = output.split_at_mut(data.len());
+	let (middle, lower) = rest.split_at_mut(data.len());
+	
+	bollinger_bands_into_slice(upper, middle, lower, &input, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-	// Flatten the three bands into a single vector - same convention as before
-	let mut out = up;
-	out.extend(mid);
-	out.extend(low);
-	Ok(out)
+	
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -2033,4 +2065,135 @@ pub fn bollinger_bands_batch_unified_js(data: &[f64], config: JsValue) -> Result
 
 	// 4. Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_into(
+	in_ptr: *const f64,
+	upper_ptr: *mut f64,
+	middle_ptr: *mut f64,
+	lower_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	devup: f64,
+	devdn: f64,
+	matype: &str,
+	devtype: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || upper_ptr.is_null() || middle_ptr.is_null() || lower_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = BollingerBandsParams {
+			period: Some(period),
+			devup: Some(devup),
+			devdn: Some(devdn),
+			matype: Some(matype.to_string()),
+			devtype: Some(devtype),
+		};
+		let input = BollingerBandsInput::from_slice(data, params);
+		
+		// Check for aliasing on all output pointers
+		let aliasing = in_ptr == upper_ptr || in_ptr == middle_ptr || in_ptr == lower_ptr ||
+			upper_ptr == middle_ptr || upper_ptr == lower_ptr || middle_ptr == lower_ptr;
+		
+		if aliasing {
+			// Use single allocation for temporary buffer, split into 3 parts
+			let mut temp = vec![0.0; len * 3];
+			let (temp_upper, rest) = temp.split_at_mut(len);
+			let (temp_middle, temp_lower) = rest.split_at_mut(len);
+			
+			bollinger_bands_into_slice(temp_upper, temp_middle, temp_lower, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
+			
+			upper_out.copy_from_slice(temp_upper);
+			middle_out.copy_from_slice(temp_middle);
+			lower_out.copy_from_slice(temp_lower);
+		} else {
+			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
+			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
+			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
+			
+			bollinger_bands_into_slice(upper_out, middle_out, lower_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bollinger_bands_batch_into(
+	in_ptr: *const f64,
+	upper_ptr: *mut f64,
+	middle_ptr: *mut f64,
+	lower_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	devup_start: f64,
+	devup_end: f64,
+	devup_step: f64,
+	devdn_start: f64,
+	devdn_end: f64,
+	devdn_step: f64,
+	matype: &str,
+	devtype: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || upper_ptr.is_null() || middle_ptr.is_null() || lower_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		let sweep = BollingerBandsBatchRange {
+			period: (period_start, period_end, period_step),
+			devup: (devup_start, devup_end, devup_step),
+			devdn: (devdn_start, devdn_end, devdn_step),
+			matype: (matype.to_string(), matype.to_string(), 0),
+			devtype: (devtype, devtype, 0),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let upper_out = std::slice::from_raw_parts_mut(upper_ptr, rows * cols);
+		let middle_out = std::slice::from_raw_parts_mut(middle_ptr, rows * cols);
+		let lower_out = std::slice::from_raw_parts_mut(lower_ptr, rows * cols);
+		
+		bollinger_bands_batch_inner_into(data, &sweep, Kernel::Auto, false, upper_out, middle_out, lower_out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

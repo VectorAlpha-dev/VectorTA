@@ -15,9 +15,22 @@
 //! ## Returns
 //! - **`Ok(PfeOutput)`**: `Vec<f64>` matching input length (leading NaN for non-computable values)
 //! - **`Err(PfeError)`** otherwise
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -211,11 +224,11 @@ pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, Pf
 
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => pfe_scalar(data, period, smoothing, first, &mut vec![]),
+			Kernel::Scalar | Kernel::ScalarBatch => pfe_scalar(data, period, smoothing, first),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => pfe_avx2(data, period, smoothing, first, &mut vec![]),
+			Kernel::Avx2 | Kernel::Avx2Batch => pfe_avx2(data, period, smoothing, first),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => pfe_avx512(data, period, smoothing, first, &mut vec![]),
+			Kernel::Avx512 | Kernel::Avx512Batch => pfe_avx512(data, period, smoothing, first),
 			_ => unreachable!(),
 		}
 	}
@@ -227,98 +240,65 @@ pub fn pfe_scalar(
 	period: usize,
 	smoothing: usize,
 	_first_valid: usize,
-	_out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-	// 1. Use a full 'period'-bar gap (not period - 1)
-	let ln = period;
 	let len = data.len();
 	if period > len {
-		// (though upstream should already catch this)
 		return Err(PfeError::InvalidPeriod { period, data_len: len });
 	}
 
-	// diff_len = number of indices i for which i + period < data.len()
-	let diff_len = len.saturating_sub(period);
-
-	// 2. Build diff_array[i] = data[i+period] - data[i]
-	let mut diff_array = vec![f64::NAN; diff_len];
-	for i in 0..diff_len {
-		diff_array[i] = data[i + period] - data[i];
-	}
-
-	// 3. Compute the "long leg" for each i: sqrt( ΔP² + (period)² )
-	let mut a_array = vec![f64::NAN; diff_len];
-	for i in 0..diff_len {
-		let d = diff_array[i];
-		a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
-	}
-
-	// 4. Compute the "short leg" by summing 'period' single-bar distances
-	//    for j from i..i+period (exclusive of i+period), doing sqrt( (ΔP)² + 1 ).
-	let mut b_array = vec![f64::NAN; diff_len];
-	for i in 0..diff_len {
-		let mut b_sum = 0.0;
-		let start = i;
-		// j runs from i..(i + period - 1), so that j+1 runs i+1..i+period
-		for j in start..(start + period) {
-			let step_diff = data[j + 1] - data[j];
-			b_sum += (1.0 + step_diff.powi(2)).sqrt();
-		}
-		b_array[i] = b_sum;
-	}
-
-	// 5. Form raw PFE = 100 * (long_leg / short_leg)
-	//    If denom is zero (should never happen with real candles),
-	//    we set rawPFE = 0 to avoid division by zero.
-	let mut pfe_tmp = vec![f64::NAN; diff_len];
-	for i in 0..diff_len {
-		if b_array[i].abs() < f64::EPSILON {
-			pfe_tmp[i] = 0.0;
-		} else {
-			pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
-		}
-	}
-
-	// 6. Apply sign: if diff_array[i] < 0, then negate
-	let mut signed_pfe = vec![f64::NAN; diff_len];
-	for i in 0..diff_len {
-		let d = diff_array[i];
-		if d.is_nan() {
-			signed_pfe[i] = f64::NAN;
-		} else if d > 0.0 {
-			signed_pfe[i] = pfe_tmp[i];
-		} else {
-			signed_pfe[i] = -pfe_tmp[i];
-		}
-	}
-
-	// 7. EMA‐smooth the signed PFE (period = 'smoothing')
+	// Allocate output with proper warmup period
+	let mut pfe_values = alloc_with_nan_prefix(len, period);
+	
+	// EMA state
 	let alpha = 2.0 / (smoothing as f64 + 1.0);
-	let mut ema_array = vec![f64::NAN; diff_len];
-	let mut started = false;
 	let mut ema_val = 0.0;
-	for i in 0..diff_len {
-		let val = signed_pfe[i];
-		if val.is_nan() {
-			ema_array[i] = f64::NAN;
-		} else if !started {
-			// first non‐NaN seeds the EMA
-			ema_val = val;
-			ema_array[i] = val;
-			started = true;
+	let mut ema_started = false;
+	
+	// Calculate PFE for each valid index
+	for i in 0..(len - period) {
+		// 1. Calculate diff = data[i+period] - data[i]
+		let diff = data[i + period] - data[i];
+		
+		// 2. Calculate long leg: sqrt(diff² + period²)
+		let long_leg = (diff.powi(2) + (period as f64).powi(2)).sqrt();
+		
+		// 3. Calculate short leg: sum of period single-bar distances
+		let mut short_leg = 0.0;
+		for j in i..(i + period) {
+			let step_diff = data[j + 1] - data[j];
+			short_leg += (1.0 + step_diff.powi(2)).sqrt();
+		}
+		
+		// 4. Calculate raw PFE = 100 * (long_leg / short_leg)
+		let raw_pfe = if short_leg.abs() < f64::EPSILON {
+			0.0
 		} else {
-			ema_val = alpha * val + (1.0 - alpha) * ema_val;
-			ema_array[i] = ema_val;
-		}
-	}
-
-	// 8. Build final output vector of length = data.len(), with leading NaNs
-	let mut pfe_values = vec![f64::NAN; len];
-	for (i, &val) in ema_array.iter().enumerate() {
-		let out_idx = i + ln; // i + period
-		if out_idx < pfe_values.len() {
-			pfe_values[out_idx] = val;
-		}
+			100.0 * long_leg / short_leg
+		};
+		
+		// 5. Apply sign based on diff direction
+		let signed_pfe = if diff.is_nan() {
+			f64::NAN
+		} else if diff > 0.0 {
+			raw_pfe
+		} else {
+			-raw_pfe
+		};
+		
+		// 6. Apply EMA smoothing
+		let smoothed_value = if signed_pfe.is_nan() {
+			f64::NAN
+		} else if !ema_started {
+			ema_val = signed_pfe;
+			ema_started = true;
+			signed_pfe
+		} else {
+			ema_val = alpha * signed_pfe + (1.0 - alpha) * ema_val;
+			ema_val
+		};
+		
+		// 7. Store in output at correct position
+		pfe_values[i + period] = smoothed_value;
 	}
 
 	Ok(PfeOutput { values: pfe_values })
@@ -331,9 +311,8 @@ pub fn pfe_avx512(
 	period: usize,
 	smoothing: usize,
 	first_valid: usize,
-	out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-	pfe_scalar(data, period, smoothing, first_valid, out)
+	pfe_scalar(data, period, smoothing, first_valid)
 }
 
 #[inline]
@@ -342,9 +321,8 @@ pub fn pfe_avx2(
 	period: usize,
 	smoothing: usize,
 	first_valid: usize,
-	out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-	pfe_scalar(data, period, smoothing, first_valid, out)
+	pfe_scalar(data, period, smoothing, first_valid)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -354,9 +332,8 @@ pub fn pfe_avx512_short(
 	period: usize,
 	smoothing: usize,
 	first_valid: usize,
-	out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-	pfe_scalar(data, period, smoothing, first_valid, out)
+	pfe_scalar(data, period, smoothing, first_valid)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -366,9 +343,8 @@ pub fn pfe_avx512_long(
 	period: usize,
 	smoothing: usize,
 	first_valid: usize,
-	out: &mut Vec<f64>,
 ) -> Result<PfeOutput, PfeError> {
-	pfe_scalar(data, period, smoothing, first_valid, out)
+	pfe_scalar(data, period, smoothing, first_valid)
 }
 
 #[inline]
@@ -506,12 +482,13 @@ pub fn pfe_batch_par_slice(data: &[f64], sweep: &PfeBatchRange, kern: Kernel) ->
 }
 
 #[inline(always)]
-fn pfe_batch_inner(
+pub fn pfe_batch_inner_into(
 	data: &[f64],
 	sweep: &PfeBatchRange,
 	kern: Kernel,
 	parallel: bool,
-) -> Result<PfeBatchOutput, PfeError> {
+	out: &mut [f64],
+) -> Result<Vec<PfeParams>, PfeError> {
 	let combos = expand_grid(sweep);
 	if combos.is_empty() {
 		return Err(PfeError::InvalidPeriod { period: 0, data_len: 0 });
@@ -528,7 +505,17 @@ fn pfe_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Initialize NaN prefixes for each row based on its period
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let row_start = row * cols;
+		let row_slice = &mut out[row_start..row_start + cols];
+		for i in 0..period {
+			row_slice[i] = f64::NAN;
+		}
+	}
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		let smoothing = combos[row].smoothing.unwrap();
@@ -554,7 +541,87 @@ fn pfe_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[inline(always)]
+fn pfe_batch_inner(
+	data: &[f64],
+	sweep: &PfeBatchRange,
+	kern: Kernel,
+	parallel: bool,
+) -> Result<PfeBatchOutput, PfeError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(PfeError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(PfeError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(PfeError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap())
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values_slice: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, rows * cols) };
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let smoothing = combos[row].smoothing.unwrap();
+		match kern {
+			Kernel::Scalar => {
+				let out = pfe_row_scalar(data, first, period, smoothing, out_row);
+				out;
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => {
+				let out = pfe_row_avx2(data, first, period, smoothing, out_row);
+				out;
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => {
+				let out = pfe_row_avx512(data, first, period, smoothing, out_row);
+				out;
+			}
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			values_slice
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -562,15 +629,24 @@ fn pfe_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(PfeBatchOutput {
 		values,
 		combos,
@@ -581,92 +657,58 @@ fn pfe_batch_inner(
 
 #[inline(always)]
 unsafe fn pfe_row_scalar(data: &[f64], _first_valid: usize, period: usize, smoothing: usize, out: &mut [f64]) {
-	// 1. Use a full 'period'-bar gap (not period - 1)
-	let ln = period;
 	let len = data.len();
-	let diff_len = len.saturating_sub(ln);
-
-	// 2. Build diff_array[i] = data[i + period] - data[i]
-	let mut diff_array = Vec::with_capacity(diff_len);
-	diff_array.set_len(diff_len);
-	for i in 0..diff_len {
-		diff_array[i] = data[i + ln] - data[i];
-	}
-
-	// 3. Compute the "long leg" for each i: sqrt( ΔP² + (period)² )
-	let mut a_array = Vec::with_capacity(diff_len);
-	a_array.set_len(diff_len);
-	for i in 0..diff_len {
-		let d = diff_array[i];
-		a_array[i] = (d.powi(2) + (period as f64).powi(2)).sqrt();
-	}
-
-	// 4. Compute the "short leg" by summing 'period' single-bar distances
-	//    for j in i..(i+period), summing sqrt(1 + (ΔP)²) over exactly 'period' intervals.
-	let mut b_array = Vec::with_capacity(diff_len);
-	b_array.set_len(diff_len);
-	for i in 0..diff_len {
-		let mut b_sum = 0.0;
-		let start = i;
-		// j runs from i..(i + period - 1), so that j+1 runs i+1..i+period
-		for j in start..(start + ln) {
-			let step_diff = data[j + 1] - data[j];
-			b_sum += (1.0 + step_diff.powi(2)).sqrt();
-		}
-		b_array[i] = b_sum;
-	}
-
-	// 5. Form raw PFE = 100 * (long_leg / short_leg)
-	let mut pfe_tmp = Vec::with_capacity(diff_len);
-	pfe_tmp.set_len(diff_len);
-	for i in 0..diff_len {
-		if b_array[i].abs() < f64::EPSILON {
-			pfe_tmp[i] = 0.0;
-		} else {
-			pfe_tmp[i] = 100.0 * a_array[i] / b_array[i];
-		}
-	}
-
-	// 6. Apply sign: if diff_array[i] < 0, then negate
-	let mut signed_pfe = Vec::with_capacity(diff_len);
-	signed_pfe.set_len(diff_len);
-	for i in 0..diff_len {
-		let d = diff_array[i];
-		if d.is_nan() {
-			signed_pfe[i] = f64::NAN;
-		} else if d > 0.0 {
-			signed_pfe[i] = pfe_tmp[i];
-		} else {
-			signed_pfe[i] = -pfe_tmp[i];
-		}
-	}
-
-	// 7. EMA‐smooth the signed PFE (period = 'smoothing')
+	
+	// EMA state
 	let alpha = 2.0 / (smoothing as f64 + 1.0);
-	let mut ema_array = Vec::with_capacity(diff_len);
-	ema_array.set_len(diff_len);
-	let mut started = false;
 	let mut ema_val = 0.0;
-	for i in 0..diff_len {
-		let val = signed_pfe[i];
-		if val.is_nan() {
-			ema_array[i] = f64::NAN;
-		} else if !started {
-			ema_val = val;
-			ema_array[i] = val;
-			started = true;
+	let mut ema_started = false;
+	
+	// Calculate PFE for each valid index directly into output
+	for i in 0..(len - period) {
+		// 1. Calculate diff = data[i+period] - data[i]
+		let diff = data[i + period] - data[i];
+		
+		// 2. Calculate long leg: sqrt(diff² + period²)
+		let long_leg = (diff.powi(2) + (period as f64).powi(2)).sqrt();
+		
+		// 3. Calculate short leg: sum of period single-bar distances
+		let mut short_leg = 0.0;
+		for j in i..(i + period) {
+			let step_diff = data[j + 1] - data[j];
+			short_leg += (1.0 + step_diff.powi(2)).sqrt();
+		}
+		
+		// 4. Calculate raw PFE = 100 * (long_leg / short_leg)
+		let raw_pfe = if short_leg.abs() < f64::EPSILON {
+			0.0
 		} else {
-			ema_val = alpha * val + (1.0 - alpha) * ema_val;
-			ema_array[i] = ema_val;
-		}
-	}
-
-	// 8. Write results into `out`, offset by period
-	for (i, &val) in ema_array.iter().enumerate() {
-		let out_idx = i + ln;
-		if out_idx < out.len() {
-			out[out_idx] = val;
-		}
+			100.0 * long_leg / short_leg
+		};
+		
+		// 5. Apply sign based on diff direction
+		let signed_pfe = if diff.is_nan() {
+			f64::NAN
+		} else if diff > 0.0 {
+			raw_pfe
+		} else {
+			-raw_pfe
+		};
+		
+		// 6. Apply EMA smoothing
+		let smoothed_value = if signed_pfe.is_nan() {
+			f64::NAN
+		} else if !ema_started {
+			ema_val = signed_pfe;
+			ema_started = true;
+			signed_pfe
+		} else {
+			ema_val = alpha * signed_pfe + (1.0 - alpha) * ema_val;
+			ema_val
+		};
+		
+		// 7. Store in output at correct position
+		out[i + period] = smoothed_value;
 	}
 }
 
@@ -793,6 +835,124 @@ impl PfeStream {
 		};
 
 		Some(out_val)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pfe")]
+#[pyo3(signature = (data, period, smoothing, kernel=None))]
+pub fn pfe_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	smoothing: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	let params = PfeParams {
+		period: Some(period),
+		smoothing: Some(smoothing),
+	};
+	let pfe_in = PfeInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| pfe_with_kernel(&pfe_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pfe_batch")]
+#[pyo3(signature = (data, period_range, smoothing_range, kernel=None))]
+pub fn pfe_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	smoothing_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+
+	let sweep = PfeBatchRange {
+		period: period_range,
+		smoothing: smoothing_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			pfe_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"smoothings",
+		combos
+			.iter()
+			.map(|p| p.smoothing.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "PfeStream")]
+pub struct PfeStreamPy {
+	stream: PfeStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PfeStreamPy {
+	#[new]
+	fn new(period: usize, smoothing: usize) -> PyResult<Self> {
+		let params = PfeParams {
+			period: Some(period),
+			smoothing: Some(smoothing),
+		};
+		let stream = PfeStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(PfeStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
 	}
 }
 

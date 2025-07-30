@@ -20,7 +20,10 @@
 use crate::indicators::atr::{atr, AtrData, AtrError, AtrInput, AtrOutput, AtrParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -28,6 +31,16 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum SuperTrendData<'a> {
@@ -181,7 +194,20 @@ pub fn supertrend(input: &SuperTrendInput) -> Result<SuperTrendOutput, SuperTren
 	supertrend_with_kernel(input, Kernel::Auto)
 }
 
-pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result<SuperTrendOutput, SuperTrendError> {
+#[inline(always)]
+fn supertrend_prepare<'a>(
+	input: &'a SuperTrendInput,
+	kernel: Kernel,
+) -> Result<(
+	&'a [f64],  // high
+	&'a [f64],  // low  
+	&'a [f64],  // close
+	usize,      // period
+	f64,        // factor
+	usize,      // first_valid_idx
+	Vec<f64>,   // atr_values
+	Kernel,     // chosen kernel
+), SuperTrendError> {
 	let (high, low, close) = match &input.data {
 		SuperTrendData::Candles { candles } => (
 			source_type(candles, "high"),
@@ -202,8 +228,10 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 			data_len: high.len(),
 		});
 	}
+	
 	let factor = input.get_factor();
 	let len = high.len();
+	
 	let mut first_valid_idx = None;
 	for i in 0..len {
 		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
@@ -211,10 +239,12 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 			break;
 		}
 	}
+	
 	let first_valid_idx = match first_valid_idx {
 		Some(idx) => idx,
 		None => return Err(SuperTrendError::AllValuesNaN),
 	};
+	
 	if (len - first_valid_idx) < period {
 		return Err(SuperTrendError::NotEnoughValidData {
 			needed: period,
@@ -222,6 +252,7 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 		});
 	}
 
+	// Calculate ATR values
 	let atr_input = AtrInput::from_slices(
 		&high[first_valid_idx..],
 		&low[first_valid_idx..],
@@ -230,14 +261,29 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 	);
 	let AtrOutput { values: atr_values } = atr(&atr_input)?;
 
-	let mut trend = vec![f64::NAN; len];
-	let mut changed = vec![0.0; len];
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
 
+	Ok((high, low, close, period, factor, first_valid_idx, atr_values, chosen))
+}
+
+#[inline(always)]
+fn supertrend_compute_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	factor: f64,
+	first_valid_idx: usize,
+	atr_values: &[f64],
+	kernel: Kernel,
+	trend_out: &mut [f64],
+	changed_out: &mut [f64],
+) {
 	unsafe {
-		match match kernel {
-			Kernel::Auto => detect_best_kernel(),
-			other => other,
-		} {
+		match kernel {
 			Kernel::Scalar | Kernel::ScalarBatch => {
 				supertrend_scalar(
 					high,
@@ -247,8 +293,8 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 					factor,
 					first_valid_idx,
 					&atr_values,
-					&mut trend,
-					&mut changed,
+					trend_out,
+					changed_out,
 				);
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -261,8 +307,8 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 					factor,
 					first_valid_idx,
 					&atr_values,
-					&mut trend,
-					&mut changed,
+					trend_out,
+					changed_out,
 				);
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -275,17 +321,40 @@ pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result
 					factor,
 					first_valid_idx,
 					&atr_values,
-					&mut trend,
-					&mut changed,
+					trend_out,
+					changed_out,
 				);
 			}
 			_ => unreachable!(),
 		}
 	}
+}
+
+pub fn supertrend_with_kernel(input: &SuperTrendInput, kernel: Kernel) -> Result<SuperTrendOutput, SuperTrendError> {
+	let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) = 
+		supertrend_prepare(input, kernel)?;
+
+	let len = high.len();
+	let mut trend = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
+	let mut changed = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
+
+	supertrend_compute_into(
+		high,
+		low,
+		close,
+		period,
+		factor,
+		first_valid_idx,
+		&atr_values,
+		chosen,
+		&mut trend,
+		&mut changed,
+	);
+
 	Ok(SuperTrendOutput { trend, changed })
 }
 
-// Scalar core (reference logic)
+// Scalar core (reference logic) - Zero allocation implementation
 #[inline(always)]
 pub fn supertrend_scalar(
 	high: &[f64],
@@ -299,61 +368,78 @@ pub fn supertrend_scalar(
 	changed: &mut [f64],
 ) {
 	let len = high.len();
-	let mut upper_basic = vec![f64::NAN; len - first_valid_idx];
-	let mut lower_basic = vec![f64::NAN; len - first_valid_idx];
-	let mut upper_band = vec![f64::NAN; len - first_valid_idx];
-	let mut lower_band = vec![f64::NAN; len - first_valid_idx];
-	for i in 0..(len - first_valid_idx) {
-		let half_range = (high[first_valid_idx + i] + low[first_valid_idx + i]) / 2.0;
-		upper_basic[i] = half_range + factor * atr_values[i];
-		lower_basic[i] = half_range - factor * atr_values[i];
-		upper_band[i] = upper_basic[i];
-		lower_band[i] = lower_basic[i];
+	if first_valid_idx + period > len {
+		return;
 	}
-	for i in period..(len - first_valid_idx) {
-		let prev_close = close[first_valid_idx + i - 1];
-		let prev_upper_band = upper_band[i - 1];
-		let prev_lower_band = lower_band[i - 1];
-		let curr_upper_basic = upper_basic[i];
-		let curr_lower_basic = lower_basic[i];
 
+	// Initialize first valid point
+	let warmup_idx = first_valid_idx + period - 1;
+	let half_range = (high[warmup_idx] + low[warmup_idx]) / 2.0;
+	let mut prev_upper_band = half_range + factor * atr_values[period - 1];
+	let mut prev_lower_band = half_range - factor * atr_values[period - 1];
+	
+	// Set initial trend based on close position
+	if close[warmup_idx] <= prev_upper_band {
+		trend[warmup_idx] = prev_upper_band;
+	} else {
+		trend[warmup_idx] = prev_lower_band;
+	}
+	changed[warmup_idx] = 0.0;
+
+	// Process remaining points
+	for i in (first_valid_idx + period)..len {
+		let atr_idx = i - first_valid_idx;
+		let half_range = (high[i] + low[i]) / 2.0;
+		let upper_basic = half_range + factor * atr_values[atr_idx];
+		let lower_basic = half_range - factor * atr_values[atr_idx];
+		
+		// Update bands based on previous close
+		let prev_close = close[i - 1];
+		let mut curr_upper_band = upper_basic;
+		let mut curr_lower_band = lower_basic;
+		
 		if prev_close <= prev_upper_band {
-			upper_band[i] = f64::min(curr_upper_basic, prev_upper_band);
+			curr_upper_band = f64::min(upper_basic, prev_upper_band);
 		}
 		if prev_close >= prev_lower_band {
-			lower_band[i] = f64::max(curr_lower_basic, prev_lower_band);
+			curr_lower_band = f64::max(lower_basic, prev_lower_band);
 		}
-		if prev_close <= prev_upper_band {
-			trend[first_valid_idx + i - 1] = prev_upper_band;
-		} else {
-			trend[first_valid_idx + i - 1] = prev_lower_band;
-		}
-	}
-	for i in period..(len - first_valid_idx) {
-		let prev_close = close[first_valid_idx + i - 1];
-		let prev_upper_band = upper_band[i - 1];
-		let curr_upper_band = upper_band[i];
-		let prev_lower_band = lower_band[i - 1];
-		let curr_lower_band = lower_band[i];
-		let prev_trend = trend[first_valid_idx + i - 1];
-
+		
+		// Determine current trend and change flag
+		let prev_trend = trend[i - 1];
+		let curr_close = close[i];
+		
 		if (prev_trend - prev_upper_band).abs() < f64::EPSILON {
-			if close[first_valid_idx + i] <= curr_upper_band {
-				trend[first_valid_idx + i] = curr_upper_band;
-				changed[first_valid_idx + i] = 0.0;
+			// Previous trend was upper band
+			if curr_close <= curr_upper_band {
+				trend[i] = curr_upper_band;
+				changed[i] = 0.0;
 			} else {
-				trend[first_valid_idx + i] = curr_lower_band;
-				changed[first_valid_idx + i] = 1.0;
+				trend[i] = curr_lower_band;
+				changed[i] = 1.0;
 			}
 		} else if (prev_trend - prev_lower_band).abs() < f64::EPSILON {
-			if close[first_valid_idx + i] >= curr_lower_band {
-				trend[first_valid_idx + i] = curr_lower_band;
-				changed[first_valid_idx + i] = 0.0;
+			// Previous trend was lower band
+			if curr_close >= curr_lower_band {
+				trend[i] = curr_lower_band;
+				changed[i] = 0.0;
 			} else {
-				trend[first_valid_idx + i] = curr_upper_band;
-				changed[first_valid_idx + i] = 1.0;
+				trend[i] = curr_upper_band;
+				changed[i] = 1.0;
 			}
+		} else {
+			// Fallback (shouldn't happen in normal operation)
+			if curr_close <= curr_upper_band {
+				trend[i] = curr_upper_band;
+			} else {
+				trend[i] = curr_lower_band;
+			}
+			changed[i] = 0.0;
 		}
+		
+		// Update previous bands for next iteration
+		prev_upper_band = curr_upper_band;
+		prev_lower_band = curr_lower_band;
 	}
 }
 
@@ -772,8 +858,30 @@ fn supertrend_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut trend = vec![f64::NAN; rows * cols];
-	let mut changed = vec![0.0; rows * cols];
+	
+	// For batch operations, we need to properly initialize both matrices
+	let mut trend_uninit = make_uninit_matrix(rows, cols);
+	let mut changed_uninit = make_uninit_matrix(rows, cols);
+	
+	// Initialize warmup periods for each row
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| first_valid_idx + c.period.unwrap_or(10) - 1).collect();
+	init_matrix_prefixes(&mut trend_uninit, cols, &warmup_periods);
+	init_matrix_prefixes(&mut changed_uninit, cols, &warmup_periods);
+	
+	// SAFETY: After init_matrix_prefixes, the memory is properly initialized with NaN prefixes
+	let mut trend = unsafe {
+		let len = rows * cols;
+		let ptr = trend_uninit.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, len, len)
+	};
+	std::mem::forget(trend_uninit);
+	
+	let mut changed = unsafe {
+		let len = rows * cols;
+		let ptr = changed_uninit.as_mut_ptr() as *mut f64;
+		Vec::from_raw_parts(ptr, len, len)
+	};
+	std::mem::forget(changed_uninit);
 
 	let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -1003,6 +1111,460 @@ unsafe fn supertrend_row_avx512_long(
 #[inline(always)]
 fn expand_grid_supertrend(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
 	expand_grid(r)
+}
+
+#[cfg(feature = "python")]
+#[inline(always)]
+pub fn supertrend_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &SuperTrendBatchRange,
+	simd: Kernel,
+	parallel: bool,
+	trend_out: &mut [f64],
+	changed_out: &mut [f64],
+) -> Result<Vec<SuperTrendParams>, SuperTrendError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(SuperTrendError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let len = high.len();
+	let mut first_valid_idx = None;
+	for i in 0..len {
+		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(SuperTrendError::AllValuesNaN),
+	};
+	let max_p = combos.iter().map(|c| c.period.unwrap_or(10)).max().unwrap();
+	if len - first_valid_idx < max_p {
+		return Err(SuperTrendError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first_valid_idx,
+		});
+	}
+	let rows = combos.len();
+	let cols = len;
+
+	let do_row = |row: usize, trend_row: &mut [f64], changed_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let factor = combos[row].factor.unwrap();
+		let atr_input = AtrInput::from_slices(
+			&high[first_valid_idx..],
+			&low[first_valid_idx..],
+			&close[first_valid_idx..],
+			AtrParams { length: Some(period) },
+		);
+		let AtrOutput { values: atr_values } = atr(&atr_input).unwrap();
+		match simd {
+			Kernel::Scalar => supertrend_row_scalar(
+				high,
+				low,
+				close,
+				period,
+				factor,
+				first_valid_idx,
+				&atr_values,
+				trend_row,
+				changed_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => supertrend_row_avx2(
+				high,
+				low,
+				close,
+				period,
+				factor,
+				first_valid_idx,
+				&atr_values,
+				trend_row,
+				changed_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => supertrend_row_avx512(
+				high,
+				low,
+				close,
+				period,
+				factor,
+				first_valid_idx,
+				&atr_values,
+				trend_row,
+				changed_row,
+			),
+			_ => unreachable!(),
+		}
+	};
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			trend_out
+				.par_chunks_mut(cols)
+				.zip(changed_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (tr, ch))| do_row(row, tr, ch));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (tr, ch)) in trend_out.chunks_mut(cols).zip(changed_out.chunks_mut(cols)).enumerate() {
+				do_row(row, tr, ch);
+			}
+		}
+	} else {
+		for (row, (tr, ch)) in trend_out.chunks_mut(cols).zip(changed_out.chunks_mut(cols)).enumerate() {
+			do_row(row, tr, ch);
+		}
+	}
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supertrend")]
+#[pyo3(signature = (high, low, close, period, factor, kernel=None))]
+pub fn supertrend_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	close: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	factor: f64,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = SuperTrendParams {
+		period: Some(period),
+		factor: Some(factor),
+	};
+	let input = SuperTrendInput::from_slices(high_slice, low_slice, close_slice, params);
+
+	let (trend_vec, changed_vec) = py
+		.allow_threads(|| supertrend_with_kernel(&input, kern).map(|o| (o.trend, o.changed)))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((trend_vec.into_pyarray(py), changed_vec.into_pyarray(py)))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "supertrend_batch")]
+#[pyo3(signature = (high, low, close, period_range, factor_range, kernel=None))]
+pub fn supertrend_batch_py<'py>(
+	py: Python<'py>,
+	high: numpy::PyReadonlyArray1<'py, f64>,
+	low: numpy::PyReadonlyArray1<'py, f64>,
+	close: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	factor_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = SuperTrendBatchRange {
+		period: period_range,
+		factor: factor_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	let trend_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let trend_out = unsafe { trend_arr.as_slice_mut()? };
+	let changed_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let changed_out = unsafe { changed_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			supertrend_batch_inner_into(
+				high_slice,
+				low_slice,
+				close_slice,
+				&sweep,
+				simd,
+				true,
+				trend_out,
+				changed_out,
+			)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("trend", trend_arr.reshape((rows, cols))?)?;
+	dict.set_item("changed", changed_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"factors",
+		combos.iter().map(|p| p.factor.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SuperTrendStream")]
+pub struct SuperTrendStreamPy {
+	stream: SuperTrendStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SuperTrendStreamPy {
+	#[new]
+	fn new(period: usize, factor: f64) -> PyResult<Self> {
+		let params = SuperTrendParams {
+			period: Some(period),
+			factor: Some(factor),
+		};
+		let stream = SuperTrendStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(SuperTrendStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+		self.stream.update(high, low, close)
+	}
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[inline]
+pub fn supertrend_into_slice(
+	trend_dst: &mut [f64],
+	changed_dst: &mut [f64],
+	input: &SuperTrendInput,
+	kern: Kernel,
+) -> Result<(), SuperTrendError> {
+	let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) = 
+		supertrend_prepare(input, kern)?;
+	
+	let len = high.len();
+	if trend_dst.len() != len || changed_dst.len() != len {
+		return Err(SuperTrendError::InvalidPeriod {
+			period: trend_dst.len(),
+			data_len: len,
+		});
+	}
+	
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + period - 1;
+	for v in &mut trend_dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	for v in &mut changed_dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
+	supertrend_compute_into(
+		high,
+		low,
+		close,
+		period,
+		factor,
+		first_valid_idx,
+		&atr_values,
+		chosen,
+		trend_dst,
+		changed_dst,
+	);
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supertrend_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	factor: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let params = SuperTrendParams {
+		period: Some(period),
+		factor: Some(factor),
+	};
+	let input = SuperTrendInput::from_slices(high, low, close, params);
+	
+	let output = supertrend_with_kernel(&input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Return flattened array: [trend..., changed...]
+	let mut result = Vec::with_capacity(output.trend.len() * 2);
+	result.extend_from_slice(&output.trend);
+	result.extend_from_slice(&output.changed);
+	
+	Ok(result)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supertrend_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	trend_ptr: *mut f64,
+	changed_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	factor: f64,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() 
+		|| trend_ptr.is_null() || changed_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let params = SuperTrendParams {
+			period: Some(period),
+			factor: Some(factor),
+		};
+		let input = SuperTrendInput::from_slices(high, low, close, params);
+		
+		// Check for aliasing between input and output pointers
+		let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8, close_ptr as *const u8];
+		let output_ptrs = [trend_ptr as *const u8, changed_ptr as *const u8];
+		
+		let has_aliasing = input_ptrs.iter().any(|&inp| {
+			output_ptrs.iter().any(|&out| inp == out)
+		});
+		
+		if has_aliasing {
+			// Use temporary buffers if there's aliasing
+			let output = supertrend_with_kernel(&input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let trend_out = std::slice::from_raw_parts_mut(trend_ptr, len);
+			let changed_out = std::slice::from_raw_parts_mut(changed_ptr, len);
+			
+			trend_out.copy_from_slice(&output.trend);
+			changed_out.copy_from_slice(&output.changed);
+		} else {
+			// Direct computation when no aliasing
+			let trend_out = std::slice::from_raw_parts_mut(trend_ptr, len);
+			let changed_out = std::slice::from_raw_parts_mut(changed_ptr, len);
+			
+			supertrend_into_slice(trend_out, changed_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supertrend_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn supertrend_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SuperTrendBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub factor_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SuperTrendBatchJsOutput {
+	pub trend: Vec<f64>,
+	pub changed: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub factors: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = supertrend_batch)]
+pub fn supertrend_batch_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: SuperTrendBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = SuperTrendBatchRange {
+		period: config.period_range,
+		factor: config.factor_range,
+	};
+	
+	let batch_output = supertrend_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let periods: Vec<usize> = batch_output.combos.iter()
+		.map(|c| c.period.unwrap_or(10))
+		.collect();
+	let factors: Vec<f64> = batch_output.combos.iter()
+		.map(|c| c.factor.unwrap_or(3.0))
+		.collect();
+	
+	let output = SuperTrendBatchJsOutput {
+		trend: batch_output.trend,
+		changed: batch_output.changed,
+		periods,
+		factors,
+		rows: batch_output.rows,
+		cols: batch_output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

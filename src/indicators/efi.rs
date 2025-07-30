@@ -17,9 +17,24 @@
 //! - **`Ok(EfiOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(EfiError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -203,7 +218,8 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; len];
+	// EFI warmup period is 1 (we need at least 2 values to compute a difference)
+	let mut out = alloc_with_nan_prefix(len, 1);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, &mut out),
@@ -215,6 +231,69 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
 		}
 	}
 	Ok(EfiOutput { values: out })
+}
+
+/// Write EFI directly to output slice - no allocations
+pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result<(), EfiError> {
+	let (price, volume): (&[f64], &[f64]) = match &input.data {
+		EfiData::Candles { candles, source } => {
+			let p = source_type(candles, source);
+			let v = &candles.volume;
+			(p, v)
+		}
+		EfiData::Slice { price, volume } => (price, volume),
+	};
+
+	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
+		return Err(EfiError::EmptyData);
+	}
+
+	let len = price.len();
+	if dst.len() != len {
+		return Err(EfiError::InvalidPeriod { period: dst.len(), data_len: len });
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > len {
+		return Err(EfiError::InvalidPeriod { period, data_len: len });
+	}
+
+	let first_valid_idx = price
+		.iter()
+		.zip(volume.iter())
+		.position(|(p, v)| !p.is_nan() && !v.is_nan());
+	if first_valid_idx.is_none() {
+		return Err(EfiError::AllValuesNaN);
+	}
+	let first_valid_idx = first_valid_idx.unwrap();
+
+	if (len - first_valid_idx) < 2 {
+		return Err(EfiError::NotEnoughValidData {
+			needed: 2,
+			valid: len - first_valid_idx,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Fill warmup with NaN (EFI warmup period is 1)
+	dst[0] = f64::NAN;
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => efi_avx2(price, volume, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -488,7 +567,22 @@ fn efi_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = price.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized matrix for better performance
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes based on warmup periods (1 for EFI)
+	let warmup_periods: Vec<usize> = vec![1; rows];
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to regular Vec<f64> for processing
+	let mut values = unsafe {
+		let ptr = buf_mu.as_mut_ptr() as *mut f64;
+		let len = buf_mu.len();
+		let cap = buf_mu.capacity();
+		std::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -563,6 +657,314 @@ unsafe fn efi_row_avx512_short(price: &[f64], volume: &[f64], first: usize, peri
 #[inline(always)]
 unsafe fn efi_row_avx512_long(price: &[f64], volume: &[f64], first: usize, period: usize, out: &mut [f64]) {
 	efi_scalar(price, volume, period, first, out);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "efi")]
+#[pyo3(signature = (price, volume, period, kernel=None))]
+pub fn efi_py<'py>(
+	py: Python<'py>,
+	price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let price_slice = price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = EfiParams { period: Some(period) };
+	let input = EfiInput::from_slices(price_slice, volume_slice, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| efi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "EfiStream")]
+pub struct EfiStreamPy {
+	stream: EfiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl EfiStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = EfiParams { period: Some(period) };
+		let stream = EfiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(EfiStreamPy { stream })
+	}
+
+	fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
+		self.stream.update(price, volume)
+	}
+}
+
+// Helper function for batch operations to write directly to output slice
+#[inline(always)]
+fn efi_batch_inner_into(
+	price: &[f64],
+	volume: &[f64],
+	sweep: &EfiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<EfiParams>, EfiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(EfiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = price
+		.iter()
+		.zip(volume.iter())
+		.position(|(p, v)| !p.is_nan() && !v.is_nan())
+		.ok_or(EfiError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if price.len() - first < max_p {
+		return Err(EfiError::NotEnoughValidData {
+			needed: max_p,
+			valid: price.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = price.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => efi_row_scalar(price, volume, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => efi_row_avx2(price, volume, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => efi_row_avx512(price, volume, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "efi_batch")]
+#[pyo3(signature = (price, volume, period_range, kernel=None))]
+pub fn efi_batch_py<'py>(
+	py: Python<'py>,
+	price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let price_slice = price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = EfiBatchRange { period: period_range };
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = price_slice.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			efi_batch_inner_into(price_slice, volume_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn efi_js(price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = EfiParams { period: Some(period) };
+	let input = EfiInput::from_slices(price, volume, params);
+	
+	let mut output = vec![0.0; price.len()];  // Single allocation
+	efi_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn efi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn efi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn efi_into(
+	in_price_ptr: *const f64,
+	in_volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_price_ptr.is_null() || in_volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let price = std::slice::from_raw_parts(in_price_ptr, len);
+		let volume = std::slice::from_raw_parts(in_volume_ptr, len);
+		let params = EfiParams { period: Some(period) };
+		let input = EfiInput::from_slices(price, volume, params);
+		
+		// Handle aliasing - check if output overlaps with either input
+		if in_price_ptr == out_ptr || in_volume_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			efi_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			efi_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EfiBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EfiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<EfiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = efi_batch)]
+pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: EfiBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = EfiBatchRange {
+		period: config.period_range,
+	};
+	
+	let output = efi_batch_inner(price, volume, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = EfiBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn efi_batch_into(
+	in_price_ptr: *const f64,
+	in_volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_price_ptr.is_null() || in_volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to efi_batch_into"));
+	}
+	
+	unsafe {
+		let price = std::slice::from_raw_parts(in_price_ptr, len);
+		let volume = std::slice::from_raw_parts(in_volume_ptr, len);
+		
+		let sweep = EfiBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+		
+		efi_batch_inner_into(price, volume, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }
 
 #[cfg(test)]
@@ -680,6 +1082,74 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_efi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			EfiParams::default(),                    // period: 13
+			EfiParams { period: Some(2) },           // minimum viable
+			EfiParams { period: Some(5) },           // small
+			EfiParams { period: Some(7) },           // small
+			EfiParams { period: Some(10) },          // small-medium
+			EfiParams { period: Some(20) },          // medium
+			EfiParams { period: Some(30) },          // medium-large
+			EfiParams { period: Some(50) },          // large
+			EfiParams { period: Some(100) },         // very large
+			EfiParams { period: Some(200) },         // extremely large
+			EfiParams { period: Some(500) },         // maximum reasonable
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = EfiInput::from_candles(&candles, "close", params.clone());
+			let output = efi_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_efi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
 
 	macro_rules! generate_all_efi_tests {
         ($($test_fn:ident),*) => {
@@ -711,7 +1181,8 @@ mod tests {
 		check_efi_zero_period,
 		check_efi_period_exceeds_length,
 		check_efi_nan_handling,
-		check_efi_streaming
+		check_efi_streaming,
+		check_efi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -722,6 +1193,96 @@ mod tests {
 		let def = EfiParams::default();
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods
+			(30, 100, 10),   // Large periods
+			(2, 5, 1),       // Dense small range
+			(10, 10, 0),     // Static period (small)
+			(13, 13, 0),     // Static period (default)
+			(50, 50, 0),     // Static period (large)
+			(7, 21, 7),      // Medium range with larger step
+			(100, 200, 50),  // Very large periods
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = EfiBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(())
 	}
 
@@ -746,4 +1307,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
