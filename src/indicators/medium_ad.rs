@@ -49,6 +49,7 @@ pub struct MediumAdOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MediumAdParams {
 	pub period: Option<usize>,
 }

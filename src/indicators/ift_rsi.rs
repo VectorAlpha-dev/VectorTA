@@ -7,7 +7,7 @@ use crate::indicators::rsi::{rsi, RsiError, RsiInput, RsiParams};
 use crate::indicators::wma::{wma, WmaError, WmaInput, WmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -213,16 +213,20 @@ pub fn ift_rsi_with_kernel(input: &IftRsiInput, kernel: Kernel) -> Result<IftRsi
 		other => other,
 	};
 
+	// Calculate warmup period: rsi_period + wma_period - 1
+	let warmup_period = rsi_period + wma_period - 1;
+	let mut out = alloc_with_nan_prefix(len, warmup_period);
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
-				ift_rsi_scalar(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len])
+				ift_rsi_scalar(data, rsi_period, wma_period, first, &mut out)
 			}
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => ift_rsi_avx2(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len]),
+			Kernel::Avx2 | Kernel::Avx2Batch => ift_rsi_avx2(data, rsi_period, wma_period, first, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 | Kernel::Avx512Batch => {
-				ift_rsi_avx512(data, rsi_period, wma_period, first, &mut vec![f64::NAN; len])
+				ift_rsi_avx512(data, rsi_period, wma_period, first, &mut out)
 			}
 			_ => unreachable!(),
 		}
@@ -840,6 +844,116 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_ift_rsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			IftRsiParams::default(),  // rsi_period: 5, wma_period: 9
+			IftRsiParams {
+				rsi_period: Some(2),
+				wma_period: Some(2),
+			},
+			IftRsiParams {
+				rsi_period: Some(3),
+				wma_period: Some(5),
+			},
+			IftRsiParams {
+				rsi_period: Some(7),
+				wma_period: Some(14),
+			},
+			IftRsiParams {
+				rsi_period: Some(14),
+				wma_period: Some(21),
+			},
+			IftRsiParams {
+				rsi_period: Some(21),
+				wma_period: Some(9),
+			},
+			IftRsiParams {
+				rsi_period: Some(50),
+				wma_period: Some(50),
+			},
+			IftRsiParams {
+				rsi_period: Some(100),
+				wma_period: Some(100),
+			},
+			IftRsiParams {
+				rsi_period: Some(2),
+				wma_period: Some(50),
+			},
+			IftRsiParams {
+				rsi_period: Some(50),
+				wma_period: Some(2),
+			},
+			IftRsiParams {
+				rsi_period: Some(9),
+				wma_period: Some(21),
+			},
+			IftRsiParams {
+				rsi_period: Some(25),
+				wma_period: Some(10),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = IftRsiInput::from_candles(&candles, "close", params.clone());
+			let output = ift_rsi_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: rsi_period={}, wma_period={} (param set {})",
+						test_name, val, bits, i, 
+						params.rsi_period.unwrap_or(5),
+						params.wma_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: rsi_period={}, wma_period={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(5),
+						params.wma_period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: rsi_period={}, wma_period={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(5),
+						params.wma_period.unwrap_or(9),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_ift_rsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_ift_rsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -872,7 +986,8 @@ mod tests {
 		check_ift_rsi_period_exceeds_length,
 		check_ift_rsi_very_small_dataset,
 		check_ift_rsi_reinput,
-		check_ift_rsi_nan_handling
+		check_ift_rsi_nan_handling,
+		check_ift_rsi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -884,6 +999,83 @@ mod tests {
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
 		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (rsi_start, rsi_end, rsi_step, wma_start, wma_end, wma_step)
+			(2, 10, 2, 2, 10, 2),      // Small periods
+			(5, 25, 5, 5, 25, 5),      // Medium periods
+			(30, 60, 15, 30, 60, 15),  // Large periods
+			(2, 5, 1, 2, 5, 1),        // Dense small range
+			(9, 15, 3, 9, 15, 3),      // Mid-range dense
+			(2, 2, 0, 2, 20, 2),       // Static RSI, varying WMA
+			(2, 20, 2, 9, 9, 0),       // Varying RSI, static WMA
+		];
+
+		for (cfg_idx, &(rsi_start, rsi_end, rsi_step, wma_start, wma_end, wma_step)) in test_configs.iter().enumerate() {
+			let output = IftRsiBatchBuilder::new()
+				.kernel(kernel)
+				.rsi_period_range(rsi_start, rsi_end, rsi_step)
+				.wma_period_range(wma_start, wma_end, wma_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, wma_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(5),
+						combo.wma_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, wma_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(5),
+						combo.wma_period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, wma_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(5),
+						combo.wma_period.unwrap_or(9)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
 	}
 
 	macro_rules! gen_batch_tests {
@@ -907,4 +1099,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

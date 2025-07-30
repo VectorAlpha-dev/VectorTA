@@ -444,6 +444,28 @@ const EXPECTED_OUTPUTS = {
             58724.56154031242,
             58713.39965211639
         ]
+    },
+    roc: {
+        defaultParams: { period: 10 },
+        last5Values: [
+            -0.22551709049294377,
+            -0.5561903481650754,
+            -0.32752013235864963,
+            -0.49454153980722504,
+            -1.5045927020536976
+        ],
+        // Reinput test just verifies no NaN after index 28
+        reinputLast5: [0, 0, 0, 0, 0]  // Placeholder - test will skip this check
+    },
+    rvi: {
+        defaultParams: { period: 10, ma_len: 14, matype: 1, devtype: 0 },
+        last5Values: [
+            67.48579363423423,
+            62.03322230763894,
+            56.71819195768154,
+            60.487299747927636,
+            55.022521428674175
+        ]
     }
 };
 

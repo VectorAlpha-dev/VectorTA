@@ -92,6 +92,7 @@ pub mod ppo;
 pub mod pvi;
 pub mod qstick;
 pub mod roc;
+pub use roc::{roc, RocInput, RocOutput, RocParams, RocError, RocBuilder, RocStream, RocBatchBuilder, RocBatchOutput, RocBatchRange};
 pub mod rocp;
 pub mod rocr;
 pub mod rsi;

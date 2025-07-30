@@ -279,7 +279,11 @@
       "Bash(test_bindings.bat minmax --python)",
       "Bash(.venvScriptspython.exe tests/python/test_pfe.py)",
       "Bash(\".venv/Scripts/python.exe\" tests/python/test_pfe.py)",
-      "Bash(\".venv/Scripts/python.exe\":*)"
+      "Bash(\".venv/Scripts/python.exe\":*)",
+      "Bash(test_bindings.bat roc)",
+      "Bash(.venvScriptspython.exe -m pytest tests/python/test_roc.py -v)",
+      "Bash(.venvScriptspython.exe -c \"import my_project; import numpy as np; data = np.random.randn(100); result = my_project.stddev(data, 5, 1.0); print(f''StdDev test passed. Result length: {len(result)}'')\")",
+      "Bash(cargo install:*)"
     ],
     "deny": []
   }

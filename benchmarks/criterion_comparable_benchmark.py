@@ -105,10 +105,10 @@ class CriterionComparableBenchmark:
             'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'linreg', 'linearreg_slope', 'maaq', 'mama', 'medium_ad', 'mwdx',
-            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'minmax',
+            'nma', 'pwma', 'reflex', 'roc', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'minmax',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
-            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'dti', 'dx', 'keltner'  # Added missing indicators
+            'trendflex', 'ttm_trend', 'trima', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
+            'cg', 'cfo', 'dti', 'dx', 'keltner', 'rvi'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -116,10 +116,10 @@ class CriterionComparableBenchmark:
         
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
-                           'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
+                           'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'chande_batch', 'dti_batch', 'dx_batch', 'trendflex_batch', 'keltner_batch', 'linearreg_slope_batch', 'medium_ad_batch', 'pfe_batch', 'minmax_batch']
+                           'chande_batch', 'dti_batch', 'dx_batch', 'trendflex_batch', 'ttm_trend_batch', 'vlma_batch', 'vwmacd_batch', 'keltner_batch', 'linearreg_slope_batch', 'medium_ad_batch', 'pfe_batch', 'roc_batch', 'rvi_batch', 'minmax_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -242,6 +242,7 @@ class CriterionComparableBenchmark:
             ('ao', lambda: my_project.ao(data['high'], data['low'], 5, 34)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
+            ('vwmacd', lambda: my_project.vwmacd(data['close'], data['volume'], 12, 26, 9)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
             ('wma', lambda: my_project.wma(data['close'], 14)),
             ('zlema', lambda: my_project.zlema(data['close'], 14)),
@@ -280,17 +281,21 @@ class CriterionComparableBenchmark:
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('pfe', lambda: my_project.pfe(data['close'], 10, 5)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
+            ('roc', lambda: my_project.roc(data['close'], 10)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
             ('sma', lambda: my_project.sma(data['close'], 14)),
             ('smma', lambda: my_project.smma(data['close'], 14)),
             ('sqwma', lambda: my_project.sqwma(data['close'], 14)),
             ('srwma', lambda: my_project.srwma(data['close'], 14)),
+            ('stddev', lambda: my_project.stddev(data['close'], 5, 1.0)),
             ('supersmoother_3_pole', lambda: my_project.supersmoother_3_pole(data['close'], 14)),
             ('supersmoother', lambda: my_project.supersmoother(data['close'], 14)),
             ('swma', lambda: my_project.swma(data['close'], 14)),
             ('tema', lambda: my_project.tema(data['close'], 14)),
             ('tilson', lambda: my_project.tilson(data['close'], 14, 0.7)),
             ('trendflex', lambda: my_project.trendflex(data['close'], 20)),
+            ('ttm_trend', lambda: my_project.ttm_trend((data['high'] + data['low']) / 2.0, data['close'], 5)),
+            ('vlma', lambda: my_project.vlma(data['close'], 5, 50, "sma", 0)),
             ('trima', lambda: my_project.trima(data['close'], 14)),
             ('vqwma', lambda: my_project.vqwma(data['close'], 0.5, 0.2, 0.2)),
             ('adxr', lambda: my_project.adxr(data['high'], data['low'], data['close'], 14)),
@@ -306,6 +311,7 @@ class CriterionComparableBenchmark:
             ('dti', lambda: my_project.dti(data['high'], data['low'], 14, 10, 5)),
             ('dx', lambda: my_project.dx(data['high'], data['low'], data['close'], 14)),
             ('fisher', lambda: my_project.fisher(data['high'], data['low'], 9)),
+            ('rvi', lambda: my_project.rvi(data['close'], 10, 14, 1, 0)),
         ]
         
         # Filter if requested
@@ -333,6 +339,7 @@ class CriterionComparableBenchmark:
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
+            ('stddev_batch', lambda: my_project.stddev_batch(data['close'], (5, 5, 0), (1.0, 1.0, 0.0))),
             ('ema_batch', lambda: my_project.ema_batch(data['close'], (14, 14, 1))),
             ('dema_batch', lambda: my_project.dema_batch(data['close'], (14, 14, 1))),
             ('edcf_batch', lambda: my_project.edcf_batch(data['close'], (15, 50, 1))),
@@ -359,10 +366,15 @@ class CriterionComparableBenchmark:
             ('dx_batch', lambda: my_project.dx_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('fisher_batch', lambda: my_project.fisher_batch(data['high'], data['low'], (9, 240, 1))),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
+            ('ttm_trend_batch', lambda: my_project.ttm_trend_batch((data['high'] + data['low']) / 2.0, data['close'], (5, 20, 1))),
+            ('vlma_batch', lambda: my_project.vlma_batch(data['close'], (5, 50, 5), (20, 50, 10), (0, 2, 1), "sma")),
+            ('vwmacd_batch', lambda: my_project.vwmacd_batch(data['close'], data['volume'], (10, 14, 2), (20, 26, 3), (5, 9, 2))),
             ('correlation_cycle_batch', lambda: my_project.correlation_cycle_batch(data['close'], (20, 20, 1), (9.0, 9.0, 0.0))),
             ('linearreg_slope_batch', lambda: my_project.linearreg_slope_batch(data['close'], (14, 14, 1))),
             ('medium_ad_batch', lambda: my_project.medium_ad_batch(data['close'], (5, 50, 1))),
             ('pfe_batch', lambda: my_project.pfe_batch(data['close'], (10, 40, 1), (5, 10, 1))),
+            ('roc_batch', lambda: my_project.roc_batch(data['close'], (9, 240, 1))),
+            ('rvi_batch', lambda: my_project.rvi_batch(data['close'], (10, 40, 1), (14, 14, 0), (1, 1, 0), (0, 0, 0))),
             ('minmax_batch', lambda: my_project.minmax_batch(data['high'], data['low'], (3, 20, 1))),
         ]
         
@@ -436,7 +448,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'correlation_cycle', 'pfe', 'minmax']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

@@ -126,6 +126,8 @@ use crate::indicators::moving_averages::sqwma::{sqwma_batch_py, sqwma_py, SqwmaS
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::srwma::{srwma_batch_py, srwma_py, SrwmaStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::stddev::{stddev_batch_py, stddev_py, StdDevStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::supersmoother::{
 	supersmoother_batch_py, supersmoother_py, SuperSmootherStreamPy,
 };
@@ -142,6 +144,8 @@ use crate::indicators::moving_averages::tilson::{tilson_batch_py, tilson_py, Til
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::trendflex::{trendflex_batch_py, trendflex_py, TrendFlexStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::ttm_trend::{ttm_trend_batch_py, ttm_trend_py, TtmTrendStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::trima::{trima_batch_py, trima_py, TrimaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vpwma::{vpwma_batch_py, vpwma_py, VpwmaStreamPy};
@@ -150,6 +154,8 @@ use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStrea
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwma::{vwma_batch_py, vwma_py, VwmaStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::vwmacd::{vwmacd_batch_py, vwmacd_py, VwmacdStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, WildersStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy};
@@ -157,6 +163,12 @@ use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy}
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::rvi::{rvi_batch_py, rvi_py, RviStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vlma::{vlma_batch_py, vlma_py, VlmaStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -345,6 +357,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(pfe_batch_py, m)?)?;
 	m.add_class::<PfeStreamPy>()?;
 
+	// Register ROC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(roc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(roc_batch_py, m)?)?;
+	m.add_class::<RocStreamPy>()?;
+
+	// Register RVI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rvi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rvi_batch_py, m)?)?;
+	m.add_class::<RviStreamPy>()?;
+
 	// Register Reflex functions with their user-facing names
 	m.add_function(wrap_pyfunction!(reflex_py, m)?)?;
 	m.add_function(wrap_pyfunction!(reflex_batch_py, m)?)?;
@@ -374,6 +396,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(srwma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(srwma_batch_py, m)?)?;
 	m.add_class::<SrwmaStreamPy>()?;
+
+	// Register StdDev functions with their user-facing names
+	m.add_function(wrap_pyfunction!(stddev_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stddev_batch_py, m)?)?;
+	m.add_class::<StdDevStreamPy>()?;
 
 	// Register SuperSmoother3Pole functions with their user-facing names
 	m.add_function(wrap_pyfunction!(supersmoother_3_pole_py, m)?)?;
@@ -410,6 +437,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
 	m.add_class::<TrendFlexStreamPy>()?;
 
+	// Register TTM Trend functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
+	m.add_class::<TtmTrendStreamPy>()?;
+
+	// Register VLMA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vlma_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vlma_batch_py, m)?)?;
+	m.add_class::<VlmaStreamPy>()?;
+
 	// Register Wilders functions with their user-facing names
 	m.add_function(wrap_pyfunction!(wilders_py, m)?)?;
 	m.add_function(wrap_pyfunction!(wilders_batch_py, m)?)?;
@@ -419,6 +456,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
 	m.add_class::<VwmaStreamPy>()?;
+
+	// Register VWMACD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vwmacd_batch_py, m)?)?;
+	m.add_class::<VwmacdStreamPy>()?;
 
 	// Register VWAP functions with their user-facing names
 	m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
