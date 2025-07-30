@@ -588,6 +588,80 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_emv_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Since EMV has no parameters, we test different ways of calling it
+		// Test 1: From candles
+		let input1 = EmvInput::from_candles(&candles);
+		let output1 = emv_with_kernel(&input1, kernel)?;
+		
+		// Test 2: From slices
+		let high = source_type(&candles, "high");
+		let low = source_type(&candles, "low");
+		let close = source_type(&candles, "close");
+		let volume = source_type(&candles, "volume");
+		let input2 = EmvInput::from_slices(high, low, close, volume);
+		let output2 = emv_with_kernel(&input2, kernel)?;
+		
+		// Test 3: With default candles
+		let input3 = EmvInput::with_default_candles(&candles);
+		let output3 = emv_with_kernel(&input3, kernel)?;
+		
+		// Check all outputs for poison values
+		let outputs = [
+			("from_candles", &output1.values),
+			("from_slices", &output2.values),
+			("with_default_candles", &output3.values),
+		];
+		
+		for (method_name, values) in &outputs {
+			for (i, &val) in values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 using method: {}",
+						test_name, val, bits, i, method_name
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 using method: {}",
+						test_name, val, bits, i, method_name
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 using method: {}",
+						test_name, val, bits, i, method_name
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_emv_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_emv_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -619,7 +693,8 @@ mod tests {
 		check_emv_all_nan,
 		check_emv_not_enough_data,
 		check_emv_basic_calculation,
-		check_emv_streaming
+		check_emv_streaming,
+		check_emv_no_poison
 	);
 
 	fn check_batch_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -652,4 +727,59 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_row);
+	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// EMV batch has no parameters to sweep, so we just test the default case
+		let output = EmvBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+		
+		// Check values for poison patterns
+		for (idx, &val) in output.values.iter().enumerate() {
+			if val.is_nan() {
+				continue;
+			}
+			
+			let bits = val.to_bits();
+			let row = idx / output.cols;
+			let col = idx % output.cols;
+			
+			// Check all three poison patterns with detailed context
+			if bits == 0x11111111_11111111 {
+				panic!(
+					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+					 at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+			
+			if bits == 0x22222222_22222222 {
+				panic!(
+					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) \
+					 at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+			
+			if bits == 0x33333333_33333333 {
+				panic!(
+					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) \
+					 at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 }

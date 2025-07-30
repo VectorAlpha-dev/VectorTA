@@ -16,6 +16,22 @@
 //! - **`Ok(ChopOutput)`** on success, containing a `Vec<f64>` with NaN leading until the rolling window is ready.
 //! - **`Err(ChopError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -27,6 +43,7 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::collections::VecDeque;
+use std::convert::AsRef;
 use std::error::Error;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
@@ -47,6 +64,7 @@ pub struct ChopOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct ChopParams {
 	pub period: Option<usize>,
 	pub scalar: Option<f64>,
@@ -101,6 +119,16 @@ impl<'a> ChopInput<'a> {
 	#[inline]
 	pub fn get_drift(&self) -> usize {
 		self.params.drift.unwrap_or(1)
+	}
+}
+
+impl<'a> AsRef<[f64]> for ChopInput<'a> {
+	#[inline(always)]
+	fn as_ref(&self) -> &[f64] {
+		match &self.data {
+			ChopData::Candles(candles) => candles.close.as_slice(),
+			ChopData::Slice { close, .. } => close,
+		}
 	}
 }
 
@@ -260,6 +288,84 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
 		}
 	}
 	Ok(ChopOutput { values: out })
+}
+
+#[inline]
+pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Result<(), ChopError> {
+	let (high, low, close) = match &input.data {
+		ChopData::Candles(candles) => (
+			candles.high.as_slice(),
+			candles.low.as_slice(),
+			candles.close.as_slice(),
+		),
+		ChopData::Slice { high, low, close } => (*high, *low, *close),
+	};
+
+	let len = close.len();
+	if len == 0 {
+		return Err(ChopError::EmptyData);
+	}
+
+	if dst.len() != len {
+		return Err(ChopError::InvalidPeriod { 
+			period: dst.len(), 
+			data_len: len 
+		});
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > len {
+		return Err(ChopError::InvalidPeriod { period, data_len: len });
+	}
+	let drift = input.get_drift();
+	if drift == 0 {
+		return Err(ChopError::UnderlyingFunctionFailed(
+			"Invalid drift=0 for ATR".to_string(),
+		));
+	}
+	let scalar = input.get_scalar();
+
+	let first_valid_idx = match (0..len).find(|&i| {
+		let (h, l, c) = (high[i], low[i], close[i]);
+		!(h.is_nan() || l.is_nan() || c.is_nan())
+	}) {
+		Some(idx) => idx,
+		None => return Err(ChopError::AllValuesNaN),
+	};
+	if (len - first_valid_idx) < period {
+		return Err(ChopError::NotEnoughValidData {
+			needed: period,
+			valid: len - first_valid_idx,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				chop_scalar(high, low, close, period, drift, scalar, first_valid_idx, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => chop_avx2(high, low, close, period, drift, scalar, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				chop_avx512(high, low, close, period, drift, scalar, first_valid_idx, dst)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup period with NaN
+	let warmup_period = first_valid_idx + period - 1;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -495,13 +601,28 @@ impl ChopBatchBuilder {
 		self
 	}
 	#[inline]
+	pub fn period_static(mut self, p: usize) -> Self {
+		self.range.period = (p, p, 0);
+		self
+	}
+	#[inline]
 	pub fn scalar_range(mut self, start: f64, end: f64, step: f64) -> Self {
 		self.range.scalar = (start, end, step);
 		self
 	}
 	#[inline]
+	pub fn scalar_static(mut self, s: f64) -> Self {
+		self.range.scalar = (s, s, 0.0);
+		self
+	}
+	#[inline]
 	pub fn drift_range(mut self, start: usize, end: usize, step: usize) -> Self {
 		self.range.drift = (start, end, step);
+		self
+	}
+	#[inline]
+	pub fn drift_static(mut self, d: usize) -> Self {
+		self.range.drift = (d, d, 0);
 		self
 	}
 	pub fn apply_slices(self, high: &[f64], low: &[f64], close: &[f64]) -> Result<ChopBatchOutput, ChopError> {
@@ -1368,4 +1489,371 @@ mod tests {
 	gen_batch_tests!(check_batch_param_row_lookup);
 	gen_batch_tests!(check_batch_huge_period);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+// Batch processing function that writes directly to output slice for Python bindings
+#[inline(always)]
+fn chop_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &ChopBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<ChopParams>, ChopError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(ChopError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let len = close.len();
+	let first = (0..len)
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+		.ok_or(ChopError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first < max_p {
+		return Err(ChopError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = len;
+	
+	// Write directly to the provided output slice
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let ChopParams { period, scalar, drift } = combos[row].clone();
+		let p = period.unwrap();
+		let s = scalar.unwrap();
+		let d = drift.unwrap();
+		match kern {
+			Kernel::Scalar => chop_row_scalar(high, low, close, first, p, d, s, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => chop_row_avx2(high, low, close, first, p, d, s, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => chop_row_avx512(high, low, close, first, p, d, s, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "chop")]
+#[pyo3(signature = (high, low, close, period=None, scalar=None, drift=None, kernel=None))]
+pub fn chop_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: Option<usize>,
+	scalar: Option<f64>,
+	drift: Option<usize>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = ChopParams { period, scalar, drift };
+	let input = ChopInput::from_slices(high_slice, low_slice, close_slice, params);
+	
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		chop_with_kernel(&input, kern).map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ChopStream")]
+pub struct ChopStreamPy {
+	stream: ChopStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ChopStreamPy {
+	#[new]
+	#[pyo3(signature = (period=None, scalar=None, drift=None))]
+	fn new(period: Option<usize>, scalar: Option<f64>, drift: Option<usize>) -> PyResult<Self> {
+		let params = ChopParams { period, scalar, drift };
+		let stream = ChopStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(ChopStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.stream.update(high, low, close)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "chop_batch")]
+#[pyo3(signature = (high, low, close, period_range, scalar_range, drift_range, kernel=None))]
+pub fn chop_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	scalar_range: (f64, f64, f64),
+	drift_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	
+	let sweep = ChopBatchRange {
+		period: period_range,
+		scalar: scalar_range,
+		drift: drift_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+		chop_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, slice_out)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("scalars", combos.iter().map(|p| p.scalar.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("drifts", combos.iter().map(|p| p.drift.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chop_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	scalar: f64,
+	drift: usize,
+) -> Result<Vec<f64>, JsValue> {
+	let params = ChopParams {
+		period: Some(period),
+		scalar: Some(scalar),
+		drift: Some(drift),
+	};
+	let input = ChopInput::from_slices(high, low, close, params);
+
+	let mut output = vec![0.0; close.len()];
+
+	chop_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chop_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chop_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chop_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	scalar: f64,
+	drift: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = ChopParams {
+			period: Some(period),
+			scalar: Some(scalar),
+			drift: Some(drift),
+		};
+		let input = ChopInput::from_slices(high, low, close, params);
+
+		// Check for aliasing - if any input pointer equals output, use temp buffer
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			chop_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			chop_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ChopBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub scalar_range: (f64, f64, f64),
+	pub drift_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ChopBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<ChopParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = chop_batch)]
+pub fn chop_batch_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: ChopBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = ChopBatchRange {
+		period: config.period_range,
+		scalar: config.scalar_range,
+		drift: config.drift_range,
+	};
+
+	let output = chop_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = ChopBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn chop_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	scalar_start: f64,
+	scalar_end: f64,
+	scalar_step: f64,
+	drift_start: usize,
+	drift_end: usize,
+	drift_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+
+		let sweep = ChopBatchRange {
+			period: (period_start, period_end, period_step),
+			scalar: (scalar_start, scalar_end, scalar_step),
+			drift: (drift_start, drift_end, drift_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		chop_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }

@@ -76,6 +76,34 @@ const INDICATORS = {
             }
         }
     },
+    mom: {
+        name: 'MOM',
+        // Safe API
+        safe: {
+            fn: 'mom_js',
+            params: { period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'mom_alloc',
+            freeFn: 'mom_free',
+            computeFn: 'mom_into',
+            params: { period: 10 }
+        },
+        // Batch API
+        batch: {
+            fn: 'mom_batch',
+            fastFn: 'mom_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 50, 5]       // 10 values
+                }
+            }
+        }
+    },
     pwma: {
         name: 'PWMA',
         // Safe API
@@ -102,6 +130,38 @@ const INDICATORS = {
                     period_range: [5, 25, 2]       // 11 values
                 }
             }
+        }
+    },
+    vosc: {
+        name: 'VOSC',
+        // Safe API
+        safe: {
+            fn: 'vosc_js',
+            params: { short_period: 2, long_period: 5 },
+            inputs: ['volume']  // VOSC uses volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vosc_alloc',
+            freeFn: 'vosc_free',
+            computeFn: 'vosc_into',
+            params: { short_period: 2, long_period: 5 },
+            inputs: ['volume']
+        },
+        // Batch API
+        batch: {
+            fn: 'vosc_batch',
+            config: {
+                small: {
+                    short_period_range: [2, 4, 1],   // 3 values
+                    long_period_range: [5, 7, 1]     // 3 values = 9 combinations (filtered for valid)
+                },
+                medium: {
+                    short_period_range: [2, 10, 1],  // 9 values
+                    long_period_range: [10, 20, 2]   // 6 values = many valid combinations
+                }
+            },
+            inputs: ['volume']  // VOSC uses volume data for batch API too
         }
     },
     adxr: {
@@ -133,6 +193,34 @@ const INDICATORS = {
                 }
             },
             needsMultipleInputs: true
+        }
+    },
+    rocp: {
+        name: 'ROCP',
+        // Safe API
+        safe: {
+            fn: 'rocp_js',
+            params: { period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rocp_alloc',
+            freeFn: 'rocp_free',
+            computeFn: 'rocp_into',
+            params: { period: 10 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rocp_batch',
+            fastFn: 'rocp_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 50, 5]       // 10 values
+                }
+            }
         }
     },
     alma: {
@@ -169,6 +257,74 @@ const INDICATORS = {
             },
             // Fast batch API (optional)
             fastFn: 'alma_batch_into'
+        }
+    },
+    mean_ad: {
+        name: 'Mean Absolute Deviation',
+        // Safe API
+        safe: {
+            fn: 'mean_ad_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'mean_ad_alloc',
+            freeFn: 'mean_ad_free',
+            computeFn: 'mean_ad_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'mean_ad_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]       // 5 values: 5, 10, 15, 20, 25
+                }
+            }
+        }
+    },
+    bollinger_bands: {
+        name: 'Bollinger Bands',
+        // Safe API
+        safe: {
+            fn: 'bollinger_bands_js',
+            params: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
+            // Bollinger Bands returns 3 outputs flattened as [upper..., middle..., lower...]
+            multiOutput: 3
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'bollinger_bands_alloc',
+            freeFn: 'bollinger_bands_free',
+            computeFn: 'bollinger_bands_into',
+            params: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
+            // Multiple output pointers for upper, middle, lower
+            multiOutput: 3
+        },
+        // Batch API
+        batch: {
+            fn: 'bollinger_bands_batch',
+            config: {
+                small: {
+                    period_range: [10, 30, 10],     // 3 values
+                    devup_range: [1.0, 3.0, 1.0],   // 3 values
+                    devdn_range: [2.0, 2.0, 0.0],   // 1 value
+                    matype: 'sma',
+                    devtype: 0
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [10, 50, 10],     // 5 values
+                    devup_range: [1.0, 3.0, 0.5],   // 5 values
+                    devdn_range: [1.0, 3.0, 0.5],   // 5 values
+                    matype: 'sma',
+                    devtype: 0
+                    // Total: 125 combinations
+                }
+            }
         }
     },
     vlma: {
@@ -745,6 +901,34 @@ const INDICATORS = {
                 }
             },
             fastFn: 'kama_batch_into'
+        }
+    },
+    fosc: {
+        name: 'FOSC (Forecast Oscillator)',
+        // Safe API
+        safe: {
+            fn: 'fosc_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'fosc_alloc',
+            freeFn: 'fosc_free',
+            computeFn: 'fosc_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'fosc_batch',
+            config: {
+                small: {
+                    period_range: [3, 10, 1]  // 8 values: 3, 4, 5, 6, 7, 8, 9, 10
+                },
+                medium: {
+                    period_range: [3, 20, 1]  // 18 values: 3, 4, 5, ..., 20
+                }
+            },
+            fastFn: 'fosc_batch_into'
         }
     },
     sqwma: {
@@ -1824,6 +2008,427 @@ const INDICATORS = {
             }
         }
     },
+    apo: {
+        name: 'APO',
+        // Safe API
+        safe: {
+            fn: 'apo_js',
+            params: { short_period: 10, long_period: 20 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'apo_alloc',
+            freeFn: 'apo_free',
+            computeFn: 'apo_into',
+            params: { short_period: 10, long_period: 20 }
+        },
+        // Batch API
+        batch: {
+            fn: 'apo_batch',
+            config: {
+                small: {
+                    short_period_range: [5, 15, 5],    // 3 values: 5, 10, 15
+                    long_period_range: [20, 30, 10]    // 2 values: 20, 30 = 6 combinations
+                },
+                medium: {
+                    short_period_range: [5, 15, 2],    // 6 values: 5, 7, 9, 11, 13, 15
+                    long_period_range: [20, 40, 5]     // 5 values: 20, 25, 30, 35, 40 = 30 combinations
+                }
+            }
+        }
+    },
+    chop: {
+        name: 'CHOP',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'chop_js',
+            params: { period: 14, scalar: 100.0, drift: 1 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'chop_alloc',
+            freeFn: 'chop_free',
+            computeFn: 'chop_into',
+            params: { period: 14, scalar: 100.0, drift: 1 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'chop_batch',
+            fastFn: 'chop_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values: 10, 15, 20
+                    scalar_range: [50.0, 100.0, 50.0], // 2 values: 50, 100
+                    drift_range: [1, 2, 1]          // 2 values: 1, 2
+                    // Total: 12 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values: 10, 15, 20, 25, 30
+                    scalar_range: [50.0, 150.0, 25.0], // 5 values: 50, 75, 100, 125, 150
+                    drift_range: [1, 3, 1]          // 3 values: 1, 2, 3
+                    // Total: 75 combinations
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    cvi: {
+        name: 'CVI',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'cvi_js',
+            params: { period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'cvi_alloc',
+            freeFn: 'cvi_free',
+            computeFn: 'cvi_into',
+            params: { period: 10 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'cvi_batch',
+            fastFn: 'cvi_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]        // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]        // 5 values: 5, 10, 15, 20, 25
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    di: {
+        name: 'DI',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'di_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'di_alloc',
+            freeFn: 'di_free',
+            computeFn: 'di_into',
+            params: { period: 14 },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (plus and minus)
+        },
+        // Batch API
+        batch: {
+            fn: 'di_batch',
+            fastFn: 'di_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true,
+            dualOutput: true
+        }
+    },
+    efi: {
+        name: 'EFI',
+        needsMultipleInputs: true,  // Uses close (price) and volume
+        // Safe API
+        safe: {
+            fn: 'efi_js',
+            params: { period: 13 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'efi_alloc',
+            freeFn: 'efi_free',
+            computeFn: 'efi_into',
+            params: { period: 13 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'efi_batch',
+            fastFn: 'efi_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    kst: {
+        name: 'KST',
+        // Safe API
+        safe: {
+            fn: 'kst_js',
+            params: { 
+                sma_period1: 10, 
+                sma_period2: 10, 
+                sma_period3: 10, 
+                sma_period4: 15,
+                roc_period1: 10,
+                roc_period2: 15,
+                roc_period3: 20,
+                roc_period4: 30,
+                signal_period: 9
+            },
+            multiOutput: true  // Returns {line, signal}
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'kst_alloc',
+            freeFn: 'kst_free',
+            computeFn: 'kst_into',
+            params: { 
+                sma_period1: 10, 
+                sma_period2: 10, 
+                sma_period3: 10, 
+                sma_period4: 15,
+                roc_period1: 10,
+                roc_period2: 15,
+                roc_period3: 20,
+                roc_period4: 30,
+                signal_period: 9
+            },
+            multiOutput: true  // Has separate line and signal outputs
+        },
+        // Batch API
+        batch: {
+            fn: 'kst_batch',
+            fastFn: 'kst_batch_into',
+            config: {
+                small: {
+                    sma_period1_range: [8, 12, 2],      // 3 values
+                    sma_period2_range: [8, 12, 2],      // 3 values
+                    sma_period3_range: [8, 12, 2],      // 3 values
+                    sma_period4_range: [12, 18, 3],     // 3 values
+                    roc_period1_range: [8, 12, 2],      // 3 values
+                    roc_period2_range: [12, 18, 3],     // 3 values
+                    roc_period3_range: [18, 22, 2],     // 3 values
+                    roc_period4_range: [25, 35, 5],     // 3 values
+                    signal_period_range: [7, 11, 2]     // 3 values = 3^9 = too many!
+                },
+                medium: {
+                    // More reasonable subset for batch
+                    sma_period1_range: [10, 10, 1],     // 1 value (fixed)
+                    sma_period2_range: [10, 10, 1],     // 1 value (fixed)
+                    sma_period3_range: [10, 10, 1],     // 1 value (fixed)
+                    sma_period4_range: [10, 20, 5],     // 3 values
+                    roc_period1_range: [10, 10, 1],     // 1 value (fixed)
+                    roc_period2_range: [10, 20, 5],     // 3 values
+                    roc_period3_range: [15, 25, 5],     // 3 values
+                    roc_period4_range: [25, 35, 5],     // 3 values
+                    signal_period_range: [7, 13, 3]     // 3 values = 3^5 = 243 combinations
+                }
+            },
+            multiOutput: true  // Returns {line, signal, combos, rows, cols}
+        }
+    },
+    lrsi: {
+        name: 'LRSI',
+        needsMultipleInputs: true,  // Uses high/low
+        // Safe API
+        safe: {
+            fn: 'lrsi_js',
+            params: { alpha: 0.2 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'lrsi_alloc',
+            freeFn: 'lrsi_free',
+            computeFn: 'lrsi_into',
+            params: { alpha: 0.2 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'lrsi_batch',
+            config: {
+                small: {
+                    alpha_range: [0.1, 0.3, 0.1]     // 3 values
+                },
+                medium: {
+                    alpha_range: [0.1, 0.5, 0.05]    // 9 values
+                }
+            }
+        }
+    },
+    pivot: {
+        name: 'PIVOT',
+        needsMultipleInputs: true,  // Uses high, low, close, open
+        // Safe API
+        safe: {
+            fn: 'pivot_js',
+            params: { mode: 3 },  // Camarilla mode by default
+            // Pivot returns 9 outputs flattened as [r4..., r3..., r2..., r1..., pp..., s1..., s2..., s3..., s4...]
+            multiOutput: 9
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'pivot_alloc',
+            freeFn: 'pivot_free',
+            computeFn: 'pivot_into',
+            params: { mode: 3 },
+            // Multiple output pointers for all 9 levels
+            multiOutput: 9,
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'pivot_batch',
+            config: {
+                small: {
+                    mode_range: [0, 4, 1]  // 5 values: All 5 modes
+                },
+                medium: {
+                    mode_range: [0, 4, 1]  // Same as small for pivot
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    safezonestop: {
+        name: 'SafeZoneStop',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'safezonestop_js',
+            params: { period: 22, mult: 2.5, max_lookback: 3, direction: 'long' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'safezonestop_alloc',
+            freeFn: 'safezonestop_free',
+            computeFn: 'safezonestop_into',
+            params: { period: 22, mult: 2.5, max_lookback: 3, direction: 'long' },
+            needsMultipleInputs: true,
+            needsSafeZoneStopInputs: true  // Special flag for SafeZoneStop's unique inputs
+        },
+        // Batch API
+        batch: {
+            fn: 'safezonestop_batch',
+            config: {
+                small: {
+                    period_range: [14, 30, 8],       // 3 values
+                    mult_range: [2.0, 3.0, 0.5],     // 3 values
+                    max_lookback_range: [2, 4, 1],   // 3 values = 27 combinations
+                    direction: 'long'
+                },
+                medium: {
+                    period_range: [10, 50, 10],      // 5 values
+                    mult_range: [2.0, 4.0, 0.5],     // 5 values
+                    max_lookback_range: [2, 6, 2],   // 3 values = 75 combinations
+                    direction: 'long'
+                }
+            }
+        }
+    },
+    stochf: {
+        name: 'StochF',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'stochf_js',
+            params: { fastk_period: 5, fastd_period: 3, fastd_matype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'stochf_alloc',
+            freeFn: 'stochf_free',
+            computeFn: 'stochf_into',
+            params: { fastk_period: 5, fastd_period: 3, fastd_matype: 0 },
+            needsMultipleInputs: true,
+            needsStochFInputs: true  // Special flag for StochF's three inputs and two outputs
+        },
+        // Batch API
+        batch: {
+            fn: 'stochf_batch',
+            config: {
+                small: {
+                    fastk_range: [5, 14, 1],       // 10 values
+                    fastd_range: [3, 5, 1],        // 3 values = 30 combinations
+                    fastd_matype: 0
+                },
+                medium: {
+                    fastk_range: [5, 50, 5],       // 10 values
+                    fastd_range: [3, 10, 1],       // 8 values = 80 combinations
+                    fastd_matype: 0
+                }
+            },
+            // Fast batch API (optional)
+            fastFn: 'stochf_batch_into'
+        }
+    },
+    ui: {
+        name: 'UI (Ulcer Index)',
+        // Safe API
+        safe: {
+            fn: 'ui_js',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ui_alloc',
+            freeFn: 'ui_free',
+            computeFn: 'ui_into',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'ui_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values
+                    scalar_range: [50.0, 150.0, 50.0] // 3 values = 9 combinations
+                },
+                medium: {
+                    period_range: [5, 50, 5],       // 10 values
+                    scalar_range: [50.0, 200.0, 50.0] // 4 values = 40 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'ui_batch_into'
+        }
+    },
+    wad: {
+        name: 'WAD',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'wad_js',
+            params: {}  // No parameters for WAD
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wad_alloc',
+            freeFn: 'wad_free',
+            computeFn: 'wad_into',
+            params: {},
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'wad_batch',
+            config: {
+                // WAD has no parameters, so batch always returns 1 row
+                small: {},
+                medium: {}
+            }
+        }
+    },
     bollinger_bands_width: {
         name: 'Bollinger Bands Width',
         // Safe API
@@ -2446,7 +3051,7 @@ class WasmIndicatorBenchmark {
                     }
                     
                     // Allocate second output buffer if indicator has dual outputs
-                    outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
+                    outPtr2 = (indicatorConfig.fast.dualOutput || indicatorConfig.fast.needsStochFInputs) ? this.wasm[allocFn](len) : null;
                     
                     // Debug removed for performance
                     
@@ -2694,6 +3299,9 @@ class WasmIndicatorBenchmark {
                     if (indicatorConfig.name === 'ADOSC') {
                         // ADOSC uses the new ergonomic batch API with config object
                         wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, ohlc.volume, batchConfig);
+                    } else if (indicatorConfig.name === 'SafeZoneStop') {
+                        // SafeZoneStop only needs high/low (no close) and uses config object
+                        wasmFn.call(this.wasm, ohlc.high, ohlc.low, batchConfig);
                     } else if (indicatorConfig.name === 'TTM Trend') {
                         // TTM Trend needs source (HL2) and close
                         const hl2 = new Float64Array(ohlc.high.length);
@@ -2821,6 +3429,19 @@ class WasmIndicatorBenchmark {
                 for (const value of Object.values(params)) {
                     result.push(value);
                 }
+                
+                return result;
+            }
+            
+            // Special case for SafeZoneStop which needs high/low and direction string
+            if (indicatorConfig.name === 'SafeZoneStop') {
+                const result = [ohlc.high, ohlc.low];
+                
+                // Add parameters in order (period, mult, max_lookback, direction)
+                result.push(params.period);
+                result.push(params.mult);
+                result.push(params.max_lookback);
+                result.push(params.direction);
                 
                 return result;
             }
@@ -2970,9 +3591,34 @@ class WasmIndicatorBenchmark {
                 return result;
             }
             
+            // Special case for SafeZoneStop: high_ptr, low_ptr, out_ptr, len, period, mult, max_lookback, direction
+            if (indicatorConfig.name === 'SafeZoneStop') {
+                const result = [highPtr, lowPtr, outPtr, len];
+                
+                // Add parameters in specific order
+                result.push(params.period);
+                result.push(params.mult);
+                result.push(params.max_lookback);
+                result.push(params.direction);
+                
+                return result;
+            }
+            
             // Special case for ADOSC: high_ptr, low_ptr, close_ptr, volume_ptr, out_ptr, len, short_period, long_period
             if (indicatorConfig.name === 'ADOSC') {
                 const result = [highPtr, lowPtr, closePtr, volumePtr, outPtr, len, params.short_period, params.long_period];
+                return result;
+            }
+            
+            // Special case for StochF: high_ptr, low_ptr, close_ptr, k_ptr, d_ptr, len, fastk_period, fastd_period, fastd_matype
+            if (indicatorConfig.needsStochFInputs) {
+                const result = [highPtr, lowPtr, closePtr, outPtr, outPtr2, len];
+                
+                // Add parameters in specific order
+                result.push(params.fastk_period);
+                result.push(params.fastd_period);
+                result.push(params.fastd_matype);
+                
                 return result;
             }
             

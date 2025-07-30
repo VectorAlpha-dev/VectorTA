@@ -19,9 +19,25 @@
 //!   with leading `NaN`s until the calculation window is filled.
 //! - **`Err(DiError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +65,7 @@ pub struct DiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DiParams {
 	pub period: Option<usize>,
 }
@@ -159,7 +176,8 @@ pub fn di(input: &DiInput) -> Result<DiOutput, DiError> {
 	di_with_kernel(input, Kernel::Auto)
 }
 
-pub fn di_with_kernel(input: &DiInput, kernel: Kernel) -> Result<DiOutput, DiError> {
+#[inline(always)]
+fn di_prepare<'a>(input: &'a DiInput<'a>, kernel: Kernel) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), DiError> {
 	let (high, low, close) = match &input.data {
 		DiData::Candles { candles } => {
 			let h = source_type(candles, "high");
@@ -194,6 +212,12 @@ pub fn di_with_kernel(input: &DiInput, kernel: Kernel) -> Result<DiOutput, DiErr
 		other => other,
 	};
 
+	Ok((high, low, close, period, first_idx, chosen))
+}
+
+pub fn di_with_kernel(input: &DiInput, kernel: Kernel) -> Result<DiOutput, DiError> {
+	let (high, low, close, period, first_idx, chosen) = di_prepare(input, kernel)?;
+
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => di_scalar(high, low, close, period, first_idx),
@@ -206,17 +230,99 @@ pub fn di_with_kernel(input: &DiInput, kernel: Kernel) -> Result<DiOutput, DiErr
 	}
 }
 
+// Stubs for non-nightly builds
+#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
 #[inline(always)]
-pub unsafe fn di_scalar(
+pub unsafe fn di_avx2_into(
 	high: &[f64],
 	low: &[f64],
 	close: &[f64],
 	period: usize,
 	first_idx: usize,
-) -> Result<DiOutput, DiError> {
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
+	di_scalar_into(high, low, close, period, first_idx, out_plus, out_minus)
+}
+
+#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+#[inline(always)]
+pub unsafe fn di_avx512_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
+	di_scalar_into(high, low, close, period, first_idx, out_plus, out_minus)
+}
+
+#[inline(always)]
+fn di_compute_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+	kernel: Kernel,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
+	unsafe {
+		match kernel {
+			Kernel::Scalar | Kernel::ScalarBatch => di_scalar_into(high, low, close, period, first_idx, out_plus, out_minus),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => di_avx2_into(high, low, close, period, first_idx, out_plus, out_minus),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => di_avx512_into(high, low, close, period, first_idx, out_plus, out_minus),
+			_ => unreachable!(),
+		}
+	}
+}
+
+/// Write DI results directly to output slices - no allocations
+pub fn di_into_slice(
+	dst_plus: &mut [f64],
+	dst_minus: &mut [f64],
+	input: &DiInput,
+	kern: Kernel,
+) -> Result<(), DiError> {
+	let (high, low, close, period, first_idx, chosen) = di_prepare(input, kern)?;
+
 	let n = high.len();
-	let mut plus_di = vec![f64::NAN; n];
-	let mut minus_di = vec![f64::NAN; n];
+	if dst_plus.len() != n || dst_minus.len() != n {
+		return Err(DiError::InvalidPeriod {
+			period: n,
+			data_len: dst_plus.len().min(dst_minus.len()),
+		});
+	}
+
+	di_compute_into(high, low, close, period, first_idx, chosen, dst_plus, dst_minus);
+	
+	// Fill warmup period with NaN
+	let warmup_end = first_idx + period - 1;
+	for v in &mut dst_plus[..warmup_end] {
+		*v = f64::NAN;
+	}
+	for v in &mut dst_minus[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[inline(always)]
+pub unsafe fn di_scalar_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
 	let mut prev_high = high[first_idx];
 	let mut prev_low = low[first_idx];
 	let mut prev_close = close[first_idx];
@@ -245,19 +351,19 @@ pub unsafe fn di_scalar(
 	let mut current_minus_dm = minus_dm_sum;
 	let mut current_tr = tr_sum;
 
-	plus_di[idx] = if current_tr == 0.0 {
+	out_plus[idx] = if current_tr == 0.0 {
 		0.0
 	} else {
 		(current_plus_dm / current_tr) * 100.0
 	};
-	minus_di[idx] = if current_tr == 0.0 {
+	out_minus[idx] = if current_tr == 0.0 {
 		0.0
 	} else {
 		(current_minus_dm / current_tr) * 100.0
 	};
 	idx += 1;
 
-	while idx < n {
+	while idx < high.len() {
 		let diff_p = high[idx] - prev_high;
 		let diff_m = prev_low - low[idx];
 		prev_high = high[idx];
@@ -275,22 +381,50 @@ pub unsafe fn di_scalar(
 			current_minus_dm = current_minus_dm - (current_minus_dm / (period as f64));
 		}
 		current_tr = current_tr - (current_tr / (period as f64)) + tr;
-		plus_di[idx] = if current_tr == 0.0 {
+		out_plus[idx] = if current_tr == 0.0 {
 			0.0
 		} else {
 			(current_plus_dm / current_tr) * 100.0
 		};
-		minus_di[idx] = if current_tr == 0.0 {
+		out_minus[idx] = if current_tr == 0.0 {
 			0.0
 		} else {
 			(current_minus_dm / current_tr) * 100.0
 		};
 		idx += 1;
 	}
+}
+
+#[inline(always)]
+pub unsafe fn di_scalar(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+) -> Result<DiOutput, DiError> {
+	let n = high.len();
+	let mut plus_di = alloc_with_nan_prefix(n, first_idx + period - 1);
+	let mut minus_di = alloc_with_nan_prefix(n, first_idx + period - 1);
+	di_scalar_into(high, low, close, period, first_idx, &mut plus_di, &mut minus_di);
 	Ok(DiOutput {
 		plus: plus_di,
 		minus: minus_di,
 	})
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn di_avx2_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
+	di_scalar_into(high, low, close, period, first_idx, out_plus, out_minus)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -303,6 +437,20 @@ pub unsafe fn di_avx2(
 	first_idx: usize,
 ) -> Result<DiOutput, DiError> {
 	di_scalar(high, low, close, period, first_idx)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+pub unsafe fn di_avx512_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	first_idx: usize,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) {
+	di_scalar_into(high, low, close, period, first_idx, out_plus, out_minus)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -572,6 +720,78 @@ pub fn di_batch_par_slice(
 }
 
 #[inline(always)]
+fn di_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &DiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) -> Result<Vec<DiParams>, DiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(DiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let n = high.len();
+	if n == 0 || low.len() != n || close.len() != n {
+		return Err(DiError::EmptyData);
+	}
+	let first = (0..n)
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+		.ok_or(DiError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if n - first < max_p {
+		return Err(DiError::NotEnoughValidData {
+			needed: max_p,
+			valid: n - first,
+		});
+	}
+
+	let cols = n;
+	
+	// Initialize NaN prefixes for each row
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = first + combo.period.unwrap() - 1;
+		let row_start = row * cols;
+		for i in 0..warmup {
+			out_plus[row_start + i] = f64::NAN;
+			out_minus[row_start + i] = f64::NAN;
+		}
+	}
+
+	let do_row = |row: usize, out_plus: &mut [f64], out_minus: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let result = di_row_scalar(high, low, close, period, first, out_plus, out_minus);
+		debug_assert!(result.is_ok());
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_plus.par_chunks_mut(cols)
+				.zip(out_minus.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (pl, mi))| do_row(row, pl, mi));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (pl, mi)) in out_plus.chunks_mut(cols).zip(out_minus.chunks_mut(cols)).enumerate() {
+				do_row(row, pl, mi);
+			}
+		}
+	} else {
+		for (row, (pl, mi)) in out_plus.chunks_mut(cols).zip(out_minus.chunks_mut(cols)).enumerate() {
+			do_row(row, pl, mi);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 fn di_batch_inner(
 	high: &[f64],
 	low: &[f64],
@@ -601,8 +821,26 @@ fn di_batch_inner(
 
 	let rows = combos.len();
 	let cols = n;
-	let mut plus = vec![f64::NAN; rows * cols];
-	let mut minus = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Allocate uninitialized matrices
+	let mut plus_mu = make_uninit_matrix(rows, cols);
+	let mut minus_mu = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut plus_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut minus_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slices for computation
+	let mut plus_guard = core::mem::ManuallyDrop::new(plus_mu);
+	let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
+	let plus: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(plus_guard.as_mut_ptr() as *mut f64, plus_guard.len()) };
+	let minus: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len()) };
 
 	let do_row = |row: usize, out_plus: &mut [f64], out_minus: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -630,6 +868,22 @@ fn di_batch_inner(
 			do_row(row, pl, mi);
 		}
 	}
+
+	// Convert back to Vec for output
+	let plus = unsafe {
+		Vec::from_raw_parts(
+			plus_guard.as_mut_ptr() as *mut f64,
+			plus_guard.len(),
+			plus_guard.capacity(),
+		)
+	};
+	let minus = unsafe {
+		Vec::from_raw_parts(
+			minus_guard.as_mut_ptr() as *mut f64,
+			minus_guard.len(),
+			minus_guard.capacity(),
+		)
+	};
 
 	Ok(DiBatchOutput {
 		plus,
@@ -1035,4 +1289,304 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_period_range);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "di")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+pub fn di_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DiParams { period: Some(period) };
+	let input = DiInput::from_slices(high_slice, low_slice, close_slice, params);
+	
+	let (plus_vec, minus_vec) = py.allow_threads(|| {
+		di_with_kernel(&input, kern)
+			.map(|o| (o.plus, o.minus))
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok((
+		plus_vec.into_pyarray(py),
+		minus_vec.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DiStream")]
+pub struct DiStreamPy {
+	inner: DiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DiStreamPy {
+	#[new]
+	pub fn new(period: usize) -> PyResult<Self> {
+		let params = DiParams {
+			period: Some(period),
+		};
+		let inner = DiStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(DiStreamPy { inner })
+	}
+
+	pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+		self.inner.update(high, low, close)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "di_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn di_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = DiBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	// Pre-allocate output arrays for batch operations
+	let plus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let minus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let plus_slice = unsafe { plus_arr.as_slice_mut()? };
+	let minus_slice = unsafe { minus_arr.as_slice_mut()? };
+	
+	let combos = py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		di_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, plus_slice, minus_slice)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("plus", plus_arr.reshape((rows, cols))?)?;
+	dict.set_item("minus", minus_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct DiJsOutput {
+	plus: Vec<f64>,
+	minus: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl DiJsOutput {
+	#[wasm_bindgen(getter)]
+	pub fn plus(&self) -> Vec<f64> {
+		self.plus.clone()
+	}
+	
+	#[wasm_bindgen(getter)]
+	pub fn minus(&self) -> Vec<f64> {
+		self.minus.clone()
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn di_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<DiJsOutput, JsValue> {
+	let params = DiParams { period: Some(period) };
+	let input = DiInput::from_slices(high, low, close, params);
+	
+	let mut output_plus = vec![0.0; high.len()];
+	let mut output_minus = vec![0.0; high.len()];
+	
+	di_into_slice(&mut output_plus, &mut output_minus, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(DiJsOutput {
+		plus: output_plus,
+		minus: output_minus,
+	})
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn di_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn di_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn di_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	plus_ptr: *mut f64,
+	minus_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let params = DiParams { period: Some(period) };
+		let input = DiInput::from_slices(high, low, close, params);
+		
+		// Check for aliasing - any input could be the same as any output
+		let has_aliasing = high_ptr as *const f64 == plus_ptr as *const f64 ||
+						  high_ptr as *const f64 == minus_ptr as *const f64 ||
+						  low_ptr as *const f64 == plus_ptr as *const f64 ||
+						  low_ptr as *const f64 == minus_ptr as *const f64 ||
+						  close_ptr as *const f64 == plus_ptr as *const f64 ||
+						  close_ptr as *const f64 == minus_ptr as *const f64 ||
+						  plus_ptr == minus_ptr;
+		
+		if has_aliasing {
+			// Use temporary buffers
+			let mut temp_plus = vec![0.0; len];
+			let mut temp_minus = vec![0.0; len];
+			di_into_slice(&mut temp_plus, &mut temp_minus, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let out_plus = std::slice::from_raw_parts_mut(plus_ptr, len);
+			let out_minus = std::slice::from_raw_parts_mut(minus_ptr, len);
+			out_plus.copy_from_slice(&temp_plus);
+			out_minus.copy_from_slice(&temp_minus);
+		} else {
+			let out_plus = std::slice::from_raw_parts_mut(plus_ptr, len);
+			let out_minus = std::slice::from_raw_parts_mut(minus_ptr, len);
+			di_into_slice(out_plus, out_minus, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DiBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DiBatchJsOutput {
+	pub plus: Vec<f64>,
+	pub minus: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = "di_batch")]
+pub fn di_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: DiBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = DiBatchRange { period: config.period_range };
+	
+	let output = di_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = DiBatchJsOutput {
+		plus: output.plus,
+		minus: output.minus,
+		periods: output.combos.iter().map(|p| p.period.unwrap()).collect(),
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn di_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	plus_ptr: *mut f64,
+	minus_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let sweep = DiBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let total_size = rows * len;
+		
+		let out_plus = std::slice::from_raw_parts_mut(plus_ptr, total_size);
+		let out_minus = std::slice::from_raw_parts_mut(minus_ptr, total_size);
+		
+		di_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, out_plus, out_minus)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
 }

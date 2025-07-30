@@ -771,6 +771,86 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_donchian_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations for Donchian
+		let test_params = vec![
+			DonchianParams::default(),                    // period: 20
+			DonchianParams { period: Some(2) },          // minimum viable period
+			DonchianParams { period: Some(5) },          // small period
+			DonchianParams { period: Some(10) },         // small-medium period
+			DonchianParams { period: Some(20) },         // default period
+			DonchianParams { period: Some(50) },         // medium period
+			DonchianParams { period: Some(100) },        // large period
+			DonchianParams { period: Some(200) },        // very large period
+			DonchianParams { period: Some(500) },        // extreme period
+			DonchianParams { period: Some(14) },         // common trading period
+			DonchianParams { period: Some(26) },         // another common period
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DonchianInput::from_candles(&candles, params.clone());
+			let output = donchian_with_kernel(&input, kernel)?;
+			
+			// Check all three bands for poison values
+			let bands = [
+				("upperband", &output.upperband),
+				("middleband", &output.middleband),
+				("lowerband", &output.lowerband),
+			];
+			
+			for (band_name, band_values) in &bands {
+				for (i, &val) in band_values.iter().enumerate() {
+					if val.is_nan() {
+						continue; // NaN values are expected during warmup
+					}
+					
+					let bits = val.to_bits();
+					
+					// Check all three poison patterns
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+							 in {} with params: period={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20), param_idx
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+							 in {} with params: period={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20), param_idx
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+							 in {} with params: period={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20), param_idx
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_donchian_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_donchian_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -803,7 +883,8 @@ mod tests {
 		check_donchian_very_small_dataset,
 		check_donchian_mismatched_length,
 		check_donchian_all_nan_data,
-		check_donchian_partial_computation
+		check_donchian_partial_computation,
+		check_donchian_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -838,4 +919,87 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations for Donchian
+		let test_configs = vec![
+			(2, 10, 2),       // Small periods with step 2
+			(10, 50, 10),     // Medium periods with step 10
+			(20, 100, 20),    // Common trading periods
+			(50, 150, 25),    // Large periods
+			(2, 5, 1),        // Dense small range
+			(100, 300, 50),   // Very large periods
+			(14, 26, 4),      // Popular trading periods
+			(5, 20, 3),       // Mixed small to medium
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = DonchianBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+			
+			// Check all three bands
+			let bands = [
+				("upper", &output.upper),
+				("middle", &output.middle),
+				("lower", &output.lower),
+			];
+			
+			for (band_name, band_values) in &bands {
+				for (idx, &val) in band_values.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+					
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+							 in {} at row {} col {} (flat index {}) with params: period={}",
+							test, cfg_idx, val, bits, band_name, row, col, idx, 
+							combo.period.unwrap_or(20)
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+							 in {} at row {} col {} (flat index {}) with params: period={}",
+							test, cfg_idx, val, bits, band_name, row, col, idx,
+							combo.period.unwrap_or(20)
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+							 in {} at row {} col {} (flat index {}) with params: period={}",
+							test, cfg_idx, val, bits, band_name, row, col, idx,
+							combo.period.unwrap_or(20)
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 }

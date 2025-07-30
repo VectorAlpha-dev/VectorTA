@@ -129,7 +129,11 @@ pub mod wavetrend;
 pub mod wclprice;
 pub mod willr;
 pub mod zscore;
+pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
+pub use mom::{mom, MomInput, MomOutput, MomParams};
+pub use ui::{ui, UiInput, UiOutput, UiParams};
 pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,

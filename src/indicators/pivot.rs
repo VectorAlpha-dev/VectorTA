@@ -17,7 +17,9 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +27,22 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 // ========== DATA/INPUT/OUTPUT STRUCTS ==========
 
@@ -192,16 +210,6 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
 	}
 	let mode = input.get_mode();
 
-	let mut r4 = vec![f64::NAN; len];
-	let mut r3 = vec![f64::NAN; len];
-	let mut r2 = vec![f64::NAN; len];
-	let mut r1 = vec![f64::NAN; len];
-	let mut pp = vec![f64::NAN; len];
-	let mut s1 = vec![f64::NAN; len];
-	let mut s2 = vec![f64::NAN; len];
-	let mut s3 = vec![f64::NAN; len];
-	let mut s4 = vec![f64::NAN; len];
-
 	let mut first_valid_idx = None;
 	for i in 0..len {
 		let h = high[i];
@@ -219,6 +227,17 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
 	if first_valid_idx >= len {
 		return Err(PivotError::NotEnoughValidData);
 	}
+
+	// Allocate output vectors with NaN prefix
+	let mut r4 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut r3 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut r2 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut r1 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut pp = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut s1 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut s2 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut s3 = alloc_with_nan_prefix(len, first_valid_idx);
+	let mut s4 = alloc_with_nan_prefix(len, first_valid_idx);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -293,6 +312,104 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
 		s3,
 		s4,
 	})
+}
+
+#[inline]
+pub fn pivot_into_slices(
+	r4: &mut [f64],
+	r3: &mut [f64],
+	r2: &mut [f64],
+	r1: &mut [f64],
+	pp: &mut [f64],
+	s1: &mut [f64],
+	s2: &mut [f64],
+	s3: &mut [f64],
+	s4: &mut [f64],
+	input: &PivotInput,
+	kern: Kernel,
+) -> Result<(), PivotError> {
+	let (high, low, close, open) = match &input.data {
+		PivotData::Candles { candles } => {
+			let high = source_type(candles, "high");
+			let low = source_type(candles, "low");
+			let close = source_type(candles, "close");
+			let open = source_type(candles, "open");
+			(high, low, close, open)
+		}
+		PivotData::Slices { high, low, close, open } => (*high, *low, *close, *open),
+	};
+	
+	let len = high.len();
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(PivotError::EmptyData);
+	}
+	if low.len() != len || close.len() != len || open.len() != len {
+		return Err(PivotError::EmptyData);
+	}
+	if r4.len() != len || r3.len() != len || r2.len() != len || r1.len() != len 
+		|| pp.len() != len || s1.len() != len || s2.len() != len || s3.len() != len || s4.len() != len {
+		return Err(PivotError::EmptyData);
+	}
+	
+	let mode = input.get_mode();
+	
+	let mut first_valid_idx = None;
+	for i in 0..len {
+		let h = high[i];
+		let l = low[i];
+		let c = close[i];
+		if !(h.is_nan() || l.is_nan() || c.is_nan()) {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(PivotError::AllValuesNaN),
+	};
+	if first_valid_idx >= len {
+		return Err(PivotError::NotEnoughValidData);
+	}
+	
+	// Fill warmup with NaN
+	for i in 0..first_valid_idx {
+		r4[i] = f64::NAN;
+		r3[i] = f64::NAN;
+		r2[i] = f64::NAN;
+		r1[i] = f64::NAN;
+		pp[i] = f64::NAN;
+		s1[i] = f64::NAN;
+		s2[i] = f64::NAN;
+		s3[i] = f64::NAN;
+		s4[i] = f64::NAN;
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => pivot_scalar(
+				high, low, close, open, mode, first_valid_idx,
+				r4, r3, r2, r1, pp, s1, s2, s3, s4,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => pivot_avx2(
+				high, low, close, open, mode, first_valid_idx,
+				r4, r3, r2, r1, pp, s1, s2, s3, s4,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => pivot_avx512(
+				high, low, close, open, mode, first_valid_idx,
+				r4, r3, r2, r1, pp, s1, s2, s3, s4,
+			),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
 }
 
 #[inline]
@@ -696,15 +813,6 @@ fn pivot_batch_inner(
 	let len = high.len();
 	let mut levels = Vec::with_capacity(combos.len());
 	for p in &combos {
-		let mut r4 = vec![f64::NAN; len];
-		let mut r3 = vec![f64::NAN; len];
-		let mut r2 = vec![f64::NAN; len];
-		let mut r1 = vec![f64::NAN; len];
-		let mut pp = vec![f64::NAN; len];
-		let mut s1 = vec![f64::NAN; len];
-		let mut s2 = vec![f64::NAN; len];
-		let mut s3 = vec![f64::NAN; len];
-		let mut s4 = vec![f64::NAN; len];
 		let mode = p.mode.unwrap_or(3);
 		let mut first = None;
 		for i in 0..len {
@@ -714,6 +822,17 @@ fn pivot_batch_inner(
 			}
 		}
 		let first = first.unwrap_or(len);
+		
+		// Allocate output vectors with NaN prefix
+		let mut r4 = alloc_with_nan_prefix(len, first);
+		let mut r3 = alloc_with_nan_prefix(len, first);
+		let mut r2 = alloc_with_nan_prefix(len, first);
+		let mut r1 = alloc_with_nan_prefix(len, first);
+		let mut pp = alloc_with_nan_prefix(len, first);
+		let mut s1 = alloc_with_nan_prefix(len, first);
+		let mut s2 = alloc_with_nan_prefix(len, first);
+		let mut s3 = alloc_with_nan_prefix(len, first);
+		let mut s4 = alloc_with_nan_prefix(len, first);
 		unsafe {
 			match kernel {
 				Kernel::Scalar | Kernel::ScalarBatch => pivot_row_scalar(
@@ -739,10 +858,504 @@ fn pivot_batch_inner(
 	let cols = high.len();
 	Ok(PivotBatchOutput {
 		levels,
-		combos: combos.clone(),
-		rows: combos.len(),
-		cols: high.len(),
+		combos,
+		rows,
+		cols,
 	})
+}
+
+// ========== STREAMING INTERFACE ==========
+
+/// Streaming pivot calculation
+/// Note: Pivot is not truly a streaming indicator as it requires complete period data.
+/// This implementation maintains a single pivot level based on the most recent data point.
+pub struct PivotStream {
+	mode: usize,
+}
+
+impl PivotStream {
+	pub fn new(mode: usize) -> Self {
+		Self { mode }
+	}
+
+	pub fn try_new(params: PivotParams) -> Result<Self, PivotError> {
+		let mode = params.mode.unwrap_or(3);
+		if mode > 4 {
+			return Err(PivotError::EmptyData); // Using existing error for invalid mode
+		}
+		Ok(Self { mode })
+	}
+
+	/// Update with new OHLC data and return pivot levels
+	/// Returns tuple of (r4, r3, r2, r1, pp, s1, s2, s3, s4)
+	pub fn update(&mut self, high: f64, low: f64, close: f64, open: f64) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
+		if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
+			return None;
+		}
+
+		let p = match self.mode {
+			2 => { // Demark
+				if close < open {
+					(high + 2.0 * low + close) / 4.0
+				} else if close > open {
+					(2.0 * high + low + close) / 4.0
+				} else {
+					(high + low + 2.0 * close) / 4.0
+				}
+			}
+			4 => (high + low + 2.0 * open) / 4.0, // Woodie
+			_ => (high + low + close) / 3.0, // Standard/Fibonacci/Camarilla
+		};
+
+		let (r4, r3, r2, r1, s1, s2, s3, s4) = match self.mode {
+			0 => { // Standard
+				let r1 = 2.0 * p - low;
+				let r2 = p + (high - low);
+				let s1 = 2.0 * p - high;
+				let s2 = p - (high - low);
+				(f64::NAN, f64::NAN, r2, r1, s1, s2, f64::NAN, f64::NAN)
+			}
+			1 => { // Fibonacci
+				let r1 = p + 0.382 * (high - low);
+				let r2 = p + 0.618 * (high - low);
+				let r3 = p + 1.0 * (high - low);
+				let s1 = p - 0.382 * (high - low);
+				let s2 = p - 0.618 * (high - low);
+				let s3 = p - 1.0 * (high - low);
+				(f64::NAN, r3, r2, r1, s1, s2, s3, f64::NAN)
+			}
+			2 => { // Demark
+				let r1 = if close < open {
+					(high + 2.0 * low + close) / 2.0 - low
+				} else if close > open {
+					(2.0 * high + low + close) / 2.0 - low
+				} else {
+					(high + low + 2.0 * close) / 2.0 - low
+				};
+				let s1 = if close < open {
+					(high + 2.0 * low + close) / 2.0 - high
+				} else if close > open {
+					(2.0 * high + low + close) / 2.0 - high
+				} else {
+					(high + low + 2.0 * close) / 2.0 - high
+				};
+				(f64::NAN, f64::NAN, f64::NAN, r1, s1, f64::NAN, f64::NAN, f64::NAN)
+			}
+			3 => { // Camarilla
+				let r4 = (0.55 * (high - low)) + close;
+				let r3 = (0.275 * (high - low)) + close;
+				let r2 = (0.183 * (high - low)) + close;
+				let r1 = (0.0916 * (high - low)) + close;
+				let s1 = close - (0.0916 * (high - low));
+				let s2 = close - (0.183 * (high - low));
+				let s3 = close - (0.275 * (high - low));
+				let s4 = close - (0.55 * (high - low));
+				(r4, r3, r2, r1, s1, s2, s3, s4)
+			}
+			4 => { // Woodie
+				let r3 = high + 2.0 * (p - low);
+				let r4 = r3 + (high - low);
+				let r2 = p + (high - low);
+				let r1 = 2.0 * p - low;
+				let s1 = 2.0 * p - high;
+				let s2 = p - (high - low);
+				let s3 = low - 2.0 * (high - p);
+				let s4 = s3 - (high - low);
+				(r4, r3, r2, r1, s1, s2, s3, s4)
+			}
+			_ => return None,
+		};
+
+		Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
+	}
+}
+
+// ========== PYTHON BINDINGS ==========
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pivot")]
+#[pyo3(signature = (high, low, close, open, mode=3, kernel=None))]
+pub fn pivot_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	open: PyReadonlyArray1<'py, f64>,
+	mode: usize,
+	kernel: Option<&str>,
+) -> PyResult<(
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+	Bound<'py, PyArray1<f64>>,
+)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let open_slice = open.as_slice()?;
+	
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = PivotParams { mode: Some(mode) };
+	let input = PivotInput::from_slices(high_slice, low_slice, close_slice, open_slice, params);
+
+	let result = py.allow_threads(|| pivot_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		result.r4.into_pyarray(py),
+		result.r3.into_pyarray(py),
+		result.r2.into_pyarray(py),
+		result.r1.into_pyarray(py),
+		result.pp.into_pyarray(py),
+		result.s1.into_pyarray(py),
+		result.s2.into_pyarray(py),
+		result.s3.into_pyarray(py),
+		result.s4.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "PivotStream")]
+pub struct PivotStreamPy {
+	inner: PivotStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PivotStreamPy {
+	#[new]
+	fn new(mode: Option<usize>) -> PyResult<Self> {
+		let params = PivotParams { mode };
+		let inner = PivotStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(PivotStreamPy { inner })
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64, open: f64) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
+		self.inner.update(high, low, close, open)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pivot_batch")]
+#[pyo3(signature = (high, low, close, open, mode_range, kernel=None))]
+pub fn pivot_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	open: PyReadonlyArray1<'py, f64>,
+	mode_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let open_slice = open.as_slice()?;
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = PivotBatchRange { mode: mode_range };
+
+	let output = py.allow_threads(|| {
+		pivot_batch_with_kernel(high_slice, low_slice, close_slice, open_slice, &sweep, kern)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	
+	// For pivot, we need to handle 9 output arrays per parameter combination
+	// We'll flatten them into a 2D array where each row contains all 9 levels
+	let total_values = output.rows * output.cols * 9;
+	let mut flat_values = Vec::with_capacity(total_values);
+	
+	for levels in &output.levels {
+		// For each parameter combo, interleave the 9 arrays
+		for i in 0..output.cols {
+			flat_values.push(levels[0][i]); // r4
+			flat_values.push(levels[1][i]); // r3
+			flat_values.push(levels[2][i]); // r2
+			flat_values.push(levels[3][i]); // r1
+			flat_values.push(levels[4][i]); // pp
+			flat_values.push(levels[5][i]); // s1
+			flat_values.push(levels[6][i]); // s2
+			flat_values.push(levels[7][i]); // s3
+			flat_values.push(levels[8][i]); // s4
+		}
+	}
+	
+	// Create the values array and reshape it
+	let values_arr = unsafe { PyArray1::<f64>::new(py, [total_values], false) };
+	unsafe {
+		let slice = values_arr.as_slice_mut()?;
+		slice.copy_from_slice(&flat_values);
+	}
+	dict.set_item("values", values_arr.reshape((output.rows, output.cols * 9))?)?;
+	
+	// Add mode parameters
+	dict.set_item(
+		"modes",
+		output.combos
+			.iter()
+			.map(|p| p.mode.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	// Add metadata
+	dict.set_item("rows", output.rows)?;
+	dict.set_item("cols", output.cols)?;
+	dict.set_item("n_levels", 9)?;
+	
+	Ok(dict)
+}
+
+// ========== WASM BINDINGS ==========
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pivot_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	open: &[f64],
+	mode: usize,
+) -> Result<Vec<f64>, JsValue> {
+	let params = PivotParams { mode: Some(mode) };
+	let input = PivotInput::from_slices(high, low, close, open, params);
+	
+	let len = high.len();
+	
+	// Single allocation for all 9 levels
+	let mut output = vec![0.0; len * 9];
+	
+	// Create mutable slices for each level
+	let (r4, rest) = output.split_at_mut(len);
+	let (r3, rest) = rest.split_at_mut(len);
+	let (r2, rest) = rest.split_at_mut(len);
+	let (r1, rest) = rest.split_at_mut(len);
+	let (pp, rest) = rest.split_at_mut(len);
+	let (s1, rest) = rest.split_at_mut(len);
+	let (s2, rest) = rest.split_at_mut(len);
+	let (s3, s4) = rest.split_at_mut(len);
+	
+	// Compute into slices
+	pivot_into_slices(
+		r4, r3, r2, r1,
+		pp, s1, s2, s3, s4,
+		&input, Kernel::Auto
+	).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pivot_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	open_ptr: *const f64,
+	r4_ptr: *mut f64,
+	r3_ptr: *mut f64,
+	r2_ptr: *mut f64,
+	r1_ptr: *mut f64,
+	pp_ptr: *mut f64,
+	s1_ptr: *mut f64,
+	s2_ptr: *mut f64,
+	s3_ptr: *mut f64,
+	s4_ptr: *mut f64,
+	len: usize,
+	mode: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || open_ptr.is_null() {
+		return Err(JsValue::from_str("Null input pointer provided"));
+	}
+	
+	if r4_ptr.is_null() || r3_ptr.is_null() || r2_ptr.is_null() || r1_ptr.is_null() 
+		|| pp_ptr.is_null() || s1_ptr.is_null() || s2_ptr.is_null() || s3_ptr.is_null() || s4_ptr.is_null() {
+		return Err(JsValue::from_str("Null output pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let open = std::slice::from_raw_parts(open_ptr, len);
+		
+		let params = PivotParams { mode: Some(mode) };
+		let input = PivotInput::from_slices(high, low, close, open, params);
+		
+		// Check for any aliasing between inputs and outputs
+		let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8, close_ptr as *const u8, open_ptr as *const u8];
+		let output_ptrs = [
+			r4_ptr as *const u8, r3_ptr as *const u8, r2_ptr as *const u8, r1_ptr as *const u8,
+			pp_ptr as *const u8, s1_ptr as *const u8, s2_ptr as *const u8, s3_ptr as *const u8, s4_ptr as *const u8
+		];
+		
+		let has_aliasing = input_ptrs.iter().any(|&inp| {
+			output_ptrs.iter().any(|&out| inp == out)
+		});
+		
+		if has_aliasing {
+			// Use single temporary buffer if there's aliasing
+			let mut temp = vec![0.0; len * 9];
+			
+			// Split into slices
+			let (r4_temp, rest) = temp.split_at_mut(len);
+			let (r3_temp, rest) = rest.split_at_mut(len);
+			let (r2_temp, rest) = rest.split_at_mut(len);
+			let (r1_temp, rest) = rest.split_at_mut(len);
+			let (pp_temp, rest) = rest.split_at_mut(len);
+			let (s1_temp, rest) = rest.split_at_mut(len);
+			let (s2_temp, rest) = rest.split_at_mut(len);
+			let (s3_temp, s4_temp) = rest.split_at_mut(len);
+			
+			pivot_into_slices(
+				r4_temp, r3_temp, r2_temp, r1_temp,
+				pp_temp, s1_temp, s2_temp, s3_temp, s4_temp,
+				&input, Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy results to output pointers
+			let r4_out = std::slice::from_raw_parts_mut(r4_ptr, len);
+			let r3_out = std::slice::from_raw_parts_mut(r3_ptr, len);
+			let r2_out = std::slice::from_raw_parts_mut(r2_ptr, len);
+			let r1_out = std::slice::from_raw_parts_mut(r1_ptr, len);
+			let pp_out = std::slice::from_raw_parts_mut(pp_ptr, len);
+			let s1_out = std::slice::from_raw_parts_mut(s1_ptr, len);
+			let s2_out = std::slice::from_raw_parts_mut(s2_ptr, len);
+			let s3_out = std::slice::from_raw_parts_mut(s3_ptr, len);
+			let s4_out = std::slice::from_raw_parts_mut(s4_ptr, len);
+			
+			r4_out.copy_from_slice(r4_temp);
+			r3_out.copy_from_slice(r3_temp);
+			r2_out.copy_from_slice(r2_temp);
+			r1_out.copy_from_slice(r1_temp);
+			pp_out.copy_from_slice(pp_temp);
+			s1_out.copy_from_slice(s1_temp);
+			s2_out.copy_from_slice(s2_temp);
+			s3_out.copy_from_slice(s3_temp);
+			s4_out.copy_from_slice(s4_temp);
+		} else {
+			// Direct computation into output slices
+			let r4_out = std::slice::from_raw_parts_mut(r4_ptr, len);
+			let r3_out = std::slice::from_raw_parts_mut(r3_ptr, len);
+			let r2_out = std::slice::from_raw_parts_mut(r2_ptr, len);
+			let r1_out = std::slice::from_raw_parts_mut(r1_ptr, len);
+			let pp_out = std::slice::from_raw_parts_mut(pp_ptr, len);
+			let s1_out = std::slice::from_raw_parts_mut(s1_ptr, len);
+			let s2_out = std::slice::from_raw_parts_mut(s2_ptr, len);
+			let s3_out = std::slice::from_raw_parts_mut(s3_ptr, len);
+			let s4_out = std::slice::from_raw_parts_mut(s4_ptr, len);
+			
+			pivot_into_slices(
+				r4_out, r3_out, r2_out, r1_out,
+				pp_out, s1_out, s2_out, s3_out, s4_out,
+				&input, Kernel::Auto
+			).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pivot_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pivot_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PivotBatchConfig {
+	pub mode_range: (usize, usize, usize), // (start, end, step)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PivotBatchJsOutput {
+	pub values: Vec<f64>,  // Flattened array of all levels
+	pub modes: Vec<usize>,
+	pub rows: usize,       // Number of parameter combinations
+	pub cols: usize,       // Data length
+	pub n_levels: usize,   // Always 9 for pivot
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = pivot_batch)]
+pub fn pivot_batch_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	open: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: PivotBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let sweep = PivotBatchRange {
+		mode: config.mode_range,
+	};
+	
+	let output = pivot_batch_inner(high, low, close, open, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Flatten all 9 arrays per combination
+	let mut flat_values = Vec::with_capacity(output.rows * output.cols * 9);
+	for levels in &output.levels {
+		// For each parameter combo, append all 9 levels
+		for i in 0..output.cols {
+			flat_values.push(levels[0][i]); // r4
+			flat_values.push(levels[1][i]); // r3
+			flat_values.push(levels[2][i]); // r2
+			flat_values.push(levels[3][i]); // r1
+			flat_values.push(levels[4][i]); // pp
+			flat_values.push(levels[5][i]); // s1
+			flat_values.push(levels[6][i]); // s2
+			flat_values.push(levels[7][i]); // s3
+			flat_values.push(levels[8][i]); // s4
+		}
+	}
+	
+	let modes: Vec<usize> = output.combos.iter()
+		.map(|p| p.mode.unwrap())
+		.collect();
+	
+	let result = PivotBatchJsOutput {
+		values: flat_values,
+		modes,
+		rows: output.rows,
+		cols: output.cols,
+		n_levels: 9,
+	};
+	
+	serde_wasm_bindgen::to_value(&result)
+		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]

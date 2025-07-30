@@ -828,6 +828,85 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_dec_osc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations for DEC_OSC
+		let test_params = vec![
+			DecOscParams::default(),                                      // hp_period: 125, k: 1.0
+			DecOscParams { hp_period: Some(2), k: Some(1.0) },          // minimum viable period
+			DecOscParams { hp_period: Some(10), k: Some(1.0) },         // small period
+			DecOscParams { hp_period: Some(50), k: Some(1.0) },         // medium period
+			DecOscParams { hp_period: Some(125), k: Some(1.0) },        // default period
+			DecOscParams { hp_period: Some(200), k: Some(1.0) },        // large period
+			DecOscParams { hp_period: Some(500), k: Some(1.0) },        // very large period
+			DecOscParams { hp_period: Some(50), k: Some(0.5) },         // small k
+			DecOscParams { hp_period: Some(50), k: Some(2.0) },         // large k
+			DecOscParams { hp_period: Some(125), k: Some(0.1) },        // very small k
+			DecOscParams { hp_period: Some(125), k: Some(10.0) },       // very large k
+			DecOscParams { hp_period: Some(20), k: Some(1.5) },         // mixed params
+			DecOscParams { hp_period: Some(100), k: Some(0.75) },       // mixed params
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DecOscInput::from_candles(&candles, "close", params.clone());
+			let output = dec_osc_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name, val, bits, i, 
+						params.hp_period.unwrap_or(125), 
+						params.k.unwrap_or(1.0), 
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name, val, bits, i,
+						params.hp_period.unwrap_or(125),
+						params.k.unwrap_or(1.0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name, val, bits, i,
+						params.hp_period.unwrap_or(125),
+						params.k.unwrap_or(1.0),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_dec_osc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_dec_osc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -859,7 +938,8 @@ mod tests {
 		check_dec_osc_zero_period,
 		check_dec_osc_period_exceeds_length,
 		check_dec_osc_very_small_dataset,
-		check_dec_osc_reinput
+		check_dec_osc_reinput,
+		check_dec_osc_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -908,4 +988,92 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations for DEC_OSC
+		let test_configs = vec![
+			// (hp_period_start, hp_period_end, hp_period_step, k_start, k_end, k_step)
+			(2, 10, 2, 1.0, 1.0, 0.0),          // Small periods, fixed k
+			(10, 50, 10, 1.0, 1.0, 0.0),        // Medium periods, fixed k
+			(50, 150, 25, 1.0, 1.0, 0.0),       // Large periods, fixed k
+			(125, 125, 0, 0.5, 2.0, 0.5),       // Fixed period, varying k
+			(20, 40, 5, 0.5, 1.5, 0.25),        // Mixed sweep
+			(100, 200, 50, 1.0, 1.0, 0.0),      // Very large periods
+			(2, 5, 1, 0.1, 10.0, 4.95),         // Dense small range with extreme k
+		];
+		
+		for (cfg_idx, &(hp_start, hp_end, hp_step, k_start, k_end, k_step)) in test_configs.iter().enumerate() {
+			let mut builder = DecOscBatchBuilder::new().kernel(kernel);
+			
+			// Configure period range
+			if hp_step > 0 {
+				builder = builder.hp_period_range(hp_start, hp_end, hp_step);
+			} else {
+				builder = builder.hp_period_range(hp_start, hp_start, 1);
+			}
+			
+			// Configure k range
+			if k_step > 0.0 {
+				builder = builder.k_range(k_start, k_end, k_step);
+			}
+			
+			let output = builder.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(1.0)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(1.0)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(1.0)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 }
