@@ -105,8 +105,17 @@ pub struct BopOutput {
 pub enum BopError {
 	#[error("bop: Data is empty.")]
 	EmptyData,
+	#[error("bop: Data is empty.")]
+	DataIsEmpty,
 	#[error("bop: Inconsistent lengths.")]
 	InconsistentLengths,
+	#[error("bop: Input lengths mismatch - open: {open_len}, high: {high_len}, low: {low_len}, close: {close_len}")]
+	InputLengthsMismatch {
+		open_len: usize,
+		high_len: usize,
+		low_len: usize,
+		close_len: usize,
+	},
 	#[error("bop: Candle field error: {0}")]
 	CandleFieldError(String),
 }
@@ -400,6 +409,50 @@ pub fn bop_batch_with_kernel(
 		rows: 1,
 		cols: len,
 	})
+}
+
+/// Internal function that writes directly into a provided output slice for zero-copy Python bindings
+#[inline(always)]
+fn bop_batch_inner_into(
+	open: &[f64],
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	kernel: Kernel,
+	out: &mut [f64],
+) -> Result<(), BopError> {
+	let len = open.len();
+	if len == 0 || high.len() != len || low.len() != len || close.len() != len {
+		return Err(BopError::InconsistentLengths);
+	}
+	if out.len() != len {
+		return Err(BopError::InconsistentLengths);
+	}
+
+	// Calculate the warmup period - first index where all arrays have valid values
+	let warmup_period = (0..len)
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(len);
+
+	// Fill the warmup period with NaN
+	out[..warmup_period].fill(f64::NAN);
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_batch_kernel(),
+		k => k,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, out),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
 }
 
 #[inline(always)]
@@ -807,7 +860,7 @@ pub fn bop_py<'py>(
 	close: numpy::PyReadonlyArray1<'py, f64>,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	// Zero-copy, read-only views
 	let open_slice = open.as_slice()?;
@@ -815,50 +868,20 @@ pub fn bop_py<'py>(
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
 
-	// Validate input lengths
-	let len = open_slice.len();
-	if len != high_slice.len() || len != low_slice.len() || len != close_slice.len() {
-		return Err(PyValueError::new_err("bop: Input arrays have different lengths"));
-	}
-
-	// Use kernel validation for safety
+	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, false)?;
 
-	// Pre-allocate uninitialized NumPy output buffer
-	// SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Create input structure
+	let params = BopParams::default();
+	let input = BopInput::from_slices(open_slice, high_slice, low_slice, close_slice, params);
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), BopError> {
-		if len == 0 {
-			return Err(BopError::EmptyData);
-		}
+	// Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| bop_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			k => k,
-		};
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// The BOP algorithm writes to every element of the output array
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => {
-					bop_scalar(open_slice, high_slice, low_slice, close_slice, slice_out)
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open_slice, high_slice, low_slice, close_slice, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open_slice, high_slice, low_slice, close_slice, slice_out),
-				_ => unreachable!(),
-			}
-		}
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -894,7 +917,7 @@ pub fn bop_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
 	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-	use pyo3::types::PyDict;
+	use pyo3::types::{PyDict, PyList};
 
 	// Zero-copy, read-only views
 	let open_slice = open.as_slice()?;
@@ -902,79 +925,232 @@ pub fn bop_batch_py<'py>(
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
 
-	let len = open_slice.len();
-	if len != high_slice.len() || len != low_slice.len() || len != close_slice.len() {
-		return Err(PyValueError::new_err("bop: Input arrays have different lengths"));
-	}
-
-	// Pre-allocate uninitialized NumPy array
-	// SAFETY: PyArray1::new() creates uninitialized memory
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [len], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-	// Use kernel validation for safety
+	// Validate kernel before allow_threads
 	let kern = validate_kernel(kernel, true)?;
 
-	// Heavy work without the GIL
+	// For BOP batch, we have only 1 row since BOP has no parameters
+	let rows = 1;
+	let cols = open_slice.len();
+
+	// Pre-allocate output array (OK for batch operations)
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Compute without GIL - write directly to pre-allocated array
 	py.allow_threads(|| -> Result<(), BopError> {
-		if len == 0 {
-			return Err(BopError::EmptyData);
-		}
-
-		let chosen = match kern {
-			Kernel::Auto => detect_best_batch_kernel(),
-			k => k,
-		};
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => {
-					bop_scalar(open_slice, high_slice, low_slice, close_slice, slice_out)
-				}
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open_slice, high_slice, low_slice, close_slice, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open_slice, high_slice, low_slice, close_slice, slice_out),
-				_ => unreachable!(),
-			}
-		}
-		Ok(())
+		// Use the zero-copy inner function that writes directly to output
+		bop_batch_inner_into(open_slice, high_slice, low_slice, close_slice, kern, slice_out)
 	})
 	.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Build dict with the GIL
+	// Build result dictionary
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((1, len))?)?;
-	dict.set_item("rows", 1)?;
-	dict.set_item("cols", len)?;
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("rows", rows)?;
+	dict.set_item("cols", cols)?;
 
-	// Maintain empty lists so downstream code can zip(..) - matching ALMA pattern
-	dict.set_item("params", PyList::empty(py))?; // keep for legacy
-	dict.set_item("periods", PyList::empty(py))?;
-	dict.set_item("offsets", PyList::empty(py))?;
-	dict.set_item("sigmas", PyList::empty(py))?;
+	// BOP has no parameters, so we return empty arrays - matching ALMA pattern
+	dict.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
 
 	Ok(dict)
+}
+
+/// Write directly to output slice - no allocations
+#[inline]
+pub fn bop_into_slice(
+	dst: &mut [f64],
+	open: &[f64],
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	kern: Kernel,
+) -> Result<(), BopError> {
+	// Validate inputs
+	let len = open.len();
+	if len == 0 {
+		return Err(BopError::DataIsEmpty);
+	}
+	if high.len() != len || low.len() != len || close.len() != len {
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: close.len(),
+		});
+	}
+	if dst.len() != len {
+		return Err(BopError::InputLengthsMismatch {
+			open_len: len,
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: dst.len(),
+		});
+	}
+
+	// Find warmup period
+	let warmup_period = (0..len)
+		.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+		.unwrap_or(len);
+
+	// Select kernel
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	// Compute directly into output
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => bop_scalar(open, high, low, close, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => bop_avx2(open, high, low, close, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				bop_scalar(open, high, low, close, dst)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn bop_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
-	let input = BopInput::from_slices(open, high, low, close, BopParams::default());
+	// Single allocation pattern
+	let mut output = vec![0.0; open.len()];
 
-	bop_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	bop_into_slice(&mut output, open, high, low, close, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_into(
+	open_ptr: *const f64,
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if open_ptr.is_null() || high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let open = std::slice::from_raw_parts(open_ptr, len);
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+
+		// Check for aliasing with any input
+		if open_ptr == out_ptr || high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// For aliasing case, we need to be careful about which input is aliased
+			// BOP formula: (close - open) / (high - low)
+			// We can reuse the output buffer by reading values before overwriting
+			
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			
+			// Find warmup period
+			let warmup_period = (0..len)
+				.find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+				.unwrap_or(len);
+			
+			// Fill warmup with NaN first
+			for v in &mut out[..warmup_period] {
+				*v = f64::NAN;
+			}
+			
+			// Compute BOP values starting from first valid index
+			for i in warmup_period..len {
+				let denom = high[i] - low[i];
+				out[i] = if denom <= 0.0 {
+					0.0
+				} else {
+					(close[i] - open[i]) / denom
+				};
+			}
+		} else {
+			// No aliasing, compute directly
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			bop_into_slice(out, open, high, low, close, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn bop_batch_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
 	// BOP has no parameters, so batch processing is just the regular calculation
-	bop_batch_with_kernel(open, high, low, close, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	// Use single allocation pattern
+	let mut output = vec![0.0; open.len()];
+	
+	bop_into_slice(&mut output, open, high, low, close, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bop_batch_into(
+	open_ptr: *const f64,
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if open_ptr.is_null() || high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let open = std::slice::from_raw_parts(open_ptr, len);
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+
+		// BOP has no parameters, so batch is just single calculation
+		bop_into_slice(out, open, high, low, close, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(1) // Always 1 row for BOP (no parameters)
+	}
 }
 
 #[cfg(feature = "wasm")]
@@ -982,7 +1158,7 @@ pub fn bop_batch_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> R
 pub fn bop_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
 	// BOP has no parameters, return empty metadata array
 	// This maintains the same structure as ALMA for uniform treatment
-	Ok(vec![])
+	Ok(Vec::new())
 }
 
 // New ergonomic WASM API

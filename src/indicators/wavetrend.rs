@@ -18,11 +18,29 @@
 //!
 //! ## Output
 //! - `WavetrendOutput` (fields: wt1, wt2, wt_diff)
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::moving_averages::ema::{ema, EmaError, EmaInput, EmaParams};
 use crate::indicators::moving_averages::sma::{sma, SmaError, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -292,67 +310,19 @@ pub fn wavetrend_scalar(
 	factor: f64,
 	first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
-	let data_valid = &data[first..];
+	// Calculate warmup period
+	let warmup_period = first + channel_len - 1 + average_len - 1 + ma_len - 1;
 
-	let esa_input = EmaInput::from_slice(
-		data_valid,
-		EmaParams {
-			period: Some(channel_len),
-		},
-	);
-	let esa_output = ema(&esa_input)?;
-	let esa_values = &esa_output.values;
+	// Allocate output arrays with NaN prefix using helper functions
+	let mut wt1_final = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut wt2_final = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut diff_final = alloc_with_nan_prefix(data.len(), warmup_period);
 
-	let mut diff_esa = vec![f64::NAN; data_valid.len()];
-	for i in 0..data_valid.len() {
-		if !data_valid[i].is_nan() && !esa_values[i].is_nan() {
-			diff_esa[i] = (data_valid[i] - esa_values[i]).abs();
-		}
-	}
-
-	let de_input = EmaInput::from_slice(
-		&diff_esa,
-		EmaParams {
-			period: Some(channel_len),
-		},
-	);
-	let de_output = ema(&de_input)?;
-	let de_values = &de_output.values;
-
-	let mut ci = vec![f64::NAN; data_valid.len()];
-	for i in 0..data_valid.len() {
-		if !data_valid[i].is_nan() && !esa_values[i].is_nan() && !de_values[i].is_nan() {
-			let den = factor * de_values[i];
-			if den != 0.0 {
-				ci[i] = (data_valid[i] - esa_values[i]) / den;
-			}
-		}
-	}
-
-	let wt1_input = EmaInput::from_slice(
-		&ci,
-		EmaParams {
-			period: Some(average_len),
-		},
-	);
-	let wt1_output = ema(&wt1_input)?;
-	let wt1_values = &wt1_output.values;
-
-	let wt2_input = SmaInput::from_slice(wt1_values, SmaParams { period: Some(ma_len) });
-	let wt2_output = sma(&wt2_input)?;
-	let wt2_values = &wt2_output.values;
-
-	let mut wt1_final = vec![f64::NAN; data.len()];
-	let mut wt2_final = vec![f64::NAN; data.len()];
-	let mut diff_final = vec![f64::NAN; data.len()];
-
-	for i in 0..data_valid.len() {
-		wt1_final[i + first] = wt1_values[i];
-		wt2_final[i + first] = wt2_values[i];
-		if !wt1_values[i].is_nan() && !wt2_values[i].is_nan() {
-			diff_final[i + first] = wt2_values[i] - wt1_values[i];
-		}
-	}
+	// Use the compute_into function to avoid intermediate allocations
+	wavetrend_compute_into(
+		data, channel_len, average_len, ma_len, factor, first, warmup_period,
+		&mut wt1_final, &mut wt2_final, &mut diff_final, Kernel::Scalar
+	)?;
 
 	Ok(WavetrendOutput {
 		wt1: wt1_final,
@@ -418,6 +388,289 @@ pub unsafe fn wavetrend_avx512_long(
 	first: usize,
 ) -> Result<WavetrendOutput, WavetrendError> {
 	wavetrend_scalar(data, channel_len, average_len, ma_len, factor, first)
+}
+
+#[inline(always)]
+fn wavetrend_prepare<'a>(
+	input: &'a WavetrendInput,
+) -> Result<(&'a [f64], usize, usize, usize, f64, usize, usize), WavetrendError> {
+	let data: &[f64] = input.as_ref();
+	if data.is_empty() {
+		return Err(WavetrendError::EmptyData);
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(WavetrendError::AllValuesNaN)?;
+	let channel_len = input.get_channel_length();
+	let average_len = input.get_average_length();
+	let ma_len = input.get_ma_length();
+	let factor = input.get_factor();
+	
+	// Validate parameters
+	if channel_len == 0 || channel_len > data.len() {
+		return Err(WavetrendError::InvalidChannelLen {
+			channel_length: channel_len,
+			data_len: data.len(),
+		});
+	}
+	if average_len == 0 || average_len > data.len() {
+		return Err(WavetrendError::InvalidAverageLen {
+			average_length: average_len,
+			data_len: data.len(),
+		});
+	}
+	if ma_len == 0 || ma_len > data.len() {
+		return Err(WavetrendError::InvalidMaLen {
+			ma_length: ma_len,
+			data_len: data.len(),
+		});
+	}
+	
+	let max_period = channel_len.max(average_len).max(ma_len);
+	if data.len() - first < max_period {
+		return Err(WavetrendError::NotEnoughValidData {
+			needed: max_period,
+			valid: data.len() - first,
+		});
+	}
+	
+	// Calculate warmup period
+	let warmup_period = first + channel_len - 1 + average_len - 1 + ma_len - 1;
+	
+	Ok((data, channel_len, average_len, ma_len, factor, first, warmup_period))
+}
+
+#[inline(always)]
+fn wavetrend_compute_into(
+	data: &[f64],
+	channel_len: usize,
+	average_len: usize,
+	ma_len: usize,
+	factor: f64,
+	first: usize,
+	warmup_period: usize,
+	dst_wt1: &mut [f64],
+	dst_wt2: &mut [f64],
+	dst_wt_diff: &mut [f64],
+	kernel: Kernel,
+) -> Result<(), WavetrendError> {
+	// Fill outputs with NaN up to warmup period
+	for i in 0..warmup_period {
+		dst_wt1[i] = f64::NAN;
+		dst_wt2[i] = f64::NAN;
+		dst_wt_diff[i] = f64::NAN;
+	}
+	
+	let data_valid = &data[first..];
+	
+	// We need working space for intermediate calculations
+	// Use stack allocation for small periods, heap for large
+	if data_valid.len() <= STACK_LIMIT {
+		// Stack allocation for small data
+		let mut esa_buf = [0.0f64; STACK_LIMIT];
+		let mut de_buf = [0.0f64; STACK_LIMIT];
+		let mut ci_buf = [0.0f64; STACK_LIMIT];
+		let mut wt1_buf = [0.0f64; STACK_LIMIT];
+		let mut wt2_buf = [0.0f64; STACK_LIMIT];
+		
+		let esa = &mut esa_buf[..data_valid.len()];
+		let de = &mut de_buf[..data_valid.len()];
+		let ci = &mut ci_buf[..data_valid.len()];
+		let wt1 = &mut wt1_buf[..data_valid.len()];
+		let wt2 = &mut wt2_buf[..data_valid.len()];
+		
+		wavetrend_core_computation(
+			data_valid, channel_len, average_len, ma_len, factor,
+			esa, de, ci, wt1, wt2
+		)?;
+		
+		// Copy results to output starting from warmup_period
+		for i in 0..data_valid.len() {
+			let out_idx = i + first;
+			if out_idx >= warmup_period {
+				dst_wt1[out_idx] = wt1[i];
+				dst_wt2[out_idx] = wt2[i];
+				if !wt1[i].is_nan() && !wt2[i].is_nan() {
+					dst_wt_diff[out_idx] = wt2[i] - wt1[i];
+				} else {
+					dst_wt_diff[out_idx] = f64::NAN;
+				}
+			}
+		}
+	} else {
+		// Heap allocation for large data
+		let mut esa = vec![0.0; data_valid.len()];
+		let mut de = vec![0.0; data_valid.len()];
+		let mut ci = vec![0.0; data_valid.len()];
+		let mut wt1 = vec![0.0; data_valid.len()];
+		let mut wt2 = vec![0.0; data_valid.len()];
+		
+		wavetrend_core_computation(
+			data_valid, channel_len, average_len, ma_len, factor,
+			&mut esa, &mut de, &mut ci, &mut wt1, &mut wt2
+		)?;
+		
+		// Copy results to output starting from warmup_period
+		for i in 0..data_valid.len() {
+			let out_idx = i + first;
+			if out_idx >= warmup_period {
+				dst_wt1[out_idx] = wt1[i];
+				dst_wt2[out_idx] = wt2[i];
+				if !wt1[i].is_nan() && !wt2[i].is_nan() {
+					dst_wt_diff[out_idx] = wt2[i] - wt1[i];
+				} else {
+					dst_wt_diff[out_idx] = f64::NAN;
+				}
+			}
+		}
+	}
+	
+	Ok(())
+}
+
+// Stack allocation limit for intermediate buffers
+const STACK_LIMIT: usize = 512;
+
+#[inline(always)]
+fn wavetrend_core_computation(
+	data: &[f64],
+	channel_len: usize,
+	average_len: usize,
+	ma_len: usize,
+	factor: f64,
+	esa: &mut [f64],
+	de: &mut [f64],
+	ci: &mut [f64],
+	wt1: &mut [f64],
+	wt2: &mut [f64],
+) -> Result<(), WavetrendError> {
+	// Stage 1: ESA = EMA(channel_length) on price
+	ema_compute_into(data, channel_len, esa);
+	
+	// Stage 2: DE = EMA(channel_length) on |price - ESA|
+	// We need a temporary buffer for the absolute differences
+	// Then compute EMA into de
+	if data.len() <= STACK_LIMIT {
+		let mut abs_diff_buf = [0.0f64; STACK_LIMIT];
+		let abs_diff = &mut abs_diff_buf[..data.len()];
+		for i in 0..data.len() {
+			abs_diff[i] = (data[i] - esa[i]).abs();
+		}
+		ema_compute_into(abs_diff, channel_len, de);
+	} else {
+		let mut abs_diff = vec![0.0; data.len()];
+		for i in 0..data.len() {
+			abs_diff[i] = (data[i] - esa[i]).abs();
+		}
+		ema_compute_into(&abs_diff, channel_len, de);
+	}
+	
+	// Stage 3: CI = (price - ESA) / (factor * DE)
+	for i in 0..data.len() {
+		let den = factor * de[i];
+		if den != 0.0 && !data[i].is_nan() && !esa[i].is_nan() && !de[i].is_nan() {
+			ci[i] = (data[i] - esa[i]) / den;
+		} else {
+			ci[i] = f64::NAN;
+		}
+	}
+	
+	// Stage 4: WT1 = EMA(average_length) on CI
+	ema_compute_into(ci, average_len, wt1);
+	
+	// Stage 5: WT2 = SMA(ma_length) on WT1
+	sma_compute_into(wt1, ma_len, wt2);
+	
+	Ok(())
+}
+
+// Helper function for in-place EMA computation
+#[inline(always)]
+fn ema_compute_into(data: &[f64], period: usize, out: &mut [f64]) {
+	if period == 0 || data.is_empty() {
+		return;
+	}
+	
+	let alpha = 2.0 / (period as f64 + 1.0);
+	let beta = 1.0 - alpha;
+	
+	// Find first valid value
+	let mut ema_val = f64::NAN;
+	for i in 0..data.len() {
+		if !data[i].is_nan() {
+			if ema_val.is_nan() {
+				ema_val = data[i];
+			} else {
+				ema_val = alpha * data[i] + beta * ema_val;
+			}
+			out[i] = ema_val;
+		} else {
+			out[i] = f64::NAN;
+		}
+	}
+}
+
+// Helper function for in-place SMA computation
+#[inline(always)]
+fn sma_compute_into(data: &[f64], period: usize, out: &mut [f64]) {
+	if period == 0 || data.is_empty() {
+		return;
+	}
+	
+	let mut sum = 0.0;
+	let mut count = 0;
+	
+	// Initialize with NaN
+	for i in 0..out.len() {
+		out[i] = f64::NAN;
+	}
+	
+	// Calculate SMA
+	for i in 0..data.len() {
+		if !data[i].is_nan() {
+			sum += data[i];
+			count += 1;
+			
+			if i >= period {
+				if !data[i - period].is_nan() {
+					sum -= data[i - period];
+					count -= 1;
+				}
+			}
+			
+			if count >= period {
+				out[i] = sum / period as f64;
+			}
+		}
+	}
+}
+
+/// Write wavetrend results directly to output slices - no allocations
+#[inline]
+pub fn wavetrend_into_slice(
+	dst_wt1: &mut [f64],
+	dst_wt2: &mut [f64],
+	dst_wt_diff: &mut [f64],
+	input: &WavetrendInput,
+	kern: Kernel,
+) -> Result<(), WavetrendError> {
+	// Prepare and validate parameters
+	let (data, channel_len, average_len, ma_len, factor, first, warmup_period) = wavetrend_prepare(input)?;
+	
+	// Validate output slice lengths
+	if dst_wt1.len() != data.len() || dst_wt2.len() != data.len() || dst_wt_diff.len() != data.len() {
+		return Err(WavetrendError::InvalidChannelLen {
+			channel_length: dst_wt1.len(),
+			data_len: data.len(),
+		});
+	}
+	
+	// Compute directly into output slices
+	wavetrend_compute_into(
+		data, channel_len, average_len, ma_len, factor, first, warmup_period,
+		dst_wt1, dst_wt2, dst_wt_diff, kern
+	)?;
+	
+	Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -810,9 +1063,39 @@ fn wavetrend_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut wt1 = vec![f64::NAN; rows * cols];
-	let mut wt2 = vec![f64::NAN; rows * cols];
-	let mut wt_diff = vec![f64::NAN; rows * cols];
+
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| {
+			first + c.channel_length.unwrap() - 1 + c.average_length.unwrap() - 1 + c.ma_length.unwrap() - 1
+		})
+		.collect();
+
+	// Use helper functions for batch allocation
+	let mut wt1_mu = make_uninit_matrix(rows, cols);
+	let mut wt2_mu = make_uninit_matrix(rows, cols);
+	let mut wt_diff_mu = make_uninit_matrix(rows, cols);
+
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut wt1_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut wt2_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut wt_diff_mu, cols, &warmup_periods);
+
+	// Convert to mutable slices for computation
+	let mut wt1_guard = core::mem::ManuallyDrop::new(wt1_mu);
+	let mut wt2_guard = core::mem::ManuallyDrop::new(wt2_mu);
+	let mut wt_diff_guard = core::mem::ManuallyDrop::new(wt_diff_mu);
+
+	let wt1: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(wt1_guard.as_mut_ptr() as *mut f64, wt1_guard.len())
+	};
+	let wt2: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(wt2_guard.as_mut_ptr() as *mut f64, wt2_guard.len())
+	};
+	let wt_diff: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(wt_diff_guard.as_mut_ptr() as *mut f64, wt_diff_guard.len())
+	};
 
 	let do_row = |row: usize, w1: &mut [f64], w2: &mut [f64], wd: &mut [f64]| unsafe {
 		let p = &combos[row];
@@ -863,14 +1146,124 @@ fn wavetrend_batch_inner(
 			do_row(row, w1, w2, wd);
 		}
 	}
+
+	// Convert back to owned vectors
+	let wt1_vec = unsafe {
+		Vec::from_raw_parts(
+			wt1_guard.as_mut_ptr() as *mut f64,
+			wt1_guard.len(),
+			wt1_guard.capacity(),
+		)
+	};
+	let wt2_vec = unsafe {
+		Vec::from_raw_parts(
+			wt2_guard.as_mut_ptr() as *mut f64,
+			wt2_guard.len(),
+			wt2_guard.capacity(),
+		)
+	};
+	let wt_diff_vec = unsafe {
+		Vec::from_raw_parts(
+			wt_diff_guard.as_mut_ptr() as *mut f64,
+			wt_diff_guard.len(),
+			wt_diff_guard.capacity(),
+		)
+	};
+
 	Ok(WavetrendBatchOutput {
-		wt1,
-		wt2,
-		wt_diff,
+		wt1: wt1_vec,
+		wt2: wt2_vec,
+		wt_diff: wt_diff_vec,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn wavetrend_batch_inner_into(
+	data: &[f64],
+	sweep: &WavetrendBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out_wt1: &mut [f64],
+	out_wt2: &mut [f64],
+	out_wt_diff: &mut [f64],
+) -> Result<Vec<WavetrendParams>, WavetrendError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(WavetrendError::InvalidChannelLen {
+			channel_length: 0,
+			data_len: 0,
+		});
+	}
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(WavetrendError::AllValuesNaN)?;
+	let max_ch = combos.iter().map(|c| c.channel_length.unwrap()).max().unwrap();
+	let max_avg = combos.iter().map(|c| c.average_length.unwrap()).max().unwrap();
+	let max_ma = combos.iter().map(|c| c.ma_length.unwrap()).max().unwrap();
+	let max_p = *[max_ch, max_avg, max_ma].iter().max().unwrap();
+	if data.len() - first < max_p {
+		return Err(WavetrendError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+
+	let do_row = |row: usize, w1: &mut [f64], w2: &mut [f64], wd: &mut [f64]| unsafe {
+		let p = &combos[row];
+		let r = wavetrend_row_scalar(
+			data,
+			first,
+			p.channel_length.unwrap(),
+			p.average_length.unwrap(),
+			p.ma_length.unwrap(),
+			p.factor.unwrap_or(0.015),
+			w1,
+			w2,
+			wd,
+		);
+		if let Err(e) = r {
+			panic!("wavetrend row error: {:?}", e);
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out_wt1.par_chunks_mut(cols)
+				.zip(out_wt2.par_chunks_mut(cols))
+				.zip(out_wt_diff.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, ((w1, w2), wd))| do_row(row, w1, w2, wd));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (((w1, w2), wd))) in out_wt1
+				.chunks_mut(cols)
+				.zip(out_wt2.chunks_mut(cols))
+				.zip(out_wt_diff.chunks_mut(cols))
+				.enumerate()
+			{
+				do_row(row, w1, w2, wd);
+			}
+		}
+	} else {
+		for (row, (((w1, w2), wd))) in out_wt1
+			.chunks_mut(cols)
+			.zip(out_wt2.chunks_mut(cols))
+			.zip(out_wt_diff.chunks_mut(cols))
+			.enumerate()
+		{
+			do_row(row, w1, w2, wd);
+		}
+	}
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -1350,4 +1743,325 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wavetrend")]
+#[pyo3(signature = (data, channel_length, average_length, ma_length, factor, kernel=None))]
+pub fn wavetrend_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	channel_length: usize,
+	average_length: usize,
+	ma_length: usize,
+	factor: f64,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = WavetrendParams {
+		channel_length: Some(channel_length),
+		average_length: Some(average_length),
+		ma_length: Some(ma_length),
+		factor: Some(factor),
+	};
+	let input = WavetrendInput::from_slice(slice_in, params);
+
+	let (wt1_vec, wt2_vec, wt_diff_vec) = py
+		.allow_threads(|| {
+			wavetrend_with_kernel(&input, kern).map(|o| (o.wt1, o.wt2, o.wt_diff))
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		wt1_vec.into_pyarray(py),
+		wt2_vec.into_pyarray(py),
+		wt_diff_vec.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "WavetrendStream")]
+pub struct WavetrendStreamPy {
+	stream: WavetrendStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl WavetrendStreamPy {
+	#[new]
+	fn new(channel_length: usize, average_length: usize, ma_length: usize, factor: f64) -> PyResult<Self> {
+		let params = WavetrendParams {
+			channel_length: Some(channel_length),
+			average_length: Some(average_length),
+			ma_length: Some(ma_length),
+			factor: Some(factor),
+		};
+		let stream = WavetrendStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(WavetrendStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "wavetrend_batch")]
+#[pyo3(signature = (data, channel_length_range, average_length_range, ma_length_range, factor_range, kernel=None))]
+pub fn wavetrend_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	channel_length_range: (usize, usize, usize),
+	average_length_range: (usize, usize, usize),
+	ma_length_range: (usize, usize, usize),
+	factor_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = WavetrendBatchRange {
+		channel_length: channel_length_range,
+		average_length: average_length_range,
+		ma_length: ma_length_range,
+		factor: factor_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Allocate three arrays for the three outputs
+	let wt1_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let wt2_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let wt_diff_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+
+	let slice_wt1 = unsafe { wt1_arr.as_slice_mut()? };
+	let slice_wt2 = unsafe { wt2_arr.as_slice_mut()? };
+	let slice_wt_diff = unsafe { wt_diff_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			wavetrend_batch_inner_into(slice_in, &sweep, simd, true, slice_wt1, slice_wt2, slice_wt_diff)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("wt1", wt1_arr.reshape((rows, cols))?)?;
+	dict.set_item("wt2", wt2_arr.reshape((rows, cols))?)?;
+	dict.set_item("wt_diff", wt_diff_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"channel_lengths",
+		combos
+			.iter()
+			.map(|p| p.channel_length.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"average_lengths",
+		combos
+			.iter()
+			.map(|p| p.average_length.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"ma_lengths",
+		combos
+			.iter()
+			.map(|p| p.ma_length.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"factors",
+		combos
+			.iter()
+			.map(|p| p.factor.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wavetrend_js(
+	data: &[f64],
+	channel_length: usize,
+	average_length: usize,
+	ma_length: usize,
+	factor: f64,
+) -> Result<Vec<f64>, JsValue> {
+	let params = WavetrendParams {
+		channel_length: Some(channel_length),
+		average_length: Some(average_length),
+		ma_length: Some(ma_length),
+		factor: Some(factor),
+	};
+	let input = WavetrendInput::from_slice(data, params);
+	
+	// Single allocation for flattened output [wt1..., wt2..., wt_diff...]
+	let mut output = vec![0.0; data.len() * 3];
+	let (wt1_part, rest) = output.split_at_mut(data.len());
+	let (wt2_part, wt_diff_part) = rest.split_at_mut(data.len());
+	
+	wavetrend_into_slice(wt1_part, wt2_part, wt_diff_part, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wavetrend_into(
+	in_ptr: *const f64,
+	wt1_ptr: *mut f64,
+	wt2_ptr: *mut f64,
+	wt_diff_ptr: *mut f64,
+	len: usize,
+	channel_length: usize,
+	average_length: usize,
+	ma_length: usize,
+	factor: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || wt1_ptr.is_null() || wt2_ptr.is_null() || wt_diff_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = WavetrendParams {
+			channel_length: Some(channel_length),
+			average_length: Some(average_length),
+			ma_length: Some(ma_length),
+			factor: Some(factor),
+		};
+		let input = WavetrendInput::from_slice(data, params);
+		
+		// Check if any output pointer aliases with input
+		let needs_temp = in_ptr as *const u8 == wt1_ptr as *const u8 ||
+		                 in_ptr as *const u8 == wt2_ptr as *const u8 ||
+		                 in_ptr as *const u8 == wt_diff_ptr as *const u8;
+		
+		if needs_temp {
+			// Use temporary buffer if any output aliases input
+			let mut temp = vec![0.0; len * 3];
+			let (temp_wt1, rest) = temp.split_at_mut(len);
+			let (temp_wt2, temp_wt_diff) = rest.split_at_mut(len);
+			
+			wavetrend_into_slice(temp_wt1, temp_wt2, temp_wt_diff, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy from temp to output pointers
+			let wt1_out = std::slice::from_raw_parts_mut(wt1_ptr, len);
+			let wt2_out = std::slice::from_raw_parts_mut(wt2_ptr, len);
+			let wt_diff_out = std::slice::from_raw_parts_mut(wt_diff_ptr, len);
+			
+			wt1_out.copy_from_slice(temp_wt1);
+			wt2_out.copy_from_slice(temp_wt2);
+			wt_diff_out.copy_from_slice(temp_wt_diff);
+		} else {
+			// Direct computation into output slices
+			let wt1_out = std::slice::from_raw_parts_mut(wt1_ptr, len);
+			let wt2_out = std::slice::from_raw_parts_mut(wt2_ptr, len);
+			let wt_diff_out = std::slice::from_raw_parts_mut(wt_diff_ptr, len);
+			
+			wavetrend_into_slice(wt1_out, wt2_out, wt_diff_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wavetrend_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn wavetrend_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WavetrendBatchConfig {
+	pub channel_length_range: (usize, usize, usize),
+	pub average_length_range: (usize, usize, usize),
+	pub ma_length_range: (usize, usize, usize),
+	pub factor_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct WavetrendBatchJsOutput {
+	pub wt1_values: Vec<f64>,
+	pub wt2_values: Vec<f64>,
+	pub wt_diff_values: Vec<f64>,
+	pub channel_lengths: Vec<usize>,
+	pub average_lengths: Vec<usize>,
+	pub ma_lengths: Vec<usize>,
+	pub factors: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = wavetrend_batch)]
+pub fn wavetrend_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: WavetrendBatchConfig = 
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let sweep = WavetrendBatchRange {
+		channel_length: (config.channel_length_range.0, config.channel_length_range.1, config.channel_length_range.2),
+		average_length: (config.average_length_range.0, config.average_length_range.1, config.average_length_range.2),
+		ma_length: (config.ma_length_range.0, config.ma_length_range.1, config.ma_length_range.2),
+		factor: (config.factor_range.0, config.factor_range.1, config.factor_range.2),
+	};
+	
+	let batch_output = wavetrend_batch_with_kernel(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = WavetrendBatchJsOutput {
+		wt1_values: batch_output.wt1,
+		wt2_values: batch_output.wt2,
+		wt_diff_values: batch_output.wt_diff,
+		channel_lengths: batch_output.combos.iter().map(|p| p.channel_length.unwrap()).collect(),
+		average_lengths: batch_output.combos.iter().map(|p| p.average_length.unwrap()).collect(),
+		ma_lengths: batch_output.combos.iter().map(|p| p.ma_length.unwrap()).collect(),
+		factors: batch_output.combos.iter().map(|p| p.factor.unwrap()).collect(),
+		rows: batch_output.combos.len(),
+		cols: data.len(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

@@ -435,6 +435,16 @@ const EXPECTED_OUTPUTS = {
             -0.5336179295624333
         ]
     },
+    rocr: {
+        defaultParams: { period: 10 },
+        last5Values: [
+            0.9977448290950706,
+            0.9944380965183492,
+            0.9967247986764135,
+            0.9950545846019277,
+            0.984954072979463
+        ]
+    },
     di: {
         defaultParams: { period: 14 },
         plusLast5Values: [

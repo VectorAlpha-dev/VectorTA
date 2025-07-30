@@ -23,7 +23,9 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -31,6 +33,10 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for PmaInput<'a> {
 	#[inline(always)]
@@ -182,9 +188,30 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
 
 #[inline]
 pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, PmaError> {
-	let mut predict = vec![f64::NAN; data.len()];
-	let mut trigger = vec![f64::NAN; data.len()];
-	let mut wma1 = vec![0.0; data.len()];
+	let warmup_period = first_valid_idx + 7;
+	let mut predict = alloc_with_nan_prefix(data.len(), warmup_period);
+	let mut trigger = alloc_with_nan_prefix(data.len(), warmup_period);
+	
+	// Use a sliding window for wma1 values - only need last 7 values
+	// First, compute initial wma1 values to fill the window
+	let mut wma1_window = [0.0; 7];
+	
+	// Compute first 7 wma1 values
+	if data.len() >= first_valid_idx + 7 {
+		for i in 0..7 {
+			let j = first_valid_idx + i;
+			if j >= 6 {
+				wma1_window[i] = ((7.0 * data[j])
+					+ (6.0 * data[j - 1])
+					+ (5.0 * data[j - 2])
+					+ (4.0 * data[j - 3])
+					+ (3.0 * data[j - 4])
+					+ (2.0 * data[j - 5])
+					+ data[j - 6])
+					/ 28.0;
+			}
+		}
+	}
 
 	for j in (first_valid_idx + 6)..data.len() {
 		let wma1_j = ((7.0 * data[j])
@@ -195,15 +222,20 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
 			+ (2.0 * data[j - 5])
 			+ data[j - 6])
 			/ 28.0;
-		wma1[j] = wma1_j;
+		
+		// Shift window and add new value
+		for i in 0..6 {
+			wma1_window[i] = wma1_window[i + 1];
+		}
+		wma1_window[6] = wma1_j;
 
-		let wma2 = ((7.0 * wma1[j])
-			+ (6.0 * wma1[j - 1])
-			+ (5.0 * wma1[j - 2])
-			+ (4.0 * wma1[j - 3])
-			+ (3.0 * wma1[j - 4])
-			+ (2.0 * wma1[j - 5])
-			+ wma1[j - 6])
+		let wma2 = ((7.0 * wma1_window[6])
+			+ (6.0 * wma1_window[5])
+			+ (5.0 * wma1_window[4])
+			+ (4.0 * wma1_window[3])
+			+ (3.0 * wma1_window[2])
+			+ (2.0 * wma1_window[1])
+			+ wma1_window[0])
 			/ 28.0;
 
 		let predict_j = (2.0 * wma1_j) - wma2;
@@ -214,6 +246,79 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
 	}
 
 	Ok(PmaOutput { predict, trigger })
+}
+
+#[inline(always)]
+fn pma_compute_into(
+	data: &[f64],
+	first_valid_idx: usize,
+	kernel: Kernel,
+	predict_out: &mut [f64],
+	trigger_out: &mut [f64],
+) {
+	let warmup_period = first_valid_idx + 7;
+	
+	// Fill warmup period with NaN
+	for i in 0..warmup_period.min(data.len()) {
+		predict_out[i] = f64::NAN;
+		trigger_out[i] = f64::NAN;
+	}
+	
+	// Use a sliding window for wma1 values - only need last 7 values
+	let mut wma1_window = [0.0; 7];
+	
+	// Compute first 7 wma1 values
+	if data.len() >= first_valid_idx + 7 {
+		for i in 0..7 {
+			let j = first_valid_idx + i;
+			if j >= 6 {
+				wma1_window[i] = ((7.0 * data[j])
+					+ (6.0 * data[j - 1])
+					+ (5.0 * data[j - 2])
+					+ (4.0 * data[j - 3])
+					+ (3.0 * data[j - 4])
+					+ (2.0 * data[j - 5])
+					+ data[j - 6])
+					/ 28.0;
+			}
+		}
+	}
+
+	for j in (first_valid_idx + 6)..data.len() {
+		let wma1_j = ((7.0 * data[j])
+			+ (6.0 * data[j - 1])
+			+ (5.0 * data[j - 2])
+			+ (4.0 * data[j - 3])
+			+ (3.0 * data[j - 4])
+			+ (2.0 * data[j - 5])
+			+ data[j - 6])
+			/ 28.0;
+		
+		// Shift window and add new value
+		for i in 0..6 {
+			wma1_window[i] = wma1_window[i + 1];
+		}
+		wma1_window[6] = wma1_j;
+
+		let wma2 = ((7.0 * wma1_window[6])
+			+ (6.0 * wma1_window[5])
+			+ (5.0 * wma1_window[4])
+			+ (4.0 * wma1_window[3])
+			+ (3.0 * wma1_window[2])
+			+ (2.0 * wma1_window[1])
+			+ wma1_window[0])
+			/ 28.0;
+
+		let predict_j = (2.0 * wma1_j) - wma2;
+		predict_out[j] = predict_j;
+
+		let trigger_j = if j >= 3 {
+			((4.0 * predict_j) + (3.0 * predict_out[j - 1]) + (2.0 * predict_out[j - 2]) + predict_out[j - 3]) / 10.0
+		} else {
+			f64::NAN
+		};
+		trigger_out[j] = trigger_j;
+	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -257,8 +362,8 @@ pub fn pma_batch_with_kernel(data: &[f64], sweep: &PmaBatchRange, k: Kernel) -> 
 
 #[derive(Debug, Clone)]
 pub struct PmaStream {
-	buffer: Vec<f64>,
-	wma1: Vec<f64>,
+	buffer: [f64; 7],
+	wma1: [f64; 7],
 	idx: usize,
 	filled: bool,
 }
@@ -266,8 +371,8 @@ pub struct PmaStream {
 impl PmaStream {
 	pub fn try_new(_params: PmaParams) -> Result<Self, PmaError> {
 		Ok(Self {
-			buffer: vec![f64::NAN; 7],
-			wma1: vec![0.0; 7],
+			buffer: [f64::NAN; 7],
+			wma1: [0.0; 7],
 			idx: 0,
 			filled: false,
 		})
@@ -419,9 +524,8 @@ pub unsafe fn pma_row_scalar(
 	out_predict: &mut [f64],
 	out_trigger: &mut [f64],
 ) {
-	let result = pma_scalar(data, first).unwrap();
-	out_predict.copy_from_slice(&result.predict);
-	out_trigger.copy_from_slice(&result.trigger);
+	// Compute directly into output slices - no allocation!
+	pma_compute_into(data, first, Kernel::Scalar, out_predict, out_trigger);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -478,6 +582,327 @@ pub unsafe fn pma_row_avx512_long(
 	out_trigger: &mut [f64],
 ) {
 	pma_row_scalar(data, first, stride, dummy, inv_n, out_predict, out_trigger);
+}
+
+//--------------------------
+// WASM Bindings
+//--------------------------
+#[cfg(feature = "wasm")]
+pub fn pma_into_slice(
+	predict_dst: &mut [f64],
+	trigger_dst: &mut [f64],
+	input: &PmaInput,
+	kern: Kernel,
+) -> Result<(), PmaError> {
+	let data = input.as_ref();
+	
+	if predict_dst.len() != data.len() || trigger_dst.len() != data.len() {
+		return Err(PmaError::EmptyData); // Using existing error type
+	}
+	
+	if data.is_empty() {
+		return Err(PmaError::EmptyData);
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(PmaError::AllValuesNaN)?;
+	
+	if (data.len() - first) < 7 {
+		return Err(PmaError::NotEnoughValidData {
+			valid: data.len() - first,
+		});
+	}
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	// Direct computation into output slices - no allocation!
+	pma_compute_into(data, first, chosen, predict_dst, trigger_dst);
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_js(data: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let params = PmaParams {};
+	let input = PmaInput::from_slice(data, params);
+	
+	// Single allocation for flattened output
+	let mut result = vec![0.0; data.len() * 2];
+	let (predict_part, trigger_part) = result.split_at_mut(data.len());
+	
+	pma_into_slice(predict_part, trigger_part, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(result)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_into(
+	in_ptr: *const f64,
+	predict_ptr: *mut f64,
+	trigger_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || predict_ptr.is_null() || trigger_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = PmaParams {};
+		let input = PmaInput::from_slice(data, params);
+		
+		// Check for aliasing - need to handle all possible combinations
+		let need_temp = in_ptr == predict_ptr || in_ptr == trigger_ptr || predict_ptr == trigger_ptr;
+		
+		if need_temp {
+			let mut temp_predict = vec![0.0; len];
+			let mut temp_trigger = vec![0.0; len];
+			
+			pma_into_slice(&mut temp_predict, &mut temp_trigger, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let predict_out = std::slice::from_raw_parts_mut(predict_ptr, len);
+			let trigger_out = std::slice::from_raw_parts_mut(trigger_ptr, len);
+			
+			predict_out.copy_from_slice(&temp_predict);
+			trigger_out.copy_from_slice(&temp_trigger);
+		} else {
+			let predict_out = std::slice::from_raw_parts_mut(predict_ptr, len);
+			let trigger_out = std::slice::from_raw_parts_mut(trigger_ptr, len);
+			
+			pma_into_slice(predict_out, trigger_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PmaBatchConfig {
+	// PMA has no parameters, but we keep this for API consistency
+	pub dummy: Option<usize>,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct PmaBatchJsOutput {
+	pub predict: Vec<f64>,
+	pub trigger: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = pma_batch)]
+pub fn pma_batch_js(data: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
+	// PMA has no parameters to sweep, so we just return a single result
+	let params = PmaParams {};
+	let input = PmaInput::from_slice(data, params);
+	
+	let output = pma_with_kernel(&input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = PmaBatchJsOutput {
+		predict: output.predict,
+		trigger: output.trigger,
+		rows: 1,
+		cols: data.len(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn pma_batch_into(
+	in_ptr: *const f64,
+	predict_ptr: *mut f64,
+	trigger_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	// Since PMA has no parameters, this is the same as pma_into but returns row count
+	pma_into(in_ptr, predict_ptr, trigger_ptr, len)?;
+	Ok(1) // Always returns 1 row since no parameter sweep
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct PmaStreamWasm {
+	stream: PmaStream,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl PmaStreamWasm {
+	#[wasm_bindgen(constructor)]
+	pub fn new() -> Result<PmaStreamWasm, JsValue> {
+		let params = PmaParams {};
+		let stream = PmaStream::try_new(params)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(PmaStreamWasm { stream })
+	}
+	
+	pub fn update(&mut self, value: f64) -> Result<Vec<f64>, JsValue> {
+		match self.stream.update(value) {
+			Some((predict, trigger)) => Ok(vec![predict, trigger]),
+			None => Ok(vec![f64::NAN, f64::NAN]),
+		}
+	}
+}
+
+//--------------------------
+// Python Bindings
+//--------------------------
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "python")]
+fn validate_kernel(kernel: Option<&str>, _batch: bool) -> PyResult<Kernel> {
+	match kernel {
+		None => Ok(Kernel::Auto),
+		Some(k) => match k {
+			"auto" => Ok(Kernel::Auto),
+			"scalar" => Ok(Kernel::Scalar),
+			"avx2" => Ok(Kernel::Avx2),
+			"avx512" => Ok(Kernel::Avx512),
+			_ => Err(PyValueError::new_err(format!("Invalid kernel: {}", k))),
+		},
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pma")]
+#[pyo3(signature = (data, kernel=None))]
+pub fn pma_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = PmaParams {};
+	let pma_in = PmaInput::from_slice(slice_in, params);
+	
+	let output = py
+		.allow_threads(|| pma_with_kernel(&pma_in, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("predict", output.predict.into_pyarray(py))?;
+	dict.set_item("trigger", output.trigger.into_pyarray(py))?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "PmaStream")]
+pub struct PmaStreamPy {
+	stream: PmaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PmaStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		let params = PmaParams {};
+		let stream = PmaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(PmaStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<(f64, f64)> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pma_batch")]
+#[pyo3(signature = (data, dummy_range=None, kernel=None))]
+pub fn pma_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	dummy_range: Option<(usize, usize, usize)>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	
+	let sweep = PmaBatchRange {
+		dummy: dummy_range.unwrap_or((0, 0, 0)),
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	// Pre-allocate flattened output arrays
+	let predict_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let trigger_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let predict_slice = unsafe { predict_arr.as_slice_mut()? };
+	let trigger_slice = unsafe { trigger_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Since PMA has no real parameters to sweep, just compute once
+		let result = pma_with_kernel(&PmaInput::from_slice(slice_in, PmaParams {}), simd)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		
+		predict_slice.copy_from_slice(&result.predict);
+		trigger_slice.copy_from_slice(&result.trigger);
+		
+		Ok::<(), PyErr>(())
+	})?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("predict", predict_arr.reshape((rows, cols))?)?;
+	dict.set_item("trigger", trigger_arr.reshape((rows, cols))?)?;
+	
+	Ok(dict)
 }
 
 //--------------------------

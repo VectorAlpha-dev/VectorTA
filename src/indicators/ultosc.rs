@@ -18,9 +18,27 @@
 //! - **`Ok(UltOscOutput)`**: Contains a `Vec<f64>` matching the input length.
 //! - **`Err(UltOscError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,7 +68,8 @@ pub struct UltOscOutput {
 	pub values: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct UltOscParams {
 	pub timeperiod1: Option<usize>,
 	pub timeperiod2: Option<usize>,
@@ -210,13 +229,9 @@ pub enum UltOscError {
 	AllValuesNaN,
 }
 
-// --- KERNEL ENTRYPOINTS ---
+// --- HELPER FUNCTIONS ---
 #[inline]
-pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
-	ultosc_with_kernel(input, Kernel::Auto)
-}
-
-pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscOutput, UltOscError> {
+fn ultosc_prepare<'a>(input: &'a UltOscInput, kernel: Kernel) -> Result<((&'a [f64], &'a [f64], &'a [f64]), usize, usize, usize, usize, usize, Kernel), UltOscError> {
 	let (high, low, close) = match &input.data {
 		UltOscData::Candles {
 			candles,
@@ -231,13 +246,16 @@ pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscO
 		}
 		UltOscData::Slices { high, low, close } => (*high, *low, *close),
 	};
+	
 	let len = high.len();
 	if len == 0 || low.len() == 0 || close.len() == 0 {
 		return Err(UltOscError::EmptyData);
 	}
+	
 	let p1 = input.get_timeperiod1();
 	let p2 = input.get_timeperiod2();
 	let p3 = input.get_timeperiod3();
+	
 	if p1 == 0 || p2 == 0 || p3 == 0 || p1 > len || p2 > len || p3 > len {
 		return Err(UltOscError::InvalidPeriods {
 			p1,
@@ -246,6 +264,7 @@ pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscO
 			data_len: len,
 		});
 	}
+	
 	let largest_period = p1.max(p2.max(p3));
 	let first_valid = match (1..len).find(|&i| {
 		!high[i - 1].is_nan()
@@ -258,6 +277,7 @@ pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscO
 		Some(i) => i,
 		None => return Err(UltOscError::AllValuesNaN),
 	};
+	
 	let start_idx = first_valid + (largest_period - 1);
 	if start_idx >= len {
 		return Err(UltOscError::NotEnoughValidData {
@@ -265,22 +285,53 @@ pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscO
 			valid: len.saturating_sub(first_valid),
 		});
 	}
+	
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut out = vec![f64::NAN; len];
+	
+	Ok(((high, low, close), p1, p2, p3, first_valid, start_idx, chosen))
+}
+
+// --- KERNEL ENTRYPOINTS ---
+#[inline]
+pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
+	ultosc_with_kernel(input, Kernel::Auto)
+}
+
+pub fn ultosc_with_kernel(input: &UltOscInput, kernel: Kernel) -> Result<UltOscOutput, UltOscError> {
+	let ((high, low, close), p1, p2, p3, first_valid, start_idx, chosen) = ultosc_prepare(input, kernel)?;
+	let len = high.len();
+	let mut out = alloc_with_nan_prefix(len, start_idx);
+	
+	ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, &mut out);
+	
+	Ok(UltOscOutput { values: out })
+}
+
+#[inline]
+fn ultosc_compute_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	p1: usize,
+	p2: usize,
+	p3: usize,
+	first_valid: usize,
+	chosen: Kernel,
+	dst: &mut [f64],
+) {
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => ultosc_scalar(high, low, close, p1, p2, p3, first_valid, &mut out),
+			Kernel::Scalar | Kernel::ScalarBatch => ultosc_scalar(high, low, close, p1, p2, p3, first_valid, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => ultosc_avx2(high, low, close, p1, p2, p3, first_valid, &mut out),
+			Kernel::Avx2 | Kernel::Avx2Batch => ultosc_avx2(high, low, close, p1, p2, p3, first_valid, dst),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => ultosc_avx512(high, low, close, p1, p2, p3, first_valid, &mut out),
+			Kernel::Avx512 | Kernel::Avx512Batch => ultosc_avx512(high, low, close, p1, p2, p3, first_valid, dst),
 			_ => unreachable!(),
 		}
 	}
-	Ok(UltOscOutput { values: out })
 }
 
 // --- KERNEL IMPL ---
@@ -296,99 +347,180 @@ pub unsafe fn ultosc_scalar(
 	out: &mut [f64],
 ) {
 	let len = high.len();
-	let mut cmtl = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
-	let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
-	cmtl.resize(len, f64::NAN);
-	tr.resize(len, f64::NAN);
-	for i in 1..len {
-		if high[i].is_nan() || low[i].is_nan() || close[i].is_nan() || close[i - 1].is_nan() {
-			continue;
-		}
-		let true_low = low[i].min(close[i - 1]);
-		let mut true_range = high[i] - low[i];
-		let diff1 = (high[i] - close[i - 1]).abs();
-		if diff1 > true_range {
-			true_range = diff1;
-		}
-		let diff2 = (low[i] - close[i - 1]).abs();
-		if diff2 > true_range {
-			true_range = diff2;
-		}
-		cmtl[i] = close[i] - true_low;
-		tr[i] = true_range;
+	let max_period = p1.max(p2).max(p3);
+	
+	// Allocate temporary buffers on stack for small periods, heap for large
+	const STACK_THRESHOLD: usize = 256;
+	
+	if max_period <= STACK_THRESHOLD {
+		// Stack allocation for small periods
+		let mut cmtl_stack = [0.0_f64; STACK_THRESHOLD];
+		let mut tr_stack = [0.0_f64; STACK_THRESHOLD];
+		let cmtl_buf = &mut cmtl_stack[..max_period];
+		let tr_buf = &mut tr_stack[..max_period];
+		
+		ultosc_scalar_impl(high, low, close, p1, p2, p3, first_valid, out, cmtl_buf, tr_buf);
+	} else {
+		// Heap allocation for large periods
+		let mut cmtl_vec = vec![0.0; max_period];
+		let mut tr_vec = vec![0.0; max_period];
+		
+		ultosc_scalar_impl(high, low, close, p1, p2, p3, first_valid, out, &mut cmtl_vec, &mut tr_vec);
 	}
+}
+
+#[inline(always)]
+unsafe fn ultosc_scalar_impl(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	p1: usize,
+	p2: usize,
+	p3: usize,
+	first_valid: usize,
+	out: &mut [f64],
+	cmtl_buf: &mut [f64],
+	tr_buf: &mut [f64],
+) {
+	let len = high.len();
+	let max_period = p1.max(p2).max(p3);
+	
 	let mut sum1_a = 0.0;
 	let mut sum1_b = 0.0;
 	let mut sum2_a = 0.0;
 	let mut sum2_b = 0.0;
 	let mut sum3_a = 0.0;
 	let mut sum3_b = 0.0;
-	let start_idx = first_valid + p1.max(p2).max(p3) - 1;
-	let prime_range_1 = start_idx.saturating_sub(p1 - 1)..start_idx;
-	let prime_range_2 = start_idx.saturating_sub(p2 - 1)..start_idx;
-	let prime_range_3 = start_idx.saturating_sub(p3 - 1)..start_idx;
-	for i in prime_range_1 {
-		if i < len && !cmtl[i].is_nan() && !tr[i].is_nan() {
-			sum1_a += cmtl[i];
-			sum1_b += tr[i];
+	
+	let start_idx = first_valid + max_period - 1;
+	let mut buf_idx = 0;
+	
+	// Calculate values for warmup period
+	for i in (first_valid + 1)..=start_idx {
+		if i >= len {
+			break;
+		}
+		
+		let cmtl_val;
+		let tr_val;
+		
+		if high[i].is_nan() || low[i].is_nan() || close[i].is_nan() || close[i - 1].is_nan() {
+			cmtl_val = f64::NAN;
+			tr_val = f64::NAN;
+		} else {
+			let true_low = low[i].min(close[i - 1]);
+			let mut true_range = high[i] - low[i];
+			let diff1 = (high[i] - close[i - 1]).abs();
+			if diff1 > true_range {
+				true_range = diff1;
+			}
+			let diff2 = (low[i] - close[i - 1]).abs();
+			if diff2 > true_range {
+				true_range = diff2;
+			}
+			cmtl_val = close[i] - true_low;
+			tr_val = true_range;
+		}
+		
+		cmtl_buf[buf_idx] = cmtl_val;
+		tr_buf[buf_idx] = tr_val;
+		buf_idx = (buf_idx + 1) % max_period;
+	}
+	
+	// Initialize sums for each period
+	for i in 0..p1 {
+		let idx = (buf_idx + max_period - p1 + i) % max_period;
+		if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
+			sum1_a += cmtl_buf[idx];
+			sum1_b += tr_buf[idx];
 		}
 	}
-	for i in prime_range_2 {
-		if i < len && !cmtl[i].is_nan() && !tr[i].is_nan() {
-			sum2_a += cmtl[i];
-			sum2_b += tr[i];
+	
+	for i in 0..p2 {
+		let idx = (buf_idx + max_period - p2 + i) % max_period;
+		if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
+			sum2_a += cmtl_buf[idx];
+			sum2_b += tr_buf[idx];
 		}
 	}
-	for i in prime_range_3 {
-		if i < len && !cmtl[i].is_nan() && !tr[i].is_nan() {
-			sum3_a += cmtl[i];
-			sum3_b += tr[i];
+	
+	for i in 0..p3 {
+		let idx = (buf_idx + max_period - p3 + i) % max_period;
+		if !cmtl_buf[idx].is_nan() && !tr_buf[idx].is_nan() {
+			sum3_a += cmtl_buf[idx];
+			sum3_b += tr_buf[idx];
 		}
 	}
+	
+	// Main calculation loop
 	let mut today = start_idx;
 	while today < len {
-		if !cmtl[today].is_nan() && !tr[today].is_nan() {
-			sum1_a += cmtl[today];
-			sum1_b += tr[today];
-			sum2_a += cmtl[today];
-			sum2_b += tr[today];
-			sum3_a += cmtl[today];
-			sum3_b += tr[today];
-		}
+		// Calculate current ULTOSC value
 		let v1 = if sum1_b != 0.0 { 4.0 * (sum1_a / sum1_b) } else { 0.0 };
 		let v2 = if sum2_b != 0.0 { 2.0 * (sum2_a / sum2_b) } else { 0.0 };
 		let v3 = if sum3_b != 0.0 { sum3_a / sum3_b } else { 0.0 };
 		out[today] = 100.0 * (v1 + v2 + v3) / 7.0;
-		let trailing_1 = today as isize - (p1 as isize) + 1;
-		if trailing_1 >= 0 && (trailing_1 as usize) < len {
-			let idx = trailing_1 as usize;
-			if !cmtl[idx].is_nan() {
-				sum1_a -= cmtl[idx];
+		
+		// Prepare for next iteration
+		if today + 1 < len {
+			// Calculate new values
+			let cmtl_val;
+			let tr_val;
+			
+			if high[today + 1].is_nan() || low[today + 1].is_nan() || close[today + 1].is_nan() || close[today].is_nan() {
+				cmtl_val = f64::NAN;
+				tr_val = f64::NAN;
+			} else {
+				let true_low = low[today + 1].min(close[today]);
+				let mut true_range = high[today + 1] - low[today + 1];
+				let diff1 = (high[today + 1] - close[today]).abs();
+				if diff1 > true_range {
+					true_range = diff1;
+				}
+				let diff2 = (low[today + 1] - close[today]).abs();
+				if diff2 > true_range {
+					true_range = diff2;
+				}
+				cmtl_val = close[today + 1] - true_low;
+				tr_val = true_range;
 			}
-			if !tr[idx].is_nan() {
-				sum1_b -= tr[idx];
+			
+			// Remove oldest values from sums
+			let old_idx_1 = (buf_idx + max_period - p1) % max_period;
+			if !cmtl_buf[old_idx_1].is_nan() && !tr_buf[old_idx_1].is_nan() {
+				sum1_a -= cmtl_buf[old_idx_1];
+				sum1_b -= tr_buf[old_idx_1];
 			}
+			
+			let old_idx_2 = (buf_idx + max_period - p2) % max_period;
+			if !cmtl_buf[old_idx_2].is_nan() && !tr_buf[old_idx_2].is_nan() {
+				sum2_a -= cmtl_buf[old_idx_2];
+				sum2_b -= tr_buf[old_idx_2];
+			}
+			
+			let old_idx_3 = (buf_idx + max_period - p3) % max_period;
+			if !cmtl_buf[old_idx_3].is_nan() && !tr_buf[old_idx_3].is_nan() {
+				sum3_a -= cmtl_buf[old_idx_3];
+				sum3_b -= tr_buf[old_idx_3];
+			}
+			
+			// Add new values to buffer
+			cmtl_buf[buf_idx] = cmtl_val;
+			tr_buf[buf_idx] = tr_val;
+			
+			// Add new values to sums
+			if !cmtl_val.is_nan() && !tr_val.is_nan() {
+				sum1_a += cmtl_val;
+				sum1_b += tr_val;
+				sum2_a += cmtl_val;
+				sum2_b += tr_val;
+				sum3_a += cmtl_val;
+				sum3_b += tr_val;
+			}
+			
+			buf_idx = (buf_idx + 1) % max_period;
 		}
-		let trailing_2 = today as isize - (p2 as isize) + 1;
-		if trailing_2 >= 0 && (trailing_2 as usize) < len {
-			let idx = trailing_2 as usize;
-			if !cmtl[idx].is_nan() {
-				sum2_a -= cmtl[idx];
-			}
-			if !tr[idx].is_nan() {
-				sum2_b -= tr[idx];
-			}
-		}
-		let trailing_3 = today as isize - (p3 as isize) + 1;
-		if trailing_3 >= 0 && (trailing_3 as usize) < len {
-			let idx = trailing_3 as usize;
-			if !cmtl[idx].is_nan() {
-				sum3_a -= cmtl[idx];
-			}
-			if !tr[idx].is_nan() {
-				sum3_b -= tr[idx];
-			}
-		}
+		
 		today += 1;
 	}
 }
@@ -527,32 +659,292 @@ pub fn ultosc_row_avx512_long(
 	unsafe { ultosc_avx512_long(high, low, close, p1, p2, p3, first_valid, out) }
 }
 
-// --- Batch APIs (No grid sweep for ultosc, but maintain struct/trait parity) ---
-#[derive(Clone, Debug, Default)]
-pub struct UltOscBatchRange;
-#[derive(Clone, Debug, Default)]
-pub struct UltOscBatchBuilder;
+// --- Batch APIs ---
 #[derive(Clone, Debug)]
-pub struct UltOscBatchOutput {
+pub struct UltOscBatchRange {
+	pub timeperiod1: (usize, usize, usize),
+	pub timeperiod2: (usize, usize, usize),
+	pub timeperiod3: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct UltOscBatchConfig {
+	pub timeperiod1_range: (usize, usize, usize),
+	pub timeperiod2_range: (usize, usize, usize),
+	pub timeperiod3_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct UltOscBatchJsOutput {
 	pub values: Vec<f64>,
+	pub combos: Vec<UltOscParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct UltOscBatchBuilder {
+	kernel: Kernel,
+}
+
+impl Default for UltOscBatchBuilder {
+	fn default() -> Self {
+		Self {
+			kernel: Kernel::Auto,
+		}
+	}
 }
 
 impl UltOscBatchBuilder {
 	pub fn new() -> Self {
-		Self
+		Self::default()
 	}
+	
+	pub fn kernel(mut self, k: Kernel) -> Self {
+		self.kernel = k;
+		self
+	}
+	
 	pub fn apply_slice(
 		self,
 		high: &[f64],
 		low: &[f64],
 		close: &[f64],
-		params: UltOscParams,
-		kernel: Kernel,
+		sweep: &UltOscBatchRange,
 	) -> Result<UltOscBatchOutput, UltOscError> {
-		let input = UltOscInput::from_slices(high, low, close, params);
-		let res = ultosc_with_kernel(&input, kernel)?;
-		Ok(UltOscBatchOutput { values: res.values })
+		ultosc_batch_with_kernel(high, low, close, sweep, self.kernel)
 	}
+}
+
+#[derive(Clone, Debug)]
+pub struct UltOscBatchOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<UltOscParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+impl UltOscBatchOutput {
+	pub fn row_for_params(&self, p: &UltOscParams) -> Option<usize> {
+		self.combos.iter().position(|c| {
+			c.timeperiod1.unwrap_or(7) == p.timeperiod1.unwrap_or(7)
+				&& c.timeperiod2.unwrap_or(14) == p.timeperiod2.unwrap_or(14)
+				&& c.timeperiod3.unwrap_or(28) == p.timeperiod3.unwrap_or(28)
+		})
+	}
+	
+	pub fn values_for(&self, p: &UltOscParams) -> Option<&[f64]> {
+		self.row_for_params(p).map(|row| {
+			let start = row * self.cols;
+			&self.values[start..start + self.cols]
+		})
+	}
+}
+
+#[inline(always)]
+fn expand_grid(r: &UltOscBatchRange) -> Vec<UltOscParams> {
+	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+		if step == 0 || start == end {
+			return vec![start];
+		}
+		(start..=end).step_by(step).collect()
+	}
+	
+	let timeperiod1s = axis_usize(r.timeperiod1);
+	let timeperiod2s = axis_usize(r.timeperiod2);
+	let timeperiod3s = axis_usize(r.timeperiod3);
+	
+	let mut out = Vec::with_capacity(timeperiod1s.len() * timeperiod2s.len() * timeperiod3s.len());
+	for &tp1 in &timeperiod1s {
+		for &tp2 in &timeperiod2s {
+			for &tp3 in &timeperiod3s {
+				out.push(UltOscParams {
+					timeperiod1: Some(tp1),
+					timeperiod2: Some(tp2),
+					timeperiod3: Some(tp3),
+				});
+			}
+		}
+	}
+	out
+}
+
+pub fn ultosc_batch_with_kernel(
+	high: &[f64],
+	low: &[f64], 
+	close: &[f64],
+	sweep: &UltOscBatchRange,
+	k: Kernel,
+) -> Result<UltOscBatchOutput, UltOscError> {
+	let kernel = match k {
+		Kernel::Auto => detect_best_batch_kernel(),
+		other if other.is_batch() => other,
+		_ => return Err(UltOscError::InvalidPeriods { p1: 0, p2: 0, p3: 0, data_len: 0 }),
+	};
+	
+	let simd = match kernel {
+		Kernel::Avx512Batch => Kernel::Avx512,
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => unreachable!(),
+	};
+	
+	ultosc_batch_inner(high, low, close, sweep, simd, true)
+}
+
+#[inline(always)]
+fn ultosc_batch_inner(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &UltOscBatchRange,
+	kern: Kernel,
+	parallel: bool,
+) -> Result<UltOscBatchOutput, UltOscError> {
+	let combos = expand_grid(sweep);
+	let cols = high.len();
+	let rows = combos.len();
+	
+	if cols == 0 {
+		return Err(UltOscError::EmptyData);
+	}
+	
+	// Find first valid index
+	let mut first_valid_idx = None;
+	for i in 0..cols {
+		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(UltOscError::AllValuesNaN),
+	};
+	
+	// Calculate warmup periods for each combo
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| {
+			let p1 = c.timeperiod1.unwrap_or(7);
+			let p2 = c.timeperiod2.unwrap_or(14);
+			let p3 = c.timeperiod3.unwrap_or(28);
+			first_valid_idx + p1.max(p2).max(p3) - 1
+		})
+		.collect();
+	
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+	};
+	
+	ultosc_batch_inner_into(high, low, close, sweep, kern, parallel, out)?;
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
+	Ok(UltOscBatchOutput {
+		values,
+		combos,
+		rows,
+		cols,
+	})
+}
+
+#[inline(always)]
+pub fn ultosc_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &UltOscBatchRange,
+	simd: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<UltOscParams>, UltOscError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(UltOscError::InvalidPeriods { p1: 0, p2: 0, p3: 0, data_len: 0 });
+	}
+	
+	let len = high.len();
+	let mut first_valid_idx = None;
+	for i in 0..len {
+		if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
+			first_valid_idx = Some(i);
+			break;
+		}
+	}
+	let first_valid_idx = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(UltOscError::AllValuesNaN),
+	};
+	
+	let max_p = combos.iter()
+		.map(|c| {
+			let p1 = c.timeperiod1.unwrap_or(7);
+			let p2 = c.timeperiod2.unwrap_or(14);
+			let p3 = c.timeperiod3.unwrap_or(28);
+			p1.max(p2).max(p3)
+		})
+		.max()
+		.unwrap();
+	
+	if len - first_valid_idx < max_p {
+		return Err(UltOscError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first_valid_idx,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = len;
+	
+	let do_row = |row: usize, row_out: &mut [f64]| unsafe {
+		let p1 = combos[row].timeperiod1.unwrap();
+		let p2 = combos[row].timeperiod2.unwrap();
+		let p3 = combos[row].timeperiod3.unwrap();
+		
+		match simd {
+			Kernel::Scalar => ultosc_scalar(high, low, close, p1, p2, p3, first_valid_idx, row_out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => ultosc_avx2(high, low, close, p1, p2, p3, first_valid_idx, row_out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => ultosc_avx512(high, low, close, p1, p2, p3, first_valid_idx, row_out),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, row_out)| do_row(row, row_out));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			out.chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, row_out)| do_row(row, row_out));
+		}
+	} else {
+		out.chunks_mut(cols)
+			.enumerate()
+			.for_each(|(row, row_out)| do_row(row, row_out));
+	}
+	
+	Ok(combos)
 }
 
 // --- Tests ---
@@ -697,35 +1089,50 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 
-		let params = UltOscParams::default();
-		let batch_builder = UltOscBatchBuilder::new();
+		// Test with a simple parameter sweep
+		let sweep = UltOscBatchRange {
+			timeperiod1: (5, 9, 2),   // 5, 7, 9
+			timeperiod2: (12, 16, 2), // 12, 14, 16
+			timeperiod3: (26, 30, 2), // 26, 28, 30
+		};
+		
+		let batch_builder = UltOscBatchBuilder::new().kernel(kernel);
+		let output = batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
 
-		let output = batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, params, kernel)?;
+		// Check structure
+		assert_eq!(output.rows, 3 * 3 * 3); // 27 combinations
+		assert_eq!(output.cols, candles.close.len());
+		assert_eq!(output.values.len(), output.rows * output.cols);
+		assert_eq!(output.combos.len(), output.rows);
 
-		// Output length must match input length
-		assert_eq!(output.values.len(), candles.close.len());
-
-		// Spot check last 5 values against expected (if you have reference values)
-		// Here I use the same expected values as in the accuracy test for simplicity
-		let expected_last_five = [
-			41.25546890298435,
-			40.83865967175865,
-			48.910324164909625,
-			45.43113094857947,
-			42.163165136766295,
-		];
-
-		let start = output.values.len().saturating_sub(5);
-		for (i, &val) in output.values[start..].iter().enumerate() {
-			let diff = (val - expected_last_five[i]).abs();
-			assert!(
-				diff < 1e-8,
-				"[{}] Batch ULTOSC mismatch at idx {}: got {}, expected {}",
-				test_name,
-				i,
-				val,
-				expected_last_five[i]
-			);
+		// Verify specific combination matches single calculation
+		let single_params = UltOscParams {
+			timeperiod1: Some(7),
+			timeperiod2: Some(14),
+			timeperiod3: Some(28),
+		};
+		let single_input = UltOscInput::from_slices(&candles.high, &candles.low, &candles.close, single_params);
+		let single_result = ultosc_with_kernel(&single_input, kernel)?;
+		
+		// Find the row for this combination
+		if let Some(row_idx) = output.row_for_params(&single_params) {
+			let batch_row = output.values_for(&single_params).unwrap();
+			
+			// Compare last 5 values
+			let start = batch_row.len().saturating_sub(5);
+			for i in 0..5 {
+				let diff = (batch_row[start + i] - single_result.values[start + i]).abs();
+				assert!(
+					diff < 1e-10,
+					"[{}] Batch vs single mismatch at idx {}: got {}, expected {}",
+					test_name,
+					i,
+					batch_row[start + i],
+					single_result.values[start + i]
+				);
+			}
+		} else {
+			panic!("[{}] Could not find row for params 7,14,28", test_name);
 		}
 
 		Ok(())
@@ -753,4 +1160,456 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_ultosc_batch_default);
+}
+
+// ============================================================================
+// WASM Helper Functions
+// ============================================================================
+
+#[inline]
+pub fn ultosc_into_slice(dst: &mut [f64], input: &UltOscInput, kern: Kernel) -> Result<(), UltOscError> {
+	let ((high, low, close), p1, p2, p3, first_valid, start_idx, chosen) = ultosc_prepare(input, kern)?;
+	
+	if dst.len() != high.len() {
+		return Err(UltOscError::InvalidPeriods {
+			p1: dst.len(),
+			p2: high.len(),
+			p3: 0,
+			data_len: high.len(),
+		});
+	}
+	
+	// Compute directly into destination
+	ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, dst);
+	
+	// Fill warmup period with NaN
+	for v in &mut dst[..start_idx] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+// ============================================================================
+// Streaming Implementation
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct UltOscStream {
+	params: UltOscParams,
+	cmtl_buf: Vec<f64>,
+	tr_buf: Vec<f64>,
+	sum1_a: f64,
+	sum1_b: f64,
+	sum2_a: f64,
+	sum2_b: f64,
+	sum3_a: f64,
+	sum3_b: f64,
+	buffer_idx: usize,
+	max_period: usize,
+	p1: usize,
+	p2: usize,
+	p3: usize,
+	initialized: bool,
+	prev_close: Option<f64>,
+}
+
+impl UltOscStream {
+	pub fn try_new(params: UltOscParams) -> Result<Self, UltOscError> {
+		let p1 = params.timeperiod1.unwrap_or(7);
+		let p2 = params.timeperiod2.unwrap_or(14);
+		let p3 = params.timeperiod3.unwrap_or(28);
+		
+		if p1 == 0 || p2 == 0 || p3 == 0 {
+			return Err(UltOscError::InvalidPeriods {
+				p1,
+				p2,
+				p3,
+				data_len: 0,
+			});
+		}
+		
+		let max_period = p1.max(p2).max(p3);
+		
+		Ok(UltOscStream {
+			params,
+			cmtl_buf: vec![0.0; max_period],
+			tr_buf: vec![0.0; max_period],
+			sum1_a: 0.0,
+			sum1_b: 0.0,
+			sum2_a: 0.0,
+			sum2_b: 0.0,
+			sum3_a: 0.0,
+			sum3_b: 0.0,
+			buffer_idx: 0,
+			max_period,
+			p1,
+			p2,
+			p3,
+			initialized: false,
+			prev_close: None,
+		})
+	}
+	
+	pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		if high.is_nan() || low.is_nan() || close.is_nan() {
+			return None;
+		}
+		
+		if let Some(prev_close) = self.prev_close {
+			// Calculate true range and close minus true low
+			let true_low = low.min(prev_close);
+			let mut true_range = high - low;
+			let diff1 = (high - prev_close).abs();
+			if diff1 > true_range {
+				true_range = diff1;
+			}
+			let diff2 = (low - prev_close).abs();
+			if diff2 > true_range {
+				true_range = diff2;
+			}
+			
+			let cmtl_val = close - true_low;
+			let tr_val = true_range;
+			
+			// Update circular buffers
+			self.cmtl_buf[self.buffer_idx] = cmtl_val;
+			self.tr_buf[self.buffer_idx] = tr_val;
+			
+			if !self.initialized {
+				// Prime the sums during warmup
+				self.sum1_a += cmtl_val;
+				self.sum1_b += tr_val;
+				self.sum2_a += cmtl_val;
+				self.sum2_b += tr_val;
+				self.sum3_a += cmtl_val;
+				self.sum3_b += tr_val;
+				
+				// Check if we've filled the largest period
+				if self.buffer_idx + 1 >= self.max_period {
+					self.initialized = true;
+					
+					// Adjust sums to their correct window sizes
+					self.sum1_a = 0.0;
+					self.sum1_b = 0.0;
+					self.sum2_a = 0.0;
+					self.sum2_b = 0.0;
+					self.sum3_a = 0.0;
+					self.sum3_b = 0.0;
+					
+					for i in 0..self.p1 {
+						let idx = (self.buffer_idx + self.max_period + 1 - self.p1 + i) % self.max_period;
+						self.sum1_a += self.cmtl_buf[idx];
+						self.sum1_b += self.tr_buf[idx];
+					}
+					
+					for i in 0..self.p2 {
+						let idx = (self.buffer_idx + self.max_period + 1 - self.p2 + i) % self.max_period;
+						self.sum2_a += self.cmtl_buf[idx];
+						self.sum2_b += self.tr_buf[idx];
+					}
+					
+					for i in 0..self.p3 {
+						let idx = (self.buffer_idx + self.max_period + 1 - self.p3 + i) % self.max_period;
+						self.sum3_a += self.cmtl_buf[idx];
+						self.sum3_b += self.tr_buf[idx];
+					}
+				}
+			} else {
+				// We're initialized, maintain rolling sums
+				
+				// Add new values
+				self.sum1_a += cmtl_val;
+				self.sum1_b += tr_val;
+				self.sum2_a += cmtl_val;
+				self.sum2_b += tr_val;
+				self.sum3_a += cmtl_val;
+				self.sum3_b += tr_val;
+				
+				// Remove old values
+				let old_idx_1 = (self.buffer_idx + self.max_period + 1 - self.p1) % self.max_period;
+				self.sum1_a -= self.cmtl_buf[old_idx_1];
+				self.sum1_b -= self.tr_buf[old_idx_1];
+				
+				let old_idx_2 = (self.buffer_idx + self.max_period + 1 - self.p2) % self.max_period;
+				self.sum2_a -= self.cmtl_buf[old_idx_2];
+				self.sum2_b -= self.tr_buf[old_idx_2];
+				
+				let old_idx_3 = (self.buffer_idx + self.max_period + 1 - self.p3) % self.max_period;
+				self.sum3_a -= self.cmtl_buf[old_idx_3];
+				self.sum3_b -= self.tr_buf[old_idx_3];
+			}
+			
+			// Advance circular buffer index
+			self.buffer_idx = (self.buffer_idx + 1) % self.max_period;
+			
+			if self.initialized {
+				// Calculate ULTOSC
+				let v1 = if self.sum1_b != 0.0 { 4.0 * (self.sum1_a / self.sum1_b) } else { 0.0 };
+				let v2 = if self.sum2_b != 0.0 { 2.0 * (self.sum2_a / self.sum2_b) } else { 0.0 };
+				let v3 = if self.sum3_b != 0.0 { self.sum3_a / self.sum3_b } else { 0.0 };
+				let ultosc_val = 100.0 * (v1 + v2 + v3) / 7.0;
+				self.prev_close = Some(close);
+				return Some(ultosc_val);
+			}
+		}
+		
+		self.prev_close = Some(close);
+		None
+	}
+}
+
+// ============================================================================
+// Python Bindings
+// ============================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ultosc")]
+#[pyo3(signature = (high, low, close, timeperiod1=None, timeperiod2=None, timeperiod3=None, kernel=None))]
+pub fn ultosc_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	timeperiod1: Option<usize>,
+	timeperiod2: Option<usize>,
+	timeperiod3: Option<usize>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = UltOscParams {
+		timeperiod1,
+		timeperiod2,
+		timeperiod3,
+	};
+	let input = UltOscInput::from_slices(high_slice, low_slice, close_slice, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| ultosc_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ultosc_batch")]
+#[pyo3(signature = (high, low, close, timeperiod1_range, timeperiod2_range, timeperiod3_range, kernel=None))]
+pub fn ultosc_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	timeperiod1_range: (usize, usize, usize),
+	timeperiod2_range: (usize, usize, usize),
+	timeperiod3_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = UltOscBatchRange {
+		timeperiod1: timeperiod1_range,
+		timeperiod2: timeperiod2_range,
+		timeperiod3: timeperiod3_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			ultosc_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("timeperiod1", combos.iter().map(|p| p.timeperiod1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("timeperiod2", combos.iter().map(|p| p.timeperiod2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	dict.set_item("timeperiod3", combos.iter().map(|p| p.timeperiod3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "UltOscStream")]
+pub struct UltOscStreamPy {
+	stream: UltOscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl UltOscStreamPy {
+	#[new]
+	fn new(timeperiod1: Option<usize>, timeperiod2: Option<usize>, timeperiod3: Option<usize>) -> PyResult<Self> {
+		let params = UltOscParams {
+			timeperiod1,
+			timeperiod2,
+			timeperiod3,
+		};
+		let stream = UltOscStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(UltOscStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.stream.update(high, low, close)
+	}
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ultosc_js(
+	high: &[f64], 
+	low: &[f64], 
+	close: &[f64], 
+	timeperiod1: usize, 
+	timeperiod2: usize, 
+	timeperiod3: usize
+) -> Result<Vec<f64>, JsValue> {
+	let params = UltOscParams {
+		timeperiod1: Some(timeperiod1),
+		timeperiod2: Some(timeperiod2),
+		timeperiod3: Some(timeperiod3),
+	};
+	let input = UltOscInput::from_slices(high, low, close, params);
+	
+	// Single allocation
+	let mut output = vec![0.0; high.len()];
+	ultosc_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ultosc_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	timeperiod1: usize,
+	timeperiod2: usize,
+	timeperiod3: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to ultosc_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		if timeperiod1 == 0 || timeperiod2 == 0 || timeperiod3 == 0 {
+			return Err(JsValue::from_str("Invalid period: cannot be zero"));
+		}
+		
+		let max_period = timeperiod1.max(timeperiod2).max(timeperiod3);
+		if max_period > len {
+			return Err(JsValue::from_str("Period exceeds data length"));
+		}
+		
+		let params = UltOscParams {
+			timeperiod1: Some(timeperiod1),
+			timeperiod2: Some(timeperiod2),
+			timeperiod3: Some(timeperiod3),
+		};
+		let input = UltOscInput::from_slices(high, low, close, params);
+		
+		// CRITICAL: Check for aliasing with any input array
+		if high_ptr == out_ptr as *const f64 || low_ptr == out_ptr as *const f64 || close_ptr == out_ptr as *const f64 {
+			// Input and output overlap - use temporary buffer
+			let mut temp = vec![0.0; len];
+			ultosc_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing - write directly to output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			ultosc_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ultosc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ultosc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ultosc_batch)]
+pub fn ultosc_batch_js(
+	high: &[f64], 
+	low: &[f64], 
+	close: &[f64], 
+	config: JsValue
+) -> Result<JsValue, JsValue> {
+	let config: UltOscBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = UltOscBatchRange {
+		timeperiod1: config.timeperiod1_range,
+		timeperiod2: config.timeperiod2_range,
+		timeperiod3: config.timeperiod3_range,
+	};
+	
+	let batch_output = ultosc_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let rows = batch_output.combos.len();
+	let cols = high.len();
+	
+	let result = UltOscBatchJsOutput {
+		values: batch_output.values,
+		combos: batch_output.combos,
+		rows,
+		cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&result)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

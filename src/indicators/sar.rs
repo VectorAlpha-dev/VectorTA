@@ -19,9 +19,27 @@
 //!   with leading `NaN`s until the calculation starts.
 //! - **`Err(SarError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,6 +68,7 @@ pub struct SarOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct SarParams {
 	pub acceleration: Option<f64>,
 	pub maximum: Option<f64>,
@@ -226,7 +245,8 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
 		return Err(SarError::InvalidMaximum { maximum });
 	}
 
-	let mut out = vec![f64::NAN; high.len()];
+	// SAR starts calculating from the first valid data point, NaN before that
+	let mut out = alloc_with_nan_prefix(high.len(), first);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -245,6 +265,75 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
 	}
 
 	Ok(SarOutput { values: out })
+}
+
+/// Write SAR results directly to output slice - no allocations
+#[inline]
+pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result<(), SarError> {
+	let (high, low) = match &input.data {
+		SarData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
+		SarData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(SarError::EmptyData);
+	}
+
+	// Verify output buffer size matches input
+	if dst.len() != high.len() || dst.len() != low.len() {
+		return Err(SarError::NotEnoughValidData {
+			needed: high.len().max(low.len()),
+			valid: dst.len(),
+		});
+	}
+
+	let first_valid_idx = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan());
+	let first = match first_valid_idx {
+		Some(idx) => idx,
+		None => return Err(SarError::AllValuesNaN),
+	};
+
+	if (high.len() - first) < 2 {
+		return Err(SarError::NotEnoughValidData {
+			valid: high.len() - first,
+			needed: 2,
+		});
+	}
+
+	let acceleration = input.params.acceleration.unwrap_or(0.02);
+	let maximum = input.params.maximum.unwrap_or(0.2);
+
+	if acceleration <= 0.0 || acceleration.is_nan() || acceleration.is_infinite() {
+		return Err(SarError::InvalidAcceleration { acceleration });
+	}
+	if maximum <= 0.0 || maximum.is_nan() || maximum.is_infinite() {
+		return Err(SarError::InvalidMaximum { maximum });
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		x => x,
+	};
+
+	match chosen {
+		Kernel::Scalar => sar_scalar(high, low, first, acceleration, maximum, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => sar_avx2(high, low, first, acceleration, maximum, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => sar_avx512(high, low, first, acceleration, maximum, dst),
+		#[cfg(all(feature = "simd128", target_arch = "wasm32"))]
+		Kernel::Simd128 => sar_simd128(high, low, first, acceleration, maximum, dst),
+		_ => unreachable!(),
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..first.saturating_add(1)] {
+		*v = f64::NAN;
+	}
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -330,6 +419,14 @@ pub fn sar_scalar(high: &[f64], low: &[f64], first: usize, acceleration: f64, ma
 #[inline]
 pub fn sar_avx2(high: &[f64], low: &[f64], first_valid: usize, acceleration: f64, maximum: f64, out: &mut [f64]) {
 	// AVX2 stub points to scalar
+	sar_scalar(high, low, first_valid, acceleration, maximum, out)
+}
+
+#[cfg(all(feature = "simd128", target_arch = "wasm32"))]
+#[inline]
+pub fn sar_simd128(high: &[f64], low: &[f64], first_valid: usize, acceleration: f64, maximum: f64, out: &mut [f64]) {
+	// SIMD128 for WASM - since AVX512 exists and is not a stub, we implement SIMD128
+	// For now, delegate to scalar implementation
 	sar_scalar(high, low, first_valid, acceleration, maximum, out)
 }
 
@@ -666,7 +763,22 @@ fn sar_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = high.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory like ALMA does
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for each row based on SAR's warmup period (2)
+	let warm = vec![first + 1; rows]; // SAR needs at least 2 points
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to mutable slice without copying - using ManuallyDrop pattern from ALMA
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len()
+		)
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &combos[row];
@@ -700,6 +812,15 @@ fn sar_batch_inner(
 			do_row(row, slice);
 		}
 	}
+
+	// Convert ManuallyDrop back to Vec without copying
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(SarBatchOutput {
 		values,
@@ -766,6 +887,253 @@ pub unsafe fn sar_row_avx512_long(
 #[inline(always)]
 fn expand_grid_for_test(r: &SarBatchRange) -> Vec<SarParams> {
 	expand_grid(r)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sar")]
+#[pyo3(signature = (high, low, acceleration=None, maximum=None, kernel=None))]
+pub fn sar_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	acceleration: Option<f64>,
+	maximum: Option<f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = SarParams {
+		acceleration,
+		maximum,
+	};
+	let input = SarInput::from_slices(high_slice, low_slice, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| sar_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "SarStream")]
+pub struct SarStreamPy {
+	stream: SarStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl SarStreamPy {
+	#[new]
+	fn new(acceleration: Option<f64>, maximum: Option<f64>) -> PyResult<Self> {
+		let params = SarParams {
+			acceleration,
+			maximum,
+		};
+		let stream = SarStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(SarStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "sar_batch")]
+#[pyo3(signature = (high, low, acceleration_range, maximum_range, kernel=None))]
+pub fn sar_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	acceleration_range: (f64, f64, f64),
+	maximum_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	
+	let sweep = SarBatchRange {
+		acceleration: acceleration_range,
+		maximum: maximum_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			sar_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"accelerations",
+		combos
+			.iter()
+			.map(|p| p.acceleration.unwrap_or(0.02))
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"maximums",
+		combos
+			.iter()
+			.map(|p| p.maximum.unwrap_or(0.2))
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+fn sar_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &SarBatchRange,
+	kernel: Kernel,
+	parallel: bool,
+	output: &mut [f64],
+) -> Result<Vec<SarParams>, SarError> {
+	let batch_output = sar_batch_inner(high, low, sweep, kernel, parallel)?;
+	output.copy_from_slice(&batch_output.values);
+	Ok(batch_output.combos)
+}
+
+// ============ WASM BINDINGS ============
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sar_js(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Result<Vec<f64>, JsValue> {
+	let params = SarParams {
+		acceleration: Some(acceleration),
+		maximum: Some(maximum),
+	};
+	let input = SarInput::from_slices(high, low, params);
+
+	let mut output = vec![0.0; high.len()];
+
+	sar_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sar_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	acceleration: f64,
+	maximum: f64,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to sar_into"));
+	}
+
+	unsafe {
+		let high_slice = std::slice::from_raw_parts(high_ptr, len);
+		let low_slice = std::slice::from_raw_parts(low_ptr, len);
+
+		let params = SarParams {
+			acceleration: Some(acceleration),
+			maximum: Some(maximum),
+		};
+		let input = SarInput::from_slices(high_slice, low_slice, params);
+
+		// Check if output pointer aliases with either input
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			sar_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			sar_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sar_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn sar_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SarBatchConfig {
+	pub acceleration_range: (f64, f64, f64),
+	pub maximum_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct SarBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<SarParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = sar_batch)]
+pub fn sar_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: SarBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = SarBatchRange {
+		acceleration: config.acceleration_range,
+		maximum: config.maximum_range,
+	};
+
+	let output = sar_batch_inner(high, low, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = SarBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -863,6 +1231,13 @@ mod tests {
                     #[test]
                     fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+                    }
+                )*
+                #[cfg(all(feature = "simd128", target_arch = "wasm32"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Simd128);
                     }
                 )*
             }
