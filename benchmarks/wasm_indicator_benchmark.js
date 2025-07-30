@@ -663,6 +663,32 @@ const INDICATORS = {
             }
         }
     },
+    marketefi: {
+        name: 'MarketEFI',
+        needsMultipleInputs: true,  // Uses high, low, volume
+        // Safe API
+        safe: {
+            fn: 'marketefi_js',
+            params: {}  // No parameters for MarketEFI
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'marketefi_alloc',
+            freeFn: 'marketefi_free',
+            computeFn: 'marketefi_into',
+            params: {},
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'marketefi_batch',
+            config: {
+                // MarketEFI has no parameters, so batch always returns 1 row
+                small: {},
+                medium: {}
+            }
+        }
+    },
     cci: {
         name: 'CCI',
         // Safe API
@@ -1338,6 +1364,68 @@ const INDICATORS = {
             fastFn: 'cwma_batch_into'
         }
     },
+    er: {
+        name: 'ER (Kaufman Efficiency Ratio)',
+        // Safe API
+        safe: {
+            fn: 'er_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'er_alloc',
+            freeFn: 'er_free',
+            computeFn: 'er_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'er_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 30, 5]       // 6 values: 5, 10, 15, 20, 25, 30
+                }
+            },
+            // Fast batch API
+            fastFn: 'er_batch_into'
+        }
+    },
+    decycler: {
+        name: 'Decycler',
+        // Safe API
+        safe: {
+            fn: 'decycler_js',
+            params: { hp_period: 125, k: 0.707 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'decycler_alloc',
+            freeFn: 'decycler_free',
+            computeFn: 'decycler_into',
+            params: { hp_period: 125, k: 0.707 }
+        },
+        // Batch API
+        batch: {
+            fn: 'decycler_batch',
+            config: {
+                small: {
+                    hp_period_range: [100, 150, 25],    // 3 values
+                    k_range: [0.5, 0.9, 0.2]            // 3 values
+                    // Total: 9 combinations
+                },
+                medium: {
+                    hp_period_range: [100, 150, 10],    // 6 values
+                    k_range: [0.5, 0.9, 0.1]            // 5 values
+                    // Total: 30 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'decycler_batch_into'
+        }
+    },
     dema: {
         name: 'DEMA',
         // Safe API
@@ -1841,6 +1929,33 @@ const INDICATORS = {
             fastFn: 'linreg_batch_into'
         }
     },
+    linearreg_angle: {
+        name: 'Linear Regression Angle',
+        // Safe API
+        safe: {
+            fn: 'linearreg_angle_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'linearreg_angle_alloc',
+            freeFn: 'linearreg_angle_free',
+            computeFn: 'linearreg_angle_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'linearreg_angle_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values
+                }
+            }
+        }
+    },
     sinwma: {
         name: 'SINWMA',
         // Safe API
@@ -2217,6 +2332,455 @@ const INDICATORS = {
                 },
                 medium: {
                     period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
+    atr: {
+        name: 'ATR',
+        // Safe API - requires high, low, close
+        safe: {
+            fn: 'atr',
+            params: { length: 14 }
+        },
+        needsMultipleInputs: true, // ATR needs high, low, close arrays
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'atr_alloc',
+            freeFn: 'atr_free',
+            computeFn: 'atr_into',
+            params: { length: 14 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'atr_batch',
+            fastFn: 'atr_batch_into',
+            config: {
+                small: {
+                    length_range: [10, 18, 4]      // 3 values: 10, 14, 18
+                },
+                medium: {
+                    length_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
+    cfo: {
+        name: 'CFO',
+        // Safe API
+        safe: {
+            fn: 'cfo_js',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'cfo_alloc',
+            freeFn: 'cfo_free',
+            computeFn: 'cfo_into',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'cfo_batch',
+            fastFn: 'cfo_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values: 10, 15, 20
+                    scalar_range: [50.0, 150.0, 50.0]  // 3 values: 50, 100, 150
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [5, 25, 5],       // 5 values: 5, 10, 15, 20, 25
+                    scalar_range: [25.0, 175.0, 25.0]  // 7 values: 25, 50, 75, 100, 125, 150, 175
+                    // Total: 35 combinations
+                }
+            }
+        }
+    },
+    coppock: {
+        name: 'Coppock',
+        // Safe API
+        safe: {
+            fn: 'coppock_js',
+            params: { short_period: 11, long_period: 14, ma_period: 10, ma_type: 'wma' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'coppock_alloc',
+            freeFn: 'coppock_free',
+            computeFn: 'coppock_into',
+            params: { short_period: 11, long_period: 14, ma_period: 10, ma_type: 'wma' }
+        },
+        // Batch API
+        batch: {
+            fn: 'coppock_batch',
+            config: {
+                small: {
+                    short_range: [10, 12, 2],      // 2 values: 10, 12
+                    long_range: [14, 16, 2],       // 2 values: 14, 16
+                    ma_range: [8, 10, 2],          // 2 values: 8, 10
+                    ma_type: 'wma'                 // Fixed MA type
+                    // Total: 8 combinations
+                },
+                medium: {
+                    short_range: [8, 14, 2],       // 4 values: 8, 10, 12, 14
+                    long_range: [12, 18, 2],       // 4 values: 12, 14, 16, 18
+                    ma_range: [6, 12, 2],          // 4 values: 6, 8, 10, 12
+                    ma_type: 'wma'                 // Fixed MA type
+                    // Total: 64 combinations
+                }
+            }
+        }
+    },
+    dpo: {
+        name: 'DPO',
+        // Safe API
+        safe: {
+            fn: 'dpo_js',
+            params: { period: 5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'dpo_alloc',
+            freeFn: 'dpo_free',
+            computeFn: 'dpo_into',
+            params: { period: 5 }
+        },
+        // Batch API
+        batch: {
+            fn: 'dpo_batch',
+            fastFn: 'dpo_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 25, 5]       // 5 values: 5, 10, 15, 20, 25
+                },
+                large: {
+                    period_range: [5, 60, 5]       // 12 values
+                }
+            }
+        }
+    },
+    kaufmanstop: {
+        name: 'Kaufman Stop',
+        // Safe API - requires high and low arrays
+        safe: {
+            fn: 'kaufmanstop_js',
+            params: { period: 22, mult: 2.0, direction: 'long', ma_type: 'sma' }
+        },
+        needsMultipleInputs: true,  // Uses high, low arrays
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'kaufmanstop_alloc',
+            freeFn: 'kaufmanstop_free',
+            computeFn: 'kaufmanstop_into',
+            params: { period: 22, mult: 2.0, direction: 'long', ma_type: 'sma' },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'kaufmanstop_batch_js',
+            fastFn: 'kaufmanstop_batch_into',
+            config: {
+                small: {
+                    period_range: [20, 24, 2],      // 3 values: 20, 22, 24
+                    mult_range: [1.5, 2.5, 0.5],    // 3 values: 1.5, 2.0, 2.5
+                    direction: 'long',               // Fixed direction
+                    ma_type: 'sma'                  // Fixed MA type
+                    // Total: 9 combinations
+                },
+                medium: {
+                    period_range: [18, 26, 2],      // 5 values: 18, 20, 22, 24, 26
+                    mult_range: [1.0, 3.0, 0.5],    // 5 values: 1.0, 1.5, 2.0, 2.5, 3.0
+                    direction: 'long',               // Fixed direction
+                    ma_type: 'sma'                  // Fixed MA type
+                    // Total: 25 combinations
+                }
+            }
+        }
+    },
+    midpoint: {
+        name: 'Midpoint',
+        // Safe API
+        safe: {
+            fn: 'midpoint_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'midpoint_alloc',
+            freeFn: 'midpoint_free',
+            computeFn: 'midpoint_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'midpoint_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 2]       // 6 values: 10, 12, 14, 16, 18, 20
+                },
+                medium: {
+                    period_range: [5, 25, 2]        // 11 values: 5, 7, 9, ..., 23, 25
+                },
+                large: {
+                    period_range: [5, 50, 5]        // 10 values: 5, 10, 15, ..., 45, 50
+                }
+            }
+        }
+    },
+    vi: {
+        name: 'VI (Vortex Indicator)',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'vi_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vi_alloc',
+            freeFn: 'vi_free',
+            computeFn: 'vi_into',
+            params: { period: 14 },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (plus and minus)
+        },
+        // Batch API
+        batch: {
+            fn: 'vi_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 2]  // 6 values: 10, 12, 14, 16, 18, 20
+                },
+                medium: {
+                    period_range: [10, 30, 2]  // 11 values: 10, 12, 14, ..., 30
+                }
+            },
+            fastFn: 'vi_batch_into',
+            dualOutput: true
+        }
+    },
+    vpt: {
+        name: 'VPT (Volume Price Trend)',
+        // Safe API
+        safe: {
+            fn: 'vpt_js',
+            params: {},  // VPT has no parameters
+            inputs: ['close', 'volume']  // Requires close and volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vpt_alloc',
+            freeFn: 'vpt_free',
+            computeFn: 'vpt_into',
+            params: {},  // VPT has no parameters
+            inputs: ['close', 'volume']  // Requires close and volume data
+        },
+        // Batch API
+        batch: {
+            fn: 'vpt_batch',
+            config: {},  // VPT has no parameters, so empty config
+            fastFn: 'vpt_batch_into'
+        }
+    },
+    nvi: {
+        name: 'NVI (Negative Volume Index)',
+        // Safe API
+        safe: {
+            fn: 'nvi_js',
+            params: {},  // NVI has no parameters
+            inputs: ['close', 'volume']  // Requires close and volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'nvi_alloc',
+            freeFn: 'nvi_free',
+            computeFn: 'nvi_into',
+            params: {},  // NVI has no parameters
+            inputs: ['close', 'volume']  // Requires close and volume data
+        }
+        // No batch API - NVI has no parameters to sweep
+    },
+    pvi: {
+        name: 'PVI (Positive Volume Index)',
+        // Safe API
+        safe: {
+            fn: 'pvi_js',
+            params: { initial_value: 1000.0 },
+            needsMultipleInputs: true  // Requires close and volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'pvi_alloc',
+            freeFn: 'pvi_free',
+            computeFn: 'pvi_into',
+            params: { initial_value: 1000.0 },
+            needsMultipleInputs: true  // Requires close and volume data
+        },
+        // Batch API
+        batch: {
+            fn: 'pvi_batch',
+            fastFn: 'pvi_batch_into',
+            config: {
+                small: {
+                    initial_value_range: [900.0, 1100.0, 100.0]  // 3 values: 900, 1000, 1100
+                },
+                medium: {
+                    initial_value_range: [800.0, 1200.0, 50.0]   // 9 values: 800, 850, ..., 1200
+                }
+            }
+        }
+    },
+    
+    rsmk: {
+        name: 'RSMK',
+        // Safe API
+        safe: {
+            fn: 'rsmk_js',
+            params: { lookback: 90, period: 3, signal_period: 20 },
+            prepareData: (data) => ({
+                main: data.close,
+                compare: data.close,
+                lookback: 90,
+                period: 3,
+                signal_period: 20,
+                matype: null,
+                signal_matype: null
+            })
+        },
+        needsMultipleInputs: true,
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rsmk_alloc',
+            freeFn: 'rsmk_free',
+            computeFn: 'rsmk_into',
+            params: { lookback: 90, period: 3, signal_period: 20 },
+            needsMultipleInputs: true,
+            outputCount: 2  // RSMK has two outputs: indicator and signal
+        },
+        // Batch API
+        batch: {
+            fn: 'rsmk_batch',
+            config: {
+                small: {
+                    lookback_range: [85, 95, 5],
+                    period_range: [2, 4, 1],
+                    signal_period_range: [18, 22, 2],
+                    matype: "ema",
+                    signal_matype: "ema"
+                },
+                medium: {
+                    lookback_range: [80, 100, 5],
+                    period_range: [2, 5, 1],
+                    signal_period_range: [15, 25, 2],
+                    matype: "ema",
+                    signal_matype: "ema"
+                }
+            }
+        }
+    },
+    
+    srsi: {
+        name: 'SRSI',
+        // Safe API
+        safe: {
+            fn: 'srsi_js',
+            params: { rsi_period: 14, stoch_period: 14, k: 3, d: 3 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'srsi_alloc',
+            freeFn: 'srsi_free',
+            computeFn: 'srsi_into',
+            params: { rsi_period: 14, stoch_period: 14, k: 3, d: 3 },
+            outputCount: 2  // SRSI has two outputs: k and d
+        },
+        // Batch API
+        batch: {
+            fn: 'srsi_batch',
+            config: {
+                small: {
+                    rsi_period_range: [10, 14, 2],       // 3 values: 10, 12, 14
+                    stoch_period_range: [10, 14, 2],     // 3 values: 10, 12, 14
+                    k_range: [2, 4, 1],                  // 3 values: 2, 3, 4
+                    d_range: [2, 3, 1]                   // 2 values: 2, 3
+                    // Total: 54 combinations
+                },
+                medium: {
+                    rsi_period_range: [10, 20, 2],       // 6 values
+                    stoch_period_range: [10, 20, 2],     // 6 values
+                    k_range: [2, 5, 1],                  // 4 values
+                    d_range: [2, 4, 1]                   // 3 values
+                    // Total: 432 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'srsi_batch_into'
+        }
+    },
+    tsf: {
+        name: 'TSF',
+        // Safe API
+        safe: {
+            fn: 'tsf_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'tsf_alloc',
+            freeFn: 'tsf_free',
+            computeFn: 'tsf_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'tsf_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 30, 2]      // 11 values: 10, 12, 14, ..., 30
+                }
+            },
+            // Fast batch API
+            fastFn: 'tsf_batch_into'
+        }
+    },
+    zscore: {
+        name: 'ZSCORE',
+        // Safe API
+        safe: {
+            fn: 'zscore_js',
+            params: { period: 14, ma_type: "sma", nbdev: 1.0, devtype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'zscore_alloc',
+            freeFn: 'zscore_free',
+            computeFn: 'zscore_into',
+            params: { period: 14, ma_type: "sma", nbdev: 1.0, devtype: 0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'zscore_batch',
+            fastFn: 'zscore_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],     // 3 values
+                    ma_type: "sma",
+                    nbdev_range: [1.0, 2.0, 0.5],  // 3 values
+                    devtype_range: [0, 0, 0]       // 1 value = 9 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],     // 5 values
+                    ma_type: "sma",
+                    nbdev_range: [0.5, 2.5, 0.5],  // 5 values
+                    devtype_range: [0, 1, 1]       // 2 values = 50 combinations
                 }
             }
         }
@@ -4514,12 +5078,12 @@ class WasmIndicatorBenchmark {
                 } else if (indicatorKey === 'trendflex' || indicatorKey === 'wilders' || indicatorKey === 'alma' || 
                            indicatorKey === 'highpass' || indicatorKey === 'jsa' || indicatorKey === 'maaq' || 
                            indicatorKey === 'smma' || indicatorKey === 'ehlers_itrend' ||
-                           indicatorKey === 'cwma' || indicatorKey === 'dema' || indicatorKey === 'epma' || 
+                           indicatorKey === 'cwma' || indicatorKey === 'decycler' || indicatorKey === 'dema' || indicatorKey === 'epma' || 
                            indicatorKey === 'jma' || indicatorKey === 'highpass_2_pole' || indicatorKey === 'nma' || 
                            indicatorKey === 'sma' || indicatorKey === 'supersmoother_3_pole' || indicatorKey === 'ema' || 
                            indicatorKey === 'tema' || indicatorKey === 'gaussian' || indicatorKey === 'hwma' || 
                            indicatorKey === 'mwdx' || indicatorKey === 'srwma' || indicatorKey === 'linreg' || 
-                           indicatorKey === 'sinwma' || indicatorKey === 'zlema' || indicatorKey === 'adx') {
+                           indicatorKey === 'sinwma' || indicatorKey === 'zlema' || indicatorKey === 'adx' || indicatorKey === 'tsf') {
                     // These indicators use the new ergonomic batch API with config object
                     wasmFn.call(this.wasm, data, batchConfig);
                 } else {
@@ -4557,6 +5121,19 @@ class WasmIndicatorBenchmark {
                     const vFactors = Math.floor((batchConfig.volume_factor_range[1] - batchConfig.volume_factor_range[0]) / batchConfig.volume_factor_range[2]) + 1;
                     totalCombinations *= vFactors;
                 }
+                
+                // Handle k_range for highpass_2_pole and decycler
+                if (batchConfig.k_range) {
+                    const kValues = Math.floor((batchConfig.k_range[1] - batchConfig.k_range[0]) / batchConfig.k_range[2]) + 1;
+                    totalCombinations *= kValues;
+                }
+            }
+            
+            // Handle decycler's special ranges
+            if (batchConfig.hp_period_range && batchConfig.k_range) {
+                const hpPeriods = Math.floor((batchConfig.hp_period_range[1] - batchConfig.hp_period_range[0]) / batchConfig.hp_period_range[2]) + 1;
+                const kValues = Math.floor((batchConfig.k_range[1] - batchConfig.k_range[0]) / batchConfig.k_range[2]) + 1;
+                totalCombinations = hpPeriods * kValues;
             }
             
             // Handle ADOSC's special ranges

@@ -1906,6 +1906,236 @@ mod tests {
 		assert_eq!(u.len(), c.close.len());
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_gatorosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			GatorOscParams::default(),  // Default values
+			// Minimum values
+			GatorOscParams {
+				jaws_length: Some(2),
+				jaws_shift: Some(0),
+				teeth_length: Some(2),
+				teeth_shift: Some(0),
+				lips_length: Some(2),
+				lips_shift: Some(0),
+			},
+			// Small values
+			GatorOscParams {
+				jaws_length: Some(5),
+				jaws_shift: Some(2),
+				teeth_length: Some(4),
+				teeth_shift: Some(1),
+				lips_length: Some(3),
+				lips_shift: Some(1),
+			},
+			// Medium values
+			GatorOscParams {
+				jaws_length: Some(20),
+				jaws_shift: Some(10),
+				teeth_length: Some(15),
+				teeth_shift: Some(8),
+				lips_length: Some(10),
+				lips_shift: Some(5),
+			},
+			// Large values
+			GatorOscParams {
+				jaws_length: Some(50),
+				jaws_shift: Some(20),
+				teeth_length: Some(30),
+				teeth_shift: Some(15),
+				lips_length: Some(20),
+				lips_shift: Some(10),
+			},
+			// Edge case: jaws < teeth < lips (unusual)
+			GatorOscParams {
+				jaws_length: Some(5),
+				jaws_shift: Some(3),
+				teeth_length: Some(8),
+				teeth_shift: Some(5),
+				lips_length: Some(13),
+				lips_shift: Some(8),
+			},
+			// Edge case: all same length
+			GatorOscParams {
+				jaws_length: Some(10),
+				jaws_shift: Some(5),
+				teeth_length: Some(10),
+				teeth_shift: Some(5),
+				lips_length: Some(10),
+				lips_shift: Some(5),
+			},
+			// Edge case: no shifts
+			GatorOscParams {
+				jaws_length: Some(13),
+				jaws_shift: Some(0),
+				teeth_length: Some(8),
+				teeth_shift: Some(0),
+				lips_length: Some(5),
+				lips_shift: Some(0),
+			},
+			// Edge case: large shifts
+			GatorOscParams {
+				jaws_length: Some(10),
+				jaws_shift: Some(20),
+				teeth_length: Some(8),
+				teeth_shift: Some(15),
+				lips_length: Some(5),
+				lips_shift: Some(10),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = GatorOscInput::from_candles(&candles, "close", params.clone());
+			let output = gatorosc_with_kernel(&input, kernel)?;
+			
+			// Check upper values
+			for (i, &val) in output.upper.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in upper output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in upper output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in upper output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+			
+			// Check lower values
+			for (i, &val) in output.lower.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in lower output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in lower output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in lower output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+			
+			// Check upper_change values
+			for (i, &val) in output.upper_change.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in upper_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in upper_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in upper_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+			
+			// Check lower_change values
+			for (i, &val) in output.lower_change.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in lower_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in lower_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in lower_change output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_gatorosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 
 	macro_rules! generate_all_gatorosc_tests {
         ($($test_fn:ident),*) => {
@@ -1944,7 +2174,8 @@ mod tests {
 		check_gatorosc_zero_setting,
 		check_gatorosc_small_dataset,
 		check_gatorosc_default_candles,
-		check_gatorosc_batch_default_row
+		check_gatorosc_batch_default_row,
+		check_gatorosc_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -2018,6 +2249,106 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			// Single parameter sweeps
+			(5, 20, 5, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),     // Vary jaws_length
+			(13, 13, 0, 3, 10, 2, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),  // Vary jaws_shift
+			(13, 13, 0, 8, 8, 0, 3, 10, 2, 5, 5, 0, 5, 5, 0, 3, 3, 0),  // Vary teeth_length
+			(13, 13, 0, 8, 8, 0, 8, 8, 0, 2, 8, 2, 5, 5, 0, 3, 3, 0),   // Vary teeth_shift
+			(13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 2, 8, 2, 3, 3, 0),   // Vary lips_length
+			(13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 1, 5, 1),   // Vary lips_shift
+			// Multi-parameter sweeps
+			(8, 14, 3, 5, 8, 3, 5, 8, 3, 3, 5, 2, 3, 5, 2, 2, 3, 1),    // Vary all parameters
+			// Static configurations
+			(10, 10, 0, 5, 5, 0, 8, 8, 0, 4, 4, 0, 5, 5, 0, 2, 2, 0),   // All static
+			(13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),   // Default static
+			// Edge cases
+			(2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1),     // Small values
+			(30, 50, 10, 10, 20, 5, 20, 30, 5, 8, 15, 3, 10, 20, 5, 5, 10, 2), // Large values
+		];
+
+		for (cfg_idx, &(jl_s, jl_e, jl_st, js_s, js_e, js_st, 
+		                tl_s, tl_e, tl_st, ts_s, ts_e, ts_st,
+		                ll_s, ll_e, ll_st, ls_s, ls_e, ls_st)) in test_configs.iter().enumerate() {
+			let output = GatorOscBatchBuilder::new()
+				.kernel(kernel)
+				.jaws_length_range(jl_s, jl_e, jl_st)
+				.jaws_shift_range(js_s, js_e, js_st)
+				.teeth_length_range(tl_s, tl_e, tl_st)
+				.teeth_shift_range(ts_s, ts_e, ts_st)
+				.lips_length_range(ll_s, ll_e, ll_st)
+				.lips_shift_range(ls_s, ls_e, ls_st)
+				.apply_slice(&c.close)?;
+
+			// Helper function to check poison in a matrix
+			let check_poison = |matrix: &[f64], matrix_name: &str| {
+				for (idx, &val) in matrix.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+							at row {} col {} (flat index {}) in {} output with params: jl={}, js={}, tl={}, ts={}, ll={}, ls={}",
+							test, cfg_idx, val, bits, row, col, idx, matrix_name,
+							combo.jaws_length.unwrap_or(13), combo.jaws_shift.unwrap_or(8),
+							combo.teeth_length.unwrap_or(8), combo.teeth_shift.unwrap_or(5),
+							combo.lips_length.unwrap_or(5), combo.lips_shift.unwrap_or(3)
+						);
+					}
+
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+							at row {} col {} (flat index {}) in {} output with params: jl={}, js={}, tl={}, ts={}, ll={}, ls={}",
+							test, cfg_idx, val, bits, row, col, idx, matrix_name,
+							combo.jaws_length.unwrap_or(13), combo.jaws_shift.unwrap_or(8),
+							combo.teeth_length.unwrap_or(8), combo.teeth_shift.unwrap_or(5),
+							combo.lips_length.unwrap_or(5), combo.lips_shift.unwrap_or(3)
+						);
+					}
+
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+							at row {} col {} (flat index {}) in {} output with params: jl={}, js={}, tl={}, ts={}, ll={}, ls={}",
+							test, cfg_idx, val, bits, row, col, idx, matrix_name,
+							combo.jaws_length.unwrap_or(13), combo.jaws_shift.unwrap_or(8),
+							combo.teeth_length.unwrap_or(8), combo.teeth_shift.unwrap_or(5),
+							combo.lips_length.unwrap_or(5), combo.lips_shift.unwrap_or(3)
+						);
+					}
+				}
+			};
+
+			// Check all four output matrices
+			check_poison(&output.upper, "upper");
+			check_poison(&output.lower, "lower");
+			check_poison(&output.upper_change, "upper_change");
+			check_poison(&output.lower_change, "lower_change");
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -2046,6 +2377,7 @@ mod tests {
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_multi_param_sweep);
 	gen_batch_tests!(check_batch_not_enough_data);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ============================================================================

@@ -16,7 +16,7 @@
 //! - **`Err(AtrError)`** otherwise.
 
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -224,6 +224,14 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
 	let warmup_period = first_valid + length - 1;
 	let mut out = alloc_with_nan_prefix(len, warmup_period);
 	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+				atr_simd128(high, low, close, length, &mut out);
+				return Ok(AtrOutput { values: out });
+			}
+		}
+		
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => atr_scalar(high, low, close, length, &mut out),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -264,6 +272,18 @@ pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: 
 			out[i] = rma;
 		}
 	}
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn atr_simd128(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
+	use core::arch::wasm32::*;
+	
+	// For now, use scalar implementation as ATR's sequential nature
+	// makes SIMD optimization complex. This maintains API parity with ALMA.
+	// Future optimization could process multiple true ranges in parallel
+	// for batch operations.
+	atr_scalar(high, low, close, length, out);
 }
 
 // -- AVX2/AVX512 always point to scalar; structuring for parity/stub compatibility --
@@ -469,6 +489,98 @@ pub fn atr_batch_par_slice(
 	kern: Kernel,
 ) -> Result<AtrBatchOutput, AtrError> {
 	atr_batch_inner(high, low, close, sweep, kern, true)
+}
+
+fn atr_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &AtrBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<AtrParams>, AtrError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(AtrError::InvalidLength { length: 0 });
+	}
+	let rows = combos.len();
+	let cols = high.len();
+	let expected_len = rows * cols;
+	
+	if out.len() != expected_len {
+		return Err(AtrError::NotEnoughData {
+			length: expected_len,
+			data_len: out.len(),
+		});
+	}
+
+	// Map batch kernels to regular kernels
+	let k = match kern {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512Batch => Kernel::Avx512,
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2Batch => Kernel::Avx2,
+		Kernel::ScalarBatch => Kernel::Scalar,
+		_ => kern,
+	};
+
+	// Pre-calculate warmup periods for each combination
+	let warmup_periods: Vec<usize> = combos.iter().map(|p| p.length.unwrap_or(14) - 1).collect();
+
+	// Process each parameter combination
+	#[cfg(not(target_arch = "wasm32"))]
+	if parallel {
+		out.par_chunks_mut(cols)
+			.zip(combos.par_iter())
+			.zip(warmup_periods.par_iter())
+			.try_for_each(|((row_slice, params), &warmup)| -> Result<(), AtrError> {
+				// Validate parameters
+				let length = params.length.unwrap_or(14);
+				let _ = atr_prepare(high, low, close, length)?;
+				
+				// Compute ATR for this parameter set
+				match k {
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx512 => atr_avx512(high, low, close, length, row_slice),
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx2 => atr_avx2(high, low, close, length, row_slice),
+					_ => atr_scalar(high, low, close, length, row_slice),
+				}
+				
+				// Fill warmup with NaN
+				for v in &mut row_slice[..warmup] {
+					*v = f64::NAN;
+				}
+				
+				Ok(())
+			})?;
+	} else {
+		for (i, (params, &warmup)) in combos.iter().zip(warmup_periods.iter()).enumerate() {
+			let row_start = i * cols;
+			let row_slice = &mut out[row_start..row_start + cols];
+			
+			// Validate parameters
+			let length = params.length.unwrap_or(14);
+			let _ = atr_prepare(high, low, close, length)?;
+			
+			// Compute ATR for this parameter set
+			match k {
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512 => atr_avx512(high, low, close, length, row_slice),
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2 => atr_avx2(high, low, close, length, row_slice),
+				_ => atr_scalar(high, low, close, length, row_slice),
+			}
+			
+			// Fill warmup with NaN
+			for v in &mut row_slice[..warmup] {
+				*v = f64::NAN;
+			}
+		}
+	}
+
+	Ok(combos)
 }
 
 fn atr_batch_inner(
@@ -972,6 +1084,24 @@ impl From<AtrError> for PyErr {
 	}
 }
 
+/// Helper function to prepare ATR calculation parameters from AtrInput
+#[inline(always)]
+fn atr_prepare_from_input<'a>(
+	input: &'a AtrInput,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize), AtrError> {
+	let (high, low, close) = match &input.data {
+		AtrData::Candles { candles } => {
+			(&candles.high[..], &candles.low[..], &candles.close[..])
+		}
+		AtrData::Slices { high, low, close } => (*high, *low, *close),
+	};
+	
+	let length = input.params.length.unwrap_or(14);
+	let (high, low, close, length) = atr_prepare(high, low, close, length)?;
+	let warmup = length - 1;
+	Ok((high, low, close, length, warmup))
+}
+
 /// Helper function to prepare ATR calculation parameters
 #[inline(always)]
 fn atr_prepare<'a>(
@@ -1021,49 +1151,27 @@ pub fn atr_py<'py>(
 	length: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	let kernel_enum = match kernel {
-		Some(k) => validate_kernel(Some(k), false)?,
-		None => Kernel::Auto,
-	};
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	// Validate kernel outside allow_threads
+	let kernel_enum = validate_kernel(kernel, false)?;
 
 	// Get slices from numpy arrays - zero copy
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
 
-	// Validate inputs using prepare function
-	let (high_valid, low_valid, close_valid, length_valid) = atr_prepare(high_slice, low_slice, close_slice, length)?;
+	// Create ATR input
+	let params = AtrParams { length: Some(length) };
+	let input = AtrInput::from_slices(high_slice, low_slice, close_slice, params);
 
-	let len = close_valid.len();
+	// Compute ATR and get Vec<f64> result
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| atr_with_kernel(&input, kernel_enum).map(|output| output.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Pre-allocate output array
-	let output = unsafe { PyArray1::new(py, [len], false) };
-
-	// Get mutable slice for writing
-	let out_slice = unsafe { output.as_slice_mut()? };
-
-	// Choose kernel
-	let chosen = match kernel_enum {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	// SAFETY: We have validated that inputs are the same length
-	// and output buffer is allocated with correct size
-	py.allow_threads(|| unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				atr_scalar(high_valid, low_valid, close_valid, length_valid, out_slice)
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => atr_avx2(high_valid, low_valid, close_valid, length_valid, out_slice),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => atr_avx512(high_valid, low_valid, close_valid, length_valid, out_slice),
-			_ => unreachable!(),
-		}
-	});
-
-	Ok(output.into())
+	// Zero-copy transfer to NumPy array
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1098,22 +1206,12 @@ pub fn atr_batch_py<'py>(
 	length_range: (usize, usize, usize),
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	let kernel_enum = match kernel {
-		Some(k) => validate_kernel(Some(k), true)?, // true for batch operation
-		None => Kernel::Auto,
-	};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let batch_kernel = match kernel_enum {
-		Kernel::Auto => detect_best_batch_kernel(),
-		Kernel::Scalar => Kernel::ScalarBatch,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => Kernel::Avx2Batch,
-		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => Kernel::Avx512Batch,
-		k if k.is_batch() => k,
-		_ => return Err(PyValueError::new_err("Invalid kernel for batch operation")),
-	};
+	// Validate kernel outside allow_threads
+	let kernel_enum = validate_kernel(kernel, true)?; // true for batch operation
 
+	// Get slices from numpy arrays - zero copy
 	let high_slice = high.as_slice()?;
 	let low_slice = low.as_slice()?;
 	let close_slice = close.as_slice()?;
@@ -1125,51 +1223,118 @@ pub fn atr_batch_py<'py>(
 	let rows = combos.len();
 	let cols = close_slice.len();
 
-	// Pre-allocate 2D NumPy array
+	// Pre-allocate 2D NumPy array (this is acceptable for batch operations)
 	let values_2d = unsafe { numpy::PyArray2::new(py, [rows, cols], false) };
 
-	// Ensure the array is contiguous (should always be true for new arrays)
-	debug_assert!(values_2d.is_c_contiguous());
-
-	// Clone combos to avoid recomputing expand_grid
-	let combos_cloned = combos.clone();
-
-	// Use the existing batch function that returns a result
-	let simd = match batch_kernel {
-		Kernel::Avx512Batch => Kernel::Avx512,
-		Kernel::Avx2Batch => Kernel::Avx2,
-		Kernel::ScalarBatch => Kernel::Scalar,
-		_ => unreachable!(),
-	};
-
-	let batch_result = py.allow_threads(|| atr_batch_inner(high_slice, low_slice, close_slice, &range, simd, true))?;
-
-	// Copy the results into the pre-allocated NumPy array
+	// Get mutable slice for direct writing
 	let raw_ptr = values_2d.data() as *mut f64;
-	unsafe {
-		let output_slice = std::slice::from_raw_parts_mut(raw_ptr, rows * cols);
-		output_slice.copy_from_slice(&batch_result.values);
-	}
+	let output_slice = unsafe { std::slice::from_raw_parts_mut(raw_ptr, rows * cols) };
 
+	// Compute batch results
+	py.allow_threads(|| {
+		let batch_kernel = match kernel_enum {
+			Kernel::Auto => detect_best_batch_kernel(),
+			Kernel::Scalar => Kernel::ScalarBatch,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => Kernel::Avx2Batch,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => Kernel::Avx512Batch,
+			k if k.is_batch() => k,
+			_ => return Err(AtrError::InvalidLength { length: 0 }),
+		};
+
+		// Map batch kernel to SIMD kernel
+		let simd = match batch_kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+
+		// Compute directly into the output slice
+		let batch_result = atr_batch_inner(high_slice, low_slice, close_slice, &range, simd, true)?;
+		output_slice.copy_from_slice(&batch_result.values);
+		Ok(())
+	})
+	.map_err(|e: AtrError| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
 	let dict = PyDict::new(py);
 	dict.set_item("values", values_2d)?;
 
-	// Extract lengths from combos
+	// Extract lengths from combos and use into_pyarray for zero-copy
 	let lengths: Vec<usize> = combos.iter().map(|p| p.length.unwrap_or(14)).collect();
-	dict.set_item("lengths", PyList::new(py, &lengths)?)?;
+	dict.set_item("lengths", lengths.into_pyarray(py))?;
 
 	Ok(dict.into())
 }
 
 // ============= WASM Bindings =============
 
+/// Write directly to output slice - no allocations
+#[cfg(feature = "wasm")]
+pub fn atr_into_slice(
+	dst: &mut [f64], 
+	input: &AtrInput, 
+	kern: Kernel
+) -> Result<(), AtrError> {
+	let (high, low, close, length, warmup) = atr_prepare_from_input(input)?;
+	
+	if dst.len() != high.len() {
+		return Err(AtrError::InconsistentSliceLengths {
+			high_len: high.len(),
+			low_len: low.len(),
+			close_len: dst.len(),
+		});
+	}
+	
+	// Select kernel based on input
+	let kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	// Compute ATR based on kernel
+	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+				atr_simd128(high, low, close, length, dst);
+				// Fill warmup with NaN
+				for v in &mut dst[..warmup] {
+					*v = f64::NAN;
+				}
+				return Ok(());
+			}
+		}
+		
+		match kernel {
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => atr_avx512(high, low, close, length, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => atr_avx2(high, low, close, length, dst),
+			_ => atr_scalar(high, low, close, length, dst),
+		}
+	}
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup] {
+		*v = f64::NAN;
+	}
+	Ok(())
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "atr")]
 pub fn atr_js(high: &[f64], low: &[f64], close: &[f64], length: usize) -> Result<Vec<f64>, JsError> {
 	let params = AtrParams { length: Some(length) };
 	let input = AtrInput::from_slices(high, low, close, params);
-	let output = atr(&input).map_err(|e| JsError::new(&e.to_string()))?;
-	Ok(output.values)
+	
+	let mut output = vec![0.0; high.len()];  // Single allocation
+	atr_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsError::new(&e.to_string()))?;
+	
+	Ok(output)
 }
 
 #[cfg(feature = "wasm")]
@@ -1235,6 +1400,165 @@ pub fn atr_batch_unified_js(high: &[f64], low: &[f64], close: &[f64], config: Js
 	};
 
 	serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+// Zero-copy API for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn atr_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn atr_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn atr_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	length: usize,
+) -> Result<(), JsError> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsError::new("null pointer passed to atr_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let params = AtrParams { length: Some(length) };
+		let input = AtrInput::from_slices(high, low, close, params);
+		
+		// CRITICAL: Check for aliasing - any input could be the same as output
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// Use temporary buffer if there's aliasing
+			let mut temp = vec![0.0; len];
+			atr_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing, can write directly
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			atr_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn atr_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	length_start: usize,
+	length_end: usize,
+	length_step: usize,
+) -> Result<(), JsError> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsError::new("null pointer passed to atr_batch_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+
+		let range = AtrBatchRange {
+			length: (length_start, length_end, length_step),
+		};
+
+		// Compute dimensions
+		let combos = expand_grid(&range);
+		let rows = combos.len();
+		let cols = len;
+		let output_size = rows * cols;
+
+		// Check for aliasing
+		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
+			// Use temporary buffer if there's aliasing
+			let output = atr_batch_with_kernel(high, low, close, &range, Kernel::Auto)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+			let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
+			out_slice.copy_from_slice(&output.values);
+		} else {
+			// No aliasing, compute directly into output buffer
+			let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
+			
+			// Select kernel for batch operations
+			let kernel = match detect_best_batch_kernel() {
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx512Batch => Kernel::Avx512,
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => Kernel::Scalar,
+			};
+			
+			// Use atr_batch_inner_into to write directly to output
+			atr_batch_inner_into(high, low, close, &range, kernel, false, out_slice)
+				.map_err(|e| JsError::new(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+// Streaming context for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[deprecated(
+	since = "1.0.0",
+	note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers"
+)]
+pub struct AtrContext {
+	stream: AtrStream,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[allow(deprecated)]
+impl AtrContext {
+	#[wasm_bindgen(constructor)]
+	#[deprecated(
+		since = "1.0.0",
+		note = "For weight reuse patterns, use the fast/unsafe API with persistent buffers"
+	)]
+	pub fn new(length: usize) -> Result<AtrContext, JsError> {
+		let params = AtrParams { length: Some(length) };
+		let stream = AtrStream::try_new(params).map_err(|e| JsError::new(&e.to_string()))?;
+		Ok(AtrContext { stream })
+	}
+
+	#[wasm_bindgen]
+	pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.stream.update(high, low, close)
+	}
+
+	#[wasm_bindgen]
+	pub fn reset(&mut self) -> Result<(), JsError> {
+		let length = self.stream.length;
+		let params = AtrParams { length: Some(length) };
+		self.stream = AtrStream::try_new(params).map_err(|e| JsError::new(&e.to_string()))?;
+		Ok(())
+	}
 }
 
 // Python module registration for custom exceptions

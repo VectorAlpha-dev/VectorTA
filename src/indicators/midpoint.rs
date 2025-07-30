@@ -15,9 +15,26 @@
 //! - **`Ok(MidpointOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(MidpointError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -25,6 +42,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // --- INPUT/OUTPUT TYPES ---
@@ -51,6 +69,7 @@ pub struct MidpointOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MidpointParams {
 	pub period: Option<usize>,
 }
@@ -155,6 +174,13 @@ pub enum MidpointError {
 	NotEnoughValidData { needed: usize, valid: usize },
 }
 
+#[cfg(feature = "wasm")]
+impl From<MidpointError> for JsValue {
+	fn from(err: MidpointError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 // --- INDICATOR API ---
 
 #[inline]
@@ -182,7 +208,7 @@ pub fn midpoint_with_kernel(input: &MidpointInput, kernel: Kernel) -> Result<Mid
 		});
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -201,6 +227,55 @@ pub fn midpoint_with_kernel(input: &MidpointInput, kernel: Kernel) -> Result<Mid
 	}
 
 	Ok(MidpointOutput { values: out })
+}
+
+#[inline]
+pub fn midpoint_into_slice(out: &mut [f64], input: &MidpointInput, kernel: Kernel) -> Result<(), MidpointError> {
+	let data: &[f64] = input.as_ref();
+
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(MidpointError::AllValuesNaN)?;
+	let len = data.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(MidpointError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(MidpointError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	if out.len() != len {
+		return Err(MidpointError::InvalidPeriod { period: out.len(), data_len: len });
+	}
+
+	// Initialize NaN prefix
+	for i in 0..(first + period - 1) {
+		out[i] = f64::NAN;
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => midpoint_scalar(data, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => midpoint_avx2(data, period, first, out),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => midpoint_avx512(data, period, first, out),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 // --- SIMD STUBS ---
@@ -450,7 +525,25 @@ fn midpoint_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory allocation like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each combo
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to regular slice
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -482,6 +575,17 @@ fn midpoint_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert uninitialized buffer back to Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity()
+		)
+	};
+	core::mem::forget(buf_guard);
+	
 	Ok(MidpointBatchOutput {
 		values,
 		combos,
@@ -725,4 +829,280 @@ mod tests {
         };
     }
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// --- BATCH INNER INTO ---
+
+#[inline(always)]
+pub fn midpoint_batch_inner_into(
+	data: &[f64],
+	sweep: &MidpointBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<MidpointParams>, MidpointError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(MidpointError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(MidpointError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(MidpointError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	if out.len() != rows * cols {
+		return Err(MidpointError::InvalidPeriod { period: out.len(), data_len: rows * cols });
+	}
+	
+	// Initialize output with NaN
+	out.fill(f64::NAN);
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => midpoint_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => midpoint_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => midpoint_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+// --- PYTHON BINDINGS ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "midpoint")]
+#[pyo3(signature = (data, period=None, kernel=None))]
+pub fn midpoint_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: Option<usize>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = MidpointParams { period };
+	let input = MidpointInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| midpoint_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MidpointStream")]
+pub struct MidpointStreamPy {
+	stream: MidpointStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MidpointStreamPy {
+	#[new]
+	fn new(period: Option<usize>) -> PyResult<Self> {
+		let params = MidpointParams { period };
+		let stream = MidpointStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MidpointStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "midpoint_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn midpoint_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = MidpointBatchRange {
+		period: period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			midpoint_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+// --- WASM BINDINGS ---
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn midpoint_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = MidpointParams {
+		period: Some(period),
+	};
+	let input = MidpointInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	midpoint_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn midpoint_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn midpoint_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn midpoint_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = MidpointParams { period: Some(period) };
+		let input = MidpointInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			midpoint_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			midpoint_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MidpointBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MidpointBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<MidpointParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = midpoint_batch)]
+pub fn midpoint_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: MidpointBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = MidpointBatchRange {
+		period: config.period_range,
+	};
+	
+	let result = midpoint_batch_slice(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let output = MidpointBatchJsOutput {
+		values: result.values,
+		combos: result.combos,
+		rows: result.rows,
+		cols: result.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }

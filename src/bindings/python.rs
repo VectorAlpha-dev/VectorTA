@@ -38,9 +38,11 @@ use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoBatchResult, CfoStreamPy};
+use crate::indicators::cfo::{cfo_batch_py, cfo_py, CfoStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cg::{cg_batch_py, cg_py, CgStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::coppock::{coppock_batch_py, coppock_py, CoppockStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::cmo::{cmo_batch_py, cmo_py, CmoStreamPy};
 #[cfg(feature = "python")]
@@ -53,6 +55,20 @@ use crate::indicators::chande::{chande_batch_py, chande_py, ChandeStreamPy};
 use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::decycler::{decycler_batch_py, decycler_py, DecyclerStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::dpo::{dpo_batch_py, dpo_py, DpoStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::er::{er_batch_py, er_py, ErStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kaufmanstop::{kaufmanstop_batch_py, kaufmanstop_py, KaufmanstopStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::linearreg_angle::{linearreg_angle_batch_py, linearreg_angle_py, Linearreg_angleStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::marketefi::{marketefi_batch_py, marketefi_py, MarketefiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::midpoint::{midpoint_batch_py, midpoint_py, MidpointStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::dec_osc::{dec_osc_batch_py, dec_osc_py, DecOscStreamPy};
 #[cfg(feature = "python")]
@@ -258,6 +274,22 @@ use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy}
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::nvi::{nvi_py, NviStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::pvi::{pvi_batch_py, pvi_py, PviStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::rsmk::{rsmk_batch_py, rsmk_py, RsmkStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::srsi::{srsi_batch_py, srsi_py, SrsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::tsf::{tsf_batch_py, tsf_py, TsfStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vi::{vi_batch_py, vi_py, ViStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vpt::{vpt_batch_py, vpt_py, VptStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::zscore::{zscore_batch_py, zscore_py, ZscoreStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
@@ -443,6 +475,40 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(nma_batch_py, m)?)?;
 	m.add_class::<NmaStreamPy>()?;
 
+	// Register NVI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(nvi_py, m)?)?;
+	m.add_class::<NviStreamPy>()?;
+
+	// Register PVI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(pvi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(pvi_batch_py, m)?)?;
+	m.add_class::<PviStreamPy>()?;
+
+	// Register RSMK functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsmk_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsmk_batch_py, m)?)?;
+	m.add_class::<RsmkStreamPy>()?;
+
+	// Register SRSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(srsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(srsi_batch_py, m)?)?;
+	m.add_class::<SrsiStreamPy>()?;
+
+	// Register TSF functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tsf_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tsf_batch_py, m)?)?;
+	m.add_class::<TsfStreamPy>()?;
+
+	// Register VI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vi_batch_py, m)?)?;
+	m.add_class::<ViStreamPy>()?;
+
+	// Register VPT functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vpt_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vpt_batch_py, m)?)?;
+	m.add_class::<VptStreamPy>()?;
+
 	// Register PWMA functions with their user-facing names
 	m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(pwma_batch_py, m)?)?;
@@ -596,6 +662,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
 	m.add_class::<CgStreamPy>()?;
 
+	// Register Coppock functions with their user-facing names
+	m.add_function(wrap_pyfunction!(coppock_py, m)?)?;
+	m.add_function(wrap_pyfunction!(coppock_batch_py, m)?)?;
+	m.add_class::<CoppockStreamPy>()?;
+
 	// Register CMO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(cmo_py, m)?)?;
 	m.add_function(wrap_pyfunction!(cmo_batch_py, m)?)?;
@@ -615,6 +686,41 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
+
+	// Register Decycler functions with their user-facing names
+	m.add_function(wrap_pyfunction!(decycler_py, m)?)?;
+	m.add_function(wrap_pyfunction!(decycler_batch_py, m)?)?;
+	m.add_class::<DecyclerStreamPy>()?;
+
+	// Register DPO functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dpo_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dpo_batch_py, m)?)?;
+	m.add_class::<DpoStreamPy>()?;
+
+	// Register ER functions with their user-facing names
+	m.add_function(wrap_pyfunction!(er_py, m)?)?;
+	m.add_function(wrap_pyfunction!(er_batch_py, m)?)?;
+	m.add_class::<ErStreamPy>()?;
+
+	// Register Kaufmanstop functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kaufmanstop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kaufmanstop_batch_py, m)?)?;
+	m.add_class::<KaufmanstopStreamPy>()?;
+
+	// Register Linear Regression Angle functions with their user-facing names
+	m.add_function(wrap_pyfunction!(linearreg_angle_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linearreg_angle_batch_py, m)?)?;
+	m.add_class::<Linearreg_angleStreamPy>()?;
+
+	// Register MarketEFI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(marketefi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(marketefi_batch_py, m)?)?;
+	m.add_class::<MarketefiStreamPy>()?;
+
+	// Register Midpoint functions with their user-facing names
+	m.add_function(wrap_pyfunction!(midpoint_py, m)?)?;
+	m.add_function(wrap_pyfunction!(midpoint_batch_py, m)?)?;
+	m.add_class::<MidpointStreamPy>()?;
 
 	// Register Decycler Oscillator functions with their user-facing names
 	m.add_function(wrap_pyfunction!(dec_osc_py, m)?)?;
@@ -759,12 +865,16 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
 	m.add_function(wrap_pyfunction!(cfo_batch_py, m)?)?;
 	m.add_class::<CfoStreamPy>()?;
-	m.add_class::<CfoBatchResult>()?;
 
 	// Register BOP functions with their user-facing names
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register ZSCORE functions with their user-facing names
+	m.add_function(wrap_pyfunction!(zscore_py, m)?)?;
+	m.add_function(wrap_pyfunction!(zscore_batch_py, m)?)?;
+	m.add_class::<ZscoreStreamPy>()?;
 
 	// Register GatorOsc functions with their user-facing names
 	m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;

@@ -16,7 +16,9 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -24,6 +26,21 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum VptData<'a> {
@@ -37,6 +54,7 @@ pub struct VptOutput {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VptParams;
 
 #[derive(Debug, Clone)]
@@ -171,26 +189,34 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
 #[inline]
 pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptError> {
 	let n = price.len();
-	let mut vpt_val = vec![f64::NAN; n];
+	let mut res = alloc_with_nan_prefix(n, 1);
+	
+	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
+	let mut prev_vpt_val = f64::NAN;
+	
 	for i in 1..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
-		if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
-			vpt_val[i] = f64::NAN;
+		
+		// Calculate current VPT value
+		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+			f64::NAN
 		} else {
-			vpt_val[i] = v1 * ((p1 - p0) / p0);
-		}
-	}
-	let mut res = vec![f64::NAN; n];
-	for i in 1..n {
-		let shifted = vpt_val[i - 1];
-		if vpt_val[i].is_nan() || shifted.is_nan() {
-			res[i] = f64::NAN;
+			v1 * ((p1 - p0) / p0)
+		};
+		
+		// Output is current VPT value + previous VPT value (shifted array approach)
+		res[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
+			f64::NAN
 		} else {
-			res[i] = vpt_val[i] + shifted;
-		}
+			vpt_val + prev_vpt_val
+		};
+		
+		// Save current VPT value for next iteration
+		prev_vpt_val = vpt_val;
 	}
+	
 	Ok(VptOutput { values: res })
 }
 
@@ -311,7 +337,75 @@ pub fn vpt_indicator_scalar(input: &VptInput) -> Result<VptOutput, VptError> {
 
 #[inline]
 pub fn vpt_expand_grid() -> Vec<VptParams> {
-	vec![VptParams]
+	// VPT has no parameters, return single empty params
+	// Using array instead of vec! to avoid allocation
+	[VptParams].to_vec()
+}
+
+/// Write VPT directly to output slice - no allocations
+pub fn vpt_into_slice(dst: &mut [f64], price: &[f64], volume: &[f64], kern: Kernel) -> Result<(), VptError> {
+	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
+		return Err(VptError::EmptyData);
+	}
+	
+	if dst.len() != price.len() {
+		return Err(VptError::EmptyData); // Using EmptyData as we don't have InvalidLength
+	}
+	
+	let valid_count = price
+		.iter()
+		.zip(volume.iter())
+		.filter(|(&p, &v)| !(p.is_nan() || v.is_nan()))
+		.count();
+	
+	if valid_count == 0 {
+		return Err(VptError::AllValuesNaN);
+	}
+	if valid_count < 2 {
+		return Err(VptError::NotEnoughValidData);
+	}
+	
+	// Use the row version which writes directly to output
+	unsafe {
+		match kern {
+			Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => vpt_row_scalar(price, volume, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vpt_row_avx2(price, volume, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vpt_row_avx512(price, volume, dst),
+			_ => vpt_row_scalar(price, volume, dst),
+		}
+	}
+	
+	Ok(())
+}
+
+pub fn vpt_batch_inner_into(
+	price: &[f64],
+	volume: &[f64],
+	_range: &VptBatchRange,
+	kern: Kernel,
+	_parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VptParams>, VptError> {
+	if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
+		return Err(VptError::EmptyData);
+	}
+
+	// VPT has no parameters, so only one "combo"
+	let combos = vec![VptParams];
+	
+	// Single row output
+	match kern {
+		Kernel::Scalar | Kernel::ScalarBatch => unsafe { vpt_row_scalar(price, volume, out) },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { vpt_row_avx2(price, volume, out) },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { vpt_row_avx512(price, volume, out) },
+		_ => unsafe { vpt_row_scalar(price, volume, out) },
+	}
+
+	Ok(combos)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -447,24 +541,34 @@ fn vpt_batch_inner(price: &[f64], volume: &[f64], kern: Kernel, _parallel: bool)
 #[inline(always)]
 pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
 	let n = price.len();
-	let mut vpt_val = vec![f64::NAN; n];
+	
+	// First value is always NaN
+	out[0] = f64::NAN;
+	
+	// VPT uses "shifted array approach": output[i] = vpt_val[i] + vpt_val[i-1]
+	let mut prev_vpt_val = f64::NAN;
+	
 	for i in 1..n {
 		let p0 = price[i - 1];
 		let p1 = price[i];
 		let v1 = volume[i];
-		if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
-			vpt_val[i] = f64::NAN;
+		
+		// Calculate current VPT value
+		let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
+			f64::NAN
 		} else {
-			vpt_val[i] = v1 * ((p1 - p0) / p0);
-		}
-	}
-	for i in 1..n {
-		let shifted = vpt_val[i - 1];
-		if vpt_val[i].is_nan() || shifted.is_nan() {
-			out[i] = f64::NAN;
+			v1 * ((p1 - p0) / p0)
+		};
+		
+		// Output is current VPT value + previous VPT value (shifted array approach)
+		out[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
+			f64::NAN
 		} else {
-			out[i] = vpt_val[i] + shifted;
-		}
+			vpt_val + prev_vpt_val
+		};
+		
+		// Save current VPT value for next iteration
+		prev_vpt_val = vpt_val;
 	}
 }
 
@@ -490,6 +594,210 @@ pub unsafe fn vpt_row_avx512_short(price: &[f64], volume: &[f64], out: &mut [f64
 #[inline(always)]
 pub unsafe fn vpt_row_avx512_long(price: &[f64], volume: &[f64], out: &mut [f64]) {
 	vpt_row_scalar(price, volume, out)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vpt")]
+#[pyo3(signature = (price, volume, kernel=None))]
+pub fn vpt_py<'py>(
+	py: Python<'py>,
+	price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let price_slice = price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let input = VptInput::from_slices(price_slice, volume_slice);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| vpt_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VptStream")]
+pub struct VptStreamPy {
+	stream: VptStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VptStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		Ok(VptStreamPy {
+			stream: VptStream::default(),
+		})
+	}
+
+	fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
+		self.stream.update(price, volume)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vpt_batch")]
+#[pyo3(signature = (price, volume, kernel=None))]
+pub fn vpt_batch_py<'py>(
+	py: Python<'py>,
+	price: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let price_slice = price.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	// VPT has no parameters, so single row output
+	let rows = 1;
+	let cols = price_slice.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let _combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			vpt_batch_inner_into(price_slice, volume_slice, &VptBatchRange, kernel, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	
+	// No parameters for VPT, but include empty list for consistency
+	dict.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpt_js(price: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let mut output = vec![0.0; price.len()];
+	
+	vpt_into_slice(&mut output, price, volume, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpt_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpt_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpt_into(
+	price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let price = std::slice::from_raw_parts(price_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		// Check if either input aliases with output
+		if price_ptr == out_ptr || volume_ptr == out_ptr {
+			// Need temporary buffer for aliasing
+			let mut temp = vec![0.0; len];
+			vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// No aliasing, write directly
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vpt_into_slice(out, price, volume, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VptBatchConfig {
+	// VPT has no parameters, so empty config
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VptBatchJsOutput {
+	pub values: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vpt_batch)]
+pub fn vpt_batch_js(price: &[f64], volume: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
+	// VPT has no parameters, so batch returns single row
+	let output = vpt_batch_with_kernel(price, volume, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = VptBatchJsOutput {
+		values: output.values,
+		rows: 1,
+		cols: price.len(),
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpt_batch_into(
+	price_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if price_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let price = std::slice::from_raw_parts(price_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		
+		// VPT has no parameters, so just compute once
+		vpt_batch_inner_into(price, volume, &VptBatchRange, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		// Return number of parameter combinations (always 1 for VPT)
+		Ok(1)
+	}
 }
 
 #[cfg(test)]

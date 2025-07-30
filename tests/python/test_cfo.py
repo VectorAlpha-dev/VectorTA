@@ -162,16 +162,17 @@ class TestCfo:
             scalar_range=(100.0, 100.0, 0.0)  # Default scalar only
         )
         
-        assert hasattr(result, 'values')
-        assert hasattr(result, 'periods')
-        assert hasattr(result, 'scalars')
+        assert isinstance(result, dict)
+        assert 'values' in result
+        assert 'periods' in result
+        assert 'scalars' in result
         
         # Should have 1 combination (default params)
-        assert result.values.shape[0] == 1
-        assert result.values.shape[1] == len(close)
+        assert result['values'].shape[0] == 1
+        assert result['values'].shape[1] == len(close)
         
         # Extract the single row
-        default_row = result.values[0]
+        default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['cfo']['last_5_values']
         
         # Check last 5 values match
@@ -200,17 +201,17 @@ class TestCfo:
         )
         
         # Should have 3 * 3 = 9 combinations
-        assert result.values.shape[0] == 9
-        assert result.values.shape[1] == len(close)
-        assert len(result.periods) == 9
-        assert len(result.scalars) == 9
+        assert result['values'].shape[0] == 9
+        assert result['values'].shape[1] == len(close)
+        assert len(result['periods']) == 9
+        assert len(result['scalars']) == 9
         
         # Verify periods and scalars are as expected
         expected_periods = [10, 10, 10, 15, 15, 15, 20, 20, 20]
         expected_scalars = [50.0, 100.0, 150.0] * 3
         
-        np.testing.assert_array_equal(result.periods, expected_periods)
-        np.testing.assert_array_almost_equal(result.scalars, expected_scalars, decimal=10)
+        np.testing.assert_array_equal(result['periods'], expected_periods)
+        np.testing.assert_array_almost_equal(result['scalars'], expected_scalars, decimal=10)
 
     def test_cfo_with_kernel(self, test_data):
         """Test CFO with different kernel selections"""

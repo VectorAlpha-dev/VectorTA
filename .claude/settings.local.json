@@ -268,12 +268,12 @@
       "Bash(./run_wasm_benchmark.bat --rebuild wma)",
       "Bash(./run_python_benchmark.bat alligator)",
       "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
-      "Bash(test_bindings.bat cci --python)",
-      "Bash(test_bindings.bat natr)",
-      "Bash(.test_bindings.bat natr)",
-      "Bash(test_bindings.bat rsi)",
-      "Bash(cargo doc:*)",
-      "Bash(test -f \"tests/python/test_wclprice.py\")"
+      "Bash(test_bindings.bat atr)",
+      "Bash(test_bindings.bat coppock)",
+      "Bash(rustfmt:*)",
+      "Bash(powershell:*)",
+      "Bash(cargo rustc:*)",
+      "Bash(.venv\\Scripts\\python.exe test_rsmk_quick.py:*)"
     ],
     "deny": []
   }

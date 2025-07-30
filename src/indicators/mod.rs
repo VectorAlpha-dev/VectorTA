@@ -131,6 +131,10 @@ pub mod willr;
 pub mod zscore;
 pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
+pub use coppock::{coppock, CoppockInput, CoppockOutput, CoppockParams};
+pub use er::{er, ErInput, ErOutput, ErParams};
+pub use linearreg_angle::{linearreg_angle, Linearreg_angleInput, Linearreg_angleOutput, Linearreg_angleParams};
 pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
 pub use squeeze_momentum::{
 	squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams, 
