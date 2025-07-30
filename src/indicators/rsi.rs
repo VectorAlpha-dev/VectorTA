@@ -17,16 +17,33 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
 use paste::paste;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RsiInput<'a> {
 	#[inline(always)]
@@ -50,6 +67,7 @@ pub struct RsiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct RsiParams {
 	pub period: Option<usize>,
 }
@@ -181,23 +199,25 @@ pub fn rsi_with_kernel(input: &RsiInput, kernel: Kernel) -> Result<RsiOutput, Rs
 		other => other,
 	};
 
+	let mut out = alloc_with_nan_prefix(len, first + period);
+
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => rsi_scalar(data, period, first, &mut vec![f64::NAN; len]),
+			Kernel::Scalar | Kernel::ScalarBatch => rsi_scalar(data, period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => rsi_avx2(data, period, first, &mut vec![f64::NAN; len]),
+			Kernel::Avx2 | Kernel::Avx2Batch => rsi_avx2(data, period, first, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => rsi_avx512(data, period, first, &mut vec![f64::NAN; len]),
+			Kernel::Avx512 | Kernel::Avx512Batch => rsi_avx512(data, period, first, &mut out)?,
 			_ => unreachable!(),
 		}
 	}
+
+	Ok(RsiOutput { values: out })
 }
 
 #[inline(always)]
-pub unsafe fn rsi_scalar(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<RsiOutput, RsiError> {
+pub unsafe fn rsi_scalar(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<(), RsiError> {
 	let len = data.len();
-	let mut rsi_values = vec![f64::NAN; len];
-
 	let inv_period = 1.0 / period as f64;
 	let beta = 1.0 - inv_period;
 
@@ -220,7 +240,7 @@ pub unsafe fn rsi_scalar(data: &[f64], period: usize, first: usize, out: &mut Ve
 	} else {
 		100.0 * avg_gain / (avg_gain + avg_loss)
 	};
-	rsi_values[first + period] = initial_rsi;
+	out[first + period] = initial_rsi;
 
 	for i in (first + period + 1)..len {
 		let delta = data[i] - data[i - 1];
@@ -233,20 +253,20 @@ pub unsafe fn rsi_scalar(data: &[f64], period: usize, first: usize, out: &mut Ve
 		} else {
 			100.0 * avg_gain / (avg_gain + avg_loss)
 		};
-		rsi_values[i] = rsi;
+		out[i] = rsi;
 	}
-	Ok(RsiOutput { values: rsi_values })
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn rsi_avx2(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<RsiOutput, RsiError> {
+pub unsafe fn rsi_avx2(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<(), RsiError> {
 	rsi_scalar(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub unsafe fn rsi_avx512(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<RsiOutput, RsiError> {
+pub unsafe fn rsi_avx512(data: &[f64], period: usize, first: usize, out: &mut Vec<f64>) -> Result<(), RsiError> {
 	if period <= 32 {
 		rsi_avx512_short(data, period, first, out)
 	} else {
@@ -261,7 +281,7 @@ pub unsafe fn rsi_avx512_short(
 	period: usize,
 	first: usize,
 	out: &mut Vec<f64>,
-) -> Result<RsiOutput, RsiError> {
+) -> Result<(), RsiError> {
 	rsi_scalar(data, period, first, out)
 }
 
@@ -272,8 +292,114 @@ pub unsafe fn rsi_avx512_long(
 	period: usize,
 	first: usize,
 	out: &mut Vec<f64>,
-) -> Result<RsiOutput, RsiError> {
+) -> Result<(), RsiError> {
 	rsi_scalar(data, period, first, out)
+}
+
+#[inline]
+pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result<(), RsiError> {
+	let data: &[f64] = match &input.data {
+		RsiData::Candles { candles, source } => source_type(candles, source),
+		RsiData::Slice(sl) => sl,
+	};
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsiError::AllValuesNaN)?;
+
+	let len = data.len();
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(RsiError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(RsiError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	if dst.len() != data.len() {
+		return Err(RsiError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				rsi_compute_into_scalar(data, period, first, dst);
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				rsi_compute_into_scalar(data, period, first, dst);
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				if period <= 32 {
+					rsi_compute_into_scalar(data, period, first, dst);
+				} else {
+					rsi_compute_into_scalar(data, period, first, dst);
+				}
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup period with NaN
+	let warmup_end = first + period;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+#[inline(always)]
+unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+	let len = data.len();
+	let inv_period = 1.0 / period as f64;
+	let beta = 1.0 - inv_period;
+
+	let mut avg_gain = 0.0;
+	let mut avg_loss = 0.0;
+
+	for i in (first + 1)..=(first + period) {
+		let delta = data[i] - data[i - 1];
+		if delta > 0.0 {
+			avg_gain += delta;
+		} else {
+			avg_loss += -delta;
+		}
+	}
+	avg_gain *= inv_period;
+	avg_loss *= inv_period;
+
+	let initial_rsi = if avg_gain + avg_loss == 0.0 {
+		50.0
+	} else {
+		100.0 * avg_gain / (avg_gain + avg_loss)
+	};
+	out[first + period] = initial_rsi;
+
+	for i in (first + period + 1)..len {
+		let delta = data[i] - data[i - 1];
+		let gain = if delta > 0.0 { delta } else { 0.0 };
+		let loss = if delta < 0.0 { -delta } else { 0.0 };
+		avg_gain = inv_period * gain + beta * avg_gain;
+		avg_loss = inv_period * loss + beta * avg_loss;
+		let rsi = if avg_gain + avg_loss == 0.0 {
+			50.0
+		} else {
+			100.0 * avg_gain / (avg_gain + avg_loss)
+		};
+		out[i] = rsi;
+	}
 }
 
 // --- Batch grid/range support ---
@@ -407,7 +533,21 @@ fn rsi_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory for performance
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap())
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = 
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -441,6 +581,15 @@ fn rsi_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert back to Vec for return
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(RsiBatchOutput {
 		values,
@@ -448,6 +597,69 @@ fn rsi_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+pub fn rsi_batch_inner_into(
+	data: &[f64],
+	sweep: &RsiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<RsiParams>, RsiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RsiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RsiError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(RsiError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let rows = combos.len();
+	let cols = data.len();
+	
+	if out.len() != rows * cols {
+		return Err(RsiError::InvalidPeriod { period: out.len(), data_len: rows * cols });
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => rsi_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => rsi_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => rsi_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -534,9 +746,16 @@ impl RsiStream {
 		if period == 0 {
 			return Err(RsiError::InvalidPeriod { period, data_len: 0 });
 		}
+		let mut buffer = Vec::with_capacity(period);
+		unsafe {
+			buffer.set_len(period);
+			for i in 0..period {
+				*buffer.get_unchecked_mut(i) = f64::NAN;
+			}
+		}
 		Ok(Self {
 			period,
-			buffer: vec![f64::NAN; period],
+			buffer,
 			head: 0,
 			filled: false,
 			avg_gain: 0.0,
@@ -825,4 +1044,223 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// --- Python Bindings ---
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rsi")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn rsi_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = RsiParams {
+		period: Some(period),
+	};
+	let input = RsiInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| rsi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "RsiStream")]
+pub struct RsiStreamPy {
+	stream: RsiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl RsiStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = RsiParams {
+			period: Some(period),
+		};
+		let stream = RsiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(RsiStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rsi_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn rsi_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = RsiBatchRange {
+		period: period_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			rsi_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = RsiParams { period: Some(period) };
+	let input = RsiInput::from_slice(data, params);
+	
+	// Use uninitialized memory and let rsi_into_slice handle initialization
+	let mut output = Vec::with_capacity(data.len());
+	unsafe {
+		output.set_len(data.len());
+	}
+	
+	rsi_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsi_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsi_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to rsi_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = RsiParams { period: Some(period) };
+		let input = RsiInput::from_slice(data, params);
+
+		if in_ptr == out_ptr {
+			// Use uninitialized memory for temp buffer
+			let mut temp = Vec::with_capacity(len);
+			unsafe {
+				temp.set_len(len);
+			}
+			rsi_into_slice(&mut temp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			rsi_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RsiBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RsiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<RsiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = rsi_batch)]
+pub fn rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: RsiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = RsiBatchRange {
+		period: config.period_range,
+	};
+
+	let output = rsi_batch_with_kernel(data, &sweep, detect_best_batch_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = RsiBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

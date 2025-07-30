@@ -85,6 +85,30 @@ impl<'a> AroonOscInput<'a> {
 	pub fn get_length(&self) -> usize {
 		self.params.length.unwrap_or(14)
 	}
+	
+	#[inline]
+	pub fn data_len(&self) -> usize {
+		match &self.data {
+			AroonOscData::Candles { candles } => candles.close.len(),
+			AroonOscData::SlicesHL { high, .. } => high.len(),
+		}
+	}
+	
+	#[inline]
+	pub fn get_high(&self) -> &'a [f64] {
+		match &self.data {
+			AroonOscData::Candles { candles } => &candles.high,
+			AroonOscData::SlicesHL { high, .. } => high,
+		}
+	}
+	
+	#[inline]
+	pub fn get_low(&self) -> &'a [f64] {
+		match &self.data {
+			AroonOscData::Candles { candles } => &candles.low,
+			AroonOscData::SlicesHL { low, .. } => low,
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +184,12 @@ pub enum AroonOscError {
 
 	#[error("aroonosc: Not enough data points for Aroon Osc: required={required}, found={found}")]
 	NotEnoughData { required: usize, found: usize },
+	
+	#[error("aroonosc: Empty data")]
+	EmptyData,
+	
+	#[error("aroonosc: Mismatched array lengths: high_len={high_len}, low_len={low_len}")]
+	MismatchedArrayLengths { high_len: usize, low_len: usize },
 }
 
 #[inline]
@@ -279,6 +309,76 @@ pub unsafe fn aroon_osc_avx512_short(high: &[f64], low: &[f64], length: usize, o
 #[inline]
 pub unsafe fn aroon_osc_avx512_long(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
 	aroon_osc_scalar(high, low, length, out)
+}
+
+/// Write Aroon Oscillator directly to output slice - no allocations
+#[inline]
+pub fn aroon_osc_into_slice(dst: &mut [f64], input: &AroonOscInput, kern: Kernel) -> Result<(), AroonOscError> {
+	let length = input.get_length();
+	if length == 0 {
+		return Err(AroonOscError::InvalidLength { length: 0 });
+	}
+
+	let data_len = input.data_len();
+	if data_len == 0 {
+		return Err(AroonOscError::EmptyData);
+	}
+	if length > data_len {
+		return Err(AroonOscError::NotEnoughData {
+			required: length,
+			found: data_len,
+		});
+	}
+	if dst.len() != data_len {
+		return Err(AroonOscError::InvalidLength { 
+			length: dst.len(),
+		});
+	}
+
+	let high = input.get_high();
+	let low = input.get_low();
+	
+	if high.len() != low.len() {
+		return Err(AroonOscError::MismatchedArrayLengths {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+
+	// Fill warmup with NaN first
+	let warmup = length;
+	for v in &mut dst[..warmup] {
+		*v = f64::NAN;
+	}
+
+	// Select kernel
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	// Compute Aroon Oscillator values
+	match chosen {
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 => {
+			#[target_feature(enable = "avx512f")]
+			unsafe fn aroon_osc_avx512_wrapper(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
+				aroon_osc_avx512(high, low, length, out)
+			}
+			unsafe { aroon_osc_avx512_wrapper(high, low, length, dst) }
+		}
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 => {
+			#[target_feature(enable = "avx2,fma")]
+			unsafe fn aroon_osc_avx2_wrapper(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
+				aroon_osc_avx2(high, low, length, out)
+			}
+			unsafe { aroon_osc_avx2_wrapper(high, low, length, dst) }
+		}
+		_ => aroon_osc_scalar(high, low, length, dst),
+	}
+
+	Ok(())
 }
 
 #[inline(always)]
@@ -511,6 +611,78 @@ fn aroon_osc_batch_inner(
 }
 
 #[inline(always)]
+fn aroon_osc_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &AroonOscBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<AroonOscParams>, AroonOscError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(AroonOscError::InvalidLength { length: 0 });
+	}
+	let len = high.len();
+	if high.len() != low.len() {
+		return Err(AroonOscError::SlicesLengthMismatch {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+	if len < max_l {
+		return Err(AroonOscError::NotEnoughData {
+			required: max_l,
+			found: len,
+		});
+	}
+	let rows = combos.len();
+	let cols = len;
+
+	// Initialize NaN prefixes for each row
+	for (row, combo) in combos.iter().enumerate() {
+		let warmup = combo.length.unwrap();
+		let row_start = row * cols;
+		out[row_start..row_start + warmup].fill(f64::NAN);
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let length = combos[row].length.unwrap();
+		match kern {
+			Kernel::Scalar => aroon_osc_row_scalar(high, low, length, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => aroon_osc_row_avx2(high, low, length, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => aroon_osc_row_avx512(high, low, length, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+#[inline(always)]
 pub unsafe fn aroon_osc_row_scalar(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
 	aroon_osc_scalar(high, low, length, out)
 }
@@ -537,6 +709,40 @@ pub unsafe fn aroon_osc_row_avx512_short(high: &[f64], low: &[f64], length: usiz
 #[inline(always)]
 pub unsafe fn aroon_osc_row_avx512_long(high: &[f64], low: &[f64], length: usize, out: &mut [f64]) {
 	aroon_osc_scalar(high, low, length, out)
+}
+
+/// Write batch Aroon Oscillator directly to output slice - no allocations
+#[inline]
+pub fn aroon_osc_batch_into_slice(
+	high: &[f64],
+	low: &[f64],
+	sweep: &AroonOscBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<AroonOscParams>, AroonOscError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(AroonOscError::InvalidLength { length: 0 });
+	}
+	
+	let len = high.len();
+	if high.len() != low.len() {
+		return Err(AroonOscError::SlicesLengthMismatch {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	
+	let expected_len = combos.len() * len;
+	if out.len() != expected_len {
+		return Err(AroonOscError::InvalidLength { 
+			length: out.len(),
+		});
+	}
+	
+	// Use the existing inner function
+	aroon_osc_batch_inner_into(high, low, sweep, kern, parallel, out)
 }
 
 #[derive(Debug, Clone)]
@@ -931,7 +1137,7 @@ pub fn aroon_osc_py<'py>(
 	length: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
 	// Get slices - as_slice() will fail if array is not contiguous
 	let high_slice = high.as_slice()?;
@@ -951,60 +1157,20 @@ pub fn aroon_osc_py<'py>(
 		return Err(PyValueError::new_err("Invalid length: length must be greater than 0"));
 	}
 
-	if length + 1 > high_slice.len() {
-		return Err(PyValueError::new_err(format!(
-			"Not enough data: need at least {} data points for length {}",
-			length + 1,
-			length
-		)));
-	}
-
-	// Use kernel validation for safety
+	// Validate kernel parameter before entering allow_threads
 	let kern = validate_kernel(kernel, false)?;
 
 	// Build input struct
 	let params = AroonOscParams { length: Some(length) };
 	let aroon_in = AroonOscInput::from_slices_hl(high_slice, low_slice, params);
 
-	// Allocate uninitialized NumPy output buffer
-	// SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [high_slice.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Get Vec<f64> from Rust function with zero-copy transfer
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| aroon_osc_with_kernel(&aroon_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), AroonOscError> {
-		let length = aroon_in.get_length();
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// 1. Write NaN prefix to the first (length) elements
-		let window = length + 1;
-		if window > 1 {
-			slice_out[..window - 1].fill(f64::NAN);
-		}
-
-		// 2. Compute Aroon Oscillator values for remaining elements
-		// This is guaranteed by the aroon_osc_scalar implementation
-		let chosen = match kern {
-			Kernel::Auto => detect_best_kernel(),
-			other => other,
-		};
-
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => aroon_osc_scalar(high_slice, low_slice, length, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => aroon_osc_avx2(high_slice, low_slice, length, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => aroon_osc_avx512(high_slice, low_slice, length, slice_out),
-				_ => unreachable!(),
-			}
-		}
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	// Zero-copy transfer to NumPy
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1055,25 +1221,24 @@ pub fn aroon_osc_batch_py<'py>(
 		)));
 	}
 
+	// Validate kernel parameter before entering allow_threads
+	let kern = validate_kernel(kernel, true)?;
+
 	let sweep = AroonOscBatchRange { length: length_range };
 
-	// 1. Expand grid once to know rows*cols
+	// Calculate dimensions for pre-allocation
 	let combos = expand_grid(&sweep);
 	let rows = combos.len();
 	let cols = high_slice.len();
 
-	// 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-	// SAFETY: PyArray1::new() creates uninitialized memory, not zero-initialized
+	// Pre-allocate uninitialized NumPy array for maximum efficiency
 	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	// Use kernel validation for safety
-	let kern = validate_kernel(kernel, true)?;
-
-	// 3. Heavy work without the GIL
+	// Compute directly into pre-allocated buffer
 	let combos = py
 		.allow_threads(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
-			// Resolve Kernel::Auto to a specific kernel
+			// Resolve kernel for batch operations
 			let kernel = match kern {
 				Kernel::Auto => detect_best_batch_kernel(),
 				k => k,
@@ -1085,52 +1250,11 @@ pub fn aroon_osc_batch_py<'py>(
 				_ => unreachable!(),
 			};
 
-			// Fill slice_out with NaN initially
-			slice_out.fill(f64::NAN);
-
-			// Compute batch results directly into pre-allocated buffer
-			let combos = expand_grid(&sweep);
-			let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-			if high_slice.len() < max_l {
-				return Err(AroonOscError::NotEnoughData {
-					required: max_l,
-					found: high_slice.len(),
-				});
-			}
-
-			let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-				let length = combos[row].length.unwrap();
-				match simd {
-					Kernel::Scalar => aroon_osc_row_scalar(high_slice, low_slice, length, out_row),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx2 => aroon_osc_row_avx2(high_slice, low_slice, length, out_row),
-					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-					Kernel::Avx512 => aroon_osc_row_avx512(high_slice, low_slice, length, out_row),
-					_ => unreachable!(),
-				}
-			};
-
-			// Parallel processing for non-WASM
-			#[cfg(not(target_arch = "wasm32"))]
-			{
-				slice_out
-					.par_chunks_mut(cols)
-					.enumerate()
-					.for_each(|(row, slice)| do_row(row, slice));
-			}
-
-			#[cfg(target_arch = "wasm32")]
-			{
-				for (row, slice) in slice_out.chunks_mut(cols).enumerate() {
-					do_row(row, slice);
-				}
-			}
-
-			Ok(combos)
+			aroon_osc_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
 		})
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 4. Build dict with the GIL
+	// Build result dictionary with zero-copy transfers
 	let dict = PyDict::new(py);
 	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 	dict.set_item(
@@ -1158,9 +1282,10 @@ pub fn aroonosc_js(high: &[f64], low: &[f64], length: usize) -> Result<Vec<f64>,
 
 	let params = AroonOscParams { length: Some(length) };
 	let input = AroonOscInput::from_slices_hl(high, low, params);
-
-	aroon_osc_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
+	
+	// Use aroon_osc_with_kernel to properly allocate with NaN prefix
+	aroon_osc_with_kernel(&input, Kernel::Auto)
+		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
@@ -1186,7 +1311,7 @@ pub fn aroonosc_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
-	aroon_osc_batch_slice(high, low, &sweep, Kernel::Scalar)
+	aroon_osc_batch_slice(high, low, &sweep, Kernel::Auto)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1249,7 +1374,7 @@ pub fn aroon_osc_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) ->
 
 	// 2. Run the existing core logic
 	let output =
-		aroon_osc_batch_slice(high, low, &sweep, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		aroon_osc_batch_slice(high, low, &sweep, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 3. Create the structured output
 	let js_output = AroonOscBatchJsOutput {
@@ -1261,4 +1386,108 @@ pub fn aroon_osc_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) ->
 
 	// 4. Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	length: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let params = AroonOscParams { length: Some(length) };
+		let input = AroonOscInput::from_slices_hl(high, low, params);
+		
+		// Check for aliasing - if any input overlaps with output, use temp buffer
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			aroon_osc_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			aroon_osc_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn aroonosc_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	length_start: usize,
+	length_end: usize,
+	length_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		
+		let sweep = AroonOscBatchRange {
+			length: (length_start, length_end, length_step),
+		};
+		
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let expected_len = rows * len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, expected_len);
+		
+		// Check for aliasing - if any input overlaps with output, use temp buffer
+		let high_overlaps = (high_ptr as usize) < (out_ptr as usize + expected_len * 8) &&
+						   (high_ptr as usize + len * 8) > (out_ptr as usize);
+		let low_overlaps = (low_ptr as usize) < (out_ptr as usize + expected_len * 8) &&
+						  (low_ptr as usize + len * 8) > (out_ptr as usize);
+		
+		if high_overlaps || low_overlaps {
+			let mut temp = vec![0.0; expected_len];
+			aroon_osc_batch_into_slice(high, low, &sweep, Kernel::Auto, false, &mut temp)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			out.copy_from_slice(&temp);
+		} else {
+			aroon_osc_batch_into_slice(high, low, &sweep, Kernel::Auto, false, out)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(rows)
+	}
 }

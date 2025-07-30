@@ -13,7 +13,9 @@
 //! - **`Err(EmvError)`** otherwise
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -21,6 +23,22 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use crate::utilities::helpers::detect_wasm_kernel;
 
 #[derive(Debug, Clone)]
 pub enum EmvData<'a> {
@@ -164,7 +182,7 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
 		return Err(EmvError::NotEnoughData { valid: valid_count });
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first + 1);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -181,6 +199,75 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
 		}
 	}
 	Ok(EmvOutput { values: out })
+}
+
+#[inline]
+pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result<(), EmvError> {
+	let (high, low, close, volume) = match &input.data {
+		EmvData::Candles { candles } => {
+			let high = source_type(candles, "high");
+			let low = source_type(candles, "low");
+			let close = source_type(candles, "close");
+			let volume = source_type(candles, "volume");
+			(high, low, close, volume)
+		}
+		EmvData::Slices {
+			high,
+			low,
+			close,
+			volume,
+		} => (*high, *low, *close, *volume),
+	};
+
+	if high.is_empty() || low.is_empty() || volume.is_empty() {
+		return Err(EmvError::EmptyData);
+	}
+	let len = high.len().min(low.len()).min(volume.len());
+	if len == 0 {
+		return Err(EmvError::EmptyData);
+	}
+
+	if dst.len() != len {
+		return Err(EmvError::NotEnoughData { valid: dst.len() });
+	}
+
+	let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()));
+	let first = match first {
+		Some(idx) => idx,
+		None => return Err(EmvError::AllValuesNaN),
+	};
+
+	let mut valid_count = 0_usize;
+	for i in first..len {
+		if !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()) {
+			valid_count += 1;
+		}
+	}
+	if valid_count < 2 {
+		return Err(EmvError::NotEnoughData { valid: valid_count });
+	}
+
+	// Fill warmup period with NaN
+	for v in &mut dst[..(first + 1)] {
+		*v = f64::NAN;
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => emv_scalar(high, low, volume, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => emv_avx2(high, low, volume, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => emv_avx512(high, low, volume, first, dst),
+			_ => unreachable!(),
+		}
+	}
+	Ok(())
 }
 
 #[inline]
@@ -378,12 +465,13 @@ fn emv_batch_inner(
 	_parallel: bool,
 ) -> Result<EmvBatchOutput, EmvError> {
 	let len = high.len().min(low.len()).min(volume.len());
-	let mut out = vec![f64::NAN; len];
 	let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()));
 	let first = match first {
 		Some(idx) => idx,
 		None => return Err(EmvError::AllValuesNaN),
 	};
+	
+	let mut out = alloc_with_nan_prefix(len, first + 1);
 
 	unsafe {
 		match kern {
@@ -456,6 +544,289 @@ pub fn emv_row_avx512(
 #[inline(always)]
 fn expand_grid_emv(_r: &EmvBatchRange) -> Vec<()> {
 	vec![()]
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "emv")]
+#[pyo3(signature = (high, low, close, volume, kernel=None))]
+pub fn emv_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let data = EmvData::Slices {
+		high: high_slice,
+		low: low_slice,
+		close: close_slice,
+		volume: volume_slice,
+	};
+	let input = EmvInput {
+		data,
+		params: EmvParams,
+	};
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| emv_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "EmvStream")]
+pub struct EmvStreamPy {
+	stream: EmvStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl EmvStreamPy {
+	#[new]
+	fn new() -> PyResult<Self> {
+		let stream = EmvStream::try_new().map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(EmvStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
+		self.stream.update(high, low, volume)
+	}
+}
+
+#[cfg(feature = "python")]
+fn emv_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	_close: &[f64],
+	volume: &[f64],
+	_range: &EmvBatchRange,
+	kern: Kernel,
+	_parallel: bool,
+	out: &mut [f64],
+) -> Vec<EmvParams> {
+	let len = high.len().min(low.len()).min(volume.len());
+	let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan())).unwrap_or(0);
+	
+	// Fill warmup period with NaN
+	for i in 0..(first + 1).min(len) {
+		out[i] = f64::NAN;
+	}
+	
+	// EMV has no parameters, so we just compute once
+	unsafe {
+		match kern {
+			Kernel::ScalarBatch | Kernel::Scalar => {
+				emv_scalar(high, low, volume, first, out);
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2Batch | Kernel::Avx2 => {
+				emv_avx2(high, low, volume, first, out);
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512Batch | Kernel::Avx512 => {
+				emv_avx512(high, low, volume, first, out);
+			}
+			_ => {
+				emv_scalar(high, low, volume, first, out);
+			}
+		}
+	}
+	
+	// Return single empty params since EMV has no parameters
+	vec![EmvParams]
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "emv_batch")]
+#[pyo3(signature = (high, low, close, volume, kernel=None))]
+pub fn emv_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = EmvBatchRange {};
+	let combos = expand_grid(&sweep);
+	let rows = combos.len(); // Always 1 for EMV
+	let cols = high_slice.len();
+	
+	// Pre-allocate output array
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		emv_batch_inner_into(high_slice, low_slice, close_slice, volume_slice, &sweep, kernel, true, slice_out);
+	});
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	// No parameter arrays for EMV since it has no parameters
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn emv_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
+	let input = EmvInput::from_slices(high, low, close, volume);
+	
+	let mut output = vec![0.0; high.len().min(low.len()).min(close.len()).min(volume.len())];
+	
+	let kernel = detect_best_kernel();
+	
+	emv_into_slice(&mut output, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn emv_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to emv_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let input = EmvInput::from_slices(high, low, close, volume);
+		
+		let kernel = detect_best_kernel();
+		
+		// Check if output pointer aliases with any input pointer
+		if out_ptr == high_ptr as *mut f64 || out_ptr == low_ptr as *mut f64 || out_ptr == close_ptr as *mut f64 || out_ptr == volume_ptr as *mut f64 {
+			// Use temp buffer for aliased operation
+			let mut temp = vec![0.0; len];
+			emv_into_slice(&mut temp, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// Direct write to output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			emv_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn emv_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn emv_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EmvBatchConfig {
+	// EMV has no parameters to sweep
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct EmvBatchJsOutput {
+	pub values: Vec<f64>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = emv_batch)]
+pub fn emv_batch_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
+	let input = EmvInput::from_slices(high, low, close, volume);
+	let len = high.len().min(low.len()).min(close.len()).min(volume.len());
+	
+	let mut output = vec![0.0; len];
+	
+	let kernel = detect_best_kernel();
+	
+	emv_into_slice(&mut output, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = EmvBatchJsOutput {
+		values: output,
+		rows: 1,
+		cols: len,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn emv_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || volume_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to emv_batch_into"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let input = EmvInput::from_slices(high, low, close, volume);
+		
+		let kernel = detect_best_kernel();
+		
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		emv_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(1) // Always 1 row for EMV (no parameter sweep)
+	}
 }
 
 #[cfg(test)]

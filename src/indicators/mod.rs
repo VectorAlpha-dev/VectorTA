@@ -131,6 +131,21 @@ pub mod willr;
 pub mod zscore;
 pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
+pub use squeeze_momentum::{
+	squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams, 
+	SqueezeMomentumBuilder, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams
+};
+#[cfg(feature = "python")]
+pub use squeeze_momentum::{squeeze_momentum_py, squeeze_momentum_batch_py, SqueezeMomentumStreamPy};
+#[cfg(feature = "wasm")]
+pub use squeeze_momentum::{
+	squeeze_momentum_js, squeeze_momentum_into, squeeze_momentum_alloc, squeeze_momentum_free,
+	squeeze_momentum_batch_js, SqueezeMomentumResult
+};
+pub use trix::{trix, TrixInput, TrixOutput, TrixParams, TrixStream, TrixBatchOutput};
+#[cfg(feature = "python")]
+pub use trix::{trix_py, trix_batch_py, TrixStreamPy};
 pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
 pub use ui::{ui, UiInput, UiOutput, UiParams};

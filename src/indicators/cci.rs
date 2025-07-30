@@ -112,6 +112,13 @@ impl<'a> CciInput<'a> {
 	pub fn get_period(&self) -> usize {
 		self.params.period.unwrap_or(14)
 	}
+	#[inline]
+	pub fn data_len(&self) -> usize {
+		match &self.data {
+			CciData::Slice(slice) => slice.len(),
+			CciData::Candles { candles, .. } => candles.close.len(),
+		}
+	}
 }
 
 // ---- Builder ----
@@ -254,6 +261,43 @@ pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, Cc
 		}
 	}
 	Ok(CciOutput { values: out })
+}
+
+#[inline]
+pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result<(), CciError> {
+	let (data, period, first, chosen) = cci_prepare(input, kern)?;
+
+	if dst.len() != data.len() {
+		return Err(CciError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	// Compute directly into the output slice
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => cci_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => cci_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, dst),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+				// Fallback to scalar when AVX is not available
+				cci_scalar(data, period, first, dst)
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Set warmup period to NaN
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 // ---- Scalar + AVX2/AVX512 (Stub) ----
@@ -1159,56 +1203,20 @@ pub fn cci_py<'py>(
 	period: usize,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Use kernel validation for safety
+	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 
-	// ---------- build input struct -------------------------------------------------
 	let params = CciParams { period: Some(period) };
 	let cci_in = CciInput::from_slice(slice_in, params);
 
-	// ---------- allocate uninitialized NumPy output buffer -------------------------
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	// Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| cci_with_kernel(&cci_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// ---------- heavy lifting without the GIL --------------------------------------
-	py.allow_threads(|| -> Result<(), CciError> {
-		// Use centralized validation helper
-		let (data, period, first, chosen) = cci_prepare(&cci_in, kern)?;
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// 1. Write NaN prefix only to the first (first + period - 1) elements
-		if first + period - 1 > 0 {
-			slice_out[..first + period - 1].fill(f64::NAN);
-		}
-
-		// 2. cci_scalar/avx2/avx512 MUST write to all elements from (first + period - 1) onwards
-		// This is guaranteed by the CCI algorithm implementation
-		unsafe {
-			match chosen {
-				Kernel::Scalar | Kernel::ScalarBatch => cci_scalar(data, period, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 | Kernel::Avx2Batch => cci_avx2(data, period, first, slice_out),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, slice_out),
-				#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-				Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-					// Fallback to scalar when AVX is not available
-					cci_scalar(data, period, first, slice_out)
-				}
-				_ => unreachable!(),
-			}
-		}
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	Ok(out_arr)
+	Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -1247,56 +1255,26 @@ pub fn cci_batch_py<'py>(
 	use pyo3::types::PyDict;
 
 	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
 
 	let sweep = CciBatchRange { period: period_range };
 
-	// 1. Expand grid once to know rows*cols
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = slice_in.len();
-
-	// 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-	let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-	// Use kernel validation for safety
-	let kern = validate_kernel(kernel, true)?;
-
-	// 3. Heavy work without the GIL
-	let combos = py
-		.allow_threads(|| -> Result<Vec<CciParams>, CciError> {
-			// First, expand the grid to get the combos
-			let combos = expand_grid(&sweep);
-
-			// We need to initialize the NaN prefixes for each row
-			let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
-
-			// Initialize NaN prefixes for each row
-			for (row, combo) in combos.iter().enumerate() {
-				let period = combo.period.unwrap();
-				let warm_prefix = first + period - 1;
-				let row_start = row * cols;
-
-				// Fill the warmup period with NaN
-				for i in 0..warm_prefix.min(cols) {
-					slice_out[row_start + i] = f64::NAN;
-				}
-			}
-
-			// Use the new cci_batch_inner_into function
-			cci_batch_inner_into(slice_in, &sweep, kern, true, slice_out)?;
-
-			Ok(combos)
-		})
+	// Use the existing batch function that handles everything
+	let output = py
+		.allow_threads(|| cci_batch_with_kernel(slice_in, &sweep, kern))
 		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	// 4. Build dict with the GIL
+	// Convert output to NumPy arrays
+	let values_arr = output.values.into_pyarray(py);
+	let reshaped = values_arr.reshape((output.rows, output.cols))?;
+
+	// Build result dictionary
 	let dict = PyDict::new(py);
-	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item("values", reshaped)?;
 	dict.set_item(
 		"periods",
-		combos
+		output
+			.combos
 			.iter()
 			.map(|p| p.period.unwrap() as u64)
 			.collect::<Vec<_>>()
@@ -1312,9 +1290,67 @@ pub fn cci_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 	let params = CciParams { period: Some(period) };
 	let input = CciInput::from_slice(data, params);
 
-	cci_with_kernel(&input, Kernel::Scalar)
-		.map(|o| o.values)
-		.map_err(|e| JsValue::from_str(&e.to_string()))
+	let mut output = vec![0.0; data.len()];
+
+	cci_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cci_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to cci_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = CciParams { period: Some(period) };
+		let input = CciInput::from_slice(data, params);
+
+		// Check for aliasing
+		if in_ptr == out_ptr {
+			// Use temporary buffer to avoid aliasing issues
+			let mut temp = vec![0.0; len];
+			cci_into_slice(&mut temp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// Direct write to output
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			cci_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cci_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cci_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
 }
 
 #[cfg(feature = "wasm")]
@@ -1330,7 +1366,7 @@ pub fn cci_batch_js(
 	};
 
 	// Use the existing batch function with parallel=false for WASM
-	cci_batch_inner(data, &sweep, Kernel::Scalar, false)
+	cci_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map(|output| output.values)
 		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1380,7 +1416,7 @@ pub fn cci_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
 	};
 
 	// 2. Run the existing core logic
-	let output = cci_batch_inner(data, &sweep, Kernel::Scalar, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let output = cci_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 3. Create the structured output
 	let js_output = CciBatchJsOutput {
@@ -1392,4 +1428,37 @@ pub fn cci_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
 
 	// 4. Serialize the output struct into a JavaScript object
 	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn cci_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to cci_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = CciBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		cci_batch_inner_into(data, &sweep, detect_best_kernel(), false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }
