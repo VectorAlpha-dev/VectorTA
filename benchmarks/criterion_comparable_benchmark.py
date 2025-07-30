@@ -108,7 +108,7 @@ class CriterionComparableBenchmark:
             'nma', 'nvi', 'pvi', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'coppock', 'marketefi', 'midpoint'  # Added missing indicators
+            'cg', 'cfo', 'coppock', 'marketefi', 'midpoint', 'vi', 'vpt'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -119,7 +119,7 @@ class CriterionComparableBenchmark:
                            'sma_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'cg_batch', 'cfo_batch', 'coppock_batch', 'trendflex_batch', 'kaufmanstop_batch', 'marketefi_batch', 'midpoint_batch']
+                           'cg_batch', 'cfo_batch', 'coppock_batch', 'trendflex_batch', 'kaufmanstop_batch', 'marketefi_batch', 'midpoint_batch', 'rsmk_batch', 'srsi_batch', 'vi_batch', 'vpt_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -242,9 +242,12 @@ class CriterionComparableBenchmark:
             ('ao', lambda: my_project.ao(data['high'], data['low'], 5, 34)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
+            ('vi', lambda: my_project.vi(data['high'], data['low'], data['close'], 14)),
+            ('vpt', lambda: my_project.vpt(data['close'], data['volume'])),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
             ('wma', lambda: my_project.wma(data['close'], 14)),
             ('zlema', lambda: my_project.zlema(data['close'], 14)),
+            ('zscore', lambda: my_project.zscore(data['close'], 14, "sma", 1.0, 0)),
             ('linearreg_angle', lambda: my_project.linearreg_angle(data['close'], 14)),
             ('marketefi', lambda: my_project.marketefi(data['high'], data['low'], data['volume'])),
             ('ad', lambda: my_project.ad(data['high'], data['low'], data['close'], data['volume'])),
@@ -282,6 +285,9 @@ class CriterionComparableBenchmark:
             ('pvi', lambda: my_project.pvi(data['close'], data['volume'])),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
+            ('rsmk', lambda: my_project.rsmk(data['close'], data['close'], 90, 3, 20)),
+            ('srsi', lambda: my_project.srsi(data['close'])),
+            ('tsf', lambda: my_project.tsf(data['close'], 14)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
             ('sma', lambda: my_project.sma(data['close'], 14)),
             ('smma', lambda: my_project.smma(data['close'], 14)),
@@ -332,6 +338,7 @@ class CriterionComparableBenchmark:
             ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
+            ('zscore_batch', lambda: my_project.zscore_batch(data['close'], (10, 20, 2), "sma", (1.0, 2.0, 0.5), (0, 0, 0))),
             ('linearreg_angle_batch', lambda: my_project.linearreg_angle_batch(data['close'], (14, 14, 1))),
             ('marketefi_batch', lambda: my_project.marketefi_batch(data['high'], data['low'], data['volume'])),
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
@@ -362,6 +369,11 @@ class CriterionComparableBenchmark:
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
             ('kaufmanstop_batch', lambda: my_project.kaufmanstop_batch(data['high'], data['low'], (20, 24, 2), (1.5, 2.5, 0.5), "long", "sma")),
             ('midpoint_batch', lambda: my_project.midpoint_batch(data['close'], (10, 20, 2))),
+            ('rsmk_batch', lambda: my_project.rsmk_batch(data['close'], data['close'], (90, 90, 1), (3, 3, 1), (20, 20, 1))),
+            ('srsi_batch', lambda: my_project.srsi_batch(data['close'], (14, 14, 0), (14, 14, 0), (3, 3, 0), (3, 3, 0))),
+            ('tsf_batch', lambda: my_project.tsf_batch(data['close'], (14, 240, 1))),
+            ('vi_batch', lambda: my_project.vi_batch(data['high'], data['low'], data['close'], (10, 20, 2))),
+            ('vpt_batch', lambda: my_project.vpt_batch(data['close'], data['volume'])),
         ]
         
         # Filter batch tests if indicator filter is active

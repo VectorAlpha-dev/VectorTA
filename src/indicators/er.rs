@@ -68,6 +68,7 @@ pub struct ErOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct ErParams {
 	pub period: Option<usize>,
 }
@@ -166,6 +167,13 @@ pub enum ErError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("er: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+}
+
+#[cfg(feature = "wasm")]
+impl From<ErError> for JsValue {
+	fn from(err: ErError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
 }
 
 #[inline]

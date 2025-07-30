@@ -18,13 +18,27 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -194,8 +208,8 @@ pub fn vi_with_kernel(input: &ViInput, kernel: Kernel) -> Result<ViOutput, ViErr
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut plus = vec![f64::NAN; length];
-	let mut minus = vec![f64::NAN; length];
+	let mut plus = alloc_with_nan_prefix(length, first + period - 1);
+	let mut minus = alloc_with_nan_prefix(length, first + period - 1);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(high, low, close, period, first, &mut plus, &mut minus),
@@ -533,8 +547,30 @@ fn vi_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = high.len();
-	let mut plus = vec![f64::NAN; rows * cols];
-	let mut minus = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory for better performance
+	let mut plus_mu = make_uninit_matrix(rows, cols);
+	let mut minus_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Initialize the prefix with NaN
+	init_matrix_prefixes(&mut plus_mu, cols, &warm);
+	init_matrix_prefixes(&mut minus_mu, cols, &warm);
+	
+	// Convert to mutable slices safely
+	let mut plus_guard = core::mem::ManuallyDrop::new(plus_mu);
+	let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
+	let plus: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(plus_guard.as_mut_ptr() as *mut f64, plus_guard.len())
+	};
+	let minus: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len())
+	};
 	let do_row = |row: usize, plus_row: &mut [f64], minus_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -566,9 +602,21 @@ fn vi_batch_inner(
 			do_row(row, p, m);
 		}
 	}
+	// Convert ManuallyDrop back to Vec<f64> for the output
+	let plus_vec = unsafe {
+		Vec::from_raw_parts(plus_guard.as_mut_ptr() as *mut f64, plus_guard.len(), plus_guard.len())
+	};
+	let minus_vec = unsafe {
+		Vec::from_raw_parts(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len(), minus_guard.len())
+	};
+	
+	// Forget the guards to prevent double-free
+	core::mem::forget(plus_guard);
+	core::mem::forget(minus_guard);
+	
 	Ok(ViBatchOutput {
-		plus,
-		minus,
+		plus: plus_vec,
+		minus: minus_vec,
 		combos,
 		rows,
 		cols,
@@ -647,6 +695,333 @@ unsafe fn vi_row_avx512_long(
 fn expand_grid(_r: &ViBatchRange) -> Vec<ViParams> {
 	// For full parity with ALMA, but VI has only period for batch
 	expand_grid_vi(_r)
+}
+
+// ==========================
+// WASM Bindings
+// ==========================
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+
+/// Write VI result directly to output slices - no allocations
+#[cfg(feature = "wasm")]
+pub fn vi_into_slice(
+	dst_plus: &mut [f64],
+	dst_minus: &mut [f64],
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+	kern: Kernel,
+) -> Result<(), ViError> {
+	// Build input without allocating
+	let params = ViParams { period: Some(period) };
+	let data = ViData::Slices { high, low, close };
+	let input = ViInput { data, params };
+	
+	// Validate inputs
+	if high.is_empty() || low.is_empty() || close.is_empty() {
+		return Err(ViError::EmptyData);
+	}
+	
+	if high.len() != low.len() || high.len() != close.len() {
+		return Err(ViError::EmptyData);
+	}
+	
+	if dst_plus.len() != high.len() || dst_minus.len() != high.len() {
+		return Err(ViError::EmptyData);
+	}
+	
+	if period == 0 || period > high.len() {
+		return Err(ViError::InvalidPeriod { period, data_len: high.len() });
+	}
+	
+	// Compute VI directly into the output slices
+	let (h, l, c) = match &input.data {
+		ViData::Candles { .. } => unreachable!(),
+		ViData::Slices { high, low, close } => (*high, *low, *close),
+	};
+	
+	// Find first valid index
+	let first = (0..h.len())
+		.find(|&i| !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
+		.ok_or(ViError::AllValuesNaN)?;
+	
+	if (h.len() - first) < period {
+		return Err(ViError::NotEnoughValidData {
+			needed: period,
+			valid: h.len() - first,
+		});
+	}
+	
+	// Fill warmup period with NaN
+	for i in 0..(first + period - 1) {
+		dst_plus[i] = f64::NAN;
+		dst_minus[i] = f64::NAN;
+	}
+	
+	// Compute directly into the output slices
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => vi_scalar(h, l, c, period, first, dst_plus, dst_minus),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vi_avx2(h, l, c, period, first, dst_plus, dst_minus),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vi_avx512(h, l, c, period, first, dst_plus, dst_minus),
+			_ => unreachable!(),
+		}
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	period: usize,
+) -> Result<JsValue, JsValue> {
+	let mut plus = vec![0.0; high.len()];
+	let mut minus = vec![0.0; high.len()];
+	
+	vi_into_slice(&mut plus, &mut minus, high, low, close, period, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Create JS object with plus and minus arrays
+	let obj = js_sys::Object::new();
+	js_sys::Reflect::set(&obj, &JsValue::from_str("plus"), &serde_wasm_bindgen::to_value(&plus).unwrap())?;
+	js_sys::Reflect::set(&obj, &JsValue::from_str("minus"), &serde_wasm_bindgen::to_value(&minus).unwrap())?;
+	
+	Ok(obj.into())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	plus_ptr: *mut f64,
+	minus_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		// Check for aliasing - VI reads 3 inputs and writes 2 outputs
+		// Need to check if any output aliases with any input
+		let aliasing = (high_ptr as *const f64 == plus_ptr as *const f64) ||
+					  (high_ptr as *const f64 == minus_ptr as *const f64) ||
+					  (low_ptr as *const f64 == plus_ptr as *const f64) ||
+					  (low_ptr as *const f64 == minus_ptr as *const f64) ||
+					  (close_ptr as *const f64 == plus_ptr as *const f64) ||
+					  (close_ptr as *const f64 == minus_ptr as *const f64);
+		
+		if aliasing {
+			// Use temporary buffers for outputs
+			let mut temp_plus = vec![0.0; len];
+			let mut temp_minus = vec![0.0; len];
+			
+			vi_into_slice(&mut temp_plus, &mut temp_minus, high, low, close, period, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
+			let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
+			plus_out.copy_from_slice(&temp_plus);
+			minus_out.copy_from_slice(&temp_minus);
+		} else {
+			let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
+			let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
+			
+			vi_into_slice(plus_out, minus_out, high, low, close, period, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ViBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct ViBatchJsOutput {
+	pub plus: Vec<f64>,
+	pub minus: Vec<f64>,
+	pub periods: Vec<usize>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vi_batch)]
+pub fn vi_batch_js(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: ViBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	// Execute batch
+	let sweep = ViBatchRange { period: config.period_range };
+	let output = vi_batch_inner(high, low, close, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Extract periods from combos
+	let periods: Vec<usize> = output.combos.iter()
+		.map(|p| p.period.unwrap_or(14))
+		.collect();
+	
+	let js_output = ViBatchJsOutput {
+		plus: output.plus,
+		minus: output.minus,
+		periods,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vi_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	close_ptr: *const f64,
+	plus_ptr: *mut f64,
+	minus_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || plus_ptr.is_null() || minus_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		
+		let sweep = ViBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		// Calculate number of combinations
+		let periods = vi_expand_range(&sweep.period);
+		let rows = periods.len();
+		let cols = len;
+		
+		let plus_out = std::slice::from_raw_parts_mut(plus_ptr, rows * cols);
+		let minus_out = std::slice::from_raw_parts_mut(minus_ptr, rows * cols);
+		
+		// Use the vi_batch_inner_into function
+		vi_batch_inner_into(high, low, close, &sweep, Kernel::Auto, false, plus_out, minus_out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(rows)
+	}
+}
+
+/// Helper function for batch processing that writes directly to output slices
+#[cfg(feature = "wasm")]
+fn vi_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &ViBatchRange,
+	kernel: Kernel,
+	parallel: bool,
+	out_plus: &mut [f64],
+	out_minus: &mut [f64],
+) -> Result<(), ViError> {
+	let combos = vi_expand_range(&sweep.period).into_iter()
+		.map(|period| ViParams { period: Some(period) })
+		.collect::<Vec<_>>();
+	
+	let rows = combos.len();
+	let cols = close.len();
+	
+	if out_plus.len() != rows * cols || out_minus.len() != rows * cols {
+		return Err(ViError::EmptyData);
+	}
+	
+	// Process each parameter combination
+	for (idx, params) in combos.iter().enumerate() {
+		let row_start = idx * cols;
+		let row_end = row_start + cols;
+		
+		let plus_slice = &mut out_plus[row_start..row_end];
+		let minus_slice = &mut out_minus[row_start..row_end];
+		
+		// Use vi_into_slice directly with slices (no allocation)
+		vi_into_slice(
+			plus_slice, 
+			minus_slice, 
+			high, 
+			low, 
+			close, 
+			params.period.unwrap_or(14), 
+			kernel
+		)?;
+	}
+	
+	Ok(())
+}
+
+/// Helper function to expand range into a vector
+#[cfg(feature = "wasm")]
+fn vi_expand_range(range: &(usize, usize, usize)) -> Vec<usize> {
+	// Expand grid just returns ViParams, we need periods
+	let sweep = ViBatchRange { period: *range };
+	expand_grid_vi(&sweep).into_iter()
+		.map(|p| p.period.unwrap_or(14))
+		.collect()
 }
 
 #[cfg(test)]
@@ -836,4 +1211,168 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// =============================================================================
+// Python Bindings
+// =============================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vi")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+pub fn vi_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	// Validate input lengths
+	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+		return Err(PyValueError::new_err(format!(
+			"Input data length mismatch: high={}, low={}, close={}",
+			high_slice.len(),
+			low_slice.len(),
+			close_slice.len()
+		)));
+	}
+
+	let params = ViParams { period: Some(period) };
+	let input = ViInput::from_slices(high_slice, low_slice, close_slice, params);
+
+	// Get result vectors from Rust function
+	let (plus_vec, minus_vec) = py
+		.allow_threads(|| vi_with_kernel(&input, kern).map(|o| (o.plus, o.minus)))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary with zero-copy transfers
+	let dict = PyDict::new(py);
+	dict.set_item("plus", plus_vec.into_pyarray(py))?;
+	dict.set_item("minus", minus_vec.into_pyarray(py))?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "ViStream")]
+pub struct ViStreamPy {
+	stream: ViStream,
+	prev_high: Option<f64>,
+	prev_low: Option<f64>,
+	prev_close: Option<f64>,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ViStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = ViParams { period: Some(period) };
+		let stream = ViStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(ViStreamPy {
+			stream,
+			prev_high: None,
+			prev_low: None,
+			prev_close: None,
+		})
+	}
+
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
+		// VI Stream requires previous values
+		match (self.prev_high, self.prev_low, self.prev_close) {
+			(Some(ph), Some(pl), Some(pc)) => {
+				let result = self.stream.update(high, low, close, pl, ph, pc);
+				self.prev_high = Some(high);
+				self.prev_low = Some(low);
+				self.prev_close = Some(close);
+				result
+			}
+			_ => {
+				// First value, just store it
+				self.prev_high = Some(high);
+				self.prev_low = Some(low);
+				self.prev_close = Some(close);
+				None
+			}
+		}
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vi_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn vi_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize), // (start, end, step)
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	// Validate input lengths
+	if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+		return Err(PyValueError::new_err(format!(
+			"Input data length mismatch: high={}, low={}, close={}",
+			high_slice.len(),
+			low_slice.len(),
+			close_slice.len()
+		)));
+	}
+
+	let sweep = ViBatchRange { period: period_range };
+
+	// Calculate dimensions
+	let combos = expand_grid_vi(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	// Pre-allocate output arrays (OK for batch operations)
+	let plus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let minus_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let plus_slice = unsafe { plus_arr.as_slice_mut()? };
+	let minus_slice = unsafe { minus_arr.as_slice_mut()? };
+
+	// Compute without GIL
+	let combos = py
+		.allow_threads(|| {
+			// Get the result from vi_batch_with_kernel
+			let result = vi_batch_with_kernel(high_slice, low_slice, close_slice, &sweep, kern)?;
+			
+			// Copy the results to the pre-allocated buffers
+			plus_slice.copy_from_slice(&result.plus);
+			minus_slice.copy_from_slice(&result.minus);
+			
+			Ok::<Vec<ViParams>, ViError>(result.combos)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("plus", plus_arr.reshape((rows, cols))?)?;
+	dict.set_item("minus", minus_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
 }

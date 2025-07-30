@@ -235,6 +235,13 @@ pub enum KaufmanstopError {
 	AllValuesNaN,
 }
 
+#[cfg(feature = "wasm")]
+impl From<KaufmanstopError> for JsValue {
+	fn from(err: KaufmanstopError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 #[inline]
 pub fn kaufmanstop(input: &KaufmanstopInput) -> Result<KaufmanstopOutput, KaufmanstopError> {
 	kaufmanstop_with_kernel(input, Kernel::Auto)
@@ -937,7 +944,7 @@ pub fn kaufmanstop_py<'py>(
 	let result = py.allow_threads(|| kaufmanstop_with_kernel(&input, kern));
 
 	match result {
-		Ok(output) => Ok(output.values.into_pyarray_bound(py)),
+		Ok(output) => Ok(output.values.into_pyarray(py)),
 		Err(e) => Err(PyValueError::new_err(e.to_string())),
 	}
 }
@@ -1005,15 +1012,15 @@ pub fn kaufmanstop_batch_py<'py>(
 
 	match result {
 		Ok(output) => {
-			let dict = PyDict::new_bound(py);
+			let dict = PyDict::new(py);
 			
 			// Convert values to numpy array
-			dict.set_item("values", output.values.into_pyarray_bound(py))?;
+			dict.set_item("values", output.values.into_pyarray(py))?;
 			
 			// Convert combos to list of dicts
-			let combos_list = PyList::empty_bound(py);
+			let combos_list = PyList::empty(py);
 			for combo in output.combos {
-				let combo_dict = PyDict::new_bound(py);
+				let combo_dict = PyDict::new(py);
 				combo_dict.set_item("period", combo.period.unwrap_or(22))?;
 				combo_dict.set_item("mult", combo.mult.unwrap_or(2.0))?;
 				combo_dict.set_item("direction", combo.direction.unwrap_or_else(|| "long".to_string()))?;
@@ -1043,9 +1050,9 @@ pub fn kaufmanstop_into_slice(
 	let (high, low) = match &input.data {
 		KaufmanstopData::Candles { candles } => {
 			let high = candles.select_candle_field("high")
-				.ok_or(KaufmanstopError::EmptyData)?;
+				.map_err(|_| KaufmanstopError::EmptyData)?;
 			let low = candles.select_candle_field("low")
-				.ok_or(KaufmanstopError::EmptyData)?;
+				.map_err(|_| KaufmanstopError::EmptyData)?;
 			(high, low)
 		}
 		KaufmanstopData::Slices { high, low } => (*high, *low),
@@ -1236,16 +1243,25 @@ pub fn kaufmanstop_batch_js(
 			
 			// Add values as Float64Array
 			let values_array = js_sys::Float64Array::from(&output.values[..]);
-			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())?;
+			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
+				.map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
 			
 			// Add metadata
 			let meta_value = serde_wasm_bindgen::to_value(&meta)?;
-			js_sys::Reflect::set(&js_object, &"combos".into(), 
-				&js_sys::Reflect::get(&meta_value, &"combos".into())?)?;
-			js_sys::Reflect::set(&js_object, &"rows".into(), 
-				&js_sys::Reflect::get(&meta_value, &"rows".into())?)?;
-			js_sys::Reflect::set(&js_object, &"cols".into(), 
-				&js_sys::Reflect::get(&meta_value, &"cols".into())?)?;
+			let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
+				.map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"combos".into(), &combos)
+				.map_err(|e| JsError::new(&format!("Failed to set combos: {:?}", e)))?;
+			
+			let rows = js_sys::Reflect::get(&meta_value, &"rows".into())
+				.map_err(|e| JsError::new(&format!("Failed to get rows: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"rows".into(), &rows)
+				.map_err(|e| JsError::new(&format!("Failed to set rows: {:?}", e)))?;
+			
+			let cols = js_sys::Reflect::get(&meta_value, &"cols".into())
+				.map_err(|e| JsError::new(&format!("Failed to get cols: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"cols".into(), &cols)
+				.map_err(|e| JsError::new(&format!("Failed to set cols: {:?}", e)))?;
 			
 			Ok(js_object.into())
 		}
@@ -1295,16 +1311,25 @@ pub fn kaufmanstop_batch_unified_js(
 			
 			// Add values as Float64Array
 			let values_array = js_sys::Float64Array::from(&output.values[..]);
-			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())?;
+			js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
+				.map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
 			
 			// Add metadata
 			let meta_value = serde_wasm_bindgen::to_value(&meta)?;
-			js_sys::Reflect::set(&js_object, &"combos".into(), 
-				&js_sys::Reflect::get(&meta_value, &"combos".into())?)?;
-			js_sys::Reflect::set(&js_object, &"rows".into(), 
-				&js_sys::Reflect::get(&meta_value, &"rows".into())?)?;
-			js_sys::Reflect::set(&js_object, &"cols".into(), 
-				&js_sys::Reflect::get(&meta_value, &"cols".into())?)?;
+			let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
+				.map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"combos".into(), &combos)
+				.map_err(|e| JsError::new(&format!("Failed to set combos: {:?}", e)))?;
+			
+			let rows = js_sys::Reflect::get(&meta_value, &"rows".into())
+				.map_err(|e| JsError::new(&format!("Failed to get rows: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"rows".into(), &rows)
+				.map_err(|e| JsError::new(&format!("Failed to set rows: {:?}", e)))?;
+			
+			let cols = js_sys::Reflect::get(&meta_value, &"cols".into())
+				.map_err(|e| JsError::new(&format!("Failed to get cols: {:?}", e)))?;
+			js_sys::Reflect::set(&js_object, &"cols".into(), &cols)
+				.map_err(|e| JsError::new(&format!("Failed to set cols: {:?}", e)))?;
 			
 			Ok(js_object.into())
 		}
@@ -1488,7 +1513,13 @@ mod tests {
 		let low = candles.select_candle_field("low").unwrap();
 		
 		// Create stream
-		let mut stream = KaufmanstopStream::try_new(22, 2.0, "long", "sma")?;
+		let params = KaufmanstopParams {
+			period: Some(22),
+			mult: Some(2.0),
+			direction: Some("long".to_string()),
+			ma_type: Some("sma".to_string()),
+		};
+		let mut stream = KaufmanstopStream::try_new(params)?;
 		
 		// Feed data to stream
 		let mut stream_results = Vec::new();

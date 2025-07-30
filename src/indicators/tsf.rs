@@ -14,9 +14,25 @@
 //! - **`Ok(TsfOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(TsfError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -48,6 +64,7 @@ pub struct TsfOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TsfParams {
 	pub period: Option<usize>,
 }
@@ -140,6 +157,8 @@ impl TsfBuilder {
 
 #[derive(Debug, Error)]
 pub enum TsfError {
+	#[error("tsf: Input data slice is empty.")]
+	EmptyInputData,
 	#[error("tsf: All values are NaN.")]
 	AllValuesNaN,
 	#[error("tsf: Invalid period: period = {period}, data length = {data_len}")]
@@ -159,8 +178,11 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
 		TsfData::Slice(sl) => sl,
 	};
 
-	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
 	let len = data.len();
+	if len == 0 {
+		return Err(TsfError::EmptyInputData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
 	let period = input.get_period();
 
 	if period == 0 || period > len {
@@ -177,7 +199,7 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
 	unsafe {
 		match chosen {
@@ -191,6 +213,61 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
 	}
 
 	Ok(TsfOutput { values: out })
+}
+
+#[inline]
+pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result<(), TsfError> {
+	let data: &[f64] = match &input.data {
+		TsfData::Candles { candles, source } => source_type(candles, source),
+		TsfData::Slice(sl) => sl,
+	};
+
+	let len = data.len();
+	if len == 0 {
+		return Err(TsfError::EmptyInputData);
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
+	let period = input.get_period();
+
+	if period == 0 || period > len {
+		return Err(TsfError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(TsfError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	if dst.len() != data.len() {
+		return Err(TsfError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => unsafe { tsf_avx2(data, period, first, dst) },
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => unsafe { tsf_avx512(data, period, first, dst) },
+		#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+		Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => tsf_scalar(data, period, first, dst),
+		_ => unreachable!(),
+	}
+
+	// Fill warmup with NaN
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -475,7 +552,7 @@ fn tsf_batch_inner(
 	let mut sum_x_sq = vec![0.0; rows];
 	let mut divisors = vec![0.0; rows];
 
-	// Precompute ∑x and (∑x²) and divisor for each “period = combos[row].period”
+	// Precompute ∑x and (∑x²) and divisor for each "period = combos[row].period"
 	for (row, prm) in combos.iter().enumerate() {
 		let period = prm.period.unwrap();
 		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
@@ -486,8 +563,20 @@ fn tsf_batch_inner(
 		divisors[row] = divisor;
 	}
 
-	// Prepare a flat “rows × cols” output buffer, initialized to NaN
-	let mut values = vec![f64::NAN; rows * cols];
+	// Use uninitialized memory like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Compute warmup periods for each row
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+
+	// Use ManuallyDrop pattern for safe conversion
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	// Closure that computes one row into out_row
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
@@ -508,7 +597,7 @@ fn tsf_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			out
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -516,15 +605,24 @@ fn tsf_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+
+	// Convert back to Vec using ManuallyDrop pattern
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(TsfBatchOutput {
 		values,
@@ -532,6 +630,92 @@ fn tsf_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+// Helper function for Python batch bindings - writes directly to the provided buffer
+#[inline(always)]
+fn tsf_batch_inner_into(
+	data: &[f64],
+	sweep: &TsfBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	output: &mut [f64],
+) -> Result<Vec<TsfParams>, TsfError> {
+	// Build the list of TsfParams to run over
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(TsfError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	// Find first non‐NaN index
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsfError::AllValuesNaN)?;
+	// Compute the maximum period required by any combo
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(TsfError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	let mut sum_xs = vec![0.0; rows];
+	let mut sum_x_sq = vec![0.0; rows];
+	let mut divisors = vec![0.0; rows];
+
+	// Precompute ∑x and (∑x²) and divisor for each "period = combos[row].period"
+	for (row, prm) in combos.iter().enumerate() {
+		let period = prm.period.unwrap();
+		let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
+		let sum_x2 = (0..period).map(|x| (x as f64) * (x as f64)).sum::<f64>();
+		let divisor = (period as f64 * sum_x2) - (sum_x * sum_x);
+		sum_xs[row] = sum_x;
+		sum_x_sq[row] = sum_x2;
+		divisors[row] = divisor;
+	}
+
+	// Initialize output with NaN
+	output.fill(f64::NAN);
+
+	// Closure that computes one row into out_row
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let sum_x = sum_xs[row];
+		let divisor = divisors[row];
+
+		match kern {
+			Kernel::Scalar => tsf_row_scalar(data, first, period, sum_x, divisor, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => tsf_row_avx2(data, first, period, sum_x, divisor, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => tsf_row_avx512(data, first, period, sum_x, divisor, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			output
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in output.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in output.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 // 2) tsf_row_scalar (fixed indexing so j=0→oldest, j=period−1→newest)
@@ -601,6 +785,272 @@ pub fn expand_grid_tsf(r: &TsfBatchRange) -> Vec<TsfParams> {
 		out.push(TsfParams { period: Some(p) });
 	}
 	out
+}
+
+// ================================
+// Python Bindings
+// ================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tsf")]
+#[pyo3(signature = (data, period, kernel=None))]
+pub fn tsf_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = TsfParams {
+		period: Some(period),
+	};
+	let tsf_in = TsfInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| tsf_with_kernel(&tsf_in, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TsfStream")]
+pub struct TsfStreamPy {
+	stream: TsfStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TsfStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = TsfParams {
+			period: Some(period),
+		};
+		let stream = TsfStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(TsfStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tsf_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn tsf_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+
+	let sweep = TsfBatchRange {
+		period: period_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			tsf_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py)
+	)?;
+
+	Ok(dict)
+}
+
+// ================================
+// WASM Bindings
+// ================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = TsfParams {
+		period: Some(period),
+	};
+	let input = TsfInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()];
+
+	tsf_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsf_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsf_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsf_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = TsfParams {
+			period: Some(period),
+		};
+		let input = TsfInput::from_slice(data, params);
+
+		if in_ptr == out_ptr {
+			// Handle aliasing case
+			let mut temp = vec![0.0; len];
+			tsf_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			tsf_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TsfBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TsfBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<TsfParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tsf_batch)]
+pub fn tsf_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TsfBatchConfig =
+		serde_wasm_bindgen::from_value(config)
+			.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = TsfBatchRange {
+		period: config.period_range,
+	};
+
+	let output = tsf_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = TsfBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsf_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tsf_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = TsfBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		if rows == 0 {
+			return Err(JsValue::from_str("No valid parameter combinations"));
+		}
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		let kernel = detect_best_batch_kernel();
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => unreachable!(),
+		};
+
+		tsf_batch_inner_into(data, &sweep, simd, true, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
 }
 
 #[cfg(test)]

@@ -171,6 +171,13 @@ pub enum Linearreg_angleError {
 	EmptyData,
 }
 
+#[cfg(feature = "wasm")]
+impl From<Linearreg_angleError> for JsValue {
+	fn from(err: Linearreg_angleError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 #[inline]
 pub fn linearreg_angle(input: &Linearreg_angleInput) -> Result<Linearreg_angleOutput, Linearreg_angleError> {
 	linearreg_angle_with_kernel(input, Kernel::Auto)

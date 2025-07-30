@@ -155,6 +155,13 @@ pub enum MarketefiError {
 	ZeroOrNaNVolume,
 }
 
+#[cfg(feature = "wasm")]
+impl From<MarketefiError> for JsValue {
+	fn from(err: MarketefiError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 #[inline]
 pub fn marketefi(input: &MarketefiInput) -> Result<MarketefiOutput, MarketefiError> {
 	marketefi_with_kernel(input, Kernel::Auto)

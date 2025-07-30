@@ -159,6 +159,18 @@ use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaS
 use crate::indicators::nvi::{nvi_py, NviStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pvi::{pvi_batch_py, pvi_py, PviStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::rsmk::{rsmk_batch_py, rsmk_py, RsmkStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::srsi::{srsi_batch_py, srsi_py, SrsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::tsf::{tsf_batch_py, tsf_py, TsfStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vi::{vi_batch_py, vi_py, ViStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vpt::{vpt_batch_py, vpt_py, VptStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::zscore::{zscore_batch_py, zscore_py, ZscoreStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -330,6 +342,31 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(pvi_py, m)?)?;
 	m.add_function(wrap_pyfunction!(pvi_batch_py, m)?)?;
 	m.add_class::<PviStreamPy>()?;
+
+	// Register RSMK functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsmk_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsmk_batch_py, m)?)?;
+	m.add_class::<RsmkStreamPy>()?;
+
+	// Register SRSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(srsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(srsi_batch_py, m)?)?;
+	m.add_class::<SrsiStreamPy>()?;
+
+	// Register TSF functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tsf_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tsf_batch_py, m)?)?;
+	m.add_class::<TsfStreamPy>()?;
+
+	// Register VI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vi_batch_py, m)?)?;
+	m.add_class::<ViStreamPy>()?;
+
+	// Register VPT functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vpt_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vpt_batch_py, m)?)?;
+	m.add_class::<VptStreamPy>()?;
 
 	// Register PWMA functions with their user-facing names
 	m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
@@ -518,6 +555,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register ZSCORE functions with their user-facing names
+	m.add_function(wrap_pyfunction!(zscore_py, m)?)?;
+	m.add_function(wrap_pyfunction!(zscore_batch_py, m)?)?;
+	m.add_class::<ZscoreStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

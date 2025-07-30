@@ -272,7 +272,8 @@
       "Bash(test_bindings.bat coppock)",
       "Bash(rustfmt:*)",
       "Bash(powershell:*)",
-      "Bash(cargo rustc:*)"
+      "Bash(cargo rustc:*)",
+      "Bash(.venv\\Scripts\\python.exe test_rsmk_quick.py:*)"
     ],
     "deny": []
   }

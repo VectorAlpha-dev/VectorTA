@@ -21,9 +21,30 @@
 //! ## Returns
 //! - **`Ok(RsmkOutput)`** on success: contains indicator/signal, both `Vec<f64>` of input length.
 //! - **`Err(RsmkError)`** otherwise.
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
+use serde_wasm_bindgen;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+	init_matrix_prefixes, make_uninit_matrix
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -54,6 +75,7 @@ pub struct RsmkOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct RsmkParams {
 	pub lookback: Option<usize>,
 	pub period: Option<usize>,
@@ -245,6 +267,13 @@ pub enum RsmkError {
 	MaError(String),
 }
 
+#[cfg(feature = "wasm")]
+impl From<RsmkError> for JsValue {
+	fn from(err: RsmkError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 #[inline]
 pub fn rsmk(input: &RsmkInput) -> Result<RsmkOutput, RsmkError> {
 	rsmk_with_kernel(input, Kernel::Auto)
@@ -281,8 +310,7 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
 		});
 	}
 
-	let mut lr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, main.len());
-	lr.resize(main.len(), f64::NAN);
+	let mut lr = alloc_with_nan_prefix(main.len(), 0);
 
 	for i in 0..main.len() {
 		let m = main[i];
@@ -303,8 +331,7 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
 		});
 	}
 
-	let mut mom = AVec::<f64>::with_capacity(CACHELINE_ALIGN, lr.len());
-	mom.resize(lr.len(), f64::NAN);
+	let mut mom = alloc_with_nan_prefix(lr.len(), first_valid + lookback);
 
 	unsafe {
 		match match kernel {
@@ -346,7 +373,7 @@ pub fn rsmk_scalar(
 
 	let ma_b = ma(matype, MaData::Slice(mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
 
-	let mut indicator = vec![f64::NAN; lr.len()];
+	let mut indicator = alloc_with_nan_prefix(lr.len(), 0);
 	for i in 0..lr.len() {
 		if i < ma_b.len() {
 			indicator[i] = ma_b[i] * 100.0;
@@ -356,13 +383,134 @@ pub fn rsmk_scalar(
 	let ma_signal =
 		ma(sigmatype, MaData::Slice(&indicator), signal_period).map_err(|e| RsmkError::MaError(e.to_string()))?;
 
-	let mut signal = vec![f64::NAN; lr.len()];
+	let mut signal = alloc_with_nan_prefix(lr.len(), 0);
 	for i in 0..lr.len() {
 		if i < ma_signal.len() {
 			signal[i] = ma_signal[i];
 		}
 	}
 	Ok(RsmkOutput { indicator, signal })
+}
+
+/// Write directly to output slices - no allocations
+#[inline]
+pub fn rsmk_into_slice(
+	dst_indicator: &mut [f64],
+	dst_signal: &mut [f64],
+	input: &RsmkInput,
+	kern: Kernel,
+) -> Result<(), RsmkError> {
+	// Extract data sources
+	let (main, compare) = match &input.data {
+		RsmkData::Candles {
+			candles,
+			candles_compare,
+			source,
+		} => (source_type(candles, source), source_type(candles_compare, source)),
+		RsmkData::Slices { main, compare } => (*main, *compare),
+	};
+	
+	if dst_indicator.len() != main.len() || dst_signal.len() != main.len() {
+		return Err(RsmkError::InvalidPeriod {
+			period: dst_indicator.len(),
+			data_len: main.len(),
+		});
+	}
+	
+	// Use the same logic as rsmk_with_kernel but write directly to output slices
+	if main.is_empty() || compare.is_empty() {
+		return Err(RsmkError::EmptyData);
+	}
+	
+	let params = &input.params;
+	let lookback = params.lookback.unwrap_or(90);
+	let period = params.period.unwrap_or(3);
+	let signal_period = params.signal_period.unwrap_or(20);
+	
+	// Validate parameters
+	if lookback == 0 || period == 0 || signal_period == 0 {
+		return Err(RsmkError::InvalidPeriod {
+			period: 0,
+			data_len: main.len(),
+		});
+	}
+	
+	if lookback + period > main.len() {
+		return Err(RsmkError::NotEnoughValidData {
+			needed: lookback + period,
+			valid: main.len(),
+		});
+	}
+	
+	// Calculate warmup period
+	let warmup_period = std::cmp::max(lookback + period, lookback + period + signal_period - 1);
+	
+	// Compute linear regression with lookback
+	let mut lr = alloc_with_nan_prefix(main.len(), 0);
+	
+	for i in lookback..main.len() {
+		let mut main_sum = 0.0;
+		let mut compare_sum = 0.0;
+		for j in (i - lookback)..i {
+			main_sum += main[j];
+			compare_sum += compare[j];
+		}
+		let main_avg = main_sum / lookback as f64;
+		let compare_avg = compare_sum / lookback as f64;
+		
+		let mut numerator = 0.0;
+		let mut denominator = 0.0;
+		for j in (i - lookback)..i {
+			let main_diff = main[j] - main_avg;
+			let compare_diff = compare[j] - compare_avg;
+			numerator += main_diff * compare_diff;
+			denominator += compare_diff * compare_diff;
+		}
+		
+		if denominator != 0.0 {
+			let beta = numerator / denominator;
+			let alpha = main_avg - beta * compare_avg;
+			lr[i] = alpha + beta * compare[i];
+		} else {
+			lr[i] = main[i];
+		}
+	}
+	
+	// Compute percentage difference
+	let mut mom = alloc_with_nan_prefix(main.len(), 0);
+	for i in lookback..main.len() {
+		mom[i] = (main[i] / lr[i] - 1.0) * 100.0;
+	}
+	
+	// Apply moving average to get indicator
+	let matype = params.matype.as_deref().unwrap_or("ema");
+	let ma_result = ma(matype, MaData::Slice(&mom), period)
+		.map_err(|e| RsmkError::MaError(e.to_string()))?;
+	
+	// Copy MA result to dst_indicator with proper offset
+	for i in 0..main.len() {
+		if i < warmup_period || i >= ma_result.len() {
+			dst_indicator[i] = f64::NAN;
+		} else {
+			dst_indicator[i] = ma_result[i];
+		}
+	}
+	
+	// Apply signal moving average
+	let signal_matype = params.signal_matype.as_deref().unwrap_or("ema");
+	let signal_result = ma(signal_matype, MaData::Slice(dst_indicator), signal_period)
+		.map_err(|e| RsmkError::MaError(e.to_string()))?;
+	
+	// Copy signal result to dst_signal
+	dst_signal.copy_from_slice(&signal_result);
+	
+	// Fill warmup with NaN
+	for i in 0..warmup_period {
+		dst_indicator[i] = f64::NAN;
+		dst_signal[i] = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -567,6 +715,30 @@ pub struct RsmkBatchOutput {
 	pub cols: usize,
 }
 
+impl RsmkBatchOutput {
+	pub fn row_for_params(&self, p: &RsmkParams) -> Option<usize> {
+		self.combos.iter().position(|c| {
+			c.lookback.unwrap_or(90) == p.lookback.unwrap_or(90)
+				&& c.period.unwrap_or(3) == p.period.unwrap_or(3)
+				&& c.signal_period.unwrap_or(20) == p.signal_period.unwrap_or(20)
+		})
+	}
+
+	pub fn indicator_for(&self, p: &RsmkParams) -> Option<&[f64]> {
+		self.row_for_params(p).map(|row| {
+			let start = row * self.cols;
+			&self.indicator[start..start + self.cols]
+		})
+	}
+
+	pub fn signal_for(&self, p: &RsmkParams) -> Option<&[f64]> {
+		self.row_for_params(p).map(|row| {
+			let start = row * self.cols;
+			&self.signal[start..start + self.cols]
+		})
+	}
+}
+
 #[inline(always)]
 fn expand_grid(r: &RsmkBatchRange) -> Vec<RsmkParams> {
 	fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -634,6 +806,123 @@ pub fn rsmk_batch_par_slice(
 	rsmk_batch_inner(main, compare, sweep, kern, true)
 }
 
+#[inline(always)]
+fn rsmk_batch_inner_into(
+	main: &[f64],
+	compare: &[f64],
+	sweep: &RsmkBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	indicator_out: &mut [f64],
+	signal_out: &mut [f64],
+) -> Result<Vec<RsmkParams>, RsmkError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RsmkError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = main.iter().position(|x| !x.is_nan()).ok_or(RsmkError::AllValuesNaN)?;
+	let max_p = combos
+		.iter()
+		.map(|c| c.lookback.unwrap().max(c.period.unwrap()).max(c.signal_period.unwrap()))
+		.max()
+		.unwrap();
+
+	if main.len() - first < max_p {
+		return Err(RsmkError::NotEnoughValidData {
+			needed: max_p,
+			valid: main.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = main.len();
+
+	let do_row = |row: usize, ind_row: &mut [f64], sig_row: &mut [f64]| unsafe {
+		let prm = &combos[row];
+		let lookback = prm.lookback.unwrap();
+		let period = prm.period.unwrap();
+		let signal_period = prm.signal_period.unwrap();
+
+		let mut lr = alloc_with_nan_prefix(cols, 0);
+
+		for i in 0..cols {
+			let m = main[i];
+			let c = compare[i];
+			lr[i] = if m.is_nan() || c.is_nan() || c == 0.0 {
+				f64::NAN
+			} else {
+				(m / c).ln()
+			};
+		}
+
+		let mut mom = alloc_with_nan_prefix(cols, first + lookback);
+		for i in (first + lookback)..cols {
+			mom[i] = if lr[i].is_nan() || lr[i - lookback].is_nan() {
+				f64::NAN
+			} else {
+				lr[i] - lr[i - lookback]
+			};
+		}
+		// Calculate indicator MA - handle errors by filling row with NaN
+		match ma("ema", MaData::Slice(&mom), period) {
+			Ok(ma_b) => {
+				for i in 0..cols {
+					if i < ma_b.len() {
+						ind_row[i] = ma_b[i] * 100.0;
+					}
+				}
+			}
+			Err(_) => {
+				// Fill with NaN without allocating
+				for i in 0..cols {
+					ind_row[i] = f64::NAN;
+				}
+			}
+		}
+		
+		// Calculate signal MA
+		match ma("ema", MaData::Slice(ind_row), signal_period) {
+			Ok(ma_signal) => {
+				for i in 0..cols {
+					if i < ma_signal.len() {
+						sig_row[i] = ma_signal[i];
+					}
+				}
+			}
+			Err(_) => {
+				// Fill with NaN without allocating
+				for i in 0..cols {
+					sig_row[i] = f64::NAN;
+				}
+			}
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			indicator_out
+				.par_chunks_mut(cols)
+				.zip(signal_out.par_chunks_mut(cols))
+				.enumerate()
+				.for_each(|(row, (ind_row, sig_row))| do_row(row, ind_row, sig_row));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, (ind_row, sig_row)) in indicator_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() {
+				do_row(row, ind_row, sig_row);
+			}
+		}
+	} else {
+		for (row, (ind_row, sig_row)) in indicator_out.chunks_mut(cols).zip(signal_out.chunks_mut(cols)).enumerate() {
+			do_row(row, ind_row, sig_row);
+		}
+	}
+
+	Ok(combos)
+}
+
 fn rsmk_batch_inner(
 	main: &[f64],
 	compare: &[f64],
@@ -662,8 +951,33 @@ fn rsmk_batch_inner(
 	let rows = combos.len();
 	let cols = main.len();
 
-	let mut indicators = vec![f64::NAN; rows * cols];
-	let mut signals = vec![f64::NAN; rows * cols];
+	let mut indicators = make_uninit_matrix(rows, cols);
+	let mut signals = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for each row based on warmup periods
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| {
+			let lookback = c.lookback.unwrap();
+			let period = c.period.unwrap();
+			let signal_period = c.signal_period.unwrap();
+			first + lookback.max(period).max(signal_period)
+		})
+		.collect();
+	
+	init_matrix_prefixes(&mut indicators, cols, &warmup_periods);
+	init_matrix_prefixes(&mut signals, cols, &warmup_periods);
+	
+	// Convert to mutable slices for computation
+	let mut indicators = unsafe {
+		use std::mem::ManuallyDrop;
+		let mut v = ManuallyDrop::new(indicators);
+		Vec::from_raw_parts(v.as_mut_ptr() as *mut f64, v.len(), v.capacity())
+	};
+	let mut signals = unsafe {
+		use std::mem::ManuallyDrop;
+		let mut v = ManuallyDrop::new(signals);
+		Vec::from_raw_parts(v.as_mut_ptr() as *mut f64, v.len(), v.capacity())
+	};
 
 	let do_row = |row: usize, ind_row: &mut [f64], sig_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -671,8 +985,7 @@ fn rsmk_batch_inner(
 		let period = prm.period.unwrap();
 		let signal_period = prm.signal_period.unwrap();
 
-		let mut lr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
-		lr.resize(cols, f64::NAN);
+		let mut lr = alloc_with_nan_prefix(cols, 0);
 
 		for i in 0..cols {
 			let m = main[i];
@@ -684,8 +997,7 @@ fn rsmk_batch_inner(
 			};
 		}
 
-		let mut mom = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
-		mom.resize(cols, f64::NAN);
+		let mut mom = alloc_with_nan_prefix(cols, first + lookback);
 		for i in (first + lookback)..cols {
 			mom[i] = if lr[i].is_nan() || lr[i - lookback].is_nan() {
 				f64::NAN
@@ -693,16 +1005,37 @@ fn rsmk_batch_inner(
 				lr[i] - lr[i - lookback]
 			};
 		}
-		let ma_b = ma("ema", MaData::Slice(&mom), period).unwrap_or_else(|_| vec![f64::NAN; cols]);
-		for i in 0..cols {
-			if i < ma_b.len() {
-				ind_row[i] = ma_b[i] * 100.0;
+		// Calculate indicator MA - handle errors by filling row with NaN
+		match ma("ema", MaData::Slice(&mom), period) {
+			Ok(ma_b) => {
+				for i in 0..cols {
+					if i < ma_b.len() {
+						ind_row[i] = ma_b[i] * 100.0;
+					}
+				}
+			}
+			Err(_) => {
+				// Fill with NaN without allocating
+				for i in 0..cols {
+					ind_row[i] = f64::NAN;
+				}
 			}
 		}
-		let ma_signal = ma("ema", MaData::Slice(ind_row), signal_period).unwrap_or_else(|_| vec![f64::NAN; cols]);
-		for i in 0..cols {
-			if i < ma_signal.len() {
-				sig_row[i] = ma_signal[i];
+		
+		// Calculate signal MA
+		match ma("ema", MaData::Slice(ind_row), signal_period) {
+			Ok(ma_signal) => {
+				for i in 0..cols {
+					if i < ma_signal.len() {
+						sig_row[i] = ma_signal[i];
+					}
+				}
+			}
+			Err(_) => {
+				// Fill with NaN without allocating
+				for i in 0..cols {
+					sig_row[i] = f64::NAN;
+				}
 			}
 		}
 	};
@@ -736,6 +1069,323 @@ fn rsmk_batch_inner(
 		rows,
 		cols,
 	})
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "rsmk")]
+#[pyo3(signature = (main, compare, lookback, period, signal_period, matype=None, signal_matype=None, kernel=None))]
+pub fn rsmk_py<'py>(
+	py: Python<'py>,
+	main: PyReadonlyArray1<'py, f64>,
+	compare: PyReadonlyArray1<'py, f64>,
+	lookback: usize,
+	period: usize,
+	signal_period: usize,
+	matype: Option<&str>,
+	signal_matype: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let main_slice = main.as_slice()?;
+	let compare_slice = compare.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = RsmkParams {
+		lookback: Some(lookback),
+		period: Some(period),
+		signal_period: Some(signal_period),
+		matype: matype.map(|s| s.to_string()),
+		signal_matype: signal_matype.map(|s| s.to_string()),
+	};
+	let input = RsmkInput::from_slices(main_slice, compare_slice, params);
+
+	let output = py
+		.allow_threads(|| rsmk_with_kernel(&input, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((
+		output.indicator.into_pyarray(py),
+		output.signal.into_pyarray(py)
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rsmk_batch")]
+#[pyo3(signature = (main, compare, lookback_range, period_range, signal_period_range, matype=None, signal_matype=None, kernel=None))]
+pub fn rsmk_batch_py<'py>(
+	py: Python<'py>,
+	main: PyReadonlyArray1<'py, f64>,
+	compare: PyReadonlyArray1<'py, f64>,
+	lookback_range: (usize, usize, usize),
+	period_range: (usize, usize, usize),
+	signal_period_range: (usize, usize, usize),
+	matype: Option<&str>,
+	signal_matype: Option<&str>,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let main_slice = main.as_slice()?;
+	let compare_slice = compare.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = RsmkBatchRange {
+		lookback: lookback_range,
+		period: period_range,
+		signal_period: signal_period_range,
+	};
+
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = main_slice.len();
+
+	// Pre-allocate output arrays
+	let indicator_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let indicator_slice = unsafe { indicator_arr.as_slice_mut()? };
+	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
+
+	// Compute without GIL
+	let combos = py
+		.allow_threads(|| {
+			// Handle kernel selection for batch operations
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			
+			// Map batch kernels to regular kernels
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kern,  // Use the original if not a batch kernel
+			};
+			
+			rsmk_batch_inner_into(main_slice, compare_slice, &sweep, simd, true, indicator_slice, signal_slice)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("indicator", indicator_arr.reshape((rows, cols))?)?;
+	dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"lookbacks",
+		combos.iter().map(|p| p.lookback.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"periods",
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"signal_periods",
+		combos.iter().map(|p| p.signal_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "RsmkStream")]
+pub struct RsmkStreamPy {
+	inner: RsmkStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl RsmkStreamPy {
+	#[new]
+	pub fn new(lookback: usize, period: usize, signal_period: usize, matype: Option<&str>, signal_matype: Option<&str>) -> PyResult<Self> {
+		let params = RsmkParams {
+			lookback: Some(lookback),
+			period: Some(period),
+			signal_period: Some(signal_period),
+			matype: matype.map(|s| s.to_string()),
+			signal_matype: signal_matype.map(|s| s.to_string()),
+		};
+		let inner = RsmkStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(RsmkStreamPy { inner })
+	}
+
+	pub fn update(&mut self, main: f64, compare: f64) -> Option<(f64, f64)> {
+		self.inner.update(main, compare)
+	}
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsmk_js(
+	main: &[f64],
+	compare: &[f64],
+	lookback: usize,
+	period: usize,
+	signal_period: usize,
+	matype: Option<String>,
+	signal_matype: Option<String>,
+) -> Result<Vec<f64>, JsValue> {
+	let params = RsmkParams {
+		lookback: Some(lookback),
+		period: Some(period),
+		signal_period: Some(signal_period),
+		matype: matype.or_else(|| Some("ema".to_string())),
+		signal_matype: signal_matype.or_else(|| Some("ema".to_string())),
+	};
+	let input = RsmkInput::from_slices(main, compare, params);
+	
+	// Single allocation for flattened output [indicator..., signal...]
+	let mut output = vec![0.0; main.len() * 2];
+	let (indicator_slice, signal_slice) = output.split_at_mut(main.len());
+	
+	rsmk_into_slice(indicator_slice, signal_slice, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsmk_into(
+	in_ptr: *const f64,
+	indicator_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	len: usize,
+	compare_ptr: *const f64,
+	lookback: usize,
+	period: usize,
+	signal_period: usize,
+	matype: Option<String>,
+	signal_matype: Option<String>,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || indicator_ptr.is_null() || signal_ptr.is_null() || compare_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let main = std::slice::from_raw_parts(in_ptr, len);
+		let compare = std::slice::from_raw_parts(compare_ptr, len);
+		let params = RsmkParams {
+			lookback: Some(lookback),
+			period: Some(period),
+			signal_period: Some(signal_period),
+			matype: matype.or_else(|| Some("ema".to_string())),
+			signal_matype: signal_matype.or_else(|| Some("ema".to_string())),
+		};
+		let input = RsmkInput::from_slices(main, compare, params);
+		
+		// Check for aliasing - all pointer combinations
+		let in_aliased = in_ptr == indicator_ptr || in_ptr == signal_ptr;
+		let compare_aliased = compare_ptr == indicator_ptr || compare_ptr == signal_ptr;
+		let outputs_aliased = indicator_ptr == signal_ptr;
+		
+		if in_aliased || compare_aliased || outputs_aliased {
+			// Use temporary buffers for all aliased cases
+			let mut temp_indicator = vec![0.0; len];
+			let mut temp_signal = vec![0.0; len];
+			
+			rsmk_into_slice(&mut temp_indicator, &mut temp_signal, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			
+			// Copy in correct order to handle overlapping memory
+			if outputs_aliased {
+				// If indicator and signal point to same memory, signal wins (copied last)
+				indicator_out.copy_from_slice(&temp_indicator);
+				signal_out.copy_from_slice(&temp_signal);
+			} else {
+				indicator_out.copy_from_slice(&temp_indicator);
+				signal_out.copy_from_slice(&temp_signal);
+			}
+		} else {
+			// No aliasing, write directly
+			let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			rsmk_into_slice(indicator_out, signal_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsmk_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rsmk_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RsmkBatchConfig {
+	pub lookback_range: (usize, usize, usize),
+	pub period_range: (usize, usize, usize),
+	pub signal_period_range: (usize, usize, usize),
+	pub matype: Option<String>,
+	pub signal_matype: Option<String>,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RsmkBatchJsOutput {
+	pub indicators: Vec<f64>,
+	pub signals: Vec<f64>,
+	pub combos: Vec<RsmkParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = rsmk_batch)]
+pub fn rsmk_batch_js(main: &[f64], compare: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: RsmkBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let output = RsmkBatchBuilder::new()
+		.lookback_range(config.lookback_range.0, config.lookback_range.1, config.lookback_range.2)
+		.period_range(config.period_range.0, config.period_range.1, config.period_range.2)
+		.signal_period_range(config.signal_period_range.0, config.signal_period_range.1, config.signal_period_range.2)
+		.apply_slices(main, compare)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Flatten the 2D arrays into 1D for JavaScript
+	let indicators: Vec<f64> = output.indicator.chunks(output.cols)
+		.flat_map(|row| row.iter().copied())
+		.collect();
+		
+	let signals: Vec<f64> = output.signal.chunks(output.cols)
+		.flat_map(|row| row.iter().copied())
+		.collect();
+	
+	let js_output = RsmkBatchJsOutput {
+		indicators,
+		signals,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]

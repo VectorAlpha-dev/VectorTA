@@ -208,6 +208,13 @@ pub enum CfoError {
 	NoData,
 }
 
+#[cfg(feature = "wasm")]
+impl From<CfoError> for JsValue {
+	fn from(err: CfoError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 // --- Core API ---
 
 #[inline]

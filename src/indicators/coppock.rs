@@ -234,7 +234,14 @@ pub enum CoppockError {
 		data_len: usize,
 	},
 	#[error("coppock: Underlying MA error: {0}")]
-	MaError(#[from] Box<dyn Error>),
+	MaError(#[from] Box<dyn Error + Send + Sync>),
+}
+
+#[cfg(feature = "wasm")]
+impl From<CoppockError> for JsValue {
+	fn from(err: CoppockError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
 }
 
 #[inline]
@@ -297,7 +304,19 @@ pub fn coppock_with_kernel(input: &CoppockInput, kernel: Kernel) -> Result<Coppo
 	}
 
 	let ma_type = input.get_ma_type();
-	let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).map_err(CoppockError::MaError)?;
+	let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p)
+		.map_err(|e| {
+			use std::fmt;
+			#[derive(Debug)]
+			struct MaErrorWrapper(String);
+			impl fmt::Display for MaErrorWrapper {
+				fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+					write!(f, "{}", self.0)
+				}
+			}
+			impl Error for MaErrorWrapper {}
+			CoppockError::MaError(Box::new(MaErrorWrapper(e.to_string())))
+		})?;
 
 	Ok(CoppockOutput { values: smoothed })
 }
@@ -369,7 +388,19 @@ pub fn coppock_into_slice(
 
 	let ma_type = input.get_ma_type();
 	// Unfortunately, ma() returns a Vec<f64>, so we still need this allocation
-	let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).map_err(CoppockError::MaError)?;
+	let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p)
+		.map_err(|e| {
+			use std::fmt;
+			#[derive(Debug)]
+			struct MaErrorWrapper(String);
+			impl fmt::Display for MaErrorWrapper {
+				fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+					write!(f, "{}", self.0)
+				}
+			}
+			impl Error for MaErrorWrapper {}
+			CoppockError::MaError(Box::new(MaErrorWrapper(e.to_string())))
+		})?;
 	
 	// Copy the smoothed result directly into the output slice
 	out.copy_from_slice(&smoothed);

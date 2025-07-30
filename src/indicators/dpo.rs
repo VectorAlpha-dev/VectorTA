@@ -51,6 +51,7 @@ pub struct DpoOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DpoParams {
 	pub period: Option<usize>,
 }
@@ -154,6 +155,13 @@ pub enum DpoError {
 
 	#[error("dpo: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+}
+
+#[cfg(feature = "wasm")]
+impl From<DpoError> for JsValue {
+	fn from(err: DpoError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
 }
 
 #[inline]

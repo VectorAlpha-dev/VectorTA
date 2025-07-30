@@ -174,6 +174,13 @@ pub enum MidpointError {
 	NotEnoughValidData { needed: usize, valid: usize },
 }
 
+#[cfg(feature = "wasm")]
+impl From<MidpointError> for JsValue {
+	fn from(err: MidpointError) -> Self {
+		JsValue::from_str(&err.to_string())
+	}
+}
+
 // --- INDICATOR API ---
 
 #[inline]
