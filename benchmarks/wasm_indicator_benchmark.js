@@ -132,6 +132,38 @@ const INDICATORS = {
             }
         }
     },
+    vidya: {
+        name: 'VIDYA',
+        // Safe API
+        safe: {
+            fn: 'vidya_js',
+            params: { short_period: 2, long_period: 5, alpha: 0.2 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vidya_alloc',
+            freeFn: 'vidya_free',
+            computeFn: 'vidya_into',
+            params: { short_period: 2, long_period: 5, alpha: 0.2 }
+        },
+        // Batch API
+        batch: {
+            fn: 'vidya_batch',
+            fastFn: 'vidya_batch_into',
+            config: {
+                small: {
+                    short_period_range: [2, 4, 1],     // 3 values
+                    long_period_range: [5, 7, 1],      // 3 values
+                    alpha_range: [0.1, 0.3, 0.1]       // 3 values = 27 combinations
+                },
+                medium: {
+                    short_period_range: [2, 5, 1],     // 4 values
+                    long_period_range: [5, 10, 1],     // 6 values
+                    alpha_range: [0.1, 0.4, 0.1]       // 4 values = 96 combinations
+                }
+            }
+        }
+    },
     adxr: {
         name: 'ADXR',
         // Safe API
@@ -1497,6 +1529,35 @@ const INDICATORS = {
             fastFn: 'linearreg_intercept_batch_into'
         }
     },
+    rsx: {
+        name: 'RSX (Relative Strength Xtra)',
+        // Safe API
+        safe: {
+            fn: 'rsx_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rsx_alloc',
+            freeFn: 'rsx_free',
+            computeFn: 'rsx_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rsx_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5]      // 3 values: 10, 15, 20
+                },
+                medium: {
+                    period_range: [10, 50, 5]      // 9 values: 10, 15, 20, ..., 50
+                }
+            },
+            // Fast batch API
+            fastFn: 'rsx_batch_into'
+        }
+    },
     sinwma: {
         name: 'SINWMA',
         // Safe API
@@ -1665,6 +1726,57 @@ const INDICATORS = {
             // Fast batch API
             fastFn: 'vwma_batch_into',
             inputs: ['prices', 'volumes']  // Special: requires both price and volume
+        }
+    },
+    vwmacd: {
+        name: 'VWMACD (Volume Weighted MACD)',
+        // Safe API
+        safe: {
+            fn: 'vwmacd_js',
+            params: { 
+                fast_period: 12, 
+                slow_period: 26, 
+                signal_period: 9,
+                fast_ma_type: 'sma',
+                slow_ma_type: 'sma',
+                signal_ma_type: 'ema'
+            },
+            inputs: ['close', 'volume']  // Requires both close and volume
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vwmacd_alloc',
+            freeFn: 'vwmacd_free',
+            computeFn: 'vwmacd_into',
+            params: { 
+                fast_period: 12, 
+                slow_period: 26, 
+                signal_period: 9,
+                fast_ma_type: 'sma',
+                slow_ma_type: 'sma',
+                signal_ma_type: 'ema'
+            },
+            inputs: ['close', 'volume'],  // Requires both close and volume
+            outputs: ['macd', 'signal', 'hist']  // Multiple outputs
+        },
+        // Batch API
+        batch: {
+            fn: 'vwmacd_batch',
+            config: {
+                small: {
+                    fast_range: [10, 14, 2],      // 3 values: 10, 12, 14
+                    slow_range: [20, 26, 3],      // 3 values: 20, 23, 26
+                    signal_range: [5, 9, 2]       // 3 values: 5, 7, 9
+                    // Total: 27 combinations
+                },
+                medium: {
+                    fast_range: [8, 16, 2],       // 5 values: 8, 10, 12, 14, 16
+                    slow_range: [20, 30, 2],      // 6 values: 20, 22, 24, 26, 28, 30
+                    signal_range: [5, 13, 2]      // 5 values: 5, 7, 9, 11, 13
+                    // Total: 150 combinations
+                }
+            },
+            inputs: ['close', 'volume']  // Requires both close and volume
         }
     },
     ad: {
@@ -1874,6 +1986,68 @@ const INDICATORS = {
                     r_range: [10, 30, 5],    // 5 values
                     s_range: [5, 15, 2],     // 6 values
                     u_range: [3, 7, 1]       // 5 values = 150 combinations
+                }
+            }
+        }
+    },
+    stc: {
+        name: 'STC',
+        // Safe API
+        safe: {
+            fn: 'stc_js',
+            params: { fast_period: 23, slow_period: 50, k_period: 10, d_period: 3, fast_ma_type: "ema", slow_ma_type: "ema" }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'stc_alloc',
+            freeFn: 'stc_free',
+            computeFn: 'stc_into',
+            params: { fast_period: 23, slow_period: 50, k_period: 10, d_period: 3, fast_ma_type: "ema", slow_ma_type: "ema" }
+        },
+        // Batch API
+        batch: {
+            fn: 'stc_batch',
+            config: {
+                small: {
+                    fast_period_range: [20, 30, 5],    // 3 values: 20, 25, 30
+                    slow_period_range: [45, 55, 5],    // 3 values: 45, 50, 55
+                    k_period_range: [10, 10, 1],       // 1 value: 10
+                    d_period_range: [3, 3, 1]          // 1 value: 3 = 9 combinations
+                },
+                medium: {
+                    fast_period_range: [20, 30, 5],    // 3 values
+                    slow_period_range: [45, 55, 5],    // 3 values
+                    k_period_range: [8, 12, 2],        // 3 values
+                    d_period_range: [3, 3, 1]          // 1 value = 27 combinations
+                }
+            }
+        }
+    },
+    tsi: {
+        name: 'TSI',
+        // Safe API
+        safe: {
+            fn: 'tsi_js',
+            params: { long_period: 25, short_period: 13 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'tsi_alloc',
+            freeFn: 'tsi_free',
+            computeFn: 'tsi_into',
+            params: { long_period: 25, short_period: 13 }
+        },
+        // Batch API
+        batch: {
+            fn: 'tsi_batch',
+            config: {
+                small: {
+                    long_period_range: [20, 30, 5],    // 3 values: 20, 25, 30
+                    short_period_range: [10, 15, 5]    // 2 values: 10, 15 = 6 combinations
+                },
+                medium: {
+                    long_period_range: [20, 35, 5],    // 4 values: 20, 25, 30, 35
+                    short_period_range: [10, 20, 5]    // 3 values: 10, 15, 20 = 12 combinations
                 }
             }
         }

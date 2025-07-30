@@ -22,7 +22,11 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -193,7 +197,7 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, period - 1);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => willr_scalar(high, low, close, period, first_valid, &mut out),
@@ -205,6 +209,70 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
 		}
 	}
 	Ok(WillrOutput { values: out })
+}
+
+#[inline]
+pub fn willr_into_slice(dst: &mut [f64], input: &WillrInput, kernel: Kernel) -> Result<(), WillrError> {
+	let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
+		WillrData::Candles { candles } => (
+			source_type(candles, "high"),
+			source_type(candles, "low"),
+			source_type(candles, "close"),
+		),
+		WillrData::Slices { high, low, close } => (high, low, close),
+	};
+
+	let len = high.len();
+	if low.len() != len || close.len() != len || len == 0 {
+		return Err(WillrError::EmptyOrMismatched);
+	}
+	
+	if dst.len() != len {
+		return Err(WillrError::InvalidPeriod {
+			period: dst.len(),
+			data_len: len,
+		});
+	}
+	
+	let period = input.get_period();
+	if period == 0 || period > len {
+		return Err(WillrError::InvalidPeriod { period, data_len: len });
+	}
+
+	let first_valid = (0..len)
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+		.ok_or(WillrError::AllValuesNaN)?;
+
+	if (len - first_valid) < period {
+		return Err(WillrError::NotEnoughValidData {
+			needed: period,
+			valid: len - first_valid,
+		});
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => willr_scalar(high, low, close, period, first_valid, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => willr_avx2(high, low, close, period, first_valid, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => willr_avx512(high, low, close, period, first_valid, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	// Fill warmup period with NaN
+	let warmup_end = first_valid + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 // --- Scalar/AVX kernels ---
@@ -451,7 +519,24 @@ fn willr_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = len;
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Create uninitialized matrix and set up warmup periods
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first_valid + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to Vec<f64>
+	let mut values = unsafe {
+		let ptr = buf_mu.as_mut_ptr() as *mut f64;
+		let len = buf_mu.len();
+		let cap = buf_mu.capacity();
+		std::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
 		match kern {
@@ -562,6 +647,170 @@ pub unsafe fn willr_row_avx512_long(
 #[inline(always)]
 fn expand_grid_willr(r: &WillrBatchRange) -> Vec<WillrParams> {
 	expand_grid(r)
+}
+
+// --- Streaming implementation ---
+
+pub struct WillrStream {
+	period: usize,
+	high_buffer: Vec<f64>,
+	low_buffer: Vec<f64>,
+	close_buffer: Vec<f64>,
+	count: usize,
+	initialized: bool,
+}
+
+impl WillrStream {
+	pub fn try_new(params: WillrParams) -> Result<Self, WillrError> {
+		let period = params.period.unwrap_or(14);
+		if period == 0 {
+			return Err(WillrError::InvalidPeriod { period: 0, data_len: 0 });
+		}
+
+		Ok(Self {
+			period,
+			high_buffer: vec![f64::NAN; period],
+			low_buffer: vec![f64::NAN; period],
+			close_buffer: vec![f64::NAN; period],
+			count: 0,
+			initialized: false,
+		})
+	}
+
+	pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		// Store values in ring buffer
+		let idx = self.count % self.period;
+		self.high_buffer[idx] = high;
+		self.low_buffer[idx] = low;
+		self.close_buffer[idx] = close;
+		self.count += 1;
+
+		// Need at least period values before we can calculate
+		if self.count < self.period {
+			return None;
+		}
+
+		// Mark as initialized after we have enough data
+		if !self.initialized && self.count >= self.period {
+			self.initialized = true;
+		}
+
+		// Calculate Williams %R
+		let start_idx = if self.count > self.period {
+			(self.count - self.period) % self.period
+		} else {
+			0
+		};
+
+		let mut highest_high = f64::NEG_INFINITY;
+		let mut lowest_low = f64::INFINITY;
+		let mut has_nan = false;
+
+		// Find highest high and lowest low in the period
+		for i in 0..self.period {
+			let buffer_idx = (start_idx + i) % self.period;
+			let h = self.high_buffer[buffer_idx];
+			let l = self.low_buffer[buffer_idx];
+
+			if h.is_nan() || l.is_nan() || close.is_nan() {
+				has_nan = true;
+				break;
+			}
+
+			if h > highest_high {
+				highest_high = h;
+			}
+			if l < lowest_low {
+				lowest_low = l;
+			}
+		}
+
+		if has_nan || highest_high.is_infinite() || lowest_low.is_infinite() {
+			return Some(f64::NAN);
+		}
+
+		let denom = highest_high - lowest_low;
+		if denom == 0.0 {
+			Some(0.0)
+		} else {
+			Some((highest_high - close) / denom * -100.0)
+		}
+	}
+}
+
+#[inline(always)]
+fn willr_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	close: &[f64],
+	sweep: &WillrBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<WillrParams>, WillrError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(WillrError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	
+	let len = high.len();
+	if low.len() != len || close.len() != len || len == 0 {
+		return Err(WillrError::EmptyOrMismatched);
+	}
+
+	let first_valid = (0..len)
+		.find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
+		.ok_or(WillrError::AllValuesNaN)?;
+		
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if len - first_valid < max_p {
+		return Err(WillrError::NotEnoughValidData {
+			needed: max_p,
+			valid: len - first_valid,
+		});
+	}
+	
+	let rows = combos.len();
+	let cols = len;
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		// Initialize warmup period with NaN
+		let warmup_end = first_valid + period - 1;
+		for v in &mut out_row[..warmup_end] {
+			*v = f64::NAN;
+		}
+		match kern {
+			Kernel::Scalar => willr_row_scalar(high, low, close, first_valid, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => willr_row_avx2(high, low, close, first_valid, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => willr_row_avx512(high, low, close, first_valid, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }
 
 #[cfg(test)]
@@ -759,4 +1008,119 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// --- Python bindings ---
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "willr")]
+#[pyo3(signature = (high, low, close, period, kernel=None))]
+pub fn willr_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = WillrParams { period: Some(period) };
+	let input = WillrInput::from_slices(high_slice, low_slice, close_slice, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| willr_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "WillrStream")]
+pub struct WillrStreamPy {
+	stream: WillrStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl WillrStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = WillrParams { period: Some(period) };
+		let stream = WillrStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(WillrStreamPy { stream })
+	}
+	
+	fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+		self.stream.update(high, low, close)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "willr_batch")]
+#[pyo3(signature = (high, low, close, period_range, kernel=None))]
+pub fn willr_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	close: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let close_slice = close.as_slice()?;
+	
+	let sweep = WillrBatchRange { period: period_range };
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			willr_batch_inner_into(high_slice, low_slice, close_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
 }

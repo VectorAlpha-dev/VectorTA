@@ -161,6 +161,18 @@ use crate::indicators::midprice::{midprice_batch_py, midprice_py, MidpriceStream
 use crate::indicators::obv::{obv_batch_py, obv_py, ObvStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::qstick::{qstick_batch_py, qstick_py, QstickStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::rsx::{rsx_batch_py, rsx_py, RsxStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::stc::{stc_batch_py, stc_py, StcStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::tsi::{tsi_batch_py, tsi_py, TsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vwmacd::{vwmacd_batch_py, vwmacd_py, VwmacdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::willr::{willr_batch_py, willr_py, WillrStreamPy};
 
 #[pymodule]
 fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -522,6 +534,36 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
 	m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
 	m.add_class::<QstickStreamPy>()?;
+
+	// Register RSX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
+	m.add_class::<RsxStreamPy>()?;
+
+	// Register STC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(stc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stc_batch_py, m)?)?;
+	m.add_class::<StcStreamPy>()?;
+
+	// Register TSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tsi_batch_py, m)?)?;
+	m.add_class::<TsiStreamPy>()?;
+
+	// Register VIDYA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vidya_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vidya_batch_py, m)?)?;
+	m.add_class::<VidyaStreamPy>()?;
+	
+	// Register VWMACD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vwmacd_batch_py, m)?)?;
+	m.add_class::<VwmacdStreamPy>()?;
+
+	// Register WILLR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(willr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(willr_batch_py, m)?)?;
+	m.add_class::<WillrStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

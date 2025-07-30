@@ -903,9 +903,9 @@ pub fn eri_batch_py<'py>(
 
 	// 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
 	let bull_array: Bound<'py, PyArray1<f64>> =
-		unsafe { PyArray1::<f64>::new_uninitialized(py, rows * cols)? };
+		unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let bear_array: Bound<'py, PyArray1<f64>> =
-		unsafe { PyArray1::<f64>::new_uninitialized(py, rows * cols)? };
+		unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 
 	// 3. Get mutable slices from arrays and initialize NaN prefixes
 	let bull_slice = unsafe { bull_array.as_slice_mut()? };

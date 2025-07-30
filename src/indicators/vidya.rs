@@ -22,9 +22,26 @@
 //!   with leading `NaN`s until the computation can start.
 //! - **`Err(VidyaError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -56,6 +73,7 @@ pub struct VidyaOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VidyaParams {
 	pub short_period: Option<usize>,
 	pub long_period: Option<usize>,
@@ -244,7 +262,8 @@ pub fn vidya_with_kernel(input: &VidyaInput, kernel: Kernel) -> Result<VidyaOutp
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; data.len()];
+	let warmup_period = first + long_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => {
@@ -259,6 +278,92 @@ pub fn vidya_with_kernel(input: &VidyaInput, kernel: Kernel) -> Result<VidyaOutp
 	}
 
 	Ok(VidyaOutput { values: out })
+}
+
+/// Write directly to output slice - no allocations (for WASM bindings)
+#[inline]
+pub fn vidya_into_slice(dst: &mut [f64], input: &VidyaInput, kern: Kernel) -> Result<(), VidyaError> {
+	let data: &[f64] = match &input.data {
+		VidyaData::Candles { candles, source } => source_type(candles, source),
+		VidyaData::Slice(sl) => sl,
+	};
+
+	if data.is_empty() {
+		return Err(VidyaError::EmptyData);
+	}
+
+	if dst.len() != data.len() {
+		return Err(VidyaError::InvalidParameters {
+			short: dst.len(),
+			long: data.len(),
+			alpha: 0.0,
+		});
+	}
+
+	let short_period = input.get_short_period();
+	let long_period = input.get_long_period();
+	let alpha = input.get_alpha();
+
+	if short_period < 1
+		|| long_period < short_period
+		|| long_period < 2
+		|| alpha < 0.0
+		|| alpha > 1.0
+		|| long_period > data.len()
+	{
+		return Err(VidyaError::InvalidParameters {
+			short: short_period,
+			long: long_period,
+			alpha,
+		});
+	}
+
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(VidyaError::AllValuesNaN)?;
+	if (data.len() - first) < long_period {
+		return Err(VidyaError::NotEnoughValidData {
+			needed: long_period,
+			valid: data.len() - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	let warmup_period = first + long_period - 1;
+	
+	unsafe {
+		#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+		{
+			if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+				vidya_simd128(data, short_period, long_period, alpha, first, dst);
+				// Fill warmup with NaN after computation
+				for v in &mut dst[..warmup_period] {
+					*v = f64::NAN;
+				}
+				return Ok(());
+			}
+		}
+
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				vidya_scalar(data, short_period, long_period, alpha, first, dst)
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vidya_avx2(data, short_period, long_period, alpha, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vidya_avx512(data, short_period, long_period, alpha, first, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
 }
 
 #[inline]
@@ -329,6 +434,98 @@ pub unsafe fn vidya_scalar(
 		}
 		k *= alpha;
 		val = (data[i] - val) * k + val;
+		out[i] = val;
+	}
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn vidya_simd128(
+	data: &[f64],
+	short_period: usize,
+	long_period: usize,
+	alpha: f64,
+	first: usize,
+	out: &mut [f64],
+) {
+	use core::arch::wasm32::*;
+
+	let len = data.len();
+	let mut long_sum = 0.0;
+	let mut long_sum2 = 0.0;
+	let mut short_sum = 0.0;
+	let mut short_sum2 = 0.0;
+
+	// Warmup phase - same as scalar
+	for i in first..(first + long_period) {
+		long_sum += data[i];
+		long_sum2 += data[i] * data[i];
+		if i >= (first + long_period - short_period) {
+			short_sum += data[i];
+			short_sum2 += data[i] * data[i];
+		}
+	}
+
+	let mut val = data[first + long_period - 2];
+	out[first + long_period - 2] = val;
+
+	if first + long_period - 1 < data.len() {
+		let sp = short_period as f64;
+		let lp = long_period as f64;
+		let short_div = 1.0 / sp;
+		let long_div = 1.0 / lp;
+		let short_stddev = (short_sum2 * short_div - (short_sum * short_div) * (short_sum * short_div)).sqrt();
+		let long_stddev = (long_sum2 * long_div - (long_sum * long_div) * (long_sum * long_div)).sqrt();
+		let mut k = short_stddev / long_stddev;
+		if k.is_nan() {
+			k = 0.0;
+		}
+		k *= alpha;
+		val = (data[first + long_period - 1] - val) * k + val;
+		out[first + long_period - 1] = val;
+	}
+
+	// Main loop with SIMD optimizations for sum calculations
+	let alpha_v = f64x2_splat(alpha);
+	let sp_v = f64x2_splat(short_period as f64);
+	let lp_v = f64x2_splat(long_period as f64);
+	let short_div_v = f64x2_splat(1.0 / short_period as f64);
+	let long_div_v = f64x2_splat(1.0 / long_period as f64);
+
+	for i in (first + long_period)..len {
+		// Update sums - can vectorize some of this
+		let new_val = data[i];
+		long_sum += new_val;
+		long_sum2 += new_val * new_val;
+		short_sum += new_val;
+		short_sum2 += new_val * new_val;
+
+		let remove_long_idx = i - long_period;
+		let remove_short_idx = i - short_period;
+		let remove_long = data[remove_long_idx];
+		let remove_short = data[remove_short_idx];
+		
+		long_sum -= remove_long;
+		long_sum2 -= remove_long * remove_long;
+		short_sum -= remove_short;
+		short_sum2 -= remove_short * remove_short;
+
+		// Calculate standard deviations using SIMD
+		let short_mean = short_sum / short_period as f64;
+		let long_mean = long_sum / long_period as f64;
+		
+		let short_variance = short_sum2 / short_period as f64 - short_mean * short_mean;
+		let long_variance = long_sum2 / long_period as f64 - long_mean * long_mean;
+		
+		let short_stddev = short_variance.sqrt();
+		let long_stddev = long_variance.sqrt();
+		
+		let mut k = short_stddev / long_stddev;
+		if k.is_nan() {
+			k = 0.0;
+		}
+		k *= alpha;
+		val = (new_val - val) * k + val;
 		out[i] = val;
 	}
 }
@@ -424,8 +621,8 @@ impl VidyaStream {
 			short_period,
 			long_period,
 			alpha,
-			long_buf: vec![f64::NAN; long_period],
-			short_buf: vec![f64::NAN; short_period],
+			long_buf: alloc_with_nan_prefix(long_period, long_period),
+			short_buf: alloc_with_nan_prefix(short_period, short_period),
 			long_sum: 0.0,
 			long_sum2: 0.0,
 			short_sum: 0.0,
@@ -618,15 +815,20 @@ impl VidyaBatchOutput {
 fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
 	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
 		if step == 0 || start == end {
-			return vec![start];
+			let mut v = Vec::with_capacity(1);
+			v.push(start);
+			return v;
 		}
 		(start..=end).step_by(step).collect()
 	}
 	fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
 		if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-			return vec![start];
+			let mut v = Vec::with_capacity(1);
+			v.push(start);
+			return v;
 		}
-		let mut v = Vec::new();
+		let count = ((end - start) / step).ceil() as usize + 1;
+		let mut v = Vec::with_capacity(count);
 		let mut x = start;
 		while x <= end + 1e-12 {
 			v.push(x);
@@ -693,7 +895,22 @@ fn vidya_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + c.long_period.unwrap() - 1)
+		.collect();
+	
+	// Allocate uninitialized matrix and initialize NaN prefixes
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to initialized memory safely
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	let mut values = out;
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &combos[row];
 		let sp = p.short_period.unwrap();
@@ -728,6 +945,16 @@ fn vidya_batch_inner(
 			do_row(row, slice);
 		}
 	}
+	
+	// Take ownership of the buffer
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(VidyaBatchOutput {
 		values,
 		combos,
@@ -1027,6 +1254,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
+                    }
+                )*
             }
         }
     }
@@ -1094,4 +1328,371 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings section
+
+/// Batch calculation that writes directly to output buffer (for Python bindings)
+#[inline(always)]
+pub fn vidya_batch_inner_into(
+	data: &[f64],
+	sweep: &VidyaBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VidyaParams>, VidyaError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(VidyaError::InvalidParameters {
+			short: 0,
+			long: 0,
+			alpha: 0.0,
+		});
+	}
+	
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VidyaError::AllValuesNaN)?;
+	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
+	if data.len() - first < max_long {
+		return Err(VidyaError::NotEnoughValidData {
+			needed: max_long,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + c.long_period.unwrap() - 1)
+		.collect();
+	
+	// Initialize the NaN prefixes directly in the output buffer
+	for (row, &warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row * cols;
+		out[row_start..row_start + warmup].fill(f64::NAN);
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let p = &combos[row];
+		let sp = p.short_period.unwrap();
+		let lp = p.long_period.unwrap();
+		let a = p.alpha.unwrap();
+		match kern {
+			Kernel::Scalar => vidya_row_scalar(data, first, sp, lp, a, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => vidya_row_avx2(data, first, sp, lp, a, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => vidya_row_avx512(data, first, sp, lp, a, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vidya")]
+#[pyo3(signature = (data, short_period=2, long_period=5, alpha=0.2, kernel=None))]
+pub fn vidya_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	short_period: usize,
+	long_period: usize,
+	alpha: f64,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VidyaParams {
+		short_period: Some(short_period),
+		long_period: Some(long_period),
+		alpha: Some(alpha),
+	};
+	let input = VidyaInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py.allow_threads(|| {
+		vidya_with_kernel(&input, kern).map(|o| o.values)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VidyaStream")]
+pub struct VidyaStreamPy {
+	stream: VidyaStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VidyaStreamPy {
+	#[new]
+	fn new(short_period: usize, long_period: usize, alpha: f64) -> PyResult<Self> {
+		let params = VidyaParams {
+			short_period: Some(short_period),
+			long_period: Some(long_period),
+			alpha: Some(alpha),
+		};
+		let stream = VidyaStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VidyaStreamPy { stream })
+	}
+	
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vidya_batch")]
+#[pyo3(signature = (data, short_period_range, long_period_range, alpha_range, kernel=None))]
+pub fn vidya_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	short_period_range: (usize, usize, usize),
+	long_period_range: (usize, usize, usize),
+	alpha_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	
+	let sweep = VidyaBatchRange {
+		short_period: short_period_range,
+		long_period: long_period_range,
+		alpha: alpha_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			vidya_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"short_periods",
+		combos
+			.iter()
+			.map(|p| p.short_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"long_periods",
+		combos
+			.iter()
+			.map(|p| p.long_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"alphas",
+		combos
+			.iter()
+			.map(|p| p.alpha.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vidya_js(data: &[f64], short_period: usize, long_period: usize, alpha: f64) -> Result<Vec<f64>, JsValue> {
+	let params = VidyaParams {
+		short_period: Some(short_period),
+		long_period: Some(long_period),
+		alpha: Some(alpha),
+	};
+	let input = VidyaInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()];
+	vidya_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vidya_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_period: usize,
+	long_period: usize,
+	alpha: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = VidyaParams {
+			short_period: Some(short_period),
+			long_period: Some(long_period),
+			alpha: Some(alpha),
+		};
+		let input = VidyaInput::from_slice(data, params);
+
+		if in_ptr == out_ptr {
+			// Handle aliasing: use temporary buffer
+			let mut temp = vec![0.0; len];
+			vidya_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vidya_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vidya_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vidya_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VidyaBatchConfig {
+	pub short_period_range: (usize, usize, usize),
+	pub long_period_range: (usize, usize, usize),
+	pub alpha_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VidyaBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<VidyaParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vidya_batch)]
+pub fn vidya_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VidyaBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = VidyaBatchRange {
+		short_period: config.short_period_range,
+		long_period: config.long_period_range,
+		alpha: config.alpha_range,
+	};
+
+	let mut output = vec![0.0; data.len() * 232]; // Default 232 combinations like alma
+	let combos = vidya_batch_inner_into(data, &sweep, Kernel::Auto, false, &mut output)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let rows = combos.len();
+	let cols = data.len();
+	output.truncate(rows * cols);
+
+	let result = VidyaBatchJsOutput {
+		values: output,
+		combos,
+		rows,
+		cols,
+	};
+
+	serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vidya_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_period_start: usize,
+	short_period_end: usize,
+	short_period_step: usize,
+	long_period_start: usize,
+	long_period_end: usize,
+	long_period_step: usize,
+	alpha_start: f64,
+	alpha_end: f64,
+	alpha_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = VidyaBatchRange {
+			short_period: (short_period_start, short_period_end, short_period_step),
+			long_period: (long_period_start, long_period_end, long_period_step),
+			alpha: (alpha_start, alpha_end, alpha_step),
+		};
+
+		// Calculate expected output size
+		let combos = expand_grid(&sweep);
+		let total_size = combos.len() * len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+
+		vidya_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(combos.len())
+	}
 }

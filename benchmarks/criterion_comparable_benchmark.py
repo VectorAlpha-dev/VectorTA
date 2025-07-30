@@ -101,13 +101,13 @@ class CriterionComparableBenchmark:
         
         # Map of indicator names to their benchmark paths
         indicators_to_find = [
-            'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
+            'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'edcf', 'ehlers_itrend', 'ema', 'epma', 'eri',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'kdj', 'linearreg_intercept', 'linreg', 'maaq', 'mama', 'mass', 'midprice', 'mwdx', 'obv',
-            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
+            'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma', 'stc', 'tsi',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
-            'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
+            'trendflex', 'trima', 'vidya', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
             'cg', 'cfo'  # Added missing indicators
         ]
         
@@ -115,11 +115,11 @@ class CriterionComparableBenchmark:
         target_size = size_map.get(self.data_size, '1m')
         
         # Also add batch indicators to find
-        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
+        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'vwmacd_batch', 'willr_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'deviation_batch', 'dti_batch', 'edcf_batch', 'ehlers_itrend_batch', 'eri_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch']
+                           'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch', 'qstick_batch', 'stc_batch', 'tsi_batch', 'vidya_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -242,7 +242,9 @@ class CriterionComparableBenchmark:
             ('ao', lambda: my_project.ao(data['high'], data['low'], 5, 34)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
+            ('vwmacd', lambda: my_project.vwmacd(data['close'], data['volume'], 12, 26, 9)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
+            ('willr', lambda: my_project.willr(data['high'], data['low'], data['close'], 14)),
             ('wma', lambda: my_project.wma(data['close'], 14)),
             ('zlema', lambda: my_project.zlema(data['close'], 14)),
             ('ad', lambda: my_project.ad(data['high'], data['low'], data['close'], data['volume'])),
@@ -280,6 +282,7 @@ class CriterionComparableBenchmark:
             ('midprice', lambda: my_project.midprice(data['high'], data['low'], 14)),
             ('obv', lambda: my_project.obv(data['close'], data['volume'])),
             ('qstick', lambda: my_project.qstick(data['open'], data['close'], 5)),
+            ('rsx', lambda: my_project.rsx(data['close'], 14)),
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
             ('nma', lambda: my_project.nma(data['close'], 40)),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
@@ -289,6 +292,9 @@ class CriterionComparableBenchmark:
             ('smma', lambda: my_project.smma(data['close'], 14)),
             ('sqwma', lambda: my_project.sqwma(data['close'], 14)),
             ('srwma', lambda: my_project.srwma(data['close'], 14)),
+            ('stc', lambda: my_project.stc(data['close'], 23, 50, 10, 3, "ema", "ema")),
+            ('tsi', lambda: my_project.tsi(data['close'], 25, 13)),
+            ('vidya', lambda: my_project.vidya(data['close'], 2, 5, 0.2)),
             ('supersmoother_3_pole', lambda: my_project.supersmoother_3_pole(data['close'], 14)),
             ('supersmoother', lambda: my_project.supersmoother(data['close'], 14)),
             ('swma', lambda: my_project.swma(data['close'], 14)),
@@ -330,6 +336,7 @@ class CriterionComparableBenchmark:
             ('bollinger_bands_batch', lambda: my_project.bollinger_bands_batch(data['close'], (20, 20, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0), "sma", 0)),
             ('ao_batch', lambda: my_project.ao_batch(data['high'], data['low'], (5, 5, 1), (34, 34, 1))),
             ('vpwma_batch', lambda: my_project.vpwma_batch(data['close'], (14, 14, 1), (0.382, 0.382, 0.1))),
+            ('willr_batch', lambda: my_project.willr_batch(data['high'], data['low'], data['close'], (10, 20, 2))),
             ('wma_batch', lambda: my_project.wma_batch(data['close'], (14, 14, 1))),
             ('zlema_batch', lambda: my_project.zlema_batch(data['close'], (14, 14, 1))),
             ('sma_batch', lambda: my_project.sma_batch(data['close'], (14, 14, 1))),
@@ -363,6 +370,10 @@ class CriterionComparableBenchmark:
             ('midprice_batch', lambda: my_project.midprice_batch(data['high'], data['low'], (10, 20, 5))),
             ('obv_batch', lambda: my_project.obv_batch(data['close'], data['volume'])),
             ('qstick_batch', lambda: my_project.qstick_batch(data['open'], data['close'], (5, 20, 5))),
+            ('stc_batch', lambda: my_project.stc_batch(data['close'], (20, 30, 5), (45, 55, 5), (8, 12, 2), (3, 3, 0))),
+            ('tsi_batch', lambda: my_project.tsi_batch(data['close'], (25, 25, 1), (13, 13, 1))),
+            ('vidya_batch', lambda: my_project.vidya_batch(data['close'], (2, 2, 0), (5, 10, 5), (0.2, 0.2, 0.0))),
+            ('vwmacd_batch', lambda: my_project.vwmacd_batch(data['close'], data['volume'], (10, 14, 2), (20, 26, 3), (5, 9, 2))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -435,7 +446,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'obv', 'qstick']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'obv', 'qstick', 'stc', 'tsi']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

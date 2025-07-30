@@ -270,7 +270,10 @@
       "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
       "Bash(test_bindings.bat:*)",
       "Bash(.test_bindings.bat bandpass --python)",
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "Bash(set RUST_TEST_THREADS=1)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venvScriptspython testspythontest_willr.py)"
     ],
     "deny": []
   }

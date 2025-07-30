@@ -21,10 +21,28 @@
 //! - **Ok(VwmacdOutput)** with `.macd`, `.signal`, `.hist` (all Vec<f64>)
 //! - **Err(VwmacdError)** otherwise
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -54,7 +72,40 @@ pub struct VwmacdOutput {
 	pub hist: Vec<f64>,
 }
 
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+#[derive(Serialize, Deserialize)]
+pub struct VwmacdJsOutput {
+	#[wasm_bindgen(getter_with_clone)]
+	pub macd: Vec<f64>,
+	#[wasm_bindgen(getter_with_clone)]
+	pub signal: Vec<f64>,
+	#[wasm_bindgen(getter_with_clone)]
+	pub hist: Vec<f64>,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VwmacdBatchConfig {
+	pub fast_range: (usize, usize, usize),
+	pub slow_range: (usize, usize, usize),
+	pub signal_range: (usize, usize, usize),
+	pub fast_ma_type: Option<String>,
+	pub slow_ma_type: Option<String>,
+	pub signal_ma_type: Option<String>,
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VwmacdBatchJsOutput {
+	pub values: Vec<f64>,  // Flattened [macd..., signal..., hist...]
+	pub combos: Vec<VwmacdParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VwmacdParams {
 	pub fast_period: Option<usize>,
 	pub slow_period: Option<usize>,
@@ -256,7 +307,7 @@ pub enum VwmacdError {
 	#[error("vwmacd: Not enough valid data: needed={needed}, valid={valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
 	#[error("vwmacd: MA calculation error: {0}")]
-	MaError(Box<dyn Error>),
+	MaError(String),
 }
 
 #[inline]
@@ -341,6 +392,46 @@ pub fn vwmacd_with_kernel(input: &VwmacdInput, kernel: Kernel) -> Result<VwmacdO
 	}
 }
 
+/// Helper function for WASM bindings - writes directly to output slices with no allocations
+pub fn vwmacd_into_slice(
+	dst_macd: &mut [f64],
+	dst_signal: &mut [f64],
+	dst_hist: &mut [f64],
+	input: &VwmacdInput,
+	kern: Kernel,
+) -> Result<(), VwmacdError> {
+	// Get the data references
+	let (close, volume) = match &input.data {
+		VwmacdData::Candles {
+			candles,
+			close_source,
+			volume_source,
+		} => (source_type(candles, close_source), source_type(candles, volume_source)),
+		VwmacdData::Slices { close, volume } => (*close, *volume),
+	};
+	let data_len = close.len();
+
+	// Validate lengths
+	if dst_macd.len() != data_len || dst_signal.len() != data_len || dst_hist.len() != data_len {
+		return Err(VwmacdError::InvalidPeriod {
+			fast: input.get_fast(),
+			slow: input.get_slow(),
+			signal: input.get_signal(),
+			data_len,
+		});
+	}
+
+	// Compute VWMACD
+	let output = vwmacd_with_kernel(input, kern)?;
+
+	// Copy results to destination slices
+	dst_macd.copy_from_slice(&output.macd);
+	dst_signal.copy_from_slice(&output.signal);
+	dst_hist.copy_from_slice(&output.hist);
+
+	Ok(())
+}
+
 #[inline]
 pub unsafe fn vwmacd_scalar(
 	close: &[f64],
@@ -353,15 +444,15 @@ pub unsafe fn vwmacd_scalar(
 	signal_ma_type: &str,
 ) -> Result<VwmacdOutput, VwmacdError> {
 	let len = close.len();
-	let mut close_x_volume = vec![f64::NAN; len];
+	let mut close_x_volume = alloc_with_nan_prefix(len, 0);
 	for i in 0..len {
 		close_x_volume[i] = close[i] * volume[i];
 	}
 
-	let slow_ma_cv = ma(slow_ma_type, MaData::Slice(&close_x_volume), slow).map_err(|e| VwmacdError::MaError(e))?;
-	let slow_ma_v = ma(slow_ma_type, MaData::Slice(&volume), slow).map_err(|e| VwmacdError::MaError(e))?;
+	let slow_ma_cv = ma(slow_ma_type, MaData::Slice(&close_x_volume), slow).map_err(|e| VwmacdError::MaError(e.to_string()))?;
+	let slow_ma_v = ma(slow_ma_type, MaData::Slice(&volume), slow).map_err(|e| VwmacdError::MaError(e.to_string()))?;
 
-	let mut vwma_slow = vec![f64::NAN; len];
+	let mut vwma_slow = alloc_with_nan_prefix(len, slow - 1);
 	for i in 0..len {
 		let denom = slow_ma_v[i];
 		if !denom.is_nan() && denom != 0.0 {
@@ -369,10 +460,10 @@ pub unsafe fn vwmacd_scalar(
 		}
 	}
 
-	let fast_ma_cv = ma(fast_ma_type, MaData::Slice(&close_x_volume), fast).map_err(|e| VwmacdError::MaError(e))?;
-	let fast_ma_v = ma(fast_ma_type, MaData::Slice(&volume), fast).map_err(|e| VwmacdError::MaError(e))?;
+	let fast_ma_cv = ma(fast_ma_type, MaData::Slice(&close_x_volume), fast).map_err(|e| VwmacdError::MaError(e.to_string()))?;
+	let fast_ma_v = ma(fast_ma_type, MaData::Slice(&volume), fast).map_err(|e| VwmacdError::MaError(e.to_string()))?;
 
-	let mut vwma_fast = vec![f64::NAN; len];
+	let mut vwma_fast = alloc_with_nan_prefix(len, fast - 1);
 	for i in 0..len {
 		let denom = fast_ma_v[i];
 		if !denom.is_nan() && denom != 0.0 {
@@ -380,16 +471,16 @@ pub unsafe fn vwmacd_scalar(
 		}
 	}
 
-	let mut macd = vec![f64::NAN; len];
+	let mut macd = alloc_with_nan_prefix(len, slow - 1);
 	for i in 0..len {
 		if !vwma_fast[i].is_nan() && !vwma_slow[i].is_nan() {
 			macd[i] = vwma_fast[i] - vwma_slow[i];
 		}
 	}
 
-	let signal_vec = ma(signal_ma_type, MaData::Slice(&macd), signal).map_err(|e| VwmacdError::MaError(e))?;
+	let signal_vec = ma(signal_ma_type, MaData::Slice(&macd), signal).map_err(|e| VwmacdError::MaError(e.to_string()))?;
 
-	let mut hist = vec![f64::NAN; len];
+	let mut hist = alloc_with_nan_prefix(len, slow + signal - 2);
 	for i in 0..len {
 		if !macd[i].is_nan() && !signal_vec[i].is_nan() {
 			hist[i] = macd[i] - signal_vec[i];
@@ -499,6 +590,31 @@ pub unsafe fn vwmacd_avx512_long(
 	slow_ma_type: &str,
 	signal_ma_type: &str,
 ) -> Result<VwmacdOutput, VwmacdError> {
+	vwmacd_scalar(
+		close,
+		volume,
+		fast,
+		slow,
+		signal,
+		fast_ma_type,
+		slow_ma_type,
+		signal_ma_type,
+	)
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+pub unsafe fn vwmacd_simd128(
+	close: &[f64],
+	volume: &[f64],
+	fast: usize,
+	slow: usize,
+	signal: usize,
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+	signal_ma_type: &str,
+) -> Result<VwmacdOutput, VwmacdError> {
+	// SIMD128 implementation delegates to scalar since AVX512 is a stub
 	vwmacd_scalar(
 		close,
 		volume,
@@ -655,14 +771,58 @@ pub unsafe fn vwmacd_row_avx512_long(
 	);
 }
 
-#[derive(Debug, Clone)]
-pub struct VwmacdStream {
+// Placeholder for future streaming kernel implementation
+#[inline(always)]
+pub unsafe fn vwmacd_streaming_scalar(
+	cv_buffer: &[f64],
+	v_buffer: &[f64],
 	fast: usize,
 	slow: usize,
 	signal: usize,
+	buffer_size: usize,
+	head: usize,
+	count: usize,
+	fast_cv_sum: f64,
+	fast_v_sum: f64,
+	slow_cv_sum: f64,
+	slow_v_sum: f64,
+	macd_buffer: &[f64],
+	signal_ema_state: Option<f64>,
+) -> (f64, f64, f64) {
+	// TODO: Implement optimized streaming kernel
+	// For now, this is a placeholder that returns NaN values
+	// The actual implementation would compute VWMACD values using the provided state
+	(f64::NAN, f64::NAN, f64::NAN)
+}
+
+#[derive(Debug, Clone)]
+pub struct VwmacdStream {
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
 	fast_ma_type: String,
 	slow_ma_type: String,
 	signal_ma_type: String,
+	// Buffers for close*volume and volume
+	close_volume_buffer: Vec<f64>,
+	volume_buffer: Vec<f64>,
+	// State for fast VWMA
+	fast_cv_sum: f64,
+	fast_v_sum: f64,
+	// State for slow VWMA
+	slow_cv_sum: f64,
+	slow_v_sum: f64,
+	// MACD buffer for signal calculation
+	macd_buffer: Vec<f64>,
+	// Signal line state (EMA specific)
+	signal_ema_state: Option<f64>,
+	// Ring buffer indices
+	head: usize,
+	count: usize,
+	// Track if we have enough data
+	fast_filled: bool,
+	slow_filled: bool,
+	signal_filled: bool,
 }
 
 impl VwmacdStream {
@@ -682,17 +842,182 @@ impl VwmacdStream {
 				data_len: 0,
 			});
 		}
+		
+		// For now, only support SMA for fast/slow and EMA for signal
+		if fast_ma_type != "sma" || slow_ma_type != "sma" {
+			return Err(VwmacdError::MaError("Stream only supports SMA for VWMA calculations".to_string()));
+		}
+		if signal_ma_type != "ema" && signal_ma_type != "sma" {
+			return Err(VwmacdError::MaError("Stream only supports EMA or SMA for signal line".to_string()));
+		}
+		
+		// Buffers need to accommodate the largest period plus some extra for the ring buffer
+		// to work correctly. We need at least slow_period + 1 to avoid overwriting values
+		// that are still in use.
+		let buffer_size = (slow.max(signal) + 10).max(40);
+		
 		Ok(Self {
-			fast,
-			slow,
-			signal,
+			fast_period: fast,
+			slow_period: slow,
+			signal_period: signal,
 			fast_ma_type,
 			slow_ma_type,
 			signal_ma_type,
+			close_volume_buffer: vec![0.0; buffer_size],
+			volume_buffer: vec![0.0; buffer_size],
+			fast_cv_sum: 0.0,
+			fast_v_sum: 0.0,
+			slow_cv_sum: 0.0,
+			slow_v_sum: 0.0,
+			macd_buffer: vec![f64::NAN; signal],
+			signal_ema_state: None,
+			head: 0,
+			count: 0,
+			fast_filled: false,
+			slow_filled: false,
+			signal_filled: false,
 		})
 	}
-	pub fn update(&mut self, _close: f64, _volume: f64) -> Option<f64> {
-		None
+	
+	pub fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64, f64)> {
+		// Calculate new values
+		let cv = close * volume;
+		
+		// Store in ring buffer
+		let idx = self.count % self.close_volume_buffer.len();
+		self.close_volume_buffer[idx] = cv;
+		self.volume_buffer[idx] = volume;
+		self.count += 1;
+		
+		// Calculate VWMA values
+		let mut vwma_fast = f64::NAN;
+		let mut vwma_slow = f64::NAN;
+		
+		// Fast VWMA
+		if self.count >= self.fast_period {
+			let mut cv_sum = 0.0;
+			let mut v_sum = 0.0;
+			let start = if self.count <= self.close_volume_buffer.len() {
+				// Buffer not full yet
+				self.count.saturating_sub(self.fast_period)
+			} else {
+				// Buffer is full, calculate proper start position
+				((idx + 1 + self.close_volume_buffer.len() - self.fast_period) % self.close_volume_buffer.len())
+			};
+			
+			for i in 0..self.fast_period {
+				let buf_idx = if self.count <= self.close_volume_buffer.len() {
+					start + i
+				} else {
+					(start + i) % self.close_volume_buffer.len()
+				};
+				cv_sum += self.close_volume_buffer[buf_idx];
+				v_sum += self.volume_buffer[buf_idx];
+			}
+			
+			if v_sum != 0.0 {
+				vwma_fast = cv_sum / v_sum;
+			}
+		}
+		
+		// Slow VWMA
+		if self.count >= self.slow_period {
+			let mut cv_sum = 0.0;
+			let mut v_sum = 0.0;
+			let start = if self.count <= self.close_volume_buffer.len() {
+				// Buffer not full yet
+				self.count.saturating_sub(self.slow_period)
+			} else {
+				// Buffer is full, calculate proper start position
+				((idx + 1 + self.close_volume_buffer.len() - self.slow_period) % self.close_volume_buffer.len())
+			};
+			
+			for i in 0..self.slow_period {
+				let buf_idx = if self.count <= self.close_volume_buffer.len() {
+					start + i
+				} else {
+					(start + i) % self.close_volume_buffer.len()
+				};
+				cv_sum += self.close_volume_buffer[buf_idx];
+				v_sum += self.volume_buffer[buf_idx];
+			}
+			
+			if v_sum != 0.0 {
+				vwma_slow = cv_sum / v_sum;
+			}
+		}
+		
+		// Calculate MACD
+		let macd = if !vwma_fast.is_nan() && !vwma_slow.is_nan() {
+			vwma_fast - vwma_slow
+		} else {
+			f64::NAN
+		};
+		
+		// Store MACD value for signal calculation
+		let macd_idx = (self.count - 1) % self.signal_period;
+		self.macd_buffer[macd_idx] = macd;
+		
+		// Calculate signal line
+		let signal = if self.count >= self.slow_period {
+			if self.signal_ma_type == "ema" {
+				// EMA signal line
+				if !macd.is_nan() {
+					let alpha = 2.0 / (self.signal_period as f64 + 1.0);
+					match self.signal_ema_state {
+						None => {
+							// Initialize with first MACD value
+							self.signal_ema_state = Some(macd);
+							macd
+						}
+						Some(prev_ema) => {
+							let new_ema = alpha * macd + (1.0 - alpha) * prev_ema;
+							self.signal_ema_state = Some(new_ema);
+							new_ema
+						}
+					}
+				} else {
+					f64::NAN
+				}
+			} else {
+				// SMA signal line
+				if self.count >= self.slow_period + self.signal_period - 1 {
+					// Calculate SMA of MACD values
+					let mut sum = 0.0;
+					let mut valid_count = 0;
+					for i in 0..self.signal_period {
+						let val = self.macd_buffer[i];
+						if !val.is_nan() {
+							sum += val;
+							valid_count += 1;
+						}
+					}
+					if valid_count > 0 {
+						sum / valid_count as f64
+					} else {
+						f64::NAN
+					}
+				} else {
+					f64::NAN
+				}
+			}
+		} else {
+			f64::NAN
+		};
+		
+		// Calculate histogram
+		let hist = if !macd.is_nan() && !signal.is_nan() {
+			macd - signal
+		} else {
+			f64::NAN
+		};
+		
+		// Return results if we have valid MACD
+		if !macd.is_nan() {
+			Some((macd, signal, hist))
+		} else {
+			None
+		}
 	}
 }
 
@@ -893,7 +1218,17 @@ fn vwmacd_batch_inner(
 	let len = close.len();
 	let rows = params.len();
 	let cols = len;
-	let mut macd = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with proper NaN prefixes
+	let warmup_periods: Vec<usize> = params.iter().map(|p| {
+		let slow = p.slow_period.unwrap_or(26);
+		let signal = p.signal_period.unwrap_or(9);
+		slow + signal - 1
+	}).collect();
+	
+	let mut macd_uninit = make_uninit_matrix(rows, cols);
+	unsafe { init_matrix_prefixes(&mut macd_uninit, cols, &warmup_periods); }
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &params[row];
 		match kern {
@@ -935,31 +1270,538 @@ fn vwmacd_batch_inner(
 			_ => unreachable!(),
 		}
 	};
+	// Process each row
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			macd.par_chunks_mut(cols)
+			macd_uninit.par_chunks_mut(cols)
 				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
+				.for_each(|(row, slice)| {
+					let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
+					do_row(row, out_row);
+				});
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in macd.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
+			for (row, slice) in macd_uninit.chunks_mut(cols).enumerate() {
+				let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
+				do_row(row, out_row);
 			}
 		}
 	} else {
-		for (row, slice) in macd.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
+		for (row, slice) in macd_uninit.chunks_mut(cols).enumerate() {
+			let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
+			do_row(row, out_row);
 		}
 	}
+	
+	// Convert to Vec<f64>
+	let macd: Vec<f64> = unsafe { std::mem::transmute(macd_uninit) };
+	
 	Ok(VwmacdBatchOutput {
 		macd,
 		params,
 		rows,
 		cols,
 	})
+}
+
+// batch_inner_into function for zero-copy Python batch operations
+pub fn vwmacd_batch_inner_into(
+	close: &[f64],
+	volume: &[f64],
+	sweep: &VwmacdBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VwmacdParams>, VwmacdError> {
+	let params = expand_grid(sweep);
+	if params.is_empty() {
+		return Err(VwmacdError::InvalidPeriod {
+			fast: 0,
+			slow: 0,
+			signal: 0,
+			data_len: 0,
+		});
+	}
+	
+	let len = close.len();
+	let rows = params.len();
+	let cols = len;
+	
+	if out.len() < rows * cols {
+		return Err(VwmacdError::InvalidPeriod {
+			fast: 0,
+			slow: 0,
+			signal: 0,
+			data_len: out.len(),
+		});
+	}
+	
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let p = &params[row];
+		match kern {
+			Kernel::Scalar => vwmacd_row_scalar(
+				close,
+				volume,
+				p.fast_period.unwrap(),
+				p.slow_period.unwrap(),
+				p.signal_period.unwrap(),
+				p.fast_ma_type.as_deref().unwrap_or("sma"),
+				p.slow_ma_type.as_deref().unwrap_or("sma"),
+				p.signal_ma_type.as_deref().unwrap_or("ema"),
+				out_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => vwmacd_row_avx2(
+				close,
+				volume,
+				p.fast_period.unwrap(),
+				p.slow_period.unwrap(),
+				p.signal_period.unwrap(),
+				p.fast_ma_type.as_deref().unwrap_or("sma"),
+				p.slow_ma_type.as_deref().unwrap_or("sma"),
+				p.signal_ma_type.as_deref().unwrap_or("ema"),
+				out_row,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => vwmacd_row_avx512(
+				close,
+				volume,
+				p.fast_period.unwrap(),
+				p.slow_period.unwrap(),
+				p.signal_period.unwrap(),
+				p.fast_ma_type.as_deref().unwrap_or("sma"),
+				p.slow_ma_type.as_deref().unwrap_or("sma"),
+				p.signal_ma_type.as_deref().unwrap_or("ema"),
+				out_row,
+			),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(params)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwmacd")]
+#[pyo3(signature = (close, volume, fast_period=12, slow_period=26, signal_period=9, fast_ma_type="sma", slow_ma_type="sma", signal_ma_type="ema", kernel=None))]
+/// Compute Volume Weighted MACD (VWMACD) using volume-weighted moving averages.
+///
+/// VWMACD uses VWMA instead of EMA/SMA for calculating MACD, providing volume-aware momentum.
+///
+/// Parameters:
+/// -----------
+/// close : np.ndarray
+///     Close price data array (float64).
+/// volume : np.ndarray  
+///     Volume data array (float64), must be same length as close.
+/// fast_period : int, default=12
+///     Period for fast VWMA.
+/// slow_period : int, default=26
+///     Period for slow VWMA.
+/// signal_period : int, default=9
+///     Period for signal line MA.
+/// fast_ma_type : str, default="sma"
+///     MA type for fast VWMA calculation.
+/// slow_ma_type : str, default="sma"
+///     MA type for slow VWMA calculation.
+/// signal_ma_type : str, default="ema"
+///     MA type for signal line.
+/// kernel : str, optional
+///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
+///
+/// Returns:
+/// --------
+/// tuple[np.ndarray, np.ndarray, np.ndarray]
+///     (macd, signal, histogram) arrays, all same length as input.
+///
+/// Raises:
+/// -------
+/// ValueError
+///     If inputs are invalid (mismatched lengths, invalid periods, etc).
+pub fn vwmacd_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+	signal_ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VwmacdParams {
+		fast_period: Some(fast_period),
+		slow_period: Some(slow_period),
+		signal_period: Some(signal_period),
+		fast_ma_type: Some(fast_ma_type.to_string()),
+		slow_ma_type: Some(slow_ma_type.to_string()),
+		signal_ma_type: Some(signal_ma_type.to_string()),
+	};
+	
+	let input = VwmacdInput::from_slices(close_slice, volume_slice, params);
+	
+	// Compute VWMACD without GIL
+	let (macd_vec, signal_vec, hist_vec) = py
+		.allow_threads(|| {
+			vwmacd_with_kernel(&input, kern)
+				.map(|o| (o.macd, o.signal, o.hist))
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Zero-copy transfer to NumPy arrays
+	Ok((
+		macd_vec.into_pyarray(py),
+		signal_vec.into_pyarray(py),
+		hist_vec.into_pyarray(py),
+	))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vwmacd_batch")]
+#[pyo3(signature = (close, volume, fast_range, slow_range, signal_range, fast_ma_type="sma", slow_ma_type="sma", signal_ma_type="ema", kernel=None))]
+/// Compute VWMACD for multiple parameter combinations in a single pass.
+///
+/// Parameters:
+/// -----------
+/// close : np.ndarray
+///     Close price data array (float64).
+/// volume : np.ndarray
+///     Volume data array (float64).
+/// fast_range : tuple
+///     (start, end, step) for fast period values.
+/// slow_range : tuple  
+///     (start, end, step) for slow period values.
+/// signal_range : tuple
+///     (start, end, step) for signal period values.
+/// fast_ma_type : str, default="sma"
+///     MA type for fast VWMA.
+/// slow_ma_type : str, default="sma"
+///     MA type for slow VWMA.
+/// signal_ma_type : str, default="ema"
+///     MA type for signal line.
+/// kernel : str, optional
+///     Computation kernel.
+///
+/// Returns:
+/// --------
+/// dict
+///     Dictionary with 'values' (2D MACD array), 'fast_periods', 'slow_periods', 'signal_periods'.
+pub fn vwmacd_batch_py<'py>(
+	py: Python<'py>,
+	close: PyReadonlyArray1<'py, f64>,
+	volume: PyReadonlyArray1<'py, f64>,
+	fast_range: (usize, usize, usize),
+	slow_range: (usize, usize, usize),
+	signal_range: (usize, usize, usize),
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+	signal_ma_type: &str,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+	
+	let sweep = VwmacdBatchRange {
+		fast: fast_range,
+		slow: slow_range,
+		signal: signal_range,
+		fast_ma_type: fast_ma_type.to_string(),
+		slow_ma_type: slow_ma_type.to_string(),
+		signal_ma_type: signal_ma_type.to_string(),
+	};
+	
+	// Calculate dimensions
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+	
+	// Pre-allocate output array
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	// Compute without GIL
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			vwmacd_batch_inner_into(close_slice, volume_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"fast_periods",
+		combos
+			.iter()
+			.map(|p| p.fast_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"slow_periods",
+		combos
+			.iter()
+			.map(|p| p.slow_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"signal_periods",
+		combos
+			.iter()
+			.map(|p| p.signal_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VwmacdStream")]
+pub struct VwmacdStreamPy {
+	inner: VwmacdStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VwmacdStreamPy {
+	#[new]
+	#[pyo3(signature = (fast_period=12, slow_period=26, signal_period=9, fast_ma_type="sma", slow_ma_type="sma", signal_ma_type="ema"))]
+	fn new(
+		fast_period: usize,
+		slow_period: usize,
+		signal_period: usize,
+		fast_ma_type: &str,
+		slow_ma_type: &str,
+		signal_ma_type: &str,
+	) -> PyResult<Self> {
+		let params = VwmacdParams {
+			fast_period: Some(fast_period),
+			slow_period: Some(slow_period),
+			signal_period: Some(signal_period),
+			fast_ma_type: Some(fast_ma_type.to_string()),
+			slow_ma_type: Some(slow_ma_type.to_string()),
+			signal_ma_type: Some(signal_ma_type.to_string()),
+		};
+		let inner = VwmacdStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VwmacdStreamPy { inner })
+	}
+	
+	/// Update with new close and volume values, returns (macd, signal, hist) if ready.
+	fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64, f64)> {
+		self.inner.update(close, volume)
+	}
+}
+
+// ============================================================================
+// WASM Bindings
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwmacd_js(
+	close: &[f64],
+	volume: &[f64],
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+	signal_ma_type: &str,
+) -> Result<VwmacdJsOutput, JsValue> {
+	let params = VwmacdParams {
+		fast_period: Some(fast_period),
+		slow_period: Some(slow_period),
+		signal_period: Some(signal_period),
+		fast_ma_type: Some(fast_ma_type.to_string()),
+		slow_ma_type: Some(slow_ma_type.to_string()),
+		signal_ma_type: Some(signal_ma_type.to_string()),
+	};
+	let input = VwmacdInput::from_slices(close, volume, params);
+
+	// Single allocation for each output
+	let mut macd = vec![0.0; close.len()];
+	let mut signal = vec![0.0; close.len()];
+	let mut hist = vec![0.0; close.len()];
+
+	vwmacd_into_slice(&mut macd, &mut signal, &mut hist, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(VwmacdJsOutput { macd, signal, hist })
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwmacd_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwmacd_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vwmacd_into(
+	in_ptr: *const f64,
+	volume_ptr: *const f64,
+	macd_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	hist_ptr: *mut f64,
+	len: usize,
+	fast_period: usize,
+	slow_period: usize,
+	signal_period: usize,
+	fast_ma_type: &str,
+	slow_ma_type: &str,
+	signal_ma_type: &str,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || volume_ptr.is_null() || macd_ptr.is_null() || signal_ptr.is_null() || hist_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let close = std::slice::from_raw_parts(in_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let params = VwmacdParams {
+			fast_period: Some(fast_period),
+			slow_period: Some(slow_period),
+			signal_period: Some(signal_period),
+			fast_ma_type: Some(fast_ma_type.to_string()),
+			slow_ma_type: Some(slow_ma_type.to_string()),
+			signal_ma_type: Some(signal_ma_type.to_string()),
+		};
+		let input = VwmacdInput::from_slices(close, volume, params);
+
+		// Check for aliasing - need to check all output pointers against both inputs
+		let needs_temp = in_ptr == macd_ptr as *const f64 || 
+		                in_ptr == signal_ptr as *const f64 || 
+		                in_ptr == hist_ptr as *const f64 ||
+		                volume_ptr == macd_ptr as *const f64 || 
+		                volume_ptr == signal_ptr as *const f64 || 
+		                volume_ptr == hist_ptr as *const f64;
+
+		if needs_temp {
+			// Use temporary buffers if there's aliasing
+			let mut temp_macd = vec![0.0; len];
+			let mut temp_signal = vec![0.0; len];
+			let mut temp_hist = vec![0.0; len];
+			
+			vwmacd_into_slice(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let macd_out = std::slice::from_raw_parts_mut(macd_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
+			
+			macd_out.copy_from_slice(&temp_macd);
+			signal_out.copy_from_slice(&temp_signal);
+			hist_out.copy_from_slice(&temp_hist);
+		} else {
+			// Direct write without temp buffers
+			let macd_out = std::slice::from_raw_parts_mut(macd_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
+			
+			vwmacd_into_slice(macd_out, signal_out, hist_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vwmacd_batch)]
+pub fn vwmacd_batch_unified_js(
+	close: &[f64],
+	volume: &[f64],
+	config: JsValue,
+) -> Result<JsValue, JsValue> {
+	let config: VwmacdBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let fast_ma_type = config.fast_ma_type.unwrap_or_else(|| "sma".to_string());
+	let slow_ma_type = config.slow_ma_type.unwrap_or_else(|| "sma".to_string());
+	let signal_ma_type = config.signal_ma_type.unwrap_or_else(|| "ema".to_string());
+
+	// Create batch builder and apply the configuration
+	let builder = VwmacdBatchBuilder::new()
+		.fast_range(config.fast_range.0, config.fast_range.1, config.fast_range.2)
+		.slow_range(config.slow_range.0, config.slow_range.1, config.slow_range.2)
+		.signal_range(config.signal_range.0, config.signal_range.1, config.signal_range.2)
+		.fast_ma_type(fast_ma_type)
+		.slow_ma_type(slow_ma_type)
+		.signal_ma_type(signal_ma_type)
+		.kernel(Kernel::Auto);
+
+	let output = builder.apply_slices(close, volume)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// Create flattened output for JavaScript
+	// Note: VwmacdBatchOutput only contains MACD values, not signal/hist
+	// For consistency with the single output API, we'll only return MACD values
+	let values = output.macd;
+
+	let js_output = VwmacdBatchJsOutput {
+		values,
+		combos: output.params,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 #[cfg(test)]
@@ -1148,6 +1990,13 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                $(
+                    #[test]
+                    fn [<$test_fn _simd128_f64>]() {
+                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
+                    }
+                )*
             }
         }
     }
@@ -1157,8 +2006,117 @@ mod tests {
 		check_vwmacd_with_custom_ma_types,
 		check_vwmacd_nan_data,
 		check_vwmacd_zero_period,
-		check_vwmacd_period_exceeds
+		check_vwmacd_period_exceeds,
+		check_vwmacd_streaming
 	);
+
+	fn check_vwmacd_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let fast_period = 12;
+		let slow_period = 26;
+		let signal_period = 9;
+		let fast_ma_type = "sma";
+		let slow_ma_type = "sma";
+		let signal_ma_type = "ema";
+
+		// Get batch output for comparison
+		let params = VwmacdParams {
+			fast_period: Some(fast_period),
+			slow_period: Some(slow_period),
+			signal_period: Some(signal_period),
+			fast_ma_type: Some(fast_ma_type.to_string()),
+			slow_ma_type: Some(slow_ma_type.to_string()),
+			signal_ma_type: Some(signal_ma_type.to_string()),
+		};
+		let input = VwmacdInput::from_slices(&candles.close, &candles.volume, params.clone());
+		let batch_output = vwmacd_with_kernel(&input, kernel)?;
+
+		// Create stream
+		let mut stream = VwmacdStream::try_new(params)?;
+
+		// Process all values through the stream
+		let mut stream_macd = Vec::with_capacity(candles.close.len());
+		let mut stream_signal = Vec::with_capacity(candles.close.len());
+		let mut stream_hist = Vec::with_capacity(candles.close.len());
+
+		for i in 0..candles.close.len() {
+			match stream.update(candles.close[i], candles.volume[i]) {
+				Some((m, s, h)) => {
+					stream_macd.push(m);
+					stream_signal.push(s);
+					stream_hist.push(h);
+				}
+				None => {
+					stream_macd.push(f64::NAN);
+					stream_signal.push(f64::NAN);
+					stream_hist.push(f64::NAN);
+				}
+			}
+			
+		}
+
+		// Compare results
+		assert_eq!(batch_output.macd.len(), stream_macd.len());
+		assert_eq!(batch_output.signal.len(), stream_signal.len());
+		assert_eq!(batch_output.hist.len(), stream_hist.len());
+
+		// Check MACD values
+		for (i, (&b, &s)) in batch_output.macd.iter().zip(stream_macd.iter()).enumerate() {
+			if b.is_nan() && s.is_nan() {
+				continue;
+			}
+			let diff = (b - s).abs();
+			assert!(
+				diff < 1e-7,
+				"[{}] VWMACD streaming MACD mismatch at idx {}: batch={}, stream={}, diff={}",
+				test_name,
+				i,
+				b,
+				s,
+				diff
+			);
+		}
+
+		// Check signal values
+		for (i, (&b, &s)) in batch_output.signal.iter().zip(stream_signal.iter()).enumerate() {
+			if b.is_nan() && s.is_nan() {
+				continue;
+			}
+			let diff = (b - s).abs();
+			assert!(
+				diff < 1e-7,
+				"[{}] VWMACD streaming signal mismatch at idx {}: batch={}, stream={}, diff={}",
+				test_name,
+				i,
+				b,
+				s,
+				diff
+			);
+		}
+
+		// Check histogram values
+		for (i, (&b, &s)) in batch_output.hist.iter().zip(stream_hist.iter()).enumerate() {
+			if b.is_nan() && s.is_nan() {
+				continue;
+			}
+			let diff = (b - s).abs();
+			assert!(
+				diff < 1e-7,
+				"[{}] VWMACD streaming histogram mismatch at idx {}: batch={}, stream={}, diff={}",
+				test_name,
+				i,
+				b,
+				s,
+				diff
+			);
+		}
+
+		Ok(())
+	}
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
