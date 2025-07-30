@@ -17,14 +17,28 @@
 //! - **Ok(UiOutput)** on success, containing a Vec<f64> matching the input length.
 //! - **Err(UiError)** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for UiInput<'a> {
@@ -49,6 +63,7 @@ pub struct UiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct UiParams {
 	pub period: Option<usize>,
 	pub scalar: Option<f64>,
@@ -171,6 +186,8 @@ pub enum UiError {
 	InvalidPeriod { period: usize, data_len: usize },
 	#[error("ui: Not enough valid data: needed = {needed}, valid = {valid}")]
 	NotEnoughValidData { needed: usize, valid: usize },
+	#[error("ui: Invalid length: expected = {expected}, actual = {actual}")]
+	InvalidLength { expected: usize, actual: usize },
 }
 
 #[inline]
@@ -200,7 +217,8 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; len];
+	let warmup_period = period * 2 - 2;
+	let mut out = alloc_with_nan_prefix(len, warmup_period);
 
 	unsafe {
 		match chosen {
@@ -219,13 +237,15 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
 #[inline]
 pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &mut [f64]) {
 	let len = data.len();
-	let mut rolling_max: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, len);
-	rolling_max.resize(len, f64::NAN);
-
-	// Rolling max calculation
+	
+	// We'll use the output buffer to store intermediate values
+	// Layout: out[0..len] will temporarily hold rolling max values
+	// Then we'll compute UI values in-place
+	
+	// Step 1: Compute rolling max into output buffer
 	for i in first..len {
 		if i < period - 1 {
+			out[i] = f64::NAN;
 			continue;
 		}
 		let mut max = f64::NAN;
@@ -235,43 +255,77 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
 				max = v;
 			}
 		}
-		rolling_max[i] = max;
+		out[i] = max;
 	}
-
-	let mut squared_drawdowns: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> =
-		AVec::with_capacity(CACHELINE_ALIGN, len);
-	squared_drawdowns.resize(len, f64::NAN);
-
-	for i in (first + period - 1)..len {
-		if !rolling_max[i].is_nan() && !data[i].is_nan() && rolling_max[i] != 0.0 {
-			let dd = scalar * (data[i] - rolling_max[i]) / rolling_max[i];
-			squared_drawdowns[i] = dd * dd;
-		}
-	}
-
+	
+	// Step 2: Compute UI using a rolling window of squared drawdowns
+	// We only need to keep track of 'period' squared drawdowns at a time
+	let mut squared_dd_window: AVec<f64, aligned_vec::ConstAlign<CACHELINE_ALIGN>> = 
+		AVec::with_capacity(CACHELINE_ALIGN, period);
+	squared_dd_window.resize(period, f64::NAN);
+	let mut window_idx = 0;
 	let mut sum = 0.0;
 	let mut count = 0usize;
-	for i in (first + period - 1)..len {
-		if squared_drawdowns[i].is_nan() {
-			continue;
+	
+	// Initialize the window with the first 'period' squared drawdowns
+	for i in (first + period - 1)..(first + period * 2 - 1).min(len) {
+		let rolling_max = out[i];
+		if !rolling_max.is_nan() && !data[i].is_nan() && rolling_max != 0.0 {
+			let dd = scalar * (data[i] - rolling_max) / rolling_max;
+			let squared_dd = dd * dd;
+			squared_dd_window[window_idx] = squared_dd;
+			sum += squared_dd;
+			count += 1;
+		} else {
+			squared_dd_window[window_idx] = f64::NAN;
 		}
-		sum += squared_drawdowns[i];
-		count += 1;
-		if count >= period {
-			break;
-		}
+		window_idx = (window_idx + 1) % period;
 	}
-
+	
+	// Calculate first UI value
 	if count == period {
-		out[first + period * 2 - 2] = (sum / period as f64).sqrt();
-	}
-
-	for i in (first + period * 2 - 1)..len {
-		if squared_drawdowns[i].is_nan() || squared_drawdowns[i - period].is_nan() {
-			continue;
+		let ui_value = (sum / period as f64).sqrt();
+		// Store UI value, but need to preserve rolling max for next iterations
+		let temp_max = out[first + period * 2 - 2];
+		out[first + period * 2 - 2] = ui_value;
+		
+		// Continue with sliding window
+		for i in (first + period * 2 - 1)..len {
+			let rolling_max = out[i];
+			let old_dd = squared_dd_window[window_idx];
+			
+			if !rolling_max.is_nan() && !data[i].is_nan() && rolling_max != 0.0 {
+				let dd = scalar * (data[i] - rolling_max) / rolling_max;
+				let new_squared_dd = dd * dd;
+				squared_dd_window[window_idx] = new_squared_dd;
+				
+				if !old_dd.is_nan() {
+					sum = sum - old_dd + new_squared_dd;
+				} else {
+					sum += new_squared_dd;
+					count += 1;
+				}
+			} else {
+				squared_dd_window[window_idx] = f64::NAN;
+				if !old_dd.is_nan() {
+					sum -= old_dd;
+					count -= 1;
+				}
+			}
+			
+			window_idx = (window_idx + 1) % period;
+			
+			if count == period {
+				out[i] = (sum / period as f64).sqrt();
+			} else {
+				out[i] = f64::NAN;
+			}
 		}
-		sum += squared_drawdowns[i] - squared_drawdowns[i - period];
-		out[i] = (sum / period as f64).sqrt();
+	}
+	
+	// Clear the values before warmup period that were used for rolling max
+	for i in first..(first + period * 2 - 2).min(len) {
+		out[i] = f64::NAN;
 	}
 }
 
@@ -540,7 +594,22 @@ fn ui_batch_inner(data: &[f64], sweep: &UiBatchRange, kern: Kernel, parallel: bo
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with proper prefixes, matching ALMA pattern
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| c.period.unwrap() * 2 - 2)
+		.collect();
+	
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -575,6 +644,15 @@ fn ui_batch_inner(data: &[f64], sweep: &UiBatchRange, kern: Kernel, parallel: bo
 			do_row(row, slice);
 		}
 	}
+
+	// Convert back to Vec<f64> from ManuallyDrop
+	let values = unsafe {
+		let ptr = buf_guard.as_mut_ptr() as *mut f64;
+		let len = buf_guard.len();
+		let cap = buf_guard.capacity();
+		core::mem::forget(buf_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
 
 	Ok(UiBatchOutput {
 		values,
@@ -611,6 +689,394 @@ unsafe fn ui_row_avx512_short(data: &[f64], first: usize, period: usize, scalar:
 #[inline(always)]
 unsafe fn ui_row_avx512_long(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
 	ui_scalar(data, period, scalar, first, out)
+}
+
+// Python bindings
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ui")]
+#[pyo3(signature = (data, period, scalar=100.0, kernel=None))]
+pub fn ui_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	scalar: f64,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = UiParams {
+		period: Some(period),
+		scalar: Some(scalar),
+	};
+	let input = UiInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| ui_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "ui_batch")]
+#[pyo3(signature = (data, period_range, scalar_range=(100.0, 100.0, 0.0), kernel=None))]
+pub fn ui_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	scalar_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+
+	let sweep = UiBatchRange {
+		period: period_range,
+		scalar: scalar_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			ui_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+	dict.set_item(
+		"scalars",
+		combos.iter().map(|p| p.scalar.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "UiStream")]
+pub struct UiStreamPy {
+	inner: UiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl UiStreamPy {
+	#[new]
+	pub fn new(period: usize, scalar: f64) -> PyResult<Self> {
+		let params = UiParams {
+			period: Some(period),
+			scalar: Some(scalar),
+		};
+		let inner = UiStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(UiStreamPy { inner })
+	}
+
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.inner.update(value)
+	}
+}
+
+// Helper function for batch operations with direct output writing
+#[inline(always)]
+fn ui_batch_inner_into(
+	data: &[f64],
+	sweep: &UiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<UiParams>, UiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(UiError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(UiError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let scalar = combos[row].scalar.unwrap();
+		match kern {
+			Kernel::Scalar => ui_row_scalar(data, first, period, scalar, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => ui_row_avx2(data, first, period, scalar, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => ui_row_avx512(data, first, period, scalar, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+// WASM bindings
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+/// Core helper for writing directly to output slice - no allocations
+#[cfg(feature = "wasm")]
+pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(), UiError> {
+	let data: &[f64] = input.as_ref();
+	let len = data.len();
+	let period = input.get_period();
+	let scalar = input.get_scalar();
+
+	if dst.len() != len {
+		return Err(UiError::InvalidLength {
+			expected: len,
+			actual: dst.len(),
+		});
+	}
+
+	// Validate parameters first
+	if period == 0 || period > len {
+		return Err(UiError::InvalidPeriod { period, data_len: len });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(UiError::AllValuesNaN)?;
+
+	if (len - first) < period {
+		return Err(UiError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+
+	// Choose kernel
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Compute directly into dst
+	match chosen {
+		Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx2 | Kernel::Avx2Batch => ui_avx2(data, period, scalar, first, dst),
+		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+		Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, dst),
+		_ => unreachable!(),
+	}
+
+	// Fill warmup with NaN
+	let warmup_period = period * 2 - 2;
+	for v in &mut dst[..warmup_period.min(len)] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
+}
+
+/// Safe API - allocates and returns Vec<f64>
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ui_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsValue> {
+	let params = UiParams {
+		period: Some(period),
+		scalar: Some(scalar),
+	};
+	let input = UiInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()]; // Single allocation
+
+	ui_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+/// Fast API with aliasing detection - zero allocations unless aliased
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ui_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	scalar: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = UiParams {
+			period: Some(period),
+			scalar: Some(scalar),
+		};
+		let input = UiInput::from_slice(data, params);
+
+		if in_ptr == out_ptr.cast_const() {
+			// CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			ui_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			ui_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+/// Memory allocation for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ui_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+/// Memory deallocation for WASM
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ui_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+/// Batch configuration for WASM
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct UiBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub scalar_range: (f64, f64, f64),
+}
+
+/// Batch output for WASM
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct UiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<UiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+/// Batch processing API
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = ui_batch)]
+pub fn ui_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: UiBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = UiBatchRange {
+		period: config.period_range,
+		scalar: config.scalar_range,
+	};
+
+	let output = ui_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = UiBatchJsOutput {
+		values: output.values,
+		combos: output.combos.clone(),
+		rows: output.combos.len(),
+		cols: data.len(),
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+/// Fast batch API with raw pointers
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn ui_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	scalar_start: f64,
+	scalar_end: f64,
+	scalar_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to ui_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let sweep = UiBatchRange {
+			period: (period_start, period_end, period_step),
+			scalar: (scalar_start, scalar_end, scalar_step),
+		};
+
+		let output = ui_batch_inner(data, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		let total_len = output.values.len();
+		if total_len > 0 {
+			let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
+			out.copy_from_slice(&output.values);
+		}
+
+		Ok(output.combos.len())
+	}
 }
 
 #[cfg(test)]

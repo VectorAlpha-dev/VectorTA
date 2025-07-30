@@ -269,7 +269,8 @@
       "Bash(./run_python_benchmark.bat alligator)",
       "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
       "Bash(test_bindings.bat:*)",
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "Bash(powershell:*)"
     ],
     "deny": []
   }

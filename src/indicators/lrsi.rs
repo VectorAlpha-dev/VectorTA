@@ -753,8 +753,11 @@ fn lrsi_batch_inner(
 
 	// SAFETY: buf_uninit was properly initialized through kernel computations
 	let values = unsafe {
-		let ptr = buf_uninit.into_raw_parts().0;
-		Vec::from_raw_parts(ptr as *mut f64, rows * cols, rows * cols)
+		let ptr = buf_uninit.as_mut_ptr();
+		let len = buf_uninit.len();
+		let cap = buf_uninit.capacity();
+		std::mem::forget(buf_uninit);
+		Vec::from_raw_parts(ptr as *mut f64, len, cap)
 	};
 
 	Ok(LrsiBatchOutput {

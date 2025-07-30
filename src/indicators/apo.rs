@@ -308,7 +308,7 @@ pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &m
 // --- AVX2/AVX512 Kernels: Stubs
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx2")]
 pub unsafe fn apo_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
 	let alpha_short = 2.0 / (short as f64 + 1.0);
@@ -334,7 +334,7 @@ pub unsafe fn apo_avx2(data: &[f64], short: usize, long: usize, first: usize, ou
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
 	// Choose between short/long variants based on period
@@ -346,7 +346,7 @@ pub unsafe fn apo_avx512(data: &[f64], short: usize, long: usize, first: usize, 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_avx512_short(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
 	let alpha_short = 2.0 / (short as f64 + 1.0);
@@ -371,7 +371,7 @@ pub unsafe fn apo_avx512_short(data: &[f64], short: usize, long: usize, first: u
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_avx512_long(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
 	// For longer periods, use the same approach
@@ -794,44 +794,76 @@ fn apo_batch_inner_into(
 	}
 
 	// Compute APO values for each parameter combination
-	let do_row = |row: usize| {
-		let params = &combos[row];
-		let out_row = &mut out[row * cols..(row + 1) * cols];
-		unsafe {
-			match kern {
-				Kernel::Scalar => apo_row_scalar(
-					data,
-					first,
-					params.short_period.unwrap(),
-					params.long_period.unwrap(),
-					out_row
-				),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx2 => apo_row_avx2(
-					data,
-					first,
-					params.short_period.unwrap(),
-					params.long_period.unwrap(),
-					out_row
-				),
-				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-				Kernel::Avx512 => apo_row_avx512(
-					data,
-					first,
-					params.short_period.unwrap(),
-					params.long_period.unwrap(),
-					out_row
-				),
-				_ => unreachable!(),
-			}
-		}
-	};
-
 	if parallel && !cfg!(target_arch = "wasm32") {
 		#[cfg(not(target_arch = "wasm32"))]
-		(0..rows).into_par_iter().for_each(do_row);
+		{
+			use rayon::prelude::*;
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, out_row)| {
+					let params = &combos[row];
+					unsafe {
+						match kern {
+							Kernel::Scalar => apo_row_scalar(
+								data,
+								first,
+								params.short_period.unwrap(),
+								params.long_period.unwrap(),
+								out_row
+							),
+							#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+							Kernel::Avx2 => apo_row_avx2(
+								data,
+								first,
+								params.short_period.unwrap(),
+								params.long_period.unwrap(),
+								out_row
+							),
+							#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+							Kernel::Avx512 => apo_row_avx512(
+								data,
+								first,
+								params.short_period.unwrap(),
+								params.long_period.unwrap(),
+								out_row
+							),
+							_ => unreachable!(),
+						}
+					}
+				});
+		}
 	} else {
-		(0..rows).for_each(do_row);
+		for (row, out_row) in out.chunks_mut(cols).enumerate() {
+			let params = &combos[row];
+			unsafe {
+				match kern {
+					Kernel::Scalar => apo_row_scalar(
+						data,
+						first,
+						params.short_period.unwrap(),
+						params.long_period.unwrap(),
+						out_row
+					),
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx2 => apo_row_avx2(
+						data,
+						first,
+						params.short_period.unwrap(),
+						params.long_period.unwrap(),
+						out_row
+					),
+					#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+					Kernel::Avx512 => apo_row_avx512(
+						data,
+						first,
+						params.short_period.unwrap(),
+						params.long_period.unwrap(),
+						out_row
+					),
+					_ => unreachable!(),
+				}
+			}
+		}
 	}
 
 	Ok(combos)
@@ -844,13 +876,13 @@ pub unsafe fn apo_row_scalar(data: &[f64], first: usize, short: usize, long: usi
 	apo_scalar(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx2")]
 pub unsafe fn apo_row_avx2(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
 	apo_avx2(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_row_avx512(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
 	if long <= 32 {
@@ -860,13 +892,13 @@ pub unsafe fn apo_row_avx512(data: &[f64], first: usize, short: usize, long: usi
 	}
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_row_avx512_short(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
 	apo_avx512_short(data, short, long, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_row_avx512_long(data: &[f64], first: usize, short: usize, long: usize, out: &mut [f64]) {
 	apo_avx512_long(data, short, long, first, out)

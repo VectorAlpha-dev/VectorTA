@@ -177,7 +177,7 @@ pub fn di(input: &DiInput) -> Result<DiOutput, DiError> {
 }
 
 #[inline(always)]
-fn di_prepare(input: &DiInput, kernel: Kernel) -> Result<(&[f64], &[f64], &[f64], usize, usize, Kernel), DiError> {
+fn di_prepare<'a>(input: &'a DiInput<'a>, kernel: Kernel) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), DiError> {
 	let (high, low, close) = match &input.data {
 		DiData::Candles { candles } => {
 			let h = source_type(candles, "high");

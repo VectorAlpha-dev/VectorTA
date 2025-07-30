@@ -25,7 +25,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -33,6 +33,22 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
+
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for VoscInput<'a> {
 	#[inline(always)]
@@ -56,6 +72,7 @@ pub struct VoscOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VoscParams {
 	pub short_period: Option<usize>,
 	pub long_period: Option<usize>,
@@ -239,7 +256,8 @@ pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput,
 		other => other,
 	};
 
-	let mut out = vec![f64::NAN; data.len()];
+	let warmup_period = first + long_period - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
 	unsafe {
 		match chosen {
@@ -860,4 +878,338 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// ================================================================================================
+// Python Bindings
+// ================================================================================================
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vosc")]
+#[pyo3(signature = (data, short_period=2, long_period=5, kernel=None))]
+pub fn vosc_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	short_period: usize,
+	long_period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = VoscParams {
+		short_period: Some(short_period),
+		long_period: Some(long_period),
+	};
+	let input = VoscInput::from_slice(slice_in, params);
+
+	// Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| vosc_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VoscStream")]
+pub struct VoscStreamPy {
+	stream: VoscStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VoscStreamPy {
+	#[new]
+	fn new(short_period: usize, long_period: usize) -> PyResult<Self> {
+		let params = VoscParams {
+			short_period: Some(short_period),
+			long_period: Some(long_period),
+		};
+		let stream = VoscStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VoscStreamPy { stream })
+	}
+
+	/// Updates the stream with a new value and returns the calculated VOSC value.
+	/// Returns `None` if the buffer is not yet full.
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vosc_batch")]
+#[pyo3(signature = (data, short_period_range, long_period_range, kernel=None))]
+pub fn vosc_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	short_period_range: (usize, usize, usize),
+	long_period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = VoscBatchRange {
+		short_period: short_period_range,
+		long_period: long_period_range,
+	};
+
+	// Expand grid to know dimensions
+	let combos = expand_grid(&sweep);
+	if combos.is_empty() {
+		return Err(PyValueError::new_err("No valid parameter combinations"));
+	}
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	// Pre-allocate uninitialized NumPy array (acceptable for batch operations)
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	// Heavy work without the GIL
+	let combos = py
+		.allow_threads(|| -> Result<Vec<VoscParams>, VoscError> {
+			// Resolve Kernel::Auto to a specific kernel
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+
+			// Map batch kernel to regular kernel
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+
+			let result = vosc_batch_inner(slice_in, &sweep, simd, true)?;
+
+			// Copy results to the pre-allocated buffer
+			slice_out.copy_from_slice(&result.values);
+
+			Ok(result.combos)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"short_periods",
+		combos
+			.iter()
+			.map(|p| p.short_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"long_periods",
+		combos
+			.iter()
+			.map(|p| p.long_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+// ============================================================================
+// WASM API
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+/// Write VOSC values directly to output slice - no allocations
+pub fn vosc_into_slice(
+	dst: &mut [f64], 
+	input: &VoscInput, 
+	kern: Kernel
+) -> Result<(), VoscError> {
+	let data: &[f64] = match &input.data {
+		VoscData::Candles { candles, source } => source_type(candles, source),
+		VoscData::Slice(sl) => sl,
+	};
+
+	if data.is_empty() {
+		return Err(VoscError::EmptyData);
+	}
+
+	if dst.len() != data.len() {
+		return Err(VoscError::NotEnoughValidData {
+			needed: data.len(),
+			valid: dst.len(),
+		});
+	}
+
+	let short_period = input.get_short_period();
+	let long_period = input.get_long_period();
+
+	if short_period == 0 || short_period > data.len() {
+		return Err(VoscError::InvalidShortPeriod {
+			period: short_period,
+			data_len: data.len(),
+		});
+	}
+	if long_period == 0 || long_period > data.len() {
+		return Err(VoscError::InvalidLongPeriod {
+			period: long_period,
+			data_len: data.len(),
+		});
+	}
+	if short_period > long_period {
+		return Err(VoscError::ShortPeriodGreaterThanLongPeriod);
+	}
+
+	let first = match data.iter().position(|&x| !x.is_nan()) {
+		Some(idx) => idx,
+		None => return Err(VoscError::AllValuesNaN),
+	};
+	
+	if (data.len() - first) < long_period {
+		return Err(VoscError::NotEnoughValidData {
+			needed: long_period,
+			valid: data.len() - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	let warmup_period = first + long_period - 1;
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => vosc_scalar(data, short_period, long_period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => vosc_avx2(data, short_period, long_period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => vosc_avx512(data, short_period, long_period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vosc_js(data: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = VoscParams {
+		short_period: Some(short_period),
+		long_period: Some(long_period),
+	};
+	let input = VoscInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	vosc_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vosc_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	short_period: usize,
+	long_period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = VoscParams {
+			short_period: Some(short_period),
+			long_period: Some(long_period),
+		};
+		let input = VoscInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			let mut temp = vec![0.0; len];
+			vosc_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			vosc_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vosc_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vosc_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VoscBatchConfig {
+	pub short_period_range: (usize, usize, usize),
+	pub long_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VoscBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<VoscParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vosc_batch)]
+pub fn vosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VoscBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = VoscBatchRange {
+		short_period: config.short_period_range,
+		long_period: config.long_period_range,
+	};
+
+	let output = vosc_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = VoscBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

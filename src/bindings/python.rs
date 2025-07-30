@@ -66,6 +66,18 @@ use crate::indicators::mom::{mom_batch_py, mom_py, MomStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pivot::{pivot_batch_py, pivot_py, PivotStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::rocp::{rocp_batch_py, rocp_py, RocpStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::safezonestop::{safezonestop_batch_py, safezonestop_py, SafeZoneStopStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::stochf::{stochf_batch_py, stochf_py, StochfStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ui::{ui_batch_py, ui_py, UiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vosc::{vosc_batch_py, vosc_py, VoscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::wad::{wad_batch_py, wad_py, WadStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -520,6 +532,36 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(pivot_py, m)?)?;
 	m.add_function(wrap_pyfunction!(pivot_batch_py, m)?)?;
 	m.add_class::<PivotStreamPy>()?;
+
+	// Register ROCP functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rocp_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rocp_batch_py, m)?)?;
+	m.add_class::<RocpStreamPy>()?;
+
+	// Register SafeZoneStop functions with their user-facing names
+	m.add_function(wrap_pyfunction!(safezonestop_py, m)?)?;
+	m.add_function(wrap_pyfunction!(safezonestop_batch_py, m)?)?;
+	m.add_class::<SafeZoneStopStreamPy>()?;
+
+	// Register StochF functions with their user-facing names
+	m.add_function(wrap_pyfunction!(stochf_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stochf_batch_py, m)?)?;
+	m.add_class::<StochfStreamPy>()?;
+
+	// Register UI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ui_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ui_batch_py, m)?)?;
+	m.add_class::<UiStreamPy>()?;
+
+	// Register VOSC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vosc_batch_py, m)?)?;
+	m.add_class::<VoscStreamPy>()?;
+
+	// Register WAD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wad_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wad_batch_py, m)?)?;
+	m.add_class::<WadStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

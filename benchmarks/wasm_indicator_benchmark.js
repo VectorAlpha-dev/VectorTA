@@ -132,6 +132,38 @@ const INDICATORS = {
             }
         }
     },
+    vosc: {
+        name: 'VOSC',
+        // Safe API
+        safe: {
+            fn: 'vosc_js',
+            params: { short_period: 2, long_period: 5 },
+            inputs: ['volume']  // VOSC uses volume data
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vosc_alloc',
+            freeFn: 'vosc_free',
+            computeFn: 'vosc_into',
+            params: { short_period: 2, long_period: 5 },
+            inputs: ['volume']
+        },
+        // Batch API
+        batch: {
+            fn: 'vosc_batch',
+            config: {
+                small: {
+                    short_period_range: [2, 4, 1],   // 3 values
+                    long_period_range: [5, 7, 1]     // 3 values = 9 combinations (filtered for valid)
+                },
+                medium: {
+                    short_period_range: [2, 10, 1],  // 9 values
+                    long_period_range: [10, 20, 2]   // 6 values = many valid combinations
+                }
+            },
+            inputs: ['volume']  // VOSC uses volume data for batch API too
+        }
+    },
     adxr: {
         name: 'ADXR',
         // Safe API
@@ -161,6 +193,34 @@ const INDICATORS = {
                 }
             },
             needsMultipleInputs: true
+        }
+    },
+    rocp: {
+        name: 'ROCP',
+        // Safe API
+        safe: {
+            fn: 'rocp_js',
+            params: { period: 10 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rocp_alloc',
+            freeFn: 'rocp_free',
+            computeFn: 'rocp_into',
+            params: { period: 10 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rocp_batch',
+            fastFn: 'rocp_batch_into',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]       // 3 values
+                },
+                medium: {
+                    period_range: [5, 50, 5]       // 10 values
+                }
+            }
         }
     },
     alma: {
@@ -1910,6 +1970,135 @@ const INDICATORS = {
             },
             needsMultipleInputs: true
         }
+    },
+    safezonestop: {
+        name: 'SafeZoneStop',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'safezonestop_js',
+            params: { period: 22, mult: 2.5, max_lookback: 3, direction: 'long' }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'safezonestop_alloc',
+            freeFn: 'safezonestop_free',
+            computeFn: 'safezonestop_into',
+            params: { period: 22, mult: 2.5, max_lookback: 3, direction: 'long' },
+            needsMultipleInputs: true,
+            needsSafeZoneStopInputs: true  // Special flag for SafeZoneStop's unique inputs
+        },
+        // Batch API
+        batch: {
+            fn: 'safezonestop_batch',
+            config: {
+                small: {
+                    period_range: [14, 30, 8],       // 3 values
+                    mult_range: [2.0, 3.0, 0.5],     // 3 values
+                    max_lookback_range: [2, 4, 1],   // 3 values = 27 combinations
+                    direction: 'long'
+                },
+                medium: {
+                    period_range: [10, 50, 10],      // 5 values
+                    mult_range: [2.0, 4.0, 0.5],     // 5 values
+                    max_lookback_range: [2, 6, 2],   // 3 values = 75 combinations
+                    direction: 'long'
+                }
+            }
+        }
+    },
+    stochf: {
+        name: 'StochF',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'stochf_js',
+            params: { fastk_period: 5, fastd_period: 3, fastd_matype: 0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'stochf_alloc',
+            freeFn: 'stochf_free',
+            computeFn: 'stochf_into',
+            params: { fastk_period: 5, fastd_period: 3, fastd_matype: 0 },
+            needsMultipleInputs: true,
+            needsStochFInputs: true  // Special flag for StochF's three inputs and two outputs
+        },
+        // Batch API
+        batch: {
+            fn: 'stochf_batch',
+            config: {
+                small: {
+                    fastk_range: [5, 14, 1],       // 10 values
+                    fastd_range: [3, 5, 1],        // 3 values = 30 combinations
+                    fastd_matype: 0
+                },
+                medium: {
+                    fastk_range: [5, 50, 5],       // 10 values
+                    fastd_range: [3, 10, 1],       // 8 values = 80 combinations
+                    fastd_matype: 0
+                }
+            },
+            // Fast batch API (optional)
+            fastFn: 'stochf_batch_into'
+        }
+    },
+    ui: {
+        name: 'UI (Ulcer Index)',
+        // Safe API
+        safe: {
+            fn: 'ui_js',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ui_alloc',
+            freeFn: 'ui_free',
+            computeFn: 'ui_into',
+            params: { period: 14, scalar: 100.0 }
+        },
+        // Batch API
+        batch: {
+            fn: 'ui_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values
+                    scalar_range: [50.0, 150.0, 50.0] // 3 values = 9 combinations
+                },
+                medium: {
+                    period_range: [5, 50, 5],       // 10 values
+                    scalar_range: [50.0, 200.0, 50.0] // 4 values = 40 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'ui_batch_into'
+        }
+    },
+    wad: {
+        name: 'WAD',
+        needsMultipleInputs: true,  // Uses high, low, close
+        // Safe API
+        safe: {
+            fn: 'wad_js',
+            params: {}  // No parameters for WAD
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wad_alloc',
+            freeFn: 'wad_free',
+            computeFn: 'wad_into',
+            params: {},
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'wad_batch',
+            config: {
+                // WAD has no parameters, so batch always returns 1 row
+                small: {},
+                medium: {}
+            }
+        }
     }
 };
 
@@ -2227,7 +2416,7 @@ class WasmIndicatorBenchmark {
                     }
                     
                     // Allocate second output buffer if indicator has dual outputs
-                    outPtr2 = indicatorConfig.fast.dualOutput ? this.wasm[allocFn](len) : null;
+                    outPtr2 = (indicatorConfig.fast.dualOutput || indicatorConfig.fast.needsStochFInputs) ? this.wasm[allocFn](len) : null;
                     
                     // Debug removed for performance
                     
@@ -2416,6 +2605,9 @@ class WasmIndicatorBenchmark {
                     if (indicatorConfig.name === 'ADOSC') {
                         // ADOSC uses the new ergonomic batch API with config object
                         wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, ohlc.volume, batchConfig);
+                    } else if (indicatorConfig.name === 'SafeZoneStop') {
+                        // SafeZoneStop only needs high/low (no close) and uses config object
+                        wasmFn.call(this.wasm, ohlc.high, ohlc.low, batchConfig);
                     } else {
                         wasmFn.call(this.wasm, ohlc.high, ohlc.low, ohlc.close, batchConfig);
                     }
@@ -2536,6 +2728,19 @@ class WasmIndicatorBenchmark {
                 for (const value of Object.values(params)) {
                     result.push(value);
                 }
+                
+                return result;
+            }
+            
+            // Special case for SafeZoneStop which needs high/low and direction string
+            if (indicatorConfig.name === 'SafeZoneStop') {
+                const result = [ohlc.high, ohlc.low];
+                
+                // Add parameters in order (period, mult, max_lookback, direction)
+                result.push(params.period);
+                result.push(params.mult);
+                result.push(params.max_lookback);
+                result.push(params.direction);
                 
                 return result;
             }
@@ -2663,9 +2868,34 @@ class WasmIndicatorBenchmark {
                 return result;
             }
             
+            // Special case for SafeZoneStop: high_ptr, low_ptr, out_ptr, len, period, mult, max_lookback, direction
+            if (indicatorConfig.name === 'SafeZoneStop') {
+                const result = [highPtr, lowPtr, outPtr, len];
+                
+                // Add parameters in specific order
+                result.push(params.period);
+                result.push(params.mult);
+                result.push(params.max_lookback);
+                result.push(params.direction);
+                
+                return result;
+            }
+            
             // Special case for ADOSC: high_ptr, low_ptr, close_ptr, volume_ptr, out_ptr, len, short_period, long_period
             if (indicatorConfig.name === 'ADOSC') {
                 const result = [highPtr, lowPtr, closePtr, volumePtr, outPtr, len, params.short_period, params.long_period];
+                return result;
+            }
+            
+            // Special case for StochF: high_ptr, low_ptr, close_ptr, k_ptr, d_ptr, len, fastk_period, fastd_period, fastd_matype
+            if (indicatorConfig.needsStochFInputs) {
+                const result = [highPtr, lowPtr, closePtr, outPtr, outPtr2, len];
+                
+                // Add parameters in specific order
+                result.push(params.fastk_period);
+                result.push(params.fastd_period);
+                result.push(params.fastd_matype);
+                
                 return result;
             }
             

@@ -104,11 +104,11 @@ class CriterionComparableBenchmark:
             'alma', 'alligator', 'aroonosc', 'bollinger_bands', 'ao', 'vpwma', 'vwma', 'wilders', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
-            'hwma', 'jma', 'jsa', 'kama', 'kst', 'linreg', 'lrsi', 'mean_ad', 'mom', 'pivot', 'maaq', 'mama', 'mwdx',
+            'hwma', 'jma', 'jsa', 'kama', 'kst', 'linreg', 'lrsi', 'mean_ad', 'mom', 'pivot', 'rocp', 'maaq', 'mama', 'mwdx',
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'chop', 'cvi', 'di', 'efi', 'fosc'  # Added missing indicators
+            'cg', 'cfo', 'chop', 'cvi', 'di', 'efi', 'fosc', 'ui', 'vosc'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -117,9 +117,9 @@ class CriterionComparableBenchmark:
         # Also add batch indicators to find
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
-                           'hma_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
+                           'hma_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'rocp_batch', 'stochf_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'chop_batch', 'cvi_batch', 'di_batch', 'efi_batch', 'fosc_batch', 'trendflex_batch']
+                           'chop_batch', 'cvi_batch', 'di_batch', 'efi_batch', 'fosc_batch', 'trendflex_batch', 'ui_batch', 'vosc_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -273,6 +273,9 @@ class CriterionComparableBenchmark:
             ('mean_ad', lambda: my_project.mean_ad(data['close'], 5)),
             ('mom', lambda: my_project.mom(data['close'], 10)),
             ('pivot', lambda: my_project.pivot(data['high'], data['low'], data['close'], data['open'], 3)),
+            ('rocp', lambda: my_project.rocp(data['close'], 10)),
+            ('safezonestop', lambda: my_project.safezonestop(data['high'], data['low'], 22, 2.5, 3, "long")),
+            ('stochf', lambda: my_project.stochf(data['high'], data['low'], data['close'], 5, 3, 0)),
             ('linreg', lambda: my_project.linreg(data['close'], 14)),
             ('maaq', lambda: my_project.maaq(data['close'], 14, 10, 50)),
             ('mama', lambda: my_project.mama(data['close'], 0.5, 0.05)),
@@ -306,6 +309,9 @@ class CriterionComparableBenchmark:
             ('di', lambda: my_project.di(data['high'], data['low'], data['close'], 14)),
             ('efi', lambda: my_project.efi(data['close'], data['volume'], 13)),
             ('fosc', lambda: my_project.fosc(data['close'], 5)),
+            ('ui', lambda: my_project.ui(data['close'], 14, 100.0)),
+            ('vosc', lambda: my_project.vosc(data['volume'], 2, 5)),
+            ('wad', lambda: my_project.wad(data['high'], data['low'], data['close'])),
         ]
         
         # Filter if requested
@@ -345,6 +351,8 @@ class CriterionComparableBenchmark:
             ('mean_ad_batch', lambda: my_project.mean_ad_batch(data['close'], (5, 50, 1))),
             ('mom_batch', lambda: my_project.mom_batch(data['close'], (5, 50, 1))),
             ('pivot_batch', lambda: my_project.pivot_batch(data['high'], data['low'], data['close'], data['open'], (0, 4, 1))),
+            ('rocp_batch', lambda: my_project.rocp_batch(data['close'], (9, 240, 1))),
+            ('safezonestop_batch', lambda: my_project.safezonestop_batch(data['high'], data['low'], (14, 30, 8), (2.0, 3.0, 0.5), (2, 4, 1), "long")),
             ('cwma_batch', lambda: my_project.cwma_batch(data['close'], (14, 14, 1))),
             ('adxr_batch', lambda: my_project.adxr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('adx_batch', lambda: my_project.adx_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
@@ -363,6 +371,9 @@ class CriterionComparableBenchmark:
             ('di_batch', lambda: my_project.di_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('efi_batch', lambda: my_project.efi_batch(data['close'], data['volume'], (13, 100, 1))),
             ('fosc_batch', lambda: my_project.fosc_batch(data['close'], (5, 50, 1))),
+            ('ui_batch', lambda: my_project.ui_batch(data['close'], (14, 60, 1), (100.0, 100.0, 0.0))),
+            ('vosc_batch', lambda: my_project.vosc_batch(data['volume'], (2, 10, 1), (5, 20, 1))),
+            ('wad_batch', lambda: my_project.wad_batch(data['high'], data['low'], data['close'])),
             ('trendflex_batch', lambda: my_project.trendflex_batch(data['close'], (20, 80, 1))),
         ]
         
@@ -436,7 +447,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'kst', 'lrsi', 'mean_ad', 'pivot', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'cvi', 'di']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'kst', 'lrsi', 'mean_ad', 'pivot', 'rocp', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'cvi', 'di', 'wad']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

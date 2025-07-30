@@ -186,7 +186,7 @@ pub fn cvi(input: &CviInput) -> Result<CviOutput, CviError> {
 
 pub fn cvi_with_kernel(input: &CviInput, kernel: Kernel) -> Result<CviOutput, CviError> {
 	let (high, low) = match &input.data {
-		CviData::Candles { candles } => {
+		CviData::Candles { candles, source: _ } => {
 			if candles.high.is_empty() || candles.low.is_empty() {
 				return Err(CviError::EmptyData);
 			}
@@ -623,10 +623,12 @@ impl CviStream {
 		let mut lag_buffer = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
 		lag_buffer.resize(period, 0.0);
 		lag_buffer[0] = val;
+		// Convert AVec to Vec
+		let lag_buffer_vec: Vec<f64> = lag_buffer.into_iter().copied().collect();
 		Ok(Self {
 			period,
 			alpha,
-			lag_buffer: lag_buffer.into(),
+			lag_buffer: lag_buffer_vec,
 			head: 1,
 			filled: false,
 			state_val: val,
@@ -767,7 +769,7 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let default_params = CviParams { period: None };
-		let input_default = CviInput::from_candles(&candles, default_params);
+		let input_default = CviInput::from_candles(&candles, "close", default_params);
 		let output_default = cvi_with_kernel(&input_default, kernel)?;
 		assert_eq!(output_default.values.len(), candles.close.len());
 		Ok(())
@@ -778,7 +780,7 @@ mod tests {
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
 		let candles = read_candles_from_csv(file_path)?;
 		let params = CviParams { period: Some(5) };
-		let input = CviInput::from_candles(&candles, params);
+		let input = CviInput::from_candles(&candles, "close", params);
 		let cvi_result = cvi_with_kernel(&input, kernel)?;
 
 		let expected_last_five_cvi = [
@@ -887,6 +889,76 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_cvi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations for CVI
+		let test_params = vec![
+			CviParams::default(),                    // period: 10
+			CviParams { period: Some(2) },          // minimum viable period
+			CviParams { period: Some(5) },          // small period
+			CviParams { period: Some(10) },         // default
+			CviParams { period: Some(14) },         // common period
+			CviParams { period: Some(20) },         // medium period
+			CviParams { period: Some(50) },         // large period
+			CviParams { period: Some(100) },        // very large period
+			CviParams { period: Some(200) },        // extreme period
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			// Test with high/low data
+			let input = CviInput::from_candles(&candles, "high", params.clone());
+			let output = cvi_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(10), param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10), param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10), param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_cvi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_cvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -919,7 +991,8 @@ mod tests {
 		check_cvi_with_period_exceeding_data_length,
 		check_cvi_very_small_data_set,
 		check_cvi_with_nan_data,
-		check_cvi_slice_reinput
+		check_cvi_slice_reinput,
+		check_cvi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -954,6 +1027,79 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations for CVI
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods with step 2
+			(5, 25, 5),      // Medium periods with step 5
+			(10, 50, 10),    // Common periods
+			(2, 5, 1),       // Dense small range
+			(30, 60, 15),    // Large periods
+			(14, 21, 7),     // Common trading periods
+			(50, 100, 25),   // Very large periods
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = CviBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.period.unwrap_or(10)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(10)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(10)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
 }
 
 /// Helper function to find the first valid index where both high and low are not NaN
@@ -981,7 +1127,7 @@ pub fn cvi_into_slice(output: &mut [f64], input: &CviInput, kernel: Kernel) -> R
 		return Err(CviError::EmptyData);
 	}
 	if period == 0 || period > high.len() {
-		return Err(CviError::InvalidPeriod);
+		return Err(CviError::InvalidPeriod { period, data_len: high.len() });
 	}
 	if high.len() != low.len() || output.len() != high.len() {
 		return Err(CviError::EmptyData);
@@ -998,7 +1144,10 @@ pub fn cvi_into_slice(output: &mut [f64], input: &CviInput, kernel: Kernel) -> R
 
 	// Check we have enough valid data
 	if high.len() - first_valid_idx < min_data_points {
-		return Err(CviError::NotEnoughValidData);
+		return Err(CviError::NotEnoughValidData { 
+			needed: min_data_points, 
+			valid: high.len() - first_valid_idx 
+		});
 	}
 
 	// Fill prefix with NaN
@@ -1009,20 +1158,20 @@ pub fn cvi_into_slice(output: &mut [f64], input: &CviInput, kernel: Kernel) -> R
 
 	// Use kernel-specific implementation
 	match kernel {
-		Kernel::Scalar => cvi_scalar(period, high, low, first_valid_idx, out_start, output),
+		Kernel::Scalar => cvi_scalar(high, low, period, first_valid_idx, output),
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx2 => unsafe { cvi_avx2(period, high, low, first_valid_idx, out_start, output) },
+		Kernel::Avx2 => unsafe { cvi_avx2(high, low, period, first_valid_idx, output) },
 		#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-		Kernel::Avx512 => unsafe { cvi_avx512(period, high, low, first_valid_idx, out_start, output) },
+		Kernel::Avx512 => unsafe { cvi_avx512(high, low, period, first_valid_idx, output) },
 		Kernel::Auto => match detect_best_kernel() {
-			Kernel::Scalar => cvi_scalar(period, high, low, first_valid_idx, out_start, output),
+			Kernel::Scalar => cvi_scalar(high, low, period, first_valid_idx, output),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => unsafe { cvi_avx2(period, high, low, first_valid_idx, out_start, output) },
+			Kernel::Avx2 => unsafe { cvi_avx2(high, low, period, first_valid_idx, output) },
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => unsafe { cvi_avx512(period, high, low, first_valid_idx, out_start, output) },
-			_ => cvi_scalar(period, high, low, first_valid_idx, out_start, output),
+			Kernel::Avx512 => unsafe { cvi_avx512(high, low, period, first_valid_idx, output) },
+			_ => cvi_scalar(high, low, period, first_valid_idx, output),
 		},
-		_ => return Err(CviError::InvalidPeriod),
+		_ => return Err(CviError::InvalidPeriod { period, data_len: high.len() }),
 	}
 
 	Ok(())
