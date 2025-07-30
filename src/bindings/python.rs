@@ -66,6 +66,18 @@ use crate::indicators::msw::{msw_batch_py, msw_py, MswStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::pma::{pma_batch_py, pma_py, PmaStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::rocr::{rocr_batch_py, rocr_py, RocrStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::sar::{sar_batch_py, sar_py, SarStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::supertrend::{supertrend_batch_py, supertrend_py, SuperTrendStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::ultosc::{ultosc_batch_py, ultosc_py, UltOscStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::voss::{voss_batch_py, voss_py, VossStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::wavetrend::{wavetrend_batch_py, wavetrend_py, WavetrendStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -515,6 +527,36 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(pma_py, m)?)?;
 	m.add_function(wrap_pyfunction!(pma_batch_py, m)?)?;
 	m.add_class::<PmaStreamPy>()?;
+
+	// Register ROCR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rocr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rocr_batch_py, m)?)?;
+	m.add_class::<RocrStreamPy>()?;
+
+	// Register SAR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(sar_py, m)?)?;
+	m.add_function(wrap_pyfunction!(sar_batch_py, m)?)?;
+	m.add_class::<SarStreamPy>()?;
+
+	// Register SuperTrend functions with their user-facing names
+	m.add_function(wrap_pyfunction!(supertrend_py, m)?)?;
+	m.add_function(wrap_pyfunction!(supertrend_batch_py, m)?)?;
+	m.add_class::<SuperTrendStreamPy>()?;
+
+	// Register UltOsc functions with their user-facing names
+	m.add_function(wrap_pyfunction!(ultosc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(ultosc_batch_py, m)?)?;
+	m.add_class::<UltOscStreamPy>()?;
+
+	// Register Voss functions with their user-facing names
+	m.add_function(wrap_pyfunction!(voss_py, m)?)?;
+	m.add_function(wrap_pyfunction!(voss_batch_py, m)?)?;
+	m.add_class::<VossStreamPy>()?;
+
+	// Register Wavetrend functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wavetrend_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wavetrend_batch_py, m)?)?;
+	m.add_class::<WavetrendStreamPy>()?;
 
 	// Add other indicators here as you implement their Python bindings
 

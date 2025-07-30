@@ -1987,7 +1987,6 @@ impl CkspStreamPy {
 	}
 }
 
-#[cfg(feature = "python")]
 #[inline(always)]
 fn cksp_batch_inner_into(
 	high: &[f64],

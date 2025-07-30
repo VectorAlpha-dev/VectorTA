@@ -741,6 +741,35 @@ const INDICATORS = {
             // Note: No fastFn for reflex batch as it doesn't have batch_into
         }
     },
+    rocr: {
+        name: 'ROCR',
+        // Safe API
+        safe: {
+            fn: 'rocr_js',
+            params: { period: 9 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rocr_alloc',
+            freeFn: 'rocr_free',
+            computeFn: 'rocr_into',
+            params: { period: 9 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rocr_batch',
+            config: {
+                small: {
+                    period_range: [5, 15, 5]     // 3 values: 5, 10, 15
+                },
+                medium: {
+                    period_range: [5, 20, 3]     // 6 values: 5, 8, 11, 14, 17, 20
+                }
+            },
+            // Fast batch API
+            fastFn: 'rocr_batch_into'
+        }
+    },
     swma: {
         name: 'SWMA (Symmetric Weighted Moving Average)',
         // Safe API
@@ -1854,6 +1883,175 @@ const INDICATORS = {
             fastFn: 'pma_batch_into',
             dualOutput: true
         }
+    },
+    sar: {
+        name: 'SAR',
+        needsMultipleInputs: true,  // Uses high, low
+        // Safe API
+        safe: {
+            fn: 'sar_js',
+            params: { acceleration: 0.02, maximum: 0.2 },
+            needsMultipleInputs: true
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'sar_alloc',
+            freeFn: 'sar_free',
+            computeFn: 'sar_into',
+            params: { acceleration: 0.02, maximum: 0.2 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'sar_batch',
+            config: {
+                small: {
+                    acceleration_range: [0.01, 0.03, 0.01],  // 3 values
+                    maximum_range: [0.1, 0.3, 0.1]           // 3 values = 9 combinations
+                },
+                medium: {
+                    acceleration_range: [0.01, 0.05, 0.01],  // 5 values
+                    maximum_range: [0.1, 0.5, 0.1]           // 5 values = 25 combinations
+                }
+            }
+        }
+    },
+    supertrend: {
+        name: 'SuperTrend',
+        // Safe API
+        safe: {
+            fn: 'supertrend_js',
+            params: { period: 10, factor: 3.0 },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (trend and changed)
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'supertrend_alloc',
+            freeFn: 'supertrend_free',
+            computeFn: 'supertrend_into',
+            params: { period: 10, factor: 3.0 },
+            needsMultipleInputs: true,
+            dualOutput: true  // Has two outputs (trend and changed)
+        },
+        // Batch API
+        batch: {
+            fn: 'supertrend_batch',
+            config: {
+                small: {
+                    period_range: [8, 12, 2],      // 3 values
+                    factor_range: [2.0, 4.0, 1.0]  // 3 values = 9 combinations
+                },
+                medium: {
+                    period_range: [5, 15, 2],      // 6 values
+                    factor_range: [1.0, 5.0, 1.0]  // 5 values = 30 combinations
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    ultosc: {
+        name: 'ULTOSC',
+        // Safe API
+        safe: {
+            fn: 'ultosc_js',
+            params: { timeperiod1: 7, timeperiod2: 14, timeperiod3: 28 },
+            needsMultipleInputs: true  // Requires high, low, close
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'ultosc_alloc',
+            freeFn: 'ultosc_free',
+            computeFn: 'ultosc_into',
+            params: { timeperiod1: 7, timeperiod2: 14, timeperiod3: 28 },
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'ultosc_batch',
+            config: {
+                small: {
+                    timeperiod1_range: [5, 9, 2],    // 3 values
+                    timeperiod2_range: [12, 16, 2],  // 3 values
+                    timeperiod3_range: [26, 30, 2]   // 3 values = 27 combinations
+                },
+                medium: {
+                    timeperiod1_range: [5, 11, 2],   // 4 values
+                    timeperiod2_range: [10, 18, 2],  // 5 values
+                    timeperiod3_range: [24, 32, 2]   // 5 values = 100 combinations
+                }
+            },
+            needsMultipleInputs: true
+        }
+    },
+    voss: {
+        name: 'VOSS',
+        // Safe API
+        safe: {
+            fn: 'voss_js',
+            params: { period: 20, predict: 3, bandwidth: 0.25 },
+            outputLength: 2  // Returns flattened array with 2 outputs (voss, filt)
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'voss_alloc',
+            freeFn: 'voss_free',
+            computeFn: 'voss_into',
+            params: { period: 20, predict: 3, bandwidth: 0.25 },
+            dualOutput: true  // Has two outputs (voss and filt)
+        },
+        // Batch API
+        batch: {
+            fn: 'voss_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values
+                    predict_range: [2, 4, 1],       // 3 values
+                    bandwidth_range: [0.2, 0.3, 0.1] // 2 values = 18 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values
+                    predict_range: [2, 5, 1],       // 4 values
+                    bandwidth_range: [0.1, 0.4, 0.1] // 4 values = 80 combinations
+                }
+            },
+            fastFn: 'voss_batch_into'
+        }
+    },
+    wavetrend: {
+        name: 'WaveTrend',
+        // Safe API
+        safe: {
+            fn: 'wavetrend_js',
+            params: { channel_length: 9, average_length: 12, ma_length: 3, factor: 0.015 },
+            tripleOutput: true  // Has three outputs (wt1, wt2, wt_diff)
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wavetrend_alloc',
+            freeFn: 'wavetrend_free',
+            computeFn: 'wavetrend_into',
+            params: { channel_length: 9, average_length: 12, ma_length: 3, factor: 0.015 },
+            tripleOutput: true  // Has three outputs
+        },
+        // Batch API
+        batch: {
+            fn: 'wavetrend_batch',
+            config: {
+                small: {
+                    channel_length_range: [9, 11, 2],      // 2 values
+                    average_length_range: [12, 14, 2],     // 2 values
+                    ma_length_range: [3, 3, 0],            // 1 value
+                    factor_range: [0.015, 0.020, 0.005]    // 2 values = 8 combinations
+                },
+                medium: {
+                    channel_length_range: [7, 13, 2],      // 4 values
+                    average_length_range: [10, 16, 2],     // 4 values
+                    ma_length_range: [3, 5, 1],            // 3 values
+                    factor_range: [0.010, 0.025, 0.005]    // 4 values = 192 combinations
+                }
+            }
+        }
     }
 };
 
@@ -2529,6 +2727,18 @@ class WasmIndicatorBenchmark {
                 return result;
             }
             
+            // Special case for SAR which also only needs high/low
+            if (indicatorConfig.name === 'SAR') {
+                const result = [ohlc.high, ohlc.low];
+                
+                // Add parameters in order
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
             // Special case for ADOSC which needs high, low, close, volume
             if (indicatorConfig.name === 'ADOSC') {
                 const result = [ohlc.high, ohlc.low, ohlc.close, ohlc.volume];
@@ -2655,6 +2865,18 @@ class WasmIndicatorBenchmark {
             // Special case for ACOSC: high_ptr, low_ptr, osc_ptr, change_ptr, len
             if (indicatorConfig.name === 'ACOSC') {
                 const result = [highPtr, lowPtr, outPtr, outPtr2, len];
+                
+                // Add indicator parameters
+                for (const value of Object.values(params)) {
+                    result.push(value);
+                }
+                
+                return result;
+            }
+            
+            // Special case for SAR: high_ptr, low_ptr, out_ptr, len, acceleration, maximum
+            if (indicatorConfig.name === 'SAR') {
+                const result = [highPtr, lowPtr, outPtr, len];
                 
                 // Add indicator parameters
                 for (const value of Object.values(params)) {

@@ -105,21 +105,21 @@ class CriterionComparableBenchmark:
             'bandpass', 'vwap', 'cwma', 'dema', 'edcf', 'ehlers_itrend', 'ema', 'epma',
             'frama', 'fwma', 'gaussian', 'highpass_2_pole', 'highpass', 'hma',
             'hwma', 'jma', 'jsa', 'kama', 'kurtosis', 'linreg', 'mab', 'maaq', 'mama', 'medprice', 'msw', 'mwdx',
-            'nma', 'pma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
-            'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
+            'nma', 'pma', 'pwma', 'reflex', 'sar', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
+            'supersmoother_3_pole', 'supersmoother', 'supertrend', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'damiani_volatmeter', 'emd', 'gatorosc'  # Added missing indicators
+            'cg', 'cfo', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
         target_size = size_map.get(self.data_size, '1m')
         
         # Also add batch indicators to find
-        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'wma_batch', 'zlema_batch', 
+        batch_indicators = ['alma_batch', 'aroonosc_batch', 'bollinger_bands_batch', 'ao_batch', 'vpwma_batch', 'voss_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'damiani_volatmeter_batch', 'emd_batch', 'trendflex_batch', 'gatorosc_batch', 'kurtosis_batch', 'mab_batch', 'msw_batch', 'pma_batch']
+                           'damiani_volatmeter_batch', 'emd_batch', 'trendflex_batch', 'gatorosc_batch', 'kurtosis_batch', 'mab_batch', 'msw_batch', 'pma_batch', 'sar_batch', 'supertrend_batch', 'wavetrend_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -242,6 +242,7 @@ class CriterionComparableBenchmark:
             ('aroonosc', lambda: my_project.aroonosc(data['high'], data['low'], 14)),
             ('ao', lambda: my_project.ao(data['high'], data['low'], 5, 34)),
             ('vpwma', lambda: my_project.vpwma(data['close'], 14, 0.382)),
+            ('voss', lambda: my_project.voss(data['close'], 20, 3, 0.25)),
             ('vwma', lambda: my_project.vwma(data['close'], data['volume'], 14)),
             ('wilders', lambda: my_project.wilders(data['close'], 14)),
             ('wma', lambda: my_project.wma(data['close'], 14)),
@@ -280,6 +281,8 @@ class CriterionComparableBenchmark:
             ('mwdx', lambda: my_project.mwdx(data['close'], 0.125)),
             ('nma', lambda: my_project.nma(data['close'], 40)),
             ('pma', lambda: my_project.pma(data['close'])),
+            ('rocr', lambda: my_project.rocr(data['close'], 9)),
+            ('sar', lambda: my_project.sar(data['high'], data['low'], 0.02, 0.2)),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
@@ -289,6 +292,8 @@ class CriterionComparableBenchmark:
             ('srwma', lambda: my_project.srwma(data['close'], 14)),
             ('supersmoother_3_pole', lambda: my_project.supersmoother_3_pole(data['close'], 14)),
             ('supersmoother', lambda: my_project.supersmoother(data['close'], 14)),
+            ('supertrend', lambda: my_project.supertrend(data['high'], data['low'], data['close'], 10, 3.0)),
+            ('ultosc', lambda: my_project.ultosc(data['high'], data['low'], data['close'], 7, 14, 28)),
             ('swma', lambda: my_project.swma(data['close'], 14)),
             ('tema', lambda: my_project.tema(data['close'], 14)),
             ('tilson', lambda: my_project.tilson(data['close'], 14, 0.7)),
@@ -307,6 +312,7 @@ class CriterionComparableBenchmark:
             ('damiani_volatmeter', lambda: my_project.damiani_volatmeter(data['close'], 13, 20, 40, 100, 1.4)),
             ('emd', lambda: my_project.emd(data['high'], data['low'], data['close'], data['volume'], 20, 0.5, 0.1)),
             ('gatorosc', lambda: my_project.gatorosc(data['close'])),
+            ('wavetrend', lambda: my_project.wavetrend((data['high'] + data['low'] + data['close']) / 3, 9, 12, 3, 0.015)),
         ]
         
         # Filter if requested
@@ -363,6 +369,11 @@ class CriterionComparableBenchmark:
             ('mab_batch', lambda: my_project.mab_batch(data['close'], (10, 12, 1), (50, 50, 0), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0), "sma", "sma")),
             ('medprice_batch', lambda: my_project.medprice_batch(data['high'], data['low'])),
             ('msw_batch', lambda: my_project.msw_batch(data['close'], (5, 30, 1))),
+            ('sar_batch', lambda: my_project.sar_batch(data['high'], data['low'], (0.02, 0.2, 0.02), (0.2, 0.2, 0.0))),
+            ('supertrend_batch', lambda: my_project.supertrend_batch(data['high'], data['low'], data['close'], (10, 10, 1), (3.0, 3.0, 0.5))),
+            ('ultosc_batch', lambda: my_project.ultosc_batch(data['high'], data['low'], data['close'], (5, 9, 2), (12, 16, 2), (26, 30, 2))),
+            ('voss_batch', lambda: my_project.voss_batch(data['close'], (10, 14, 2), (2, 4, 1), (0.1, 0.2, 0.1))),
+            ('wavetrend_batch', lambda: my_project.wavetrend_batch((data['high'] + data['low'] + data['close']) / 3, (9, 12, 1), (12, 14, 1), (3, 5, 1), (0.015, 0.020, 0.005))),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -435,7 +446,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'gatorosc', 'kurtosis', 'mab', 'msw']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

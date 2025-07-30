@@ -18,7 +18,10 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, 
+	init_matrix_prefixes, make_uninit_matrix
+};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,7 +29,26 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::ManuallyDrop;
 use thiserror::Error;
+
+const DEFAULT_PERIOD: usize = 10;
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RocrInput<'a> {
 	#[inline(always)]
@@ -50,6 +72,7 @@ pub struct RocrOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct RocrParams {
 	pub period: Option<usize>,
 }
@@ -182,7 +205,7 @@ pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput,
 		});
 	}
 
-	let mut out = vec![f64::NAN; len];
+	let mut out = alloc_with_nan_prefix(len, first + period);
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -201,6 +224,69 @@ pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput,
 	}
 
 	Ok(RocrOutput { values: out })
+}
+
+/// Write ROCR directly to output slice - zero allocations (for WASM optimization)
+pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Result<(), RocrError> {
+	let (data, period) = match &input.data {
+		RocrData::Candles { candles, source } => {
+			let src = source_type(candles, source);
+			(src, input.params.period.unwrap_or(DEFAULT_PERIOD))
+		}
+		RocrData::Slice(slice) => (*slice, input.params.period.unwrap_or(DEFAULT_PERIOD)),
+	};
+
+	if data.is_empty() {
+		return Err(RocrError::EmptyData);
+	}
+
+	if dst.len() != data.len() {
+		return Err(RocrError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	if period == 0 || period > data.len() {
+		return Err(RocrError::InvalidPeriod {
+			period,
+			data_len: data.len(),
+		});
+	}
+
+	let first = data.iter().position(|&x| !x.is_nan()).ok_or(RocrError::AllValuesNaN)?;
+
+	if data.len() - first < period {
+		return Err(RocrError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Fill warmup period with NaN
+	let warmup_end = first + period;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	// Compute ROCR values directly into dst
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => rocr_scalar(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => rocr_avx2(data, period, first, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => rocr_avx512(data, period, first, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -425,7 +511,23 @@ fn rocr_batch_inner(
 	let rows = combos.len();
 	let cols = data.len();
 
-	let mut values = vec![f64::NAN; rows * cols];
+	// Use uninitialized memory for better performance
+	let mut values_uninit = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for each row based on period
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + c.period.unwrap())
+		.collect();
+	init_matrix_prefixes(&mut values_uninit, cols, &warmup_periods);
+	
+	// Convert to mutable slice without copying - using ManuallyDrop pattern from ALMA
+	let mut buf_guard = core::mem::ManuallyDrop::new(values_uninit);
+	let values: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len()
+		)
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -461,12 +563,82 @@ fn rocr_batch_inner(
 		}
 	}
 
+	// Convert ManuallyDrop back to Vec without copying
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+
 	Ok(RocrBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn rocr_batch_inner_into(
+	data: &[f64],
+	sweep: &RocrBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<RocrParams>, RocrError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(RocrError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(RocrError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(RocrError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+
+		match kern {
+			Kernel::Scalar => rocr_row_scalar(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => rocr_row_avx2(data, first, period, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => rocr_row_avx512(data, first, period, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out
+				.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -509,6 +681,263 @@ pub unsafe fn rocr_row_avx512_long(data: &[f64], first: usize, period: usize, ou
 #[inline(always)]
 pub fn expand_grid_rocr(r: &RocrBatchRange) -> Vec<RocrParams> {
 	expand_grid(r)
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "rocr")]
+#[pyo3(signature = (data, period=9, kernel=None))]
+pub fn rocr_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	let params = RocrParams {
+		period: Some(period),
+	};
+	let input = RocrInput::from_slice(slice_in, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| rocr_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "RocrStream")]
+pub struct RocrStreamPy {
+	stream: RocrStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl RocrStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = RocrParams {
+			period: Some(period),
+		};
+		let stream = RocrStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(RocrStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "rocr_batch")]
+#[pyo3(signature = (data, period_range, kernel=None))]
+pub fn rocr_batch_py<'py>(
+	py: Python<'py>,
+	data: numpy::PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let slice_in = data.as_slice()?;
+
+	let sweep = RocrBatchRange {
+		period: period_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			
+			// Write directly to the output buffer to avoid extra allocation
+			rocr_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rocr_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = RocrParams {
+		period: Some(period),
+	};
+	let input = RocrInput::from_slice(data, params);
+	
+	let mut output = vec![0.0; data.len()];  // Single allocation
+	rocr_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rocr_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rocr_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rocr_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = RocrParams {
+			period: Some(period),
+		};
+		let input = RocrInput::from_slice(data, params);
+		
+		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
+			// In-place operation - use temporary buffer
+			let mut temp = vec![0.0; len];
+			rocr_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			// Direct write to output buffer
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			rocr_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+// Batch API for WASM
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RocrBatchConfig {
+	pub period_range: (usize, usize, usize), // (start, end, step)
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct RocrBatchJsOutput {
+	pub values: Vec<f64>,       // Flattened array
+	pub combos: Vec<RocrParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = rocr_batch)]
+pub fn rocr_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: RocrBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = RocrBatchRange {
+		period: config.period_range,
+	};
+
+	let output = rocr_batch_inner(data, &sweep, Kernel::Auto, false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = RocrBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn rocr_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to rocr_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		
+		// Calculate number of combinations
+		let period_count = if period_step > 0 {
+			((period_end.saturating_sub(period_start)) / period_step) + 1
+		} else {
+			1
+		};
+		
+		let total_elements = period_count * len;
+		let out = std::slice::from_raw_parts_mut(out_ptr, total_elements);
+		
+		// Build batch range
+		let sweep = RocrBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+		
+		// Compute batch directly into output buffer
+		let combos = rocr_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		
+		Ok(combos.len())
+	}
 }
 
 #[cfg(test)]

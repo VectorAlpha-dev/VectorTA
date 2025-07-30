@@ -840,6 +840,144 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_decycler_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			DecyclerParams::default(),
+			DecyclerParams {
+				hp_period: Some(2),
+				k: Some(0.1),
+			},
+			DecyclerParams {
+				hp_period: Some(2),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(2),
+				k: Some(2.0),
+			},
+			DecyclerParams {
+				hp_period: Some(5),
+				k: Some(0.5),
+			},
+			DecyclerParams {
+				hp_period: Some(5),
+				k: Some(1.0),
+			},
+			DecyclerParams {
+				hp_period: Some(10),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(20),
+				k: Some(0.3),
+			},
+			DecyclerParams {
+				hp_period: Some(20),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(20),
+				k: Some(1.5),
+			},
+			DecyclerParams {
+				hp_period: Some(50),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(75),
+				k: Some(0.9),
+			},
+			DecyclerParams {
+				hp_period: Some(100),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(100),
+				k: Some(2.5),
+			},
+			DecyclerParams {
+				hp_period: Some(200),
+				k: Some(0.707),
+			},
+			DecyclerParams {
+				hp_period: Some(200),
+				k: Some(5.0),
+			},
+			DecyclerParams {
+				hp_period: Some(500),
+				k: Some(0.707),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DecyclerInput::from_candles(&candles, "close", params.clone());
+			let output = decycler_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.hp_period.unwrap_or(125),
+						params.k.unwrap_or(0.707),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.hp_period.unwrap_or(125),
+						params.k.unwrap_or(0.707),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: hp_period={}, k={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.hp_period.unwrap_or(125),
+						params.k.unwrap_or(0.707),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_decycler_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_decycler_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -870,7 +1008,8 @@ mod tests {
 		check_decycler_period_exceed_length,
 		check_decycler_very_small_dataset,
 		check_decycler_reinput,
-		check_decycler_nan_handling
+		check_decycler_nan_handling,
+		check_decycler_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -919,5 +1058,102 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			(2, 10, 2, 0.1, 1.0, 0.3),
+			(5, 25, 5, 0.707, 0.707, 0.0),
+			(10, 10, 0, 0.5, 2.0, 0.5),
+			(2, 5, 1, 0.3, 0.9, 0.2),
+			(30, 60, 15, 0.707, 0.707, 0.0),
+			(50, 100, 25, 0.5, 1.5, 0.5),
+			(75, 125, 25, 0.707, 2.0, 0.5),
+			(100, 200, 50, 0.5, 1.0, 0.25),
+			(200, 500, 100, 0.707, 0.707, 0.0),
+		];
+
+		for (cfg_idx, &(hp_start, hp_end, hp_step, k_start, k_end, k_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = DecyclerBatchBuilder::new()
+				.kernel(kernel)
+				.hp_period_range(hp_start, hp_end, hp_step)
+				.k_range(k_start, k_end, k_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(0.707)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(0.707)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: hp_period={}, k={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.hp_period.unwrap_or(125),
+						combo.k.unwrap_or(0.707)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
