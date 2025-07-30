@@ -1,9 +1,31 @@
 //! # Rolling Deviation Indicator
 //!
 //! Computes rolling Standard Deviation, Mean Absolute Deviation, or Median Absolute Deviation.
+//! This indicator provides three different measures of variability in a data series:
+//!
+//! ## Deviation Types
+//! 
+//! ### Standard Deviation (devtype = 0)
+//! Measures the amount of variation or dispersion of a set of values. A low standard deviation
+//! indicates that values tend to be close to the mean, while a high standard deviation indicates
+//! that values are spread out over a wider range.
+//!
+//! Formula: σ = √(Σ(x - μ)² / n)
+//!
+//! ### Mean Absolute Deviation (devtype = 1)
+//! The average of the absolute deviations from the mean. It's more robust to outliers than
+//! standard deviation but less commonly used in financial analysis.
+//!
+//! Formula: MAD = Σ|x - μ| / n
+//!
+//! ### Median Absolute Deviation (devtype = 2)
+//! The median of the absolute deviations from the median. This is the most robust measure
+//! against outliers and is useful for identifying anomalies in data.
+//!
+//! Formula: MedAD = median(|x - median(x)|)
 //!
 //! ## Parameters
-//! - **period**: Window size (number of data points).
+//! - **period**: Window size (number of data points). Must be >= 2 for standard deviation.
 //! - **devtype**: Type of deviation: 0 = Standard Deviation, 1 = Mean Absolute, 2 = Median Absolute.
 //!
 //! ## Errors
@@ -15,41 +37,113 @@
 //! ## Returns
 //! - **`Ok(DeviationOutput)`** on success, containing a `Vec<f64>` of length matching the input.
 //! - **`Err(DeviationError)`** otherwise.
+//!
+//! ## Example
+//! ```rust
+//! use rust_backtester::indicators::deviation::{deviation, DeviationInput, DeviationParams};
+//! 
+//! let data = vec![10.0, 20.0, 30.0, 25.0, 35.0, 28.0, 33.0, 29.0, 31.0, 30.0];
+//! let params = DeviationParams {
+//!     period: Some(5),
+//!     devtype: Some(0), // Standard deviation
+//! };
+//! let input = DeviationInput::from_slice(&data, params);
+//! let output = deviation(&input).unwrap();
+//! ```
+
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::detect_best_batch_kernel;
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::convert::AsRef;
 use thiserror::Error;
+
+impl<'a> AsRef<[f64]> for DeviationInput<'a> {
+	#[inline(always)]
+	fn as_ref(&self) -> &[f64] {
+		match &self.data {
+			DeviationData::Slice(slice) => slice,
+			DeviationData::Candles { candles, source } => source_type(candles, source),
+		}
+	}
+}
+
+/// Data type for deviation indicator.
+#[derive(Debug, Clone)]
+pub enum DeviationData<'a> {
+	Candles { candles: &'a Candles, source: &'a str },
+	Slice(&'a [f64]),
+}
 
 /// Input for deviation indicator.
 #[derive(Debug, Clone)]
 pub struct DeviationInput<'a> {
-	pub data: &'a [f64],
+	pub data: DeviationData<'a>,
 	pub params: DeviationParams,
 }
+
 impl<'a> DeviationInput<'a> {
 	#[inline]
-	pub fn from_slice(data: &'a [f64], params: DeviationParams) -> Self {
-		Self { data, params }
+	pub fn from_candles(c: &'a Candles, s: &'a str, p: DeviationParams) -> Self {
+		Self {
+			data: DeviationData::Candles { candles: c, source: s },
+			params: p,
+		}
 	}
+	
+	#[inline]
+	pub fn from_slice(data: &'a [f64], params: DeviationParams) -> Self {
+		Self {
+			data: DeviationData::Slice(data),
+			params,
+		}
+	}
+	
 	#[inline]
 	pub fn with_defaults(data: &'a [f64]) -> Self {
 		Self {
-			data,
+			data: DeviationData::Slice(data),
 			params: DeviationParams::default(),
 		}
 	}
+	
+	#[inline]
+	pub fn with_default_candles(c: &'a Candles) -> Self {
+		Self::from_candles(c, "close", DeviationParams::default())
+	}
+	
 	#[inline]
 	pub fn get_period(&self) -> usize {
 		self.params.period.unwrap_or(9)
 	}
+	
 	#[inline]
 	pub fn get_devtype(&self) -> usize {
 		self.params.devtype.unwrap_or(0)
+	}
+	
+	#[inline]
+	fn as_slice(&self) -> &[f64] {
+		self.as_ref()
 	}
 }
 
@@ -61,6 +155,7 @@ pub struct DeviationOutput {
 
 /// Parameters for deviation indicator.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct DeviationParams {
 	pub period: Option<usize>,
 	pub devtype: Option<usize>,
@@ -111,6 +206,16 @@ impl DeviationBuilder {
 		self
 	}
 	#[inline(always)]
+	pub fn apply(self, c: &Candles, s: &str) -> Result<DeviationOutput, DeviationError> {
+		let p = DeviationParams {
+			period: self.period,
+			devtype: self.devtype,
+		};
+		let i = DeviationInput::from_candles(c, s, p);
+		deviation_with_kernel(&i, self.kernel)
+	}
+	
+	#[inline(always)]
 	pub fn apply_slice(self, d: &[f64]) -> Result<DeviationOutput, DeviationError> {
 		let p = DeviationParams {
 			period: self.period,
@@ -149,52 +254,74 @@ pub fn deviation(input: &DeviationInput) -> Result<DeviationOutput, DeviationErr
 	deviation_with_kernel(input, Kernel::Auto)
 }
 
-#[inline(always)]
-pub fn deviation_with_kernel(input: &DeviationInput, kernel: Kernel) -> Result<DeviationOutput, DeviationError> {
-	let data = input.data;
+#[inline]
+pub fn deviation_into_slice(dst: &mut [f64], input: &DeviationInput, kern: Kernel) -> Result<(), DeviationError> {
+	let data = input.as_slice();
+	let period = input.get_period();
+	let devtype = input.get_devtype();
+	
+	if dst.len() != data.len() {
+		return Err(DeviationError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+	
 	let first = data
 		.iter()
 		.position(|x| !x.is_nan())
 		.ok_or(DeviationError::AllValuesNaN)?;
-	let len = data.len();
-	let period = input.get_period();
-	let devtype = input.get_devtype();
-
-	if period == 0 || period > len {
-		return Err(DeviationError::InvalidPeriod { period, data_len: len });
+	
+	if period == 0 || period > data.len() {
+		return Err(DeviationError::InvalidPeriod { period, data_len: data.len() });
 	}
-	if (len - first) < period {
+	if (data.len() - first) < period {
 		return Err(DeviationError::NotEnoughValidData {
 			needed: period,
-			valid: len - first,
+			valid: data.len() - first,
 		});
 	}
 	if !(0..=2).contains(&devtype) {
 		return Err(DeviationError::InvalidDevType { devtype });
 	}
-
-	let chosen = match kernel {
-		Kernel::Auto => Kernel::Scalar,
-		other => other,
-	};
-	let mut out = vec![f64::NAN; len];
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => {
-				let v = deviation_scalar(data, period, first, devtype)?;
-				out.copy_from_slice(&v[..len]);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => {
-				deviation_avx2(data, period, first, devtype, &mut out);
-			}
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => {
-				deviation_avx512(data, period, first, devtype, &mut out);
-			}
-			_ => unreachable!(),
-		}
+	
+	// Initialize output with NaN prefix
+	let warmup = first + period - 1;
+	for i in 0..warmup {
+		dst[i] = f64::NAN;
 	}
+	
+	// Compute directly into dst
+	match devtype {
+		0 => standard_deviation_rolling_into(data, period, first, dst)?,
+		1 => mean_absolute_deviation_rolling_into(data, period, first, dst)?,
+		2 => median_absolute_deviation_rolling_into(data, period, first, dst)?,
+		_ => unreachable!(),
+	}
+	
+	Ok(())
+}
+
+#[inline(always)]
+pub fn deviation_with_kernel(input: &DeviationInput, kernel: Kernel) -> Result<DeviationOutput, DeviationError> {
+	let data = input.as_slice();
+	let period = input.get_period();
+	
+	let first = data
+		.iter()
+		.position(|x| !x.is_nan())
+		.ok_or(DeviationError::AllValuesNaN)?;
+		
+	let len = data.len();
+	let mut out = alloc_with_nan_prefix(len, first + period - 1);
+	
+	// Only compute from warmup period onwards
+	let warmup = first + period - 1;
+	if warmup < len {
+		// Create a temporary input with the kernel
+		deviation_into_slice(&mut out, input, kernel)?;
+	}
+	
 	Ok(DeviationOutput { values: out })
 }
 
@@ -340,21 +467,60 @@ impl DeviationBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &DeviationBatchRange) -> Vec<DeviationParams> {
-	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-		if step == 0 || start == end {
-			return vec![start];
-		}
-		(start..=end).step_by(step).collect()
-	}
-	let periods = axis_usize(r.period);
-	let devtypes = axis_usize(r.devtype);
-	let mut out = Vec::with_capacity(periods.len() * devtypes.len());
-	for &p in &periods {
-		for &d in &devtypes {
+	// Calculate capacity upfront
+	let period_count = if r.period.2 == 0 || r.period.0 == r.period.1 {
+		1
+	} else {
+		((r.period.1 - r.period.0) / r.period.2) + 1
+	};
+	
+	let devtype_count = if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
+		1
+	} else {
+		((r.devtype.1 - r.devtype.0) / r.devtype.2) + 1
+	};
+	
+	let mut out = Vec::with_capacity(period_count * devtype_count);
+	
+	// Generate periods inline
+	if r.period.2 == 0 || r.period.0 == r.period.1 {
+		let p = r.period.0;
+		// Generate devtypes inline
+		if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
 			out.push(DeviationParams {
 				period: Some(p),
-				devtype: Some(d),
+				devtype: Some(r.devtype.0),
 			});
+		} else {
+			let mut d = r.devtype.0;
+			while d <= r.devtype.1 {
+				out.push(DeviationParams {
+					period: Some(p),
+					devtype: Some(d),
+				});
+				d += r.devtype.2;
+			}
+		}
+	} else {
+		let mut p = r.period.0;
+		while p <= r.period.1 {
+			// Generate devtypes inline
+			if r.devtype.2 == 0 || r.devtype.0 == r.devtype.1 {
+				out.push(DeviationParams {
+					period: Some(p),
+					devtype: Some(r.devtype.0),
+				});
+			} else {
+				let mut d = r.devtype.0;
+				while d <= r.devtype.1 {
+					out.push(DeviationParams {
+						period: Some(p),
+						devtype: Some(d),
+					});
+					d += r.devtype.2;
+				}
+			}
+			p += r.period.2;
 		}
 	}
 	out
@@ -402,23 +568,50 @@ fn deviation_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+	
+	// Use uninitialized memory like alma.rs
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.period.unwrap() - 1)
+		.collect();
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to regular Vec for processing
+	let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
+	let values_slice: &mut [f64] = unsafe {
+		std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+	};
+	
+	let do_row = |row: usize, out_row: &mut [f64]| {
 		let period = combos[row].period.unwrap();
 		let devtype = combos[row].devtype.unwrap();
-		match kern {
-			Kernel::Scalar => deviation_row_scalar(data, first, period, 0, devtype, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => deviation_row_avx2(data, first, period, 0, devtype, out_row),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => deviation_row_avx512(data, first, period, 0, devtype, out_row),
-			_ => unreachable!(),
-		}
+		let warmup = warmup_periods[row];
+		
+		// Create input for this row
+		let params = DeviationParams {
+			period: Some(period),
+			devtype: Some(devtype),
+		};
+		let input = DeviationInput::from_slice(data, params);
+		
+		// Compute directly into the row, skipping NaN prefix
+		match devtype {
+			0 => standard_deviation_rolling_into(data, period, first, out_row).ok(),
+			1 => mean_absolute_deviation_rolling_into(data, period, first, out_row).ok(),
+			2 => median_absolute_deviation_rolling_into(data, period, first, out_row).ok(),
+			_ => None,
+		};
 	};
+	
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			values_slice
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -426,21 +619,69 @@ fn deviation_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	// Convert to owned Vec for output
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(DeviationBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline]
+fn standard_deviation_rolling_into(data: &[f64], period: usize, first: usize, out: &mut [f64]) -> Result<(), DeviationError> {
+	if period < 2 {
+		return Err(DeviationError::InvalidPeriod { period, data_len: data.len() });
+	}
+	
+	let first_valid_idx = first;
+	if data.len() - first_valid_idx < period {
+		return Err(DeviationError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first_valid_idx,
+		});
+	}
+	
+	let mut sum = 0.0;
+	let mut sumsq = 0.0;
+	for &val in &data[first_valid_idx..(first_valid_idx + period)] {
+		sum += val;
+		sumsq += val * val;
+	}
+	
+	let idx = first_valid_idx + period - 1;
+	let mean = sum / (period as f64);
+	let var = (sumsq / (period as f64)) - mean * mean;
+	out[idx] = var.sqrt();
+	
+	for i in (idx + 1)..data.len() {
+		let val_in = data[i];
+		let val_out = data[i - period];
+		sum += val_in - val_out;
+		sumsq += val_in * val_in - val_out * val_out;
+		let mean = sum / (period as f64);
+		let var = (sumsq / (period as f64)) - mean * mean;
+		out[i] = var.sqrt();
+	}
+	Ok(())
 }
 
 #[inline]
@@ -461,7 +702,7 @@ fn standard_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f64>, B
 		)
 		.into());
 	}
-	let mut result = vec![f64::NAN; data.len()];
+	let mut result = alloc_with_nan_prefix(data.len(), period - 1);
 	let mut sum = 0.0;
 	let mut sumsq = 0.0;
 	for &val in &data[first_valid_idx..(first_valid_idx + period)] {
@@ -485,6 +726,27 @@ fn standard_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f64>, B
 }
 
 #[inline]
+fn mean_absolute_deviation_rolling_into(data: &[f64], period: usize, first: usize, out: &mut [f64]) -> Result<(), DeviationError> {
+	let first_valid_idx = first;
+	if data.len() - first_valid_idx < period {
+		return Err(DeviationError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first_valid_idx,
+		});
+	}
+	
+	let start_window_end = first_valid_idx + period - 1;
+	for i in start_window_end..data.len() {
+		let window_start = i + 1 - period;
+		let window = &data[window_start..=i];
+		let mean = window.iter().sum::<f64>() / (period as f64);
+		let abs_sum = window.iter().fold(0.0, |acc, &x| acc + (x - mean).abs());
+		out[i] = abs_sum / (period as f64);
+	}
+	Ok(())
+}
+
+#[inline]
 fn mean_absolute_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
 	let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
 		Some(idx) => idx,
@@ -499,7 +761,7 @@ fn mean_absolute_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f6
 		)
 		.into());
 	}
-	let mut result = vec![f64::NAN; data.len()];
+	let mut result = alloc_with_nan_prefix(data.len(), period - 1);
 	let start_window_end = first_valid_idx + period - 1;
 	for i in start_window_end..data.len() {
 		let window_start = i + 1 - period;
@@ -512,6 +774,48 @@ fn mean_absolute_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<f6
 		result[i] = abs_sum / (period as f64);
 	}
 	Ok(result)
+}
+
+#[inline]
+fn median_absolute_deviation_rolling_into(data: &[f64], period: usize, first: usize, out: &mut [f64]) -> Result<(), DeviationError> {
+	let first_valid_idx = first;
+	if data.len() - first_valid_idx < period {
+		return Err(DeviationError::NotEnoughValidData {
+			needed: period,
+			valid: data.len() - first_valid_idx,
+		});
+	}
+	
+	let start_window_end = first_valid_idx + period - 1;
+	
+	// Pre-allocate buffer for absolute deviations
+	const STACK_SIZE: usize = 256;
+	let mut stack_buffer: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
+	let mut heap_buffer: Vec<f64> = if period > STACK_SIZE {
+		vec![0.0; period]
+	} else {
+		Vec::new()
+	};
+	
+	for i in start_window_end..data.len() {
+		let window_start = i + 1 - period;
+		let window = &data[window_start..=i];
+		let median = find_median(window);
+		
+		// Use pre-allocated buffer for absolute deviations
+		let abs_devs = if period <= STACK_SIZE {
+			&mut stack_buffer[..period]
+		} else {
+			&mut heap_buffer[..period]
+		};
+		
+		for (j, &x) in window.iter().enumerate() {
+			abs_devs[j] = (x - median).abs();
+		}
+		
+		out[i] = find_median(abs_devs);
+	}
+	Ok(())
 }
 
 #[inline]
@@ -529,8 +833,18 @@ fn median_absolute_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<
 		)
 		.into());
 	}
-	let mut result = vec![f64::NAN; data.len()];
+	let mut result = alloc_with_nan_prefix(data.len(), period - 1);
 	let start_window_end = first_valid_idx + period - 1;
+	
+	// Pre-allocate buffer for absolute deviations
+	const STACK_SIZE: usize = 256;
+	let mut stack_buffer: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
+	let mut heap_buffer: Vec<f64> = if period > STACK_SIZE {
+		vec![0.0; period]
+	} else {
+		Vec::new()
+	};
+	
 	for i in start_window_end..data.len() {
 		let window_start = i + 1 - period;
 		if window_start < first_valid_idx {
@@ -538,8 +852,19 @@ fn median_absolute_deviation_rolling(data: &[f64], period: usize) -> Result<Vec<
 		}
 		let window = &data[window_start..=i];
 		let median = find_median(window);
-		let mut abs_devs: Vec<f64> = window.iter().map(|&x| (x - median).abs()).collect();
-		result[i] = find_median(&abs_devs);
+		
+		// Use pre-allocated buffer for absolute deviations
+		let abs_devs = if period <= STACK_SIZE {
+			&mut stack_buffer[..period]
+		} else {
+			&mut heap_buffer[..period]
+		};
+		
+		for (j, &x) in window.iter().enumerate() {
+			abs_devs[j] = (x - median).abs();
+		}
+		
+		result[i] = find_median(abs_devs);
 	}
 	Ok(result)
 }
@@ -549,13 +874,33 @@ fn find_median(slice: &[f64]) -> f64 {
 	if slice.is_empty() {
 		return f64::NAN;
 	}
-	let mut sorted = slice.to_vec();
-	sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-	let mid = sorted.len() / 2;
-	if sorted.len() % 2 == 0 {
-		(sorted[mid - 1] + sorted[mid]) / 2.0
+	// Use stack allocation for small windows, heap for large
+	const STACK_SIZE: usize = 256;
+	let len = slice.len();
+	
+	if len <= STACK_SIZE {
+		// Stack allocation for small windows
+		let mut sorted: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
+		sorted[..len].copy_from_slice(slice);
+		let sorted_slice = &mut sorted[..len];
+		sorted_slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+		
+		let mid = len / 2;
+		if len % 2 == 0 {
+			(sorted_slice[mid - 1] + sorted_slice[mid]) / 2.0
+		} else {
+			sorted_slice[mid]
+		}
 	} else {
-		sorted[mid]
+		// For large windows, we have to allocate
+		let mut sorted = slice.to_vec();
+		sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+		let mid = sorted.len() / 2;
+		if sorted.len() % 2 == 0 {
+			(sorted[mid - 1] + sorted[mid]) / 2.0
+		} else {
+			sorted[mid]
+		}
 	}
 }
 
@@ -638,8 +983,19 @@ pub unsafe fn deviation_row_scalar(
 	devtype: usize,
 	out: &mut [f64],
 ) {
-	let result = deviation_scalar(data, period, first, devtype).unwrap();
-	out.copy_from_slice(&result[..out.len()]);
+	// Initialize with NaN up to warmup period
+	let warmup = first + period - 1;
+	for i in 0..warmup.min(out.len()) {
+		out[i] = f64::NAN;
+	}
+	
+	// Compute directly into out
+	match devtype {
+		0 => standard_deviation_rolling_into(data, period, first, out).ok(),
+		1 => mean_absolute_deviation_rolling_into(data, period, first, out).ok(), 
+		2 => median_absolute_deviation_rolling_into(data, period, first, out).ok(),
+		_ => None,
+	};
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1094,6 +1450,58 @@ mod tests {
 		check_deviation_invalid_devtype,
 		check_deviation_no_poison
 	);
+	
+	#[cfg(test)]
+	mod deviation_property_tests {
+		use super::*;
+		use proptest::prelude::*;
+		
+		proptest! {
+			#[test]
+			fn deviation_property_test(
+				data in prop::collection::vec(prop::num::f64::ANY, 10..=1000),
+				period in 2usize..=50,
+				devtype in 0usize..=2
+			) {
+				// Skip if all data is NaN
+				if data.iter().all(|x| x.is_nan()) {
+					return Ok(());
+				}
+				
+				// Skip if not enough valid data
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				if data.len() - first_valid < period {
+					return Ok(());
+				}
+				
+				let params = DeviationParams {
+					period: Some(period),
+					devtype: Some(devtype),
+				};
+				let input = DeviationInput::from_slice(&data, params);
+				
+				// Test that it doesn't panic
+				let result = deviation(&input);
+				
+				// If successful, verify output length matches input
+				if let Ok(output) = result {
+					prop_assert_eq!(output.values.len(), data.len());
+					
+					// Verify NaN prefix
+					for i in 0..(first_valid + period - 1).min(data.len()) {
+						prop_assert!(output.values[i].is_nan());
+					}
+					
+					// Verify non-NaN values after warmup (for valid devtypes)
+					if devtype <= 2 {
+						for i in (first_valid + period - 1)..data.len() {
+							prop_assert!(!output.values[i].is_nan() || data[i].is_nan());
+						}
+					}
+				}
+			}
+		}
+	}
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1267,4 +1675,378 @@ mod tests {
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_varying_params);
 	gen_batch_tests!(check_batch_no_poison);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "deviation")]
+#[pyo3(signature = (data, period, devtype, kernel=None))]
+pub fn deviation_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	devtype: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = DeviationParams {
+		period: Some(period),
+		devtype: Some(devtype),
+	};
+	let input = DeviationInput::from_slice(slice_in, params);
+
+	// Allocate output array first to avoid intermediate Vec
+	let len = slice_in.len();
+	let out_arr = unsafe { PyArray1::<f64>::new(py, len, false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	py.allow_threads(|| {
+		// Use the into_slice version to write directly to numpy array
+		deviation_into_slice(slice_out, &input, kern)
+	})
+	.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(out_arr.into())
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "DeviationStream")]
+pub struct DeviationStreamPy {
+	stream: DeviationStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DeviationStreamPy {
+	#[new]
+	fn new(period: usize, devtype: usize) -> PyResult<Self> {
+		let params = DeviationParams {
+			period: Some(period),
+			devtype: Some(devtype),
+		};
+		let stream = DeviationStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(DeviationStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "deviation_batch")]
+#[pyo3(signature = (data, period_range, devtype_range, kernel=None))]
+pub fn deviation_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	devtype_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, true)?;
+
+	let sweep = DeviationBatchRange {
+		period: period_range,
+		devtype: devtype_range,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	py.allow_threads(|| {
+		let kernel = match kern {
+			Kernel::Auto => detect_best_batch_kernel(),
+			k => k,
+		};
+		let simd = match kernel {
+			Kernel::Avx512Batch => Kernel::Avx512,
+			Kernel::Avx2Batch => Kernel::Avx2,
+			Kernel::ScalarBatch => Kernel::Scalar,
+			_ => kernel,
+		};
+		
+		// Get batch result and copy to output
+		let result = deviation_batch_inner(slice_in, &sweep, simd, true)?;
+		slice_out.copy_from_slice(&result.values);
+		Ok(())
+	})
+	.map_err(|e: DeviationError| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"devtypes",
+		combos.iter()
+			.map(|p| p.devtype.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = deviation_js)]
+pub fn deviation_js(data: &[f64], period: usize, devtype: usize) -> Result<Vec<f64>, JsValue> {
+	let params = DeviationParams {
+		period: Some(period),
+		devtype: Some(devtype),
+	};
+	let input = DeviationInput::from_slice(data, params);
+	
+	// Use helper for zero allocation - calculate warmup period
+	let first_valid_idx = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+	let warmup = first_valid_idx + period - 1;
+	let mut output = alloc_with_nan_prefix(data.len(), warmup);
+	
+	deviation_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct DeviationBatchResult {
+	values: Vec<f64>, // flattened array
+	combos: usize,    // number of parameter combinations
+	cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl DeviationBatchResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn combos(&self) -> usize {
+		self.combos
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct DeviationBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub devtype_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn deviation_batch(data: &[f64], config: JsValue) -> Result<DeviationBatchResult, JsValue> {
+	let config: DeviationBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = DeviationBatchRange {
+		period: config.period_range,
+		devtype: config.devtype_range,
+	};
+	
+	let result = deviation_batch_with_kernel(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(DeviationBatchResult {
+		values: result.values,
+		combos: result.rows,
+		cols: result.cols,
+	})
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn deviation_batch_metadata(
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	devtype_start: usize,
+	devtype_end: usize,
+	devtype_step: usize,
+) -> Vec<f64> {
+	let sweep = DeviationBatchRange {
+		period: (period_start, period_end, period_step),
+		devtype: (devtype_start, devtype_end, devtype_step),
+	};
+	
+	let combos = expand_grid(&sweep);
+	let mut metadata = Vec::with_capacity(combos.len() * 2);
+	
+	for combo in combos {
+		metadata.push(combo.period.unwrap() as f64);
+		metadata.push(combo.devtype.unwrap() as f64);
+	}
+	
+	metadata
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn deviation_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn deviation_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = deviation_into)]
+pub unsafe fn deviation_into(data_ptr: *const f64, len: usize, period: usize, devtype: usize, out_ptr: *mut f64) -> Result<(), JsValue> {
+	let data = std::slice::from_raw_parts(data_ptr, len);
+	
+	// Check for aliasing (if input and output point to same memory)
+	let in_ptr = data_ptr as usize;
+	let out_ptr_addr = out_ptr as usize;
+	let size = len * std::mem::size_of::<f64>();
+	
+	let params = DeviationParams {
+		period: Some(period),
+		devtype: Some(devtype),
+	};
+	let input = DeviationInput::from_slice(data, params);
+	
+	if in_ptr == out_ptr_addr {
+		// Same memory location, need temporary buffer
+		let mut temp = vec![0.0; len];
+		deviation_into_slice(&mut temp, &input, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		out.copy_from_slice(&temp);
+	} else {
+		// Different memory locations, safe to write directly
+		let out = std::slice::from_raw_parts_mut(out_ptr, len);
+		deviation_into_slice(out, &input, Kernel::Auto)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn deviation_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	devtype_start: usize,
+	devtype_end: usize,
+	devtype_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to deviation_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = DeviationBatchRange {
+			period: (period_start, period_end, period_step),
+			devtype: (devtype_start, devtype_end, devtype_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		if rows == 0 {
+			return Err(JsValue::from_str("No valid parameter combinations"));
+		}
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		// Use the batch inner function directly into the output slice
+		let warmup_periods: Vec<usize> = combos.iter()
+			.map(|p| {
+				let first_valid_idx = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+				first_valid_idx + p.period.unwrap_or(1) - 1
+			})
+			.collect();
+
+		// Initialize with NaN using a more direct approach
+		for (row, &warmup) in warmup_periods.iter().enumerate() {
+			let row_start = row * cols;
+			for i in 0..warmup.min(cols) {
+				out[row_start + i] = f64::NAN;
+			}
+		}
+
+		// Process each parameter combination
+		for (row, p) in combos.iter().enumerate() {
+			let input = DeviationInput::from_slice(data, p.clone());
+			let row_start = row * cols;
+			let row_slice = &mut out[row_start..row_start + cols];
+			
+			// Only compute from warmup onwards to avoid overwriting NaN prefix
+			let warmup = warmup_periods[row];
+			if warmup < cols {
+				deviation_into_slice(row_slice, &input, Kernel::Auto)
+					.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			}
+		}
+
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct DeviationStream {
+	inner: crate::indicators::deviation::DeviationStream,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl DeviationStream {
+	#[wasm_bindgen(constructor)]
+	pub fn new(period: usize, devtype: usize) -> Result<DeviationStream, JsValue> {
+		let params = DeviationParams {
+			period: Some(period),
+			devtype: Some(devtype),
+		};
+		let inner = crate::indicators::deviation::DeviationStream::try_new(params)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(DeviationStream { inner })
+	}
+	
+	#[wasm_bindgen]
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.inner.update(value)
+	}
 }

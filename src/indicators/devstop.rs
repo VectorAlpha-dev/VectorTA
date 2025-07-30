@@ -1031,6 +1031,189 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_devstop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			DevStopParams::default(),
+			// Minimum period
+			DevStopParams {
+				period: Some(2),
+				mult: Some(0.0),
+				devtype: Some(0),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			// Small period with various multipliers
+			DevStopParams {
+				period: Some(5),
+				mult: Some(0.5),
+				devtype: Some(0),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			DevStopParams {
+				period: Some(5),
+				mult: Some(1.0),
+				devtype: Some(1),
+				direction: Some("short".to_string()),
+				ma_type: Some("ema".to_string()),
+			},
+			// Medium periods with different devtypes
+			DevStopParams {
+				period: Some(10),
+				mult: Some(0.0),
+				devtype: Some(0),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			DevStopParams {
+				period: Some(10),
+				mult: Some(2.0),
+				devtype: Some(1),
+				direction: Some("short".to_string()),
+				ma_type: Some("ema".to_string()),
+			},
+			DevStopParams {
+				period: Some(10),
+				mult: Some(1.5),
+				devtype: Some(2),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			// Default period (20) variations
+			DevStopParams {
+				period: Some(20),
+				mult: Some(0.0),
+				devtype: Some(0),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			DevStopParams {
+				period: Some(20),
+				mult: Some(1.0),
+				devtype: Some(1),
+				direction: Some("short".to_string()),
+				ma_type: Some("ema".to_string()),
+			},
+			DevStopParams {
+				period: Some(20),
+				mult: Some(2.5),
+				devtype: Some(2),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			// Large periods
+			DevStopParams {
+				period: Some(50),
+				mult: Some(0.5),
+				devtype: Some(0),
+				direction: Some("short".to_string()),
+				ma_type: Some("ema".to_string()),
+			},
+			DevStopParams {
+				period: Some(50),
+				mult: Some(1.0),
+				devtype: Some(1),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			// Very large period
+			DevStopParams {
+				period: Some(100),
+				mult: Some(0.0),
+				devtype: Some(0),
+				direction: Some("long".to_string()),
+				ma_type: Some("sma".to_string()),
+			},
+			DevStopParams {
+				period: Some(100),
+				mult: Some(3.0),
+				devtype: Some(2),
+				direction: Some("short".to_string()),
+				ma_type: Some("ema".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DevStopInput::from_candles(&candles, "high", "low", params.clone());
+			let output = devstop_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, devtype={}, direction={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(20),
+						params.mult.unwrap_or(0.0),
+						params.devtype.unwrap_or(0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, devtype={}, direction={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(20),
+						params.mult.unwrap_or(0.0),
+						params.devtype.unwrap_or(0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, devtype={}, direction={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(20),
+						params.mult.unwrap_or(0.0),
+						params.devtype.unwrap_or(0),
+						params.direction.as_deref().unwrap_or("long"),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_devstop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_devstop_tests!(
 		check_devstop_partial_params,
 		check_devstop_accuracy,
@@ -1039,7 +1222,8 @@ mod tests {
 		check_devstop_period_exceeds_length,
 		check_devstop_very_small_dataset,
 		check_devstop_reinput,
-		check_devstop_nan_handling
+		check_devstop_nan_handling,
+		check_devstop_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1079,5 +1263,141 @@ mod tests {
 			}
 		};
 	}
+	fn check_batch_sweep(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let high = &c.high;
+		let low = &c.low;
+
+		let output = DevStopBatchBuilder::new()
+			.kernel(kernel)
+			.period_range(10, 30, 5)
+			.mult_range(0.0, 2.0, 0.5)
+			.devtype_range(0, 2, 1)
+			.apply_slices(high, low)?;
+
+		let expected_combos = 5 * 5 * 3; // 5 periods * 5 mults * 3 devtypes
+		assert_eq!(output.combos.len(), expected_combos);
+		assert_eq!(output.rows, expected_combos);
+		assert_eq!(output.cols, c.close.len());
+
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let high = &c.high;
+		let low = &c.low;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, mult_start, mult_end, mult_step, devtype_start, devtype_end, devtype_step)
+			(2, 10, 2, 0.0, 2.0, 0.5, 0, 2, 1),      // Small periods with mult variations
+			(5, 25, 5, 0.0, 1.0, 0.25, 0, 0, 0),     // Medium periods, single devtype
+			(30, 60, 15, 1.0, 3.0, 1.0, 1, 1, 0),    // Large periods, mean abs dev
+			(2, 5, 1, 0.0, 0.5, 0.1, 2, 2, 0),       // Dense small range, median abs dev
+			(10, 20, 2, 0.5, 2.5, 0.5, 0, 2, 2),     // Medium range, all devtypes
+			(20, 20, 0, 0.0, 3.0, 0.3, 0, 2, 1),     // Single period, mult sweep
+			(5, 50, 15, 1.0, 1.0, 0.0, 0, 2, 1),     // Wide period range, single mult
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, d_start, d_end, d_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = DevStopBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.mult_range(m_start, m_end, m_step)
+				.devtype_range(d_start, d_end, d_step)
+				.apply_slices(high, low)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, devtype={}, \
+						 direction={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(20),
+						combo.mult.unwrap_or(0.0),
+						combo.devtype.unwrap_or(0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, devtype={}, \
+						 direction={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(20),
+						combo.mult.unwrap_or(0.0),
+						combo.devtype.unwrap_or(0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, devtype={}, \
+						 direction={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(20),
+						combo.mult.unwrap_or(0.0),
+						combo.devtype.unwrap_or(0),
+						combo.direction.as_deref().unwrap_or("long"),
+						combo.ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_sweep);
+	gen_batch_tests!(check_batch_no_poison);
 }

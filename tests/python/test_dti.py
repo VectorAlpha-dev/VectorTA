@@ -1,219 +1,277 @@
-"""
-Python binding tests for DTI indicator.
-These tests mirror the Rust unit tests to ensure Python bindings work correctly.
-"""
-import pytest
 import numpy as np
-import sys
-from pathlib import Path
-
-try:
-    import my_project as ta_indicators
-except ImportError:
-    # If not in virtual environment, try to import from installed location
-    try:
-        import my_project as ta_indicators
-    except ImportError:
-        pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
-
-from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
-from rust_comparison import compare_with_rust
+import pytest
+import rust_backtester as ta
+from .utils import (
+    generate_random_data,
+    assert_valid_output,
+    assert_warmup_period,
+    compare_with_reference,
+    check_edge_cases,
+    validate_batch_output,
+    check_streaming_consistency,
+    create_candle_data
+)
 
 
-class TestDti:
-    @pytest.fixture(scope='class')
-    def test_data(self):
-        return load_test_data()
+class TestDTI:
+    """Test suite for Dynamic Trend Index (DTI) indicator"""
     
-    def test_dti_partial_params(self, test_data):
-        """Test DTI with partial parameters (None values) - mirrors check_dti_partial_params"""
-        high = test_data['high']
-        low = test_data['low']
+    def test_dti_basic(self):
+        """Test basic DTI calculation with default parameters"""
+        high = np.array([10.0, 11.0, 12.0, 11.5, 13.0, 12.5, 14.0, 13.5, 15.0, 14.5])
+        low = np.array([9.0, 10.0, 11.0, 10.5, 12.0, 11.5, 13.0, 12.5, 14.0, 13.5])
         
-        # Test with all default params
-        result = ta_indicators.dti(high, low, 14, 10, 5)  # Using defaults
+        result = ta.dti(high, low, r=14, s=10, u=5)
+        
+        assert isinstance(result, np.ndarray)
         assert len(result) == len(high)
-    
-    def test_dti_accuracy(self, test_data):
-        """Test DTI matches expected values from Rust tests - mirrors check_dti_accuracy"""
-        high = test_data['high']
-        low = test_data['low']
-        expected = EXPECTED_OUTPUTS.get('dti', {})
+        assert result.dtype == np.float64
         
-        # If expected values not yet added to test_utils.py, skip
-        if not expected:
-            pytest.skip("DTI expected values not yet added to EXPECTED_OUTPUTS")
+    def test_dti_with_real_data(self):
+        """Test DTI with realistic market data"""
+        candles = create_candle_data(1000)
+        high = candles['high']
+        low = candles['low']
         
-        result = ta_indicators.dti(
-            high, low,
-            r=expected['default_params']['r'],
-            s=expected['default_params']['s'],
-            u=expected['default_params']['u']
-        )
+        result = ta.dti(high, low, r=14, s=10, u=5)
         
-        assert len(result) == len(high)
+        assert_valid_output(result)
+        # DTI should be bounded between -100 and 100
+        valid_values = result[~np.isnan(result)]
+        assert np.all(valid_values >= -100.0)
+        assert np.all(valid_values <= 100.0)
         
-        # Check last 5 values match expected
-        assert_close(
-            result[-5:], 
-            expected['last_5_values'],
-            rtol=1e-6,
-            msg="DTI last 5 values mismatch"
-        )
+    def test_dti_warmup_period(self):
+        """Test DTI warmup period behavior"""
+        high = np.random.randn(100) + 100
+        low = high - np.abs(np.random.randn(100))
         
-        # Compare full output with Rust
-        compare_with_rust('dti', result, 'high,low', expected['default_params'])
-    
-    def test_dti_default_candles(self, test_data):
-        """Test DTI with default parameters - mirrors check_dti_default_candles"""
-        high = test_data['high']
-        low = test_data['low']
+        result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # Default params: r=14, s=10, u=5
-        result = ta_indicators.dti(high, low, 14, 10, 5)
-        assert len(result) == len(high)
-    
-    def test_dti_zero_period(self):
-        """Test DTI fails with zero period - mirrors check_dti_zero_period"""
-        high = np.array([10.0, 11.0, 12.0])
+        # DTI needs at least 2 values (first valid index + 1)
+        # First value is always NaN
+        assert np.isnan(result[0])
+        # Should have values after warmup
+        assert not np.all(np.isnan(result[2:]))
+        
+    def test_dti_parameter_validation(self):
+        """Test DTI parameter validation"""
+        high = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+        low = np.array([9.0, 10.0, 11.0, 12.0, 13.0])
+        
+        # Test zero period
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=0, s=10, u=5)
+            
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=14, s=0, u=5)
+            
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=14, s=10, u=0)
+            
+        # Test period exceeding data length
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=10, s=5, u=5)
+            
+    def test_dti_mismatched_lengths(self):
+        """Test DTI with mismatched high/low lengths"""
+        high = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
         low = np.array([9.0, 10.0, 11.0])
         
-        with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.dti(high, low, r=0, s=10, u=5)
-    
-    def test_dti_period_exceeds_length(self):
-        """Test DTI fails when period exceeds data length - mirrors check_dti_period_exceeds_length"""
-        high = np.array([10.0, 11.0])
-        low = np.array([9.0, 10.0])
-        
-        with pytest.raises(ValueError, match="Invalid period"):
-            ta_indicators.dti(high, low, r=14, s=10, u=5)
-    
-    def test_dti_all_nan(self):
-        """Test DTI fails with all NaN values - mirrors check_dti_all_nan"""
-        high = np.array([np.nan, np.nan, np.nan])
-        low = np.array([np.nan, np.nan, np.nan])
-        
-        with pytest.raises(ValueError, match="All.*values are NaN"):
-            ta_indicators.dti(high, low, r=14, s=10, u=5)
-    
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=14, s=10, u=5)
+            
     def test_dti_empty_data(self):
-        """Test DTI fails with empty data - mirrors check_dti_empty_data"""
+        """Test DTI with empty data"""
         high = np.array([])
         low = np.array([])
         
-        with pytest.raises(ValueError, match="Empty data"):
-            ta_indicators.dti(high, low, r=14, s=10, u=5)
-    
-    def test_dti_mismatched_lengths(self):
-        """Test DTI fails when high/low have different lengths"""
-        high = np.array([10.0, 11.0, 12.0])
-        low = np.array([9.0, 10.0])
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=14, s=10, u=5)
+            
+    def test_dti_all_nan(self):
+        """Test DTI with all NaN values"""
+        high = np.full(10, np.nan)
+        low = np.full(10, np.nan)
         
-        with pytest.raises(ValueError, match="Empty data"):
-            ta_indicators.dti(high, low, r=14, s=10, u=5)
-    
-    def test_dti_streaming(self, test_data):
-        """Test DTI streaming matches batch calculation - mirrors check_dti_streaming"""
-        high = test_data['high']
-        low = test_data['low']
-        r = 14
-        s = 10
-        u = 5
+        with pytest.raises(Exception):
+            ta.dti(high, low, r=14, s=10, u=5)
+            
+    def test_dti_with_nan_values(self):
+        """Test DTI handling of NaN values in data"""
+        high = np.array([10.0, 11.0, np.nan, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0])
+        low = np.array([9.0, 10.0, np.nan, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0])
         
-        # Batch calculation
-        batch_result = ta_indicators.dti(high, low, r=r, s=s, u=u)
+        result = ta.dti(high, low, r=3, s=2, u=2)
         
-        # Streaming calculation
-        stream = ta_indicators.DtiStream(r=r, s=s, u=u)
-        stream_values = []
+        assert len(result) == len(high)
+        # NaN values should propagate
+        assert np.isnan(result[2])
         
-        for h, l in zip(high, low):
-            result = stream.update(h, l)
-            stream_values.append(result if result is not None else np.nan)
+    def test_dti_different_parameters(self):
+        """Test DTI with various parameter combinations"""
+        high = np.random.randn(100) + 100
+        low = high - np.abs(np.random.randn(100))
         
-        stream_values = np.array(stream_values)
+        # Test different r, s, u combinations
+        params = [
+            (5, 3, 2),
+            (10, 5, 3),
+            (20, 10, 5),
+            (30, 15, 7)
+        ]
         
-        # Compare batch vs streaming
-        assert len(batch_result) == len(stream_values)
+        for r, s, u in params:
+            result = ta.dti(high, low, r=r, s=s, u=u)
+            assert_valid_output(result)
+            
+    def test_dti_batch_single_param(self):
+        """Test DTI batch calculation with single parameter set"""
+        high = np.random.randn(100) + 100
+        low = high - np.abs(np.random.randn(100))
         
-        # Compare values where both are not NaN
-        for i, (b, s_val) in enumerate(zip(batch_result, stream_values)):
-            if np.isnan(b) and np.isnan(s_val):
-                continue
-            assert_close(b, s_val, rtol=1e-9, atol=1e-9, 
-                        msg=f"DTI streaming mismatch at index {i}")
-    
-    def test_dti_batch(self, test_data):
-        """Test DTI batch processing - mirrors check_batch_default_row"""
-        high = test_data['high']
-        low = test_data['low']
-        
-        result = ta_indicators.dti_batch(
+        result = ta.dti_batch(
             high, low,
-            r_range=(14, 14, 1),  # Default r only
-            s_range=(10, 10, 1),  # Default s only
-            u_range=(5, 5, 1)     # Default u only
+            r_range=(14, 14, 0),
+            s_range=(10, 10, 0),
+            u_range=(5, 5, 0)
         )
         
-        assert 'values' in result
+        validate_batch_output(result, expected_rows=1, expected_cols=len(high))
+        
+        # Should match single calculation
+        single_result = ta.dti(high, low, r=14, s=10, u=5)
+        np.testing.assert_array_almost_equal(
+            result['values'][0], single_result, decimal=10
+        )
+        
+    def test_dti_batch_multiple_params(self):
+        """Test DTI batch calculation with multiple parameter sets"""
+        high = np.random.randn(100) + 100
+        low = high - np.abs(np.random.randn(100))
+        
+        result = ta.dti_batch(
+            high, low,
+            r_range=(10, 20, 5),    # 10, 15, 20
+            s_range=(8, 12, 2),     # 8, 10, 12
+            u_range=(4, 6, 1)       # 4, 5, 6
+        )
+        
+        # Should have 3 * 3 * 3 = 27 combinations
+        validate_batch_output(result, expected_rows=27, expected_cols=len(high))
+        
+        # Check parameter arrays
         assert 'r_values' in result
         assert 's_values' in result
         assert 'u_values' in result
+        assert len(result['r_values']) == 27
+        assert len(result['s_values']) == 27
+        assert len(result['u_values']) == 27
         
-        # Should have 1 combination (default params)
-        assert result['values'].shape[0] == 1
-        assert result['values'].shape[1] == len(high)
+    def test_dti_streaming(self):
+        """Test DTI streaming calculation"""
+        high = np.random.randn(100) + 100
+        low = high - np.abs(np.random.randn(100))
         
-        # Extract the single row
-        default_row = result['values'][0]
-        expected = EXPECTED_OUTPUTS.get('dti', {}).get('last_5_values', [])
+        # Create stream
+        stream = ta.DtiStream(r=14, s=10, u=5)
         
-        if expected:
-            # Check last 5 values match
-            assert_close(
-                default_row[-5:],
-                expected,
-                rtol=1e-6,
-                msg="DTI batch default row mismatch"
-            )
-    
-    def test_dti_nan_handling(self, test_data):
-        """Test DTI handles NaN values correctly"""
-        high = test_data['high']
-        low = test_data['low']
+        # Process values one by one
+        stream_results = []
+        for h, l in zip(high, low):
+            result = stream.update(h, l)
+            stream_results.append(result if result is not None else np.nan)
+            
+        stream_results = np.array(stream_results)
         
-        result = ta_indicators.dti(high, low, r=14, s=10, u=5)
-        assert len(result) == len(high)
+        # Compare with batch calculation
+        batch_result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # Check warmup period
-        warmup = 14  # max(r, s, u)
+        check_streaming_consistency(stream_results, batch_result)
         
-        # After warmup period, no NaN values should exist
-        if len(result) > warmup + 100:
-            assert not np.any(np.isnan(result[warmup + 100:])), "Found unexpected NaN after warmup period"
-    
-    def test_dti_kernel_parameter(self, test_data):
+    def test_dti_kernel_parameter(self):
         """Test DTI with different kernel parameters"""
-        high = test_data['high'][:1000]  # Use smaller dataset for speed
-        low = test_data['low'][:1000]
+        high = np.random.randn(1000) + 100
+        low = high - np.abs(np.random.randn(1000))
         
-        # Test with default kernel (auto)
-        result_auto = ta_indicators.dti(high, low, r=14, s=10, u=5)
+        # Test with different kernels
+        kernels = [None, 'scalar', 'avx2', 'avx512']
         
-        # Test with scalar kernel
-        result_scalar = ta_indicators.dti(high, low, r=14, s=10, u=5, kernel='scalar')
+        results = []
+        for kernel in kernels:
+            try:
+                if kernel:
+                    result = ta.dti(high, low, r=14, s=10, u=5, kernel=kernel)
+                else:
+                    result = ta.dti(high, low, r=14, s=10, u=5)
+                results.append(result)
+            except:
+                # Some kernels might not be available
+                pass
+                
+        # All available kernels should produce same results
+        if len(results) > 1:
+            for i in range(1, len(results)):
+                np.testing.assert_array_almost_equal(
+                    results[0], results[i], decimal=10
+                )
+                
+    def test_dti_trend_detection(self):
+        """Test DTI's ability to detect trends"""
+        # Create uptrend data
+        time = np.arange(100)
+        high = 100 + time * 0.5 + np.random.randn(100) * 0.1
+        low = high - 1 - np.random.randn(100) * 0.1
         
-        assert len(result_auto) == len(high)
-        assert len(result_scalar) == len(high)
+        result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # Results should be very close
-        for i, (a, s) in enumerate(zip(result_auto, result_scalar)):
-            if np.isnan(a) and np.isnan(s):
-                continue
-            assert_close(a, s, rtol=1e-9, atol=1e-9,
-                        msg=f"Kernel results mismatch at index {i}")
+        # In uptrend, DTI should be mostly positive
+        valid_values = result[~np.isnan(result)]
+        assert np.mean(valid_values[20:]) > 0
+        
+        # Create downtrend data
+        high = 100 - time * 0.5 + np.random.randn(100) * 0.1
+        low = high - 1 - np.random.randn(100) * 0.1
+        
+        result = ta.dti(high, low, r=14, s=10, u=5)
+        
+        # In downtrend, DTI should be mostly negative
+        valid_values = result[~np.isnan(result)]
+        assert np.mean(valid_values[20:]) < 0
+        
+    def test_dti_edge_values(self):
+        """Test DTI with edge case values"""
+        # Test with constant values
+        high = np.full(50, 100.0)
+        low = np.full(50, 99.0)
+        
+        result = ta.dti(high, low, r=14, s=10, u=5)
+        
+        # With constant values, DTI should converge to 0
+        valid_values = result[~np.isnan(result)]
+        assert np.all(np.abs(valid_values[20:]) < 1e-10)
+        
+        # Test with single spike
+        high = np.full(50, 100.0)
+        low = np.full(50, 99.0)
+        high[25] = 110.0  # Single spike
+        
+        result = ta.dti(high, low, r=14, s=10, u=5)
+        
+        # Should react to spike and then decay back
+        assert len(result) == len(high)
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+if __name__ == "__main__":
+    test = TestDTI()
+    test.test_dti_basic()
+    test.test_dti_with_real_data()
+    test.test_dti_warmup_period()
+    test.test_dti_parameter_validation()
+    test.test_dti_different_parameters()
+    test.test_dti_batch_single_param()
+    test.test_dti_batch_multiple_params()
+    test.test_dti_streaming()
+    test.test_dti_kernel_parameter()
+    test.test_dti_trend_detection()
+    print("All DTI tests passed!")

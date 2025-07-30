@@ -324,6 +324,50 @@ pub fn bandpass_with_kernel(input: &BandPassInput, kernel: Kernel) -> Result<Ban
 	})
 }
 
+/// Write directly to output slices - no allocations
+#[inline]
+pub fn bandpass_into_slice(
+	bp_dst: &mut [f64],
+	bp_normalized_dst: &mut [f64],
+	signal_dst: &mut [f64],
+	trigger_dst: &mut [f64],
+	input: &BandPassInput,
+	kern: Kernel,
+) -> Result<(), BandPassError> {
+	let data: &[f64] = match &input.data {
+		BandPassData::Candles { candles, source } => source_type(candles, source),
+		BandPassData::Slice(sl) => sl,
+	};
+	
+	let len = data.len();
+	let period = input.get_period();
+	let bandwidth = input.get_bandwidth();
+	
+	// Validate input
+	if len == 0 || len < period {
+		return Err(BandPassError::NotEnoughData { data_len: len, period });
+	}
+	if period == 0 {
+		return Err(BandPassError::InvalidPeriod { period });
+	}
+	
+	// Validate output slice lengths
+	if bp_dst.len() != len || bp_normalized_dst.len() != len || signal_dst.len() != len || trigger_dst.len() != len {
+		return Err(BandPassError::InvalidPeriod { period: 0 });
+	}
+	
+	// Use existing logic from bandpass_with_kernel but write to provided slices
+	let result = bandpass_with_kernel(input, kern)?;
+	
+	// Copy results to output slices
+	bp_dst.copy_from_slice(&result.bp);
+	bp_normalized_dst.copy_from_slice(&result.bp_normalized);
+	signal_dst.copy_from_slice(&result.signal);
+	trigger_dst.copy_from_slice(&result.trigger);
+	
+	Ok(())
+}
+
 #[inline(always)]
 pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
 	let len = hp.len();
@@ -1176,6 +1220,57 @@ mod tests {
 		Ok(())
 	}
 
+	fn check_bandpass_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let period = 20;
+		let bandwidth = 0.3;
+
+		let input = BandPassInput::from_candles(
+			&candles,
+			"close",
+			BandPassParams {
+				period: Some(period),
+				bandwidth: Some(bandwidth),
+			},
+		);
+		let batch_output = bandpass_with_kernel(&input, kernel)?;
+
+		let mut stream = BandPassStream::try_new(BandPassParams {
+			period: Some(period),
+			bandwidth: Some(bandwidth),
+		})?;
+
+		let mut stream_values = Vec::with_capacity(candles.close.len());
+		for &price in &candles.close {
+			let bp_val = stream.update(price);
+			stream_values.push(bp_val);
+		}
+
+		assert_eq!(batch_output.bp.len(), stream_values.len());
+		for (i, (&b, &s)) in batch_output.bp.iter().zip(stream_values.iter()).enumerate() {
+			if b.is_nan() && s.is_nan() {
+				continue;
+			}
+			let diff = (b - s).abs();
+			let tol = 1e-10 * b.abs().max(1.0);
+			assert!(
+				diff < tol,
+				"[{}] Streaming vs batch mismatch at index {}: batch={}, stream={}, diff={}",
+				test_name,
+				i,
+				b,
+				s,
+				diff
+			);
+		}
+
+		Ok(())
+	}
+
 	generate_all_bandpass_tests!(
 		check_bandpass_partial_params,
 		check_bandpass_accuracy,
@@ -1185,7 +1280,8 @@ mod tests {
 		check_bandpass_very_small_dataset,
 		check_bandpass_reinput,
 		check_bandpass_nan_handling,
-		check_bandpass_no_poison
+		check_bandpass_no_poison,
+		check_bandpass_streaming
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1409,53 +1505,28 @@ pub fn bandpass_py<'py>(
 	bandwidth: f64,
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-	use numpy::{PyArray1, PyArrayMethods};
+	use numpy::{IntoPyArray, PyArrayMethods};
 
-	let slice_in = data.as_slice()?; // zero-copy, read-only view
-
-	// Use kernel validation for safety
+	let slice_in = data.as_slice()?;
 	let kern = validate_kernel(kernel, false)?;
 
-	// Build input struct
 	let params = BandPassParams {
 		period: Some(period),
 		bandwidth: Some(bandwidth),
 	};
 	let bandpass_in = BandPassInput::from_slice(slice_in, params);
 
-	// Pre-allocate uninitialized NumPy output buffers for all 4 outputs
-	// NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
-	let bp_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let bp_normalized_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let signal_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-	let trigger_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+	// Get all output vectors from Rust function
+	let output = py
+		.allow_threads(|| bandpass_with_kernel(&bandpass_in, kern))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-	let bp_slice = unsafe { bp_arr.as_slice_mut()? };
-	let bp_normalized_slice = unsafe { bp_normalized_arr.as_slice_mut()? };
-	let signal_slice = unsafe { signal_arr.as_slice_mut()? };
-	let trigger_slice = unsafe { trigger_arr.as_slice_mut()? };
-
-	// Heavy lifting without the GIL
-	py.allow_threads(|| -> Result<(), BandPassError> {
-		let output = bandpass_with_kernel(&bandpass_in, kern)?;
-
-		// SAFETY: We must write to ALL elements before returning to Python
-		// The bandpass algorithm fills all elements of the output arrays
-		bp_slice.copy_from_slice(&output.bp);
-		bp_normalized_slice.copy_from_slice(&output.bp_normalized);
-		signal_slice.copy_from_slice(&output.signal);
-		trigger_slice.copy_from_slice(&output.trigger);
-
-		Ok(())
-	})
-	.map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-	// Create output dictionary
+	// Create output dictionary with zero-copy transfers
 	let dict = PyDict::new(py);
-	dict.set_item("bp", bp_arr)?;
-	dict.set_item("bp_normalized", bp_normalized_arr)?;
-	dict.set_item("signal", signal_arr)?;
-	dict.set_item("trigger", trigger_arr)?;
+	dict.set_item("bp", output.bp.into_pyarray(py))?;
+	dict.set_item("bp_normalized", output.bp_normalized.into_pyarray(py))?;
+	dict.set_item("signal", output.signal.into_pyarray(py))?;
+	dict.set_item("trigger", output.trigger.into_pyarray(py))?;
 
 	Ok(dict)
 }
@@ -1593,99 +1664,73 @@ pub fn bandpass_batch_py<'py>(
 // ========================= WASM Bindings =========================
 
 #[cfg(feature = "wasm")]
-#[derive(Serialize, Deserialize)]
-pub struct BandPassJsOutput {
-	pub bp: Vec<f64>,
-	pub bp_normalized: Vec<f64>,
-	pub signal: Vec<f64>,
-	pub trigger: Vec<f64>,
+#[wasm_bindgen]
+pub struct BandPassResult {
+	values: Vec<f64>, // [bp..., bp_normalized..., signal..., trigger...]
+	rows: usize,      // 4 for bandpass
+	cols: usize,      // data length
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn bandpass_js(data: &[f64], period: usize, bandwidth: f64) -> Result<JsValue, JsValue> {
+impl BandPassResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn rows(&self) -> usize {
+		self.rows
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_js(data: &[f64], period: usize, bandwidth: f64) -> Result<BandPassResult, JsValue> {
 	let params = BandPassParams {
 		period: Some(period),
 		bandwidth: Some(bandwidth),
 	};
 	let input = BandPassInput::from_slice(data, params);
-
-	bandpass_with_kernel(&input, Kernel::Scalar)
-		.map(|output| {
-			let js_output = BandPassJsOutput {
-				bp: output.bp,
-				bp_normalized: output.bp_normalized,
-				signal: output.signal,
-				trigger: output.trigger,
-			};
-			serde_wasm_bindgen::to_value(&js_output)
-				.map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
-		})
-		.map_err(|e| JsValue::from_str(&e.to_string()))?
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub fn bandpass_batch_js(
-	data: &[f64],
-	period_start: usize,
-	period_end: usize,
-	period_step: usize,
-	bandwidth_start: f64,
-	bandwidth_end: f64,
-	bandwidth_step: f64,
-) -> Result<JsValue, JsValue> {
-	let sweep = BandPassBatchRange {
-		period: (period_start, period_end, period_step),
-		bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
-	};
-
-	// Expand grid to get dimensions
-	let combos = expand_grid(&sweep);
-	let rows = combos.len();
-	let cols = data.len();
-
-	// Pre-allocate output vectors
-	let mut bp_values = vec![0.0; rows * cols];
-	let mut bp_normalized_values = vec![0.0; rows * cols];
-	let mut signal_values = vec![0.0; rows * cols];
-	let mut trigger_values = vec![0.0; rows * cols];
-
-	// Use the _into variant with parallel=false for WASM
-	bandpass_batch_inner_into(
-		data,
-		&sweep,
-		Kernel::Scalar,
-		false,
-		&mut bp_values,
-		&mut bp_normalized_values,
-		&mut signal_values,
-		&mut trigger_values,
-	)
-	.map(|_combos| {
-		// Create structured output
-		let js_output = BandPassJsOutput {
-			bp: bp_values,
-			bp_normalized: bp_normalized_values,
-			signal: signal_values,
-			trigger: trigger_values,
-		};
-
-		serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+	
+	// Single allocation for flattened output
+	let len = data.len();
+	let mut output = vec![0.0; len * 4]; // [bp..., bp_normalized..., signal..., trigger...]
+	
+	// Split the output into 4 slices
+	let (bp_slice, rest) = output.split_at_mut(len);
+	let (bp_norm_slice, rest) = rest.split_at_mut(len);
+	let (signal_slice, trigger_slice) = rest.split_at_mut(len);
+	
+	// Use the zero-allocation helper
+	bandpass_into_slice(bp_slice, bp_norm_slice, signal_slice, trigger_slice, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Return the flattened result - no copies!
+	Ok(BandPassResult {
+		values: output,
+		rows: 4,
+		cols: len,
 	})
-	.map_err(|e| JsValue::from_str(&e.to_string()))?
 }
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn bandpass_batch_metadata_js(
+pub fn bandpass_batch_metadata(
 	period_start: usize,
 	period_end: usize,
 	period_step: usize,
 	bandwidth_start: f64,
 	bandwidth_end: f64,
 	bandwidth_step: f64,
-) -> Result<Vec<f64>, JsValue> {
+) -> Vec<f64> {
 	let sweep = BandPassBatchRange {
 		period: (period_start, period_end, period_step),
 		bandwidth: (bandwidth_start, bandwidth_end, bandwidth_step),
@@ -1699,7 +1744,7 @@ pub fn bandpass_batch_metadata_js(
 		metadata.push(combo.bandwidth.unwrap());
 	}
 
-	Ok(metadata)
+	metadata
 }
 
 // New ergonomic WASM API
@@ -1711,20 +1756,41 @@ pub struct BandPassBatchConfig {
 }
 
 #[cfg(feature = "wasm")]
-#[derive(Serialize, Deserialize)]
-pub struct BandPassBatchJsOutput {
-	pub bp: Vec<f64>,
-	pub bp_normalized: Vec<f64>,
-	pub signal: Vec<f64>,
-	pub trigger: Vec<f64>,
-	pub combos: Vec<BandPassParams>,
-	pub rows: usize,
-	pub cols: usize,
+#[wasm_bindgen]
+pub struct BandPassBatchResult {
+	values: Vec<f64>, // flattened [bp_row0..., bp_norm_row0..., signal_row0..., trigger_row0..., bp_row1..., ...]
+	combos: usize,    // number of parameter combinations
+	outputs: usize,   // 4 (bp, bp_normalized, signal, trigger)
+	cols: usize,      // data length
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl BandPassBatchResult {
+	#[wasm_bindgen(getter)]
+	pub fn values(&self) -> Vec<f64> {
+		self.values.clone()
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn combos(&self) -> usize {
+		self.combos
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn outputs(&self) -> usize {
+		self.outputs
+	}
+
+	#[wasm_bindgen(getter)]
+	pub fn cols(&self) -> usize {
+		self.cols
+	}
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = bandpass_batch)]
-pub fn bandpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+pub fn bandpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<BandPassBatchResult, JsValue> {
 	// 1. Deserialize the configuration object from JavaScript
 	let config: BandPassBatchConfig =
 		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
@@ -1734,40 +1800,132 @@ pub fn bandpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
 		bandwidth: config.bandwidth_range,
 	};
 
-	// 2. Get dimensions and pre-allocate
+	// 2. Get dimensions
 	let combos = expand_grid(&sweep);
-	let rows = combos.len();
+	let num_combos = combos.len();
 	let cols = data.len();
 
-	let mut bp_values = vec![0.0; rows * cols];
-	let mut bp_normalized_values = vec![0.0; rows * cols];
-	let mut signal_values = vec![0.0; rows * cols];
-	let mut trigger_values = vec![0.0; rows * cols];
+	// Single allocation for all outputs in row-major order
+	// Layout: [combo0_bp, combo0_bp_norm, combo0_signal, combo0_trigger, combo1_bp, ...]
+	let mut output = vec![0.0; num_combos * cols * 4];
 
-	// 3. Run the _into variant with parallel=false for WASM
-	bandpass_batch_inner_into(
-		data,
-		&sweep,
-		Kernel::Scalar,
-		false,
-		&mut bp_values,
-		&mut bp_normalized_values,
-		&mut signal_values,
-		&mut trigger_values,
-	)
-	.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	// Process each combination
+	for (i, combo) in combos.iter().enumerate() {
+		let input = BandPassInput::from_slice(data, combo.clone());
+		
+		// Calculate offset for this combination's outputs
+		let offset = i * cols * 4;
+		
+		// Split the output slice for this combination
+		let combo_slice = &mut output[offset..offset + cols * 4];
+		let (bp_slice, rest) = combo_slice.split_at_mut(cols);
+		let (bp_norm_slice, rest) = rest.split_at_mut(cols);
+		let (signal_slice, trigger_slice) = rest.split_at_mut(cols);
+		
+		// Compute directly into the output slices
+		bandpass_into_slice(bp_slice, bp_norm_slice, signal_slice, trigger_slice, &input, Kernel::Scalar)
+			.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	}
 
-	// 4. Create the structured output
-	let js_output = BandPassBatchJsOutput {
-		bp: bp_values,
-		bp_normalized: bp_normalized_values,
-		signal: signal_values,
-		trigger: trigger_values,
-		combos,
-		rows,
+	// Return the flattened result - no copies!
+	Ok(BandPassBatchResult {
+		values: output,
+		combos: num_combos,
+		outputs: 4,
 		cols,
-	};
+	})
+}
 
-	// 5. Serialize the output struct into a JavaScript object
-	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+// ========================= Fast API with Aliasing Detection =========================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_into(
+	in_ptr: *const f64,
+	bp_ptr: *mut f64,
+	bp_normalized_ptr: *mut f64,
+	signal_ptr: *mut f64,
+	trigger_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	bandwidth: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || bp_ptr.is_null() || bp_normalized_ptr.is_null() || signal_ptr.is_null() || trigger_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+	
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = BandPassParams {
+			period: Some(period),
+			bandwidth: Some(bandwidth),
+		};
+		let input = BandPassInput::from_slice(data, params);
+		
+		// Check if any output pointers alias with input
+		let in_aliases_bp = in_ptr == bp_ptr;
+		let in_aliases_bp_norm = in_ptr == bp_normalized_ptr;
+		let in_aliases_signal = in_ptr == signal_ptr;
+		let in_aliases_trigger = in_ptr == trigger_ptr;
+		
+		// Check if any output pointers alias with each other
+		let outputs_alias = bp_ptr == bp_normalized_ptr || bp_ptr == signal_ptr || bp_ptr == trigger_ptr
+			|| bp_normalized_ptr == signal_ptr || bp_normalized_ptr == trigger_ptr
+			|| signal_ptr == trigger_ptr;
+		
+		if in_aliases_bp || in_aliases_bp_norm || in_aliases_signal || in_aliases_trigger || outputs_alias {
+			// Need temporary buffer - single allocation
+			let mut temp = vec![0.0; len * 4];
+			
+			// Split temp buffer into 4 slices
+			let (temp_bp, rest) = temp.split_at_mut(len);
+			let (temp_bp_normalized, rest) = rest.split_at_mut(len);
+			let (temp_signal, temp_trigger) = rest.split_at_mut(len);
+			
+			bandpass_into_slice(temp_bp, temp_bp_normalized, temp_signal, temp_trigger, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy to output pointers
+			let bp_out = std::slice::from_raw_parts_mut(bp_ptr, len);
+			let bp_normalized_out = std::slice::from_raw_parts_mut(bp_normalized_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let trigger_out = std::slice::from_raw_parts_mut(trigger_ptr, len);
+			
+			bp_out.copy_from_slice(temp_bp);
+			bp_normalized_out.copy_from_slice(temp_bp_normalized);
+			signal_out.copy_from_slice(temp_signal);
+			trigger_out.copy_from_slice(temp_trigger);
+		} else {
+			// Direct write - no aliasing
+			let bp_out = std::slice::from_raw_parts_mut(bp_ptr, len);
+			let bp_normalized_out = std::slice::from_raw_parts_mut(bp_normalized_ptr, len);
+			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
+			let trigger_out = std::slice::from_raw_parts_mut(trigger_ptr, len);
+			
+			bandpass_into_slice(bp_out, bp_normalized_out, signal_out, trigger_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+// ========================= Memory Management =========================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn bandpass_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
 }

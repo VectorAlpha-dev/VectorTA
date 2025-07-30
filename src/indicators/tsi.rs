@@ -15,11 +15,28 @@
 //! ## Returns
 //! - **`Ok(TsiOutput)`** on success with `Vec<f64>` matching input.
 //! - **`Err(TsiError)`** otherwise.
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::indicators::ema::{ema, EmaError, EmaInput, EmaOutput, EmaParams};
 use crate::indicators::mom::{mom, MomError, MomInput, MomOutput, MomParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,6 +67,7 @@ pub struct TsiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct TsiParams {
 	pub long_period: Option<usize>,
 	pub short_period: Option<usize>,
@@ -234,16 +252,76 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
 }
 
 #[inline]
+pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result<(), TsiError> {
+	let data: &[f64] = match &input.data {
+		TsiData::Candles { candles, source } => source_type(candles, source),
+		TsiData::Slice(sl) => sl,
+	};
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsiError::AllValuesNaN)?;
+	let len = data.len();
+	let long = input.get_long_period();
+	let short = input.get_short_period();
+
+	if dst.len() != data.len() {
+		return Err(TsiError::InvalidPeriod {
+			long_period: dst.len(),
+			short_period: 0,
+			data_len: data.len(),
+		});
+	}
+
+	if long == 0 || short == 0 || long > len || short > len {
+		return Err(TsiError::InvalidPeriod {
+			long_period: long,
+			short_period: short,
+			data_len: len,
+		});
+	}
+	let needed = 1 + long + short;
+	if (len - first) < needed {
+		return Err(TsiError::NotEnoughValidData {
+			needed,
+			valid: len - first,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Compute TSI using existing kernels
+	let result = unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => tsi_scalar(data, long, short, first),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => tsi_avx2(data, long, short, first),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => tsi_avx512(data, long, short, first),
+			_ => unreachable!(),
+		}
+	}?;
+
+	// Copy result to destination
+	dst.copy_from_slice(&result.values);
+
+	Ok(())
+}
+
+#[inline]
 pub unsafe fn tsi_scalar(data: &[f64], long: usize, short: usize, first: usize) -> Result<TsiOutput, TsiError> {
-	let mut out = vec![f64::NAN; data.len()];
+	let warmup_period = first + 1 + long + short - 1;
+	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
 	let mom_input = MomInput::from_slice(&data[first..], MomParams { period: Some(1) });
 	let mom_output: MomOutput = mom(&mom_input)?;
-	let abs_mom: Vec<f64> = mom_output
-		.values
-		.iter()
-		.map(|&v| if v.is_nan() { f64::NAN } else { v.abs() })
-		.collect();
+	
+	// Avoid allocation by computing abs_mom on the fly when needed
+	let mut abs_mom = alloc_with_nan_prefix(mom_output.values.len(), 0);
+	for (i, &v) in mom_output.values.iter().enumerate() {
+		abs_mom[i] = if v.is_nan() { f64::NAN } else { v.abs() };
+	}
 
 	let ema_long_numer = EmaInput::from_slice(&mom_output.values, EmaParams { period: Some(long) });
 	let ema_long_numer: EmaOutput = ema(&ema_long_numer)?;
@@ -323,7 +401,7 @@ impl TsiStream {
 		Ok(Self {
 			long,
 			short,
-			buffer: vec![f64::NAN; 1],
+			buffer: vec![f64::NAN; 1], // Small buffer, OK
 			idx: 0,
 			filled: false,
 			ema_long_num: crate::indicators::ema::EmaStream::try_new(EmaParams { period: Some(long) })?,
@@ -470,7 +548,7 @@ fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
 	let longs = axis_usize(r.long_period);
 	let shorts = axis_usize(r.short_period);
 
-	let mut out = Vec::with_capacity(longs.len() * shorts.len());
+	let mut out = Vec::with_capacity(longs.len() * shorts.len()); // Small params vector, OK
 	for &l in &longs {
 		for &s in &shorts {
 			out.push(TsiParams {
@@ -520,7 +598,20 @@ fn tsi_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory helpers like ALMA
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each combination
+	let warmup_periods: Vec<usize> = combos.iter()
+		.map(|c| first + 1 + c.long_period.unwrap() + c.short_period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values: &mut [f64] = unsafe { 
+		core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) 
+	};
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let p = &combos[row];
@@ -555,12 +646,86 @@ fn tsi_batch_inner(
 		}
 	}
 
+	// Convert uninitialized buffer to Vec like ALMA does
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	
 	Ok(TsiBatchOutput {
 		values,
 		combos,
 		rows,
 		cols,
 	})
+}
+
+#[inline(always)]
+fn tsi_batch_inner_into(
+	data: &[f64],
+	sweep: &TsiBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<TsiParams>, TsiError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(TsiError::InvalidPeriod {
+			long_period: 0,
+			short_period: 0,
+			data_len: 0,
+		});
+	}
+
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(TsiError::AllValuesNaN)?;
+	let max_long = combos.iter().map(|c| c.long_period.unwrap()).max().unwrap();
+	let max_short = combos.iter().map(|c| c.short_period.unwrap()).max().unwrap();
+	let max_needed = 1 + max_long + max_short;
+	if data.len() - first < max_needed {
+		return Err(TsiError::NotEnoughValidData {
+			needed: max_needed,
+			valid: data.len() - first,
+		});
+	}
+
+	let rows = combos.len();
+	let cols = data.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let p = &combos[row];
+		match kern {
+			Kernel::Scalar => tsi_row_scalar(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => tsi_row_avx2(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => tsi_row_avx512(data, p.long_period.unwrap(), p.short_period.unwrap(), first, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
 }
 
 #[inline(always)]
@@ -842,4 +1007,286 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "tsi")]
+#[pyo3(signature = (data, long_period=25, short_period=13, kernel=None))]
+pub fn tsi_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	long_period: usize,
+	short_period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+	
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = TsiParams {
+		long_period: Some(long_period),
+		short_period: Some(short_period),
+	};
+	let input = TsiInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| tsi_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "tsi_batch")]
+#[pyo3(signature = (data, long_period_range, short_period_range, kernel=None))]
+pub fn tsi_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	long_period_range: (usize, usize, usize),
+	short_period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+	
+	let slice_in = data.as_slice()?;
+	
+	let sweep = TsiBatchRange {
+		long_period: long_period_range,
+		short_period: short_period_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	// Pre-allocate output array for batch operations
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	// Compute without GIL using _into variant for zero-copy
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			// Map batch kernels to regular kernels
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			tsi_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	// Build result dictionary
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	
+	// Add parameter arrays
+	dict.set_item(
+		"long_periods",
+		combos.iter()
+			.map(|p| p.long_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	dict.set_item(
+		"short_periods", 
+		combos.iter()
+			.map(|p| p.short_period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py)
+	)?;
+	
+	Ok(dict)
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "TsiStream")]
+pub struct TsiStreamPy {
+	inner: TsiStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl TsiStreamPy {
+	#[new]
+	pub fn new(long_period: usize, short_period: usize) -> PyResult<Self> {
+		let params = TsiParams {
+			long_period: Some(long_period),
+			short_period: Some(short_period),
+		};
+		let inner = TsiStream::try_new(params)
+			.map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(TsiStreamPy { inner })
+	}
+	
+	pub fn update(&mut self, value: f64) -> Option<f64> {
+		self.inner.update(value)
+	}
+}
+
+// ====== WASM Bindings ======
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsi_js(data: &[f64], long_period: usize, short_period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = TsiParams {
+		long_period: Some(long_period),
+		short_period: Some(short_period),
+	};
+	let input = TsiInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()];
+
+	tsi_into_slice(&mut output, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsi_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	long_period: usize,
+	short_period: usize,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+		let params = TsiParams {
+			long_period: Some(long_period),
+			short_period: Some(short_period),
+		};
+		let input = TsiInput::from_slice(data, params);
+
+		if in_ptr == out_ptr as *const f64 {
+			// Aliasing detected - use temporary buffer
+			let mut temp = vec![0.0; len];
+			tsi_into_slice(&mut temp, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			tsi_into_slice(out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsi_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsi_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TsiBatchConfig {
+	pub long_period_range: (usize, usize, usize),
+	pub short_period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct TsiBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<TsiParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = tsi_batch)]
+pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: TsiBatchConfig = serde_wasm_bindgen::from_value(config)
+		.map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = TsiBatchRange {
+		long_period: config.long_period_range,
+		short_period: config.short_period_range,
+	};
+
+	let result = tsi_batch_slice(data, &sweep, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = TsiBatchJsOutput {
+		values: result.values,
+		combos: result.combos,
+		rows: result.rows,
+		cols: result.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output)
+		.map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn tsi_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	long_period_start: usize,
+	long_period_end: usize,
+	long_period_step: usize,
+	short_period_start: usize,
+	short_period_end: usize,
+	short_period_step: usize,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to tsi_batch_into"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = TsiBatchRange {
+			long_period: (long_period_start, long_period_end, long_period_step),
+			short_period: (short_period_start, short_period_end, short_period_step),
+		};
+
+		let combos = expand_grid(&sweep);
+		let rows = combos.len();
+		let cols = len;
+		let total_size = rows * cols;
+
+		let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
+
+		// Use the batch_inner_into function to compute directly into output
+		match tsi_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice) {
+			Ok(_) => Ok(rows),
+			Err(e) => Err(JsValue::from_str(&e.to_string())),
+		}
+	}
 }

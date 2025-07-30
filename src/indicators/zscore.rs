@@ -21,7 +21,7 @@
 //! - **`Ok(ZscoreOutput)`** on success, containing a `Vec<f64>` matching the input.
 //! - **`Err(ZscoreError)`** otherwise.
 
-use crate::indicators::deviation::{deviation, DevError, DevInput, DevParams, DeviationOutput};
+use crate::indicators::deviation::{deviation, DevError, DevInput, DevParams, DeviationData, DeviationOutput};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -287,7 +287,7 @@ pub unsafe fn zscore_scalar(
 	let means = ma(ma_type, MaData::Slice(data), period)
 		.map_err(|e| ZscoreError::MaError(e.to_string()))?;
 	let dev_input = DevInput {
-		data,
+		data: DeviationData::Slice(data),
 		params: DevParams {
 			period: Some(period),
 			devtype: Some(devtype),
@@ -424,7 +424,7 @@ impl ZscoreStream {
 			Err(_) => return f64::NAN,
 		};
 		let dev_input = DevInput {
-			data: &ordered,
+			data: DeviationData::Slice(&ordered),
 			params: DevParams {
 				period: Some(self.period),
 				devtype: Some(self.devtype),
@@ -760,7 +760,7 @@ unsafe fn zscore_row_scalar(
 		}
 	};
 	let dev_input = DevInput {
-		data,
+		data: DeviationData::Slice(data),
 		params: DevParams {
 			period: Some(period),
 			devtype: Some(devtype),

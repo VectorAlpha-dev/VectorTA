@@ -56,6 +56,16 @@ use crate::indicators::correlation_cycle::{
 	correlation_cycle_batch_py, correlation_cycle_py, CorrelationCycleStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::correl_hl::{correl_hl_batch_py, correl_hl_py, CorrelHlStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::deviation::{deviation_batch_py, deviation_py, DeviationStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::eri::{eri_batch_py, eri_py, EriStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::kdj::{kdj_batch_py, kdj_py, KdjStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::decycler::{decycler_batch_py, decycler_py, DecyclerStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::dpo::{dpo_batch_py, dpo_py, DpoStreamPy};
@@ -273,6 +283,30 @@ use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, 
 use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::linearreg_intercept::{
+	linearreg_intercept_batch_py, linearreg_intercept_py, LinearRegInterceptStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::mass::{mass_batch_py, mass_py, MassStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::midprice::{midprice_batch_py, midprice_py, MidpriceStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::obv::{obv_batch_py, obv_py, ObvStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::qstick::{qstick_batch_py, qstick_py, QstickStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::rsx::{rsx_batch_py, rsx_py, RsxStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::stc::{stc_batch_py, stc_py, StcStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::tsi::{tsi_batch_py, tsi_py, TsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vwmacd::{vwmacd_batch_py, vwmacd_py, VwmacdStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::willr::{willr_batch_py, willr_py, WillrStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::nvi::{nvi_py, NviStreamPy};
 #[cfg(feature = "python")]
@@ -687,6 +721,31 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
 	m.add_class::<CorrelationCycleStreamPy>()?;
 
+	// Register Correl HL functions with their user-facing names
+	m.add_function(wrap_pyfunction!(correl_hl_py, m)?)?;
+	m.add_function(wrap_pyfunction!(correl_hl_batch_py, m)?)?;
+	m.add_class::<CorrelHlStreamPy>()?;
+
+	// Register Deviation functions with their user-facing names
+	m.add_function(wrap_pyfunction!(deviation_py, m)?)?;
+	m.add_function(wrap_pyfunction!(deviation_batch_py, m)?)?;
+	m.add_class::<DeviationStreamPy>()?;
+
+	// Register DTI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(dti_py, m)?)?;
+	m.add_function(wrap_pyfunction!(dti_batch_py, m)?)?;
+	m.add_class::<DtiStreamPy>()?;
+
+	// Register ERI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(eri_py, m)?)?;
+	m.add_function(wrap_pyfunction!(eri_batch_py, m)?)?;
+	m.add_class::<EriStreamPy>()?;
+
+	// Register KDJ functions with their user-facing names
+	m.add_function(wrap_pyfunction!(kdj_py, m)?)?;
+	m.add_function(wrap_pyfunction!(kdj_batch_py, m)?)?;
+	m.add_class::<KdjStreamPy>()?;
+
 	// Register Decycler functions with their user-facing names
 	m.add_function(wrap_pyfunction!(decycler_py, m)?)?;
 	m.add_function(wrap_pyfunction!(decycler_batch_py, m)?)?;
@@ -870,6 +929,61 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(bop_py, m)?)?;
 	m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
 	m.add_class::<BopStreamPy>()?;
+
+	// Register Linear Regression Intercept functions with their user-facing names
+	m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
+	m.add_function(wrap_pyfunction!(linearreg_intercept_batch_py, m)?)?;
+	m.add_class::<LinearRegInterceptStreamPy>()?;
+
+	// Register Mass Index functions with their user-facing names
+	m.add_function(wrap_pyfunction!(mass_py, m)?)?;
+	m.add_function(wrap_pyfunction!(mass_batch_py, m)?)?;
+	m.add_class::<MassStreamPy>()?;
+
+	// Register Midprice functions with their user-facing names
+	m.add_function(wrap_pyfunction!(midprice_py, m)?)?;
+	m.add_function(wrap_pyfunction!(midprice_batch_py, m)?)?;
+	m.add_class::<MidpriceStreamPy>()?;
+
+	// Register OBV functions with their user-facing names
+	m.add_function(wrap_pyfunction!(obv_py, m)?)?;
+	m.add_function(wrap_pyfunction!(obv_batch_py, m)?)?;
+	m.add_class::<ObvStreamPy>()?;
+
+	// Register Qstick functions with their user-facing names
+	m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
+	m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
+	m.add_class::<QstickStreamPy>()?;
+
+	// Register RSX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
+	m.add_class::<RsxStreamPy>()?;
+
+	// Register STC functions with their user-facing names
+	m.add_function(wrap_pyfunction!(stc_py, m)?)?;
+	m.add_function(wrap_pyfunction!(stc_batch_py, m)?)?;
+	m.add_class::<StcStreamPy>()?;
+
+	// Register TSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(tsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(tsi_batch_py, m)?)?;
+	m.add_class::<TsiStreamPy>()?;
+
+	// Register VIDYA functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vidya_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vidya_batch_py, m)?)?;
+	m.add_class::<VidyaStreamPy>()?;
+	
+	// Register VWMACD functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vwmacd_batch_py, m)?)?;
+	m.add_class::<VwmacdStreamPy>()?;
+
+	// Register WILLR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(willr_py, m)?)?;
+	m.add_function(wrap_pyfunction!(willr_batch_py, m)?)?;
+	m.add_class::<WillrStreamPy>()?;
 
 	// Register ZSCORE functions with their user-facing names
 	m.add_function(wrap_pyfunction!(zscore_py, m)?)?;

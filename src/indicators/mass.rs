@@ -20,9 +20,26 @@
 //!   with leading `NaN`s until enough data is accumulated for the Mass Index calculation.
 //! - **`Err(MassError)`** otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,6 +67,7 @@ pub struct MassOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MassParams {
 	pub period: Option<usize>,
 }
@@ -216,7 +234,8 @@ pub fn mass_with_kernel(input: &MassInput, kernel: Kernel) -> Result<MassOutput,
 		});
 	}
 
-	let mut out = vec![f64::NAN; high.len()];
+	let warmup_period = first_valid_idx + 16 + period - 1;
+	let mut out = alloc_with_nan_prefix(high.len(), warmup_period);
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -233,6 +252,76 @@ pub fn mass_with_kernel(input: &MassInput, kernel: Kernel) -> Result<MassOutput,
 		}
 	}
 	Ok(MassOutput { values: out })
+}
+
+#[inline]
+pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Result<(), MassError> {
+	let (high, low) = match &input.data {
+		MassData::Candles {
+			candles,
+			high_source,
+			low_source,
+		} => (source_type(candles, high_source), source_type(candles, low_source)),
+		MassData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() {
+		return Err(MassError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MassError::DifferentLengthHL);
+	}
+	if dst.len() != high.len() {
+		return Err(MassError::InvalidPeriod {
+			period: dst.len(),
+			data_len: high.len(),
+		});
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > high.len() {
+		return Err(MassError::InvalidPeriod {
+			period,
+			data_len: high.len(),
+		});
+	}
+
+	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(MassError::AllValuesNaN),
+	};
+
+	let needed_bars = 16 + period - 1;
+	if (high.len() - first_valid_idx) < needed_bars {
+		return Err(MassError::NotEnoughValidData {
+			needed: needed_bars,
+			valid: high.len() - first_valid_idx,
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => mass_scalar(high, low, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => mass_avx2(high, low, period, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + 16 + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 #[inline]
@@ -462,6 +551,21 @@ impl MassBatchOutput {
 	}
 }
 
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MassBatchConfig {
+	pub period_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct MassBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<MassParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
 #[inline(always)]
 fn expand_grid_mass(r: &MassBatchRange) -> Vec<MassParams> {
 	fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -529,7 +633,21 @@ fn mass_batch_inner(
 
 	let rows = combos.len();
 	let cols = high.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with proper warmup calculation
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warm: Vec<usize> = combos
+		.iter()
+		.map(|c| first + 16 + c.period.unwrap() - 1)
+		.collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warm);
+	
+	// Convert to mutable slice for computation
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let values_slice: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -546,7 +664,7 @@ fn mass_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
+			values_slice
 				.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
@@ -554,15 +672,24 @@ fn mass_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in values_slice.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+
+	// Convert ManuallyDrop buffer to Vec
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
 
 	Ok(MassBatchOutput {
 		values,
@@ -603,11 +730,6 @@ unsafe fn mass_row_avx512_short(high: &[f64], low: &[f64], period: usize, first:
 #[inline(always)]
 unsafe fn mass_row_avx512_long(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
 	mass_scalar(high, low, period, first, out);
-}
-
-#[inline(always)]
-fn expand_grid(_r: &MassBatchRange) -> Vec<MassParams> {
-	unimplemented!();
 }
 
 // Tests
@@ -835,4 +957,327 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "mass")]
+#[pyo3(signature = (high, low, period, kernel=None))]
+pub fn mass_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+
+	let params = MassParams { period: Some(period) };
+	let input = MassInput::from_slices(high_slice, low_slice, params);
+
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| mass_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "MassStream")]
+pub struct MassStreamPy {
+	stream: MassStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl MassStreamPy {
+	#[new]
+	fn new(period: usize) -> PyResult<Self> {
+		let params = MassParams { period: Some(period) };
+		let stream = MassStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(MassStreamPy { stream })
+	}
+
+	fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "mass_batch")]
+#[pyo3(signature = (high, low, period_range, kernel=None))]
+pub fn mass_batch_py<'py>(
+	py: Python<'py>,
+	high: PyReadonlyArray1<'py, f64>,
+	low: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let high_slice = high.as_slice()?;
+	let low_slice = low.as_slice()?;
+
+	let sweep = MassBatchRange { period: period_range };
+
+	let combos = expand_grid_mass(&sweep);
+	let rows = combos.len();
+	let cols = high_slice.len();
+
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			mass_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+#[cfg(any(feature = "python", feature = "wasm"))]
+#[inline(always)]
+fn mass_batch_inner_into(
+	high: &[f64],
+	low: &[f64],
+	sweep: &MassBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<MassParams>, MassError> {
+	let combos = expand_grid_mass(sweep);
+	if combos.is_empty() {
+		return Err(MassError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+
+	if high.is_empty() || low.is_empty() || high.len() != low.len() {
+		return Err(MassError::DifferentLengthHL);
+	}
+
+	let first = (0..high.len())
+		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
+		.ok_or(MassError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+	let needed_bars = 16 + max_p - 1;
+	if high.len() - first < needed_bars {
+		return Err(MassError::NotEnoughValidData {
+			needed: needed_bars,
+			valid: high.len() - first,
+		});
+	}
+
+	let cols = high.len();
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		match kern {
+			Kernel::Scalar => mass_row_scalar(high, low, period, first, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => mass_row_avx2(high, low, period, first, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
+			_ => unreachable!(),
+		}
+	};
+
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+
+	Ok(combos)
+}
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mass_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
+	let params = MassParams { period: Some(period) };
+	let input = MassInput::from_slices(high, low, params);
+
+	let mut output = vec![0.0; high.len()];
+
+	mass_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mass_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+) -> Result<(), JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to mass_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = MassParams { period: Some(period) };
+		let input = MassInput::from_slices(high, low, params);
+
+		// Check for aliasing with either input
+		if high_ptr == out_ptr || low_ptr == out_ptr {
+			let mut temp = vec![0.0; len];
+			mass_into_slice(&mut temp, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			mass_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mass_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mass_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe {
+			let _ = Vec::from_raw_parts(ptr, len, len);
+		}
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = mass_batch)]
+pub fn mass_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: MassBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = MassBatchRange {
+		period: config.period_range,
+	};
+
+	let output = mass_batch_inner(high, low, &sweep, Kernel::Auto, false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = MassBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn mass_batch_into(
+	high_ptr: *const f64,
+	low_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+) -> Result<usize, JsValue> {
+	if high_ptr.is_null() || low_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to mass_batch_into"));
+	}
+
+	unsafe {
+		let high = std::slice::from_raw_parts(high_ptr, len);
+		let low = std::slice::from_raw_parts(low_ptr, len);
+
+		let sweep = MassBatchRange {
+			period: (period_start, period_end, period_step),
+		};
+
+		let combos = expand_grid_mass(&sweep);
+		let rows = combos.len();
+		let cols = len;
+
+		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+
+		mass_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+		Ok(rows)
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct MassStreamWasm {
+	stream: MassStream,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl MassStreamWasm {
+	#[wasm_bindgen(constructor)]
+	pub fn new(period: usize) -> Result<MassStreamWasm, JsValue> {
+		let params = MassParams { period: Some(period) };
+		let stream = MassStream::try_new(params).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		Ok(MassStreamWasm { stream })
+	}
+
+	pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
+		self.stream.update(high, low)
+	}
 }

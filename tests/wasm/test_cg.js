@@ -152,92 +152,26 @@ test('CG all NaN input', () => {
     }, /All values are NaN/);
 });
 
-test('CG batch single parameter set', () => {
-    // Test batch with single parameter combination
-    const close = new Float64Array(testData.close);
-    
-    // Single parameter set: period=10
-    const batchResult = wasm.cg_batch_js(
-        close,
-        10, 10, 0      // period range
-    );
-    
-    // Should match single calculation
-    const singleResult = wasm.cg_js(close, 10);
-    
-    assert.strictEqual(batchResult.length, singleResult.length);
-    assertArrayClose(batchResult, singleResult, 1e-10, "Batch vs single mismatch");
-});
-
-test('CG batch multiple periods', () => {
-    // Test batch with multiple period values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
-    
-    // Multiple periods: 10, 12, 14
-    const batchResult = wasm.cg_batch_js(
-        close,
-        10, 14, 2      // period range
-    );
-    
-    // Should have 3 rows * 100 cols = 300 values
-    assert.strictEqual(batchResult.length, 3 * 100);
-    
-    // Verify each row matches individual calculation
-    const periods = [10, 12, 14];
-    for (let i = 0; i < periods.length; i++) {
-        const rowStart = i * 100;
-        const rowEnd = rowStart + 100;
-        const rowData = batchResult.slice(rowStart, rowEnd);
-        
-        const singleResult = wasm.cg_js(close, periods[i]);
-        assertArrayClose(
-            rowData, 
-            singleResult, 
-            1e-10, 
-            `Period ${periods[i]} mismatch`
-        );
-    }
-});
-
-test('CG batch metadata', () => {
-    // Test metadata function returns correct parameter combinations
-    const metadata = wasm.cg_batch_metadata_js(
-        10, 14, 2      // period: 10, 12, 14
-    );
-    
-    // Should have 3 periods
-    assert.strictEqual(metadata.length, 3);
-    
-    // Check values
-    assert.strictEqual(metadata[0], 10);
-    assert.strictEqual(metadata[1], 12);
-    assert.strictEqual(metadata[2], 14);
-});
 
 test('CG batch full parameter sweep', () => {
     // Test full parameter sweep matching expected structure
     const close = new Float64Array(testData.close.slice(0, 50));
     
-    const batchResult = wasm.cg_batch_js(
-        close,
-        10, 14, 2      // 3 periods
-    );
-    
-    const metadata = wasm.cg_batch_metadata_js(
-        10, 14, 2
-    );
+    const result = wasm.cg_batch(close, {
+        period_range: [10, 14, 2]  // 3 periods
+    });
     
     // Should have 3 combinations
-    const numCombos = metadata.length;
-    assert.strictEqual(numCombos, 3);
-    assert.strictEqual(batchResult.length, 3 * 50);
+    assert.strictEqual(result.rows, 3);
+    assert.strictEqual(result.cols, 50);
+    assert.strictEqual(result.values.length, 3 * 50);
     
     // Verify structure
-    for (let combo = 0; combo < numCombos; combo++) {
-        const period = metadata[combo];
+    for (let combo = 0; combo < result.rows; combo++) {
+        const period = result.combos[combo].period;
         
         const rowStart = combo * 50;
-        const rowData = batchResult.slice(rowStart, rowStart + 50);
+        const rowData = result.values.slice(rowStart, rowStart + 50);
         
         // First period values should be NaN
         for (let i = 0; i < period; i++) {
@@ -256,28 +190,27 @@ test('CG batch edge cases', () => {
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     
     // Single value sweep
-    const singleBatch = wasm.cg_batch_js(
-        close,
-        5, 5, 1
-    );
+    const singleResult = wasm.cg_batch(close, {
+        period_range: [5, 5, 1]
+    });
     
-    assert.strictEqual(singleBatch.length, 12);
+    assert.strictEqual(singleResult.rows, 1);
+    assert.strictEqual(singleResult.values.length, 12);
     
     // Step larger than range
-    const largeBatch = wasm.cg_batch_js(
-        close,
-        5, 7, 10 // Step larger than range
-    );
+    const largeResult = wasm.cg_batch(close, {
+        period_range: [5, 7, 10] // Step larger than range
+    });
     
     // Should only have period=5
-    assert.strictEqual(largeBatch.length, 12);
+    assert.strictEqual(largeResult.rows, 1);
+    assert.strictEqual(largeResult.values.length, 12);
     
     // Empty data should throw
     assert.throws(() => {
-        wasm.cg_batch_js(
-            new Float64Array([]),
-            10, 10, 0
-        );
+        wasm.cg_batch(new Float64Array([]), {
+            period_range: [10, 10, 0]
+        });
     }, /All values are NaN/);
 });
 
@@ -354,34 +287,6 @@ test('CG batch - new API with multiple parameters', () => {
     }
 });
 
-test('CG batch - new API matches old API results', () => {
-    // Comprehensive comparison test
-    const close = new Float64Array(testData.close.slice(0, 100));
-    
-    const params = {
-        period_range: [8, 12, 2]
-    };
-    
-    // Old API
-    const oldValues = wasm.cg_batch_js(
-        close,
-        params.period_range[0], params.period_range[1], params.period_range[2]
-    );
-    
-    // New API
-    const newResult = wasm.cg_batch(close, params);
-    
-    // Should produce identical values
-    assert.strictEqual(oldValues.length, newResult.values.length);
-    
-    for (let i = 0; i < oldValues.length; i++) {
-        if (isNaN(oldValues[i]) && isNaN(newResult.values[i])) {
-            continue; // Both NaN is OK
-        }
-        assert(Math.abs(oldValues[i] - newResult.values[i]) < 1e-10,
-               `Value mismatch at index ${i}: old=${oldValues[i]}, new=${newResult.values[i]}`);
-    }
-});
 
 test('CG batch - new API error handling', () => {
     const close = new Float64Array(testData.close.slice(0, 10));

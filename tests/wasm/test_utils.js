@@ -445,6 +445,7 @@ const EXPECTED_OUTPUTS = {
             -0.5336179295624333
         ]
     },
+<<<<<<< HEAD
     var: {
         defaultParams: { period: 14, nbdev: 1.0 },
         last5Values: [
@@ -552,6 +553,16 @@ const EXPECTED_OUTPUTS = {
             56.71819195768154,
             60.487299747927636,
             55.022521428674175
+=======
+    midprice: {
+        defaultParams: { period: 14 },
+        last5Values: [
+            59583.0,
+            59583.0,
+            59583.0,
+            59486.0,
+            58989.0
+>>>>>>> trip-6
         ]
     }
 };

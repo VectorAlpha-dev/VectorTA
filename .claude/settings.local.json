@@ -268,12 +268,12 @@
       "Bash(./run_wasm_benchmark.bat --rebuild wma)",
       "Bash(./run_python_benchmark.bat alligator)",
       "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
-      "Bash(test_bindings.bat atr)",
-      "Bash(test_bindings.bat coppock)",
-      "Bash(rustfmt:*)",
-      "Bash(powershell:*)",
-      "Bash(cargo rustc:*)",
-      "Bash(.venv\\Scripts\\python.exe test_rsmk_quick.py:*)"
+      "Bash(test_bindings.bat:*)",
+      "Bash(.test_bindings.bat bandpass --python)",
+      "Bash(cargo:*)",
+      "Bash(set RUST_TEST_THREADS=1)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venvScriptspython testspythontest_willr.py)"
     ],
     "deny": []
   }

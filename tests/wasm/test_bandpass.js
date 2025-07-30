@@ -45,14 +45,11 @@ test('BandPass partial params', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.bandpass_js(close, 20, 0.3);
-    assert(result.bp, 'Should have bp array');
-    assert(result.bp_normalized, 'Should have bp_normalized array');
-    assert(result.signal, 'Should have signal array');
-    assert(result.trigger, 'Should have trigger array');
-    assert.strictEqual(result.bp.length, close.length);
-    assert.strictEqual(result.bp_normalized.length, close.length);
-    assert.strictEqual(result.signal.length, close.length);
-    assert.strictEqual(result.trigger.length, close.length);
+    assert(result, 'Should have result');
+    assert(result.values, 'Should have values array');
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows (bp, bp_normalized, signal, trigger)');
+    assert.strictEqual(result.cols, close.length, 'Cols should match input length');
+    assert.strictEqual(result.values.length, close.length * 4, 'Values should be flattened array');
 });
 
 test('BandPass accuracy', async () => {
@@ -66,14 +63,18 @@ test('BandPass accuracy', async () => {
         expected.defaultParams.bandwidth
     );
     
-    assert(result.bp, 'Should have bp array');
-    assert(result.bp_normalized, 'Should have bp_normalized array');
-    assert(result.signal, 'Should have signal array');
-    assert(result.trigger, 'Should have trigger array');
-    assert.strictEqual(result.bp.length, close.length);
+    assert(result, 'Should have result');
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows');
+    assert.strictEqual(result.cols, close.length, 'Cols should match input length');
+    
+    // Extract arrays from flattened result
+    const bp = result.values.slice(0, close.length);
+    const bp_normalized = result.values.slice(close.length, close.length * 2);
+    const signal = result.values.slice(close.length * 2, close.length * 3);
+    const trigger = result.values.slice(close.length * 3, close.length * 4);
     
     // Check last 5 values match expected with 1e-1 tolerance (as in Rust tests)
-    const last5Bp = result.bp.slice(-5);
+    const last5Bp = bp.slice(-5);
     assertArrayClose(
         last5Bp,
         expected.last5Values.bp,
@@ -81,7 +82,7 @@ test('BandPass accuracy', async () => {
         "Band-Pass bp last 5 values mismatch"
     );
     
-    const last5BpNormalized = result.bp_normalized.slice(-5);
+    const last5BpNormalized = bp_normalized.slice(-5);
     assertArrayClose(
         last5BpNormalized,
         expected.last5Values.bp_normalized,
@@ -89,7 +90,7 @@ test('BandPass accuracy', async () => {
         "Band-Pass bp_normalized last 5 values mismatch"
     );
     
-    const last5Signal = result.signal.slice(-5);
+    const last5Signal = signal.slice(-5);
     assertArrayClose(
         last5Signal,
         expected.last5Values.signal,
@@ -97,18 +98,13 @@ test('BandPass accuracy', async () => {
         "Band-Pass signal last 5 values mismatch"
     );
     
-    const last5Trigger = result.trigger.slice(-5);
+    const last5Trigger = trigger.slice(-5);
     assertArrayClose(
         last5Trigger,
         expected.last5Values.trigger,
         1e-1,
         "Band-Pass trigger last 5 values mismatch"
     );
-    
-    // Compare full output with Rust
-    // Note: Bandpass returns multiple outputs, compareWithRust expects single array
-    // Commenting out for now as it needs special handling
-    // await compareWithRust('bandpass', result.bp, 'close', expected.defaultParams);
 });
 
 test('BandPass default params', () => {
@@ -116,11 +112,10 @@ test('BandPass default params', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.bandpass_js(close, 20, 0.3);
-    assert(result.bp, 'Should have bp array');
-    assert(result.bp_normalized, 'Should have bp_normalized array');
-    assert(result.signal, 'Should have signal array');
-    assert(result.trigger, 'Should have trigger array');
-    assert.strictEqual(result.bp.length, close.length);
+    assert(result, 'Should have result');
+    assert.strictEqual(result.rows, 4, 'Should have 4 rows');
+    assert.strictEqual(result.cols, close.length, 'Cols should match input length');
+    assert.strictEqual(result.values.length, close.length * 4, 'Values should be flattened array');
 });
 
 test('BandPass zero period', () => {
@@ -156,15 +151,18 @@ test('BandPass reinput', () => {
     
     // First pass with specific parameters
     const firstResult = wasm.bandpass_js(close, 20, 0.3);
-    assert.strictEqual(firstResult.bp.length, close.length);
+    assert.strictEqual(firstResult.cols, close.length);
+    
+    // Extract bp from flattened result
+    const firstBp = firstResult.values.slice(0, close.length);
     
     // Second pass with different parameters using first result bp as input
     const secondResult = wasm.bandpass_js(
-        new Float64Array(firstResult.bp),
+        new Float64Array(firstBp),
         30,
         0.5
     );
-    assert.strictEqual(secondResult.bp.length, firstResult.bp.length);
+    assert.strictEqual(secondResult.cols, firstResult.cols);
 });
 
 test('BandPass NaN handling', () => {
@@ -172,15 +170,21 @@ test('BandPass NaN handling', () => {
     const close = new Float64Array(testData.close);
     
     const result = wasm.bandpass_js(close, 20, 0.3);
-    assert.strictEqual(result.bp.length, close.length);
+    assert.strictEqual(result.cols, close.length);
+    
+    // Extract arrays from flattened result
+    const bp = result.values.slice(0, close.length);
+    const bp_normalized = result.values.slice(close.length, close.length * 2);
+    const signal = result.values.slice(close.length * 2, close.length * 3);
+    const trigger = result.values.slice(close.length * 3, close.length * 4);
     
     // After index 30, no NaN values should exist in any output
-    if (result.bp.length > 30) {
-        for (let i = 30; i < result.bp.length; i++) {
-            assert(!isNaN(result.bp[i]), `Found unexpected NaN in bp at index ${i}`);
-            assert(!isNaN(result.bp_normalized[i]), `Found unexpected NaN in bp_normalized at index ${i}`);
-            assert(!isNaN(result.signal[i]), `Found unexpected NaN in signal at index ${i}`);
-            assert(!isNaN(result.trigger[i]), `Found unexpected NaN in trigger at index ${i}`);
+    if (close.length > 30) {
+        for (let i = 30; i < close.length; i++) {
+            assert(!isNaN(bp[i]), `Found unexpected NaN in bp at index ${i}`);
+            assert(!isNaN(bp_normalized[i]), `Found unexpected NaN in bp_normalized at index ${i}`);
+            assert(!isNaN(signal[i]), `Found unexpected NaN in signal at index ${i}`);
+            assert(!isNaN(trigger[i]), `Found unexpected NaN in trigger at index ${i}`);
         }
     }
 });
@@ -190,25 +194,24 @@ test('BandPass batch single parameter set', () => {
     const close = new Float64Array(testData.close);
     
     // Single parameter set: period=20, bandwidth=0.3
-    const batchResult = wasm.bandpass_batch_js(
-        close,
-        20, 20, 0,    // period range
-        0.3, 0.3, 0.0 // bandwidth range
-    );
+    const batchResult = wasm.bandpass_batch(close, {
+        period_range: [20, 20, 0],
+        bandwidth_range: [0.3, 0.3, 0.0]
+    });
     
-    assert(batchResult.bp, 'Should have bp array');
-    assert(batchResult.bp_normalized, 'Should have bp_normalized array');
-    assert(batchResult.signal, 'Should have signal array');
-    assert(batchResult.trigger, 'Should have trigger array');
+    assert(batchResult, 'Should have result');
+    assert.strictEqual(batchResult.combos, 1, 'Should have 1 combination');
+    assert.strictEqual(batchResult.outputs, 4, 'Should have 4 outputs');
+    assert.strictEqual(batchResult.cols, close.length, 'Cols should match input length');
+    
+    // Extract first combination's bp values
+    const batchBp = batchResult.values.slice(0, close.length);
     
     // Should match single calculation
     const singleResult = wasm.bandpass_js(close, 20, 0.3);
+    const singleBp = singleResult.values.slice(0, close.length);
     
-    assert.strictEqual(batchResult.bp.length, singleResult.bp.length);
-    assertArrayClose(batchResult.bp, singleResult.bp, 1e-10, "Batch vs single bp mismatch");
-    assertArrayClose(batchResult.bp_normalized, singleResult.bp_normalized, 1e-10, "Batch vs single bp_normalized mismatch");
-    assertArrayClose(batchResult.signal, singleResult.signal, 1e-10, "Batch vs single signal mismatch");
-    assertArrayClose(batchResult.trigger, singleResult.trigger, 1e-10, "Batch vs single trigger mismatch");
+    assertArrayClose(batchBp, singleBp, 1e-10, "Batch vs single bp mismatch");
 });
 
 test('BandPass batch multiple parameters', () => {
@@ -217,28 +220,27 @@ test('BandPass batch multiple parameters', () => {
     const close = new Float64Array(testData.close.slice(0, 700));
     
     // Multiple periods and bandwidths
-    const batchResult = wasm.bandpass_batch_js(
-        close,
-        10, 30, 10,     // period: 10, 20, 30
-        0.2, 0.4, 0.1   // bandwidth: 0.2, 0.3, 0.4
-    );
+    const batchResult = wasm.bandpass_batch(close, {
+        period_range: [10, 30, 10],     // period: 10, 20, 30
+        bandwidth_range: [0.2, 0.4, 0.1]   // bandwidth: 0.2, 0.3, 0.4
+    });
     
     // Should have 3 * 3 = 9 combinations
-    const expectedCombos = 9;
-    assert.strictEqual(batchResult.bp.length, expectedCombos * 700);
-    assert.strictEqual(batchResult.bp_normalized.length, expectedCombos * 700);
-    assert.strictEqual(batchResult.signal.length, expectedCombos * 700);
-    assert.strictEqual(batchResult.trigger.length, expectedCombos * 700);
+    assert.strictEqual(batchResult.combos, 9);
+    assert.strictEqual(batchResult.outputs, 4);
+    assert.strictEqual(batchResult.cols, 700);
+    assert.strictEqual(batchResult.values.length, 9 * 4 * 700);
     
-    // Verify first combination (period=10, bandwidth=0.2)
-    const firstRowBp = batchResult.bp.slice(0, 700);
+    // Verify first combination (period=10, bandwidth=0.2) bp values
+    const firstBp = batchResult.values.slice(0, 700);
     const singleResult = wasm.bandpass_js(close, 10, 0.2);
-    assertArrayClose(firstRowBp, singleResult.bp, 1e-10, "First combination mismatch");
+    const singleBp = singleResult.values.slice(0, 700);
+    assertArrayClose(firstBp, singleBp, 1e-10, "First combination mismatch");
 });
 
 test('BandPass batch metadata', () => {
     // Test metadata function returns correct parameter combinations
-    const metadata = wasm.bandpass_batch_metadata_js(
+    const metadata = wasm.bandpass_batch_metadata(
         10, 30, 10,     // period: 10, 20, 30
         0.2, 0.4, 0.1   // bandwidth: 0.2, 0.3, 0.4
     );
@@ -285,111 +287,8 @@ test('BandPass invalid bandwidth', () => {
     }, /Invalid period/);
 });
 
-// New API tests
-test('BandPass batch - new ergonomic API with single parameter', () => {
-    // Test the new API with a single parameter combination
-    const close = new Float64Array(testData.close);
-    
-    const result = wasm.bandpass_batch(close, {
-        period_range: [20, 20, 0],
-        bandwidth_range: [0.3, 0.3, 0.0]
-    });
-    
-    // Verify structure
-    assert(result.bp, 'Should have bp array');
-    assert(result.bp_normalized, 'Should have bp_normalized array');
-    assert(result.signal, 'Should have signal array');
-    assert(result.trigger, 'Should have trigger array');
-    assert(result.combos, 'Should have combos array');
-    assert(typeof result.rows === 'number', 'Should have rows count');
-    assert(typeof result.cols === 'number', 'Should have cols count');
-    
-    // Verify dimensions
-    assert.strictEqual(result.rows, 1);
-    assert.strictEqual(result.cols, close.length);
-    assert.strictEqual(result.combos.length, 1);
-    assert.strictEqual(result.bp.length, close.length);
-    
-    // Verify parameters
-    const combo = result.combos[0];
-    assert.strictEqual(combo.period, 20);
-    assert.strictEqual(combo.bandwidth, 0.3);
-    
-    // Compare with old API
-    const oldResult = wasm.bandpass_js(close, 20, 0.3);
-    assertArrayClose(result.bp, oldResult.bp, 1e-10, "New vs old API bp mismatch");
-    assertArrayClose(result.bp_normalized, oldResult.bp_normalized, 1e-10, "New vs old API bp_normalized mismatch");
-    assertArrayClose(result.signal, oldResult.signal, 1e-10, "New vs old API signal mismatch");
-    assertArrayClose(result.trigger, oldResult.trigger, 1e-10, "New vs old API trigger mismatch");
-});
-
-test('BandPass batch - new API with multiple parameters', () => {
-    // Test with multiple parameter combinations
-    // Need enough data for hp_period = round(4*20/0.2) = 400
-    const close = new Float64Array(testData.close.slice(0, 450));
-    
-    const result = wasm.bandpass_batch(close, {
-        period_range: [10, 20, 5],   // 10, 15, 20
-        bandwidth_range: [0.2, 0.4, 0.1]   // 0.2, 0.3, 0.4
-    });
-    
-    // Should have 9 combinations
-    assert.strictEqual(result.rows, 9);
-    assert.strictEqual(result.cols, 450);
-    assert.strictEqual(result.combos.length, 9);
-    assert.strictEqual(result.bp.length, 4050);  // 9 combos * 450 values
-    
-    // Verify each combo
-    const expectedCombos = [
-        [10, 0.2], [10, 0.3], [10, 0.4],
-        [15, 0.2], [15, 0.3], [15, 0.4],
-        [20, 0.2], [20, 0.3], [20, 0.4]
-    ];
-    
-    for (let i = 0; i < expectedCombos.length; i++) {
-        assert.strictEqual(result.combos[i].period, expectedCombos[i][0]);
-        assert(Math.abs(result.combos[i].bandwidth - expectedCombos[i][1]) < 1e-10);
-    }
-    
-    // Extract and verify a specific row
-    const secondRowBp = result.bp.slice(result.cols, 2 * result.cols);
-    assert.strictEqual(secondRowBp.length, 450);
-    
-    // Compare with old API for first combination
-    const oldResult = wasm.bandpass_js(close, 10, 0.2);
-    const firstRowBp = result.bp.slice(0, result.cols);
-    assertArrayClose(firstRowBp, oldResult.bp, 1e-10, "First row bp mismatch");
-});
-
-test('BandPass batch - new API matches old API results', () => {
-    // Comprehensive comparison test
-    // Need enough data for hp_period = round(4*30/0.25) = 480
-    const close = new Float64Array(testData.close.slice(0, 500));
-    
-    const params = {
-        period_range: [15, 25, 5],
-        bandwidth_range: [0.25, 0.35, 0.05]
-    };
-    
-    // Old API
-    const oldResult = wasm.bandpass_batch_js(
-        close,
-        params.period_range[0], params.period_range[1], params.period_range[2],
-        params.bandwidth_range[0], params.bandwidth_range[1], params.bandwidth_range[2]
-    );
-    
-    // New API
-    const newResult = wasm.bandpass_batch(close, params);
-    
-    // Should produce identical values
-    assert.strictEqual(oldResult.bp.length, newResult.bp.length);
-    assertArrayClose(oldResult.bp, newResult.bp, 1e-10, "Old vs new API bp mismatch");
-    assertArrayClose(oldResult.bp_normalized, newResult.bp_normalized, 1e-10, "Old vs new API bp_normalized mismatch");
-    assertArrayClose(oldResult.signal, newResult.signal, 1e-10, "Old vs new API signal mismatch");
-    assertArrayClose(oldResult.trigger, newResult.trigger, 1e-10, "Old vs new API trigger mismatch");
-});
-
-test('BandPass batch - new API error handling', () => {
+// Batch API error handling
+test('BandPass batch error handling', () => {
     const close = new Float64Array(testData.close.slice(0, 10));
     
     // Invalid config structure
@@ -420,16 +319,17 @@ test('BandPass edge cases', () => {
     // Minimum valid period - adjust bandwidth to avoid cos_val issue
     const data = new Float64Array(50).fill(1.0);
     const result = wasm.bandpass_js(data, 2, 0.5);
-    assert.strictEqual(result.bp.length, data.length);
+    assert.strictEqual(result.cols, data.length);
+    assert.strictEqual(result.rows, 4);
     
     // With very narrow bandwidth - need larger data
     const largeData = new Float64Array(5000).fill(1.0);
     const result2 = wasm.bandpass_js(largeData, 10, 0.01);
-    assert.strictEqual(result2.bp.length, largeData.length);
+    assert.strictEqual(result2.cols, largeData.length);
     
     // With very wide bandwidth
     const result3 = wasm.bandpass_js(data, 10, 0.99);
-    assert.strictEqual(result3.bp.length, data.length);
+    assert.strictEqual(result3.cols, data.length);
 });
 
 test.after(() => {
