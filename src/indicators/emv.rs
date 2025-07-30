@@ -696,11 +696,7 @@ pub fn emv_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Resul
 	
 	let mut output = vec![0.0; high.len().min(low.len()).min(close.len()).min(volume.len())];
 	
-	let kernel = if cfg!(target_arch = "wasm32") {
-		detect_wasm_kernel()
-	} else {
-		Kernel::Auto
-	};
+	let kernel = detect_best_kernel();
 	
 	emv_into_slice(&mut output, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
@@ -729,14 +725,10 @@ pub fn emv_into(
 		
 		let input = EmvInput::from_slices(high, low, close, volume);
 		
-		let kernel = if cfg!(target_arch = "wasm32") {
-			detect_wasm_kernel()
-		} else {
-			Kernel::Auto
-		};
+		let kernel = detect_best_kernel();
 		
 		// Check if output pointer aliases with any input pointer
-		if out_ptr == high_ptr || out_ptr == low_ptr || out_ptr == close_ptr || out_ptr == volume_ptr {
+		if out_ptr == high_ptr as *mut f64 || out_ptr == low_ptr as *mut f64 || out_ptr == close_ptr as *mut f64 || out_ptr == volume_ptr as *mut f64 {
 			// Use temp buffer for aliased operation
 			let mut temp = vec![0.0; len];
 			emv_into_slice(&mut temp, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -793,11 +785,7 @@ pub fn emv_batch_js(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], _c
 	
 	let mut output = vec![0.0; len];
 	
-	let kernel = if cfg!(target_arch = "wasm32") {
-		detect_wasm_kernel()
-	} else {
-		Kernel::Auto
-	};
+	let kernel = detect_best_kernel();
 	
 	emv_into_slice(&mut output, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
@@ -832,11 +820,7 @@ pub fn emv_batch_into(
 		
 		let input = EmvInput::from_slices(high, low, close, volume);
 		
-		let kernel = if cfg!(target_arch = "wasm32") {
-			detect_wasm_kernel()
-		} else {
-			Kernel::Auto
-		};
+		let kernel = detect_best_kernel();
 		
 		let out = std::slice::from_raw_parts_mut(out_ptr, len);
 		emv_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;

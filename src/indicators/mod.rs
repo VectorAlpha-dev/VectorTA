@@ -123,6 +123,21 @@ pub mod wclprice;
 pub mod willr;
 pub mod zscore;
 pub use cci::{cci, CciInput, CciOutput, CciParams};
+pub use rsi::{rsi, RsiInput, RsiOutput, RsiParams, RsiStream, RsiBatchOutput};
+pub use squeeze_momentum::{
+	squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams, 
+	SqueezeMomentumBuilder, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams
+};
+#[cfg(feature = "python")]
+pub use squeeze_momentum::{squeeze_momentum_py, squeeze_momentum_batch_py, SqueezeMomentumStreamPy};
+#[cfg(feature = "wasm")]
+pub use squeeze_momentum::{
+	squeeze_momentum_js, squeeze_momentum_into, squeeze_momentum_alloc, squeeze_momentum_free,
+	squeeze_momentum_batch_js, SqueezeMomentumResult
+};
+pub use trix::{trix, TrixInput, TrixOutput, TrixParams, TrixStream, TrixBatchOutput};
+#[cfg(feature = "python")]
+pub use trix::{trix_py, trix_batch_py, TrixStreamPy};
 pub use moving_averages::{
 	alma, cwma, dema, edcf, ehlers_itrend, ema, epma, frama, fwma, gaussian, highpass, highpass_2_pole, hma, hwma, jma,
 	jsa, kama, linreg, maaq, mama, mwdx, nma, pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother,

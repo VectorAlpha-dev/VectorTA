@@ -108,7 +108,7 @@ class CriterionComparableBenchmark:
             'nma', 'pwma', 'reflex', 'sinwma', 'sma', 'smma', 'sqwma', 'srwma',
             'supersmoother_3_pole', 'supersmoother', 'swma', 'tema', 'tilson',
             'trendflex', 'trima', 'vqwma', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
-            'cg', 'cfo', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo'  # Added missing indicators
+            'cg', 'cfo', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'var', 'vpci', 'wclprice'  # Added missing indicators
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
@@ -119,7 +119,7 @@ class CriterionComparableBenchmark:
                            'sma_batch', 'ema_batch', 'dema_batch', 'edcf_batch', 'ehlers_itrend_batch', 'tema_batch', 
                            'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'adosc_batch', 'aroon_batch',
                            'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 
-                           'trendflex_batch', 'cfo_batch', 'cmo_batch', 'dec_osc_batch', 'donchian_batch', 'emv_batch', 'macd_batch', 'mfi_batch', 'natr_batch', 'ppo_batch']
+                           'trendflex_batch', 'cfo_batch', 'cmo_batch', 'dec_osc_batch', 'donchian_batch', 'emv_batch', 'macd_batch', 'mfi_batch', 'natr_batch', 'ppo_batch', 'var_batch', 'vpci_batch', 'wclprice_batch']
         all_indicators = indicators_to_find + batch_indicators
         
         for indicator in all_indicators:
@@ -278,6 +278,7 @@ class CriterionComparableBenchmark:
             ('nma', lambda: my_project.nma(data['close'], 40)),
             ('pwma', lambda: my_project.pwma(data['close'], 14)),
             ('reflex', lambda: my_project.reflex(data['close'], 20)),
+            ('rsi', lambda: my_project.rsi(data['close'], 14)),
             ('sinwma', lambda: my_project.sinwma(data['close'], 14)),
             ('sma', lambda: my_project.sma(data['close'], 14)),
             ('smma', lambda: my_project.smma(data['close'], 14)),
@@ -306,6 +307,11 @@ class CriterionComparableBenchmark:
             ('mfi', lambda: my_project.mfi((data['high'] + data['low'] + data['close']) / 3.0, data['volume'], 14)),
             ('natr', lambda: my_project.natr(data['high'], data['low'], data['close'], 14)),
             ('ppo', lambda: my_project.ppo(data['close'], 12, 26, 'sma')),
+            ('squeeze_momentum', lambda: my_project.squeeze_momentum(data['high'], data['low'], data['close'], 20, 2.0, 20, 1.5)),
+            ('trix', lambda: my_project.trix(data['close'], 18)),
+            ('var', lambda: my_project.var(data['close'], 14, 1.0)),
+            ('vpci', lambda: my_project.vpci(data['close'], data['volume'], 5, 25)),
+            ('wclprice', lambda: my_project.wclprice(data['high'], data['low'], data['close'])),
         ]
         
         # Filter if requested
@@ -364,6 +370,12 @@ class CriterionComparableBenchmark:
             ('mfi_batch', lambda: my_project.mfi_batch((data['high'] + data['low'] + data['close']) / 3.0, data['volume'], (10, 20, 5))),
             ('natr_batch', lambda: my_project.natr_batch(data['high'], data['low'], data['close'], (14, 14, 1))),
             ('ppo_batch', lambda: my_project.ppo_batch(data['close'], (12, 12, 0), (26, 26, 0), 'sma')),
+            ('rsi_batch', lambda: my_project.rsi_batch(data['close'], (14, 14, 0))),
+            ('squeeze_momentum_batch', lambda: my_project.squeeze_momentum_batch(data['high'], data['low'], data['close'], (20, 20, 0), (2.0, 2.0, 0.0), (20, 20, 0), (1.5, 1.5, 0.0))),
+            ('trix_batch', lambda: my_project.trix_batch(data['close'], (18, 100, 1))),
+            ('var_batch', lambda: my_project.var_batch(data['close'], (14, 60, 1), (1.0, 1.0, 0.0))),
+            ('vpci_batch', lambda: my_project.vpci_batch(data['close'], data['volume'], (5, 20, 1), (25, 60, 5))),
+            ('wclprice_batch', lambda: my_project.wclprice_batch(data['high'], data['low'], data['close'])),
         ]
         
         # Filter batch tests if indicator filter is active
@@ -436,7 +448,7 @@ class CriterionComparableBenchmark:
         print("-" * 80)
         
         batch_comparisons = []
-        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'ift_rsi', 'kvo', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'cmo', 'dec_osc', 'donchian', 'mfi', 'natr', 'ppo']:
+        for base_name in ['alma', 'aroonosc', 'ao', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'tema', 'hma', 'ift_rsi', 'kvo', 'cwma', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'cmo', 'dec_osc', 'donchian', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
                 single_time = self.python_results[base_name]
                 batch_time = self.python_results[f"{base_name}_batch"]

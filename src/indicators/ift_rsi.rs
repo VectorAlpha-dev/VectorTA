@@ -26,8 +26,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -59,6 +57,7 @@ pub struct IftRsiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct IftRsiParams {
 	pub rsi_period: Option<usize>,
 	pub wma_period: Option<usize>,
@@ -1232,7 +1231,7 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
 	let mut output = vec![0.0; data.len()];  // Single allocation
 	
 	#[cfg(target_arch = "wasm32")]
-	let kernel = detect_wasm_kernel();
+	let kernel = detect_best_kernel();
 	#[cfg(not(target_arch = "wasm32"))]
 	let kernel = Kernel::Scalar;
 	
@@ -1264,7 +1263,7 @@ pub fn ift_rsi_into(
 		let input = IftRsiInput::from_slice(data, params);
 		
 		#[cfg(target_arch = "wasm32")]
-		let kernel = detect_wasm_kernel();
+		let kernel = detect_best_kernel();
 		#[cfg(not(target_arch = "wasm32"))]
 		let kernel = Kernel::Scalar;
 		
@@ -1328,7 +1327,7 @@ pub fn ift_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
 	};
 	
 	#[cfg(target_arch = "wasm32")]
-	let kernel = detect_wasm_kernel();
+	let kernel = detect_best_kernel();
 	#[cfg(not(target_arch = "wasm32"))]
 	let kernel = Kernel::Scalar;
 	

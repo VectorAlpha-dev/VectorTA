@@ -20,13 +20,31 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+	init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::mem::{ManuallyDrop, MaybeUninit};
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 use thiserror::Error;
 
 use crate::indicators::sma::{sma, SmaData, SmaError, SmaInput, SmaParams};
@@ -51,6 +69,7 @@ pub struct VpciOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VpciParams {
 	pub short_range: Option<usize>,
 	pub long_range: Option<usize>,
@@ -189,6 +208,12 @@ pub enum VpciError {
 
 	#[error("vpci: SMA error: {0}")]
 	SmaError(#[from] SmaError),
+	
+	#[error("vpci: Mismatched input lengths: close = {close_len}, volume = {volume_len}")]
+	MismatchedInputLengths { close_len: usize, volume_len: usize },
+	
+	#[error("vpci: Kernel not available")]
+	KernelNotAvailable,
 }
 
 #[inline]
@@ -249,11 +274,89 @@ pub fn vpci_with_kernel(input: &VpciInput, kernel: Kernel) -> Result<VpciOutput,
 #[inline]
 pub unsafe fn vpci_scalar(close: &[f64], volume: &[f64], short: usize, long: usize) -> Result<VpciOutput, VpciError> {
 	let len = close.len();
-	let mut close_volume: Vec<f64> = vec![0.0; len];
-	for i in 0..len {
-		close_volume[i] = close[i] * volume[i];
+	
+	// Find first valid index
+	let first = close
+		.iter()
+		.zip(volume.iter())
+		.position(|(c, v)| !c.is_nan() && !v.is_nan())
+		.unwrap_or(0);
+	
+	// Allocate output arrays with proper NaN prefix
+	let warmup = first + long - 1;
+	let mut vpci = alloc_with_nan_prefix(len, warmup);
+	let mut vpcis = alloc_with_nan_prefix(len, warmup);
+	
+	// Allocate arrays for VWMAs (volume-weighted moving averages)
+	let mut vwma_long = alloc_with_nan_prefix(len, warmup);
+	let mut vwma_short = alloc_with_nan_prefix(len, warmup);
+	
+	// Calculate VWMAs manually to avoid intermediate allocation
+	// First, calculate VWMA long
+	if warmup < len {
+		let mut sum_cv = 0.0;
+		let mut sum_v = 0.0;
+		
+		// Initialize window for long VWMA
+		for i in 0..long {
+			let idx = first + i;
+			if idx < len {
+				sum_cv += close[idx] * volume[idx];
+				sum_v += volume[idx];
+			}
+		}
+		
+		let first_idx = first + long - 1;
+		if sum_v != 0.0 {
+			vwma_long[first_idx] = sum_cv / sum_v;
+		}
+		
+		// Sliding window for long VWMA
+		for i in (first_idx + 1)..len {
+			sum_cv += close[i] * volume[i];
+			sum_v += volume[i];
+			let old_idx = i - long;
+			sum_cv -= close[old_idx] * volume[old_idx];
+			sum_v -= volume[old_idx];
+			if sum_v != 0.0 {
+				vwma_long[i] = sum_cv / sum_v;
+			}
+		}
+	}
+	
+	// Calculate VWMA short
+	if first + short - 1 < len {
+		let mut sum_cv = 0.0;
+		let mut sum_v = 0.0;
+		
+		// Initialize window for short VWMA
+		for i in 0..short {
+			let idx = first + i;
+			if idx < len {
+				sum_cv += close[idx] * volume[idx];
+				sum_v += volume[idx];
+			}
+		}
+		
+		let first_idx = first + short - 1;
+		if sum_v != 0.0 {
+			vwma_short[first_idx] = sum_cv / sum_v;
+		}
+		
+		// Sliding window for short VWMA
+		for i in (first_idx + 1)..len {
+			sum_cv += close[i] * volume[i];
+			sum_v += volume[i];
+			let old_idx = i - short;
+			sum_cv -= close[old_idx] * volume[old_idx];
+			sum_v -= volume[old_idx];
+			if sum_v != 0.0 {
+				vwma_short[i] = sum_cv / sum_v;
+			}
+		}
 	}
 
+	// Calculate all SMAs (these already use uninitialized memory internally)
 	let sma_close_long = sma(&SmaInput {
 		data: SmaData::Slice(close),
 		params: SmaParams { period: Some(long) },
@@ -274,32 +377,10 @@ pub unsafe fn vpci_scalar(close: &[f64], volume: &[f64], short: usize, long: usi
 		params: SmaParams { period: Some(short) },
 	})?
 	.values;
-	let sma_close_vol_long = sma(&SmaInput {
-		data: SmaData::Slice(&close_volume),
-		params: SmaParams { period: Some(long) },
-	})?
-	.values;
-	let sma_close_vol_short = sma(&SmaInput {
-		data: SmaData::Slice(&close_volume),
-		params: SmaParams { period: Some(short) },
-	})?
-	.values;
 
-	let mut vpci = vec![f64::NAN; len];
-	let mut vpcis = vec![f64::NAN; len];
-	let mut vwma_long = vec![f64::NAN; len];
-	let mut vwma_short = vec![f64::NAN; len];
-
-	for i in 0..len {
-		if !sma_volume_long[i].is_nan() && sma_volume_long[i] != 0.0 {
-			vwma_long[i] = sma_close_vol_long[i] / sma_volume_long[i];
-		}
-		if !sma_volume_short[i].is_nan() && sma_volume_short[i] != 0.0 {
-			vwma_short[i] = sma_close_vol_short[i] / sma_volume_short[i];
-		}
-	}
-	let mut vpci_times_vol = vec![f64::NAN; len];
-	for i in 0..len {
+	// Calculate VPCI values only after warmup period
+	for i in warmup..len {
+		// Calculate VPCI components
 		let vpc = vwma_long[i] - sma_close_long[i];
 		let vpr = if !sma_close_short[i].is_nan() && sma_close_short[i] != 0.0 {
 			vwma_short[i] / sma_close_short[i]
@@ -311,24 +392,50 @@ pub unsafe fn vpci_scalar(close: &[f64], volume: &[f64], short: usize, long: usi
 		} else {
 			f64::NAN
 		};
-		let val = vpc * vpr * vm;
-		vpci[i] = val;
-		if !val.is_nan() && !volume[i].is_nan() {
-			vpci_times_vol[i] = val * volume[i];
+		
+		vpci[i] = vpc * vpr * vm;
+	}
+	
+	// Calculate VPCIS (smoothed VPCI) using sliding window to avoid allocation
+	// VPCIS = SMA(VPCI * Volume, short) / SMA(Volume, short)
+	if warmup < len {
+		let mut sum_vpci_vol = 0.0;
+		
+		// Initialize window for VPCIS calculation
+		for i in 0..short {
+			let idx = warmup + i - short + 1;
+			if idx >= warmup && idx < len {
+				if !vpci[idx].is_nan() && !volume[idx].is_nan() {
+					sum_vpci_vol += vpci[idx] * volume[idx];
+				}
+			}
+		}
+		
+		// Calculate first VPCIS value
+		if !sma_volume_short[warmup].is_nan() && sma_volume_short[warmup] != 0.0 {
+			vpcis[warmup] = sum_vpci_vol / short as f64 / sma_volume_short[warmup];
+		}
+		
+		// Sliding window for VPCIS
+		for i in (warmup + 1)..len {
+			// Add new value
+			if !vpci[i].is_nan() && !volume[i].is_nan() {
+				sum_vpci_vol += vpci[i] * volume[i];
+			}
+			
+			// Remove old value
+			let old_idx = i - short;
+			if old_idx >= warmup && !vpci[old_idx].is_nan() && !volume[old_idx].is_nan() {
+				sum_vpci_vol -= vpci[old_idx] * volume[old_idx];
+			}
+			
+			// Calculate VPCIS
+			if !sma_volume_short[i].is_nan() && sma_volume_short[i] != 0.0 {
+				vpcis[i] = sum_vpci_vol / short as f64 / sma_volume_short[i];
+			}
 		}
 	}
-
-	let sma_vpci_times_vol_short = sma(&SmaInput {
-		data: SmaData::Slice(&vpci_times_vol),
-		params: SmaParams { period: Some(short) },
-	})?
-	.values;
-
-	for i in 0..len {
-		if !sma_volume_short[i].is_nan() && sma_volume_short[i] != 0.0 {
-			vpcis[i] = sma_vpci_times_vol_short[i] / sma_volume_short[i];
-		}
-	}
+	
 	Ok(VpciOutput { vpci, vpcis })
 }
 
@@ -538,8 +645,30 @@ fn vpci_batch_inner(
 
 	let rows = combos.len();
 	let cols = len;
-	let mut vpci = vec![f64::NAN; rows * cols];
-	let mut vpcis = vec![f64::NAN; rows * cols];
+	
+	// Create uninitialized matrices for output
+	let mut vpci_mu = make_uninit_matrix(rows, cols);
+	let mut vpcis_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each row
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.long_range.unwrap() - 1)
+		.collect();
+	
+	// Initialize NaN prefixes
+	init_matrix_prefixes(&mut vpci_mu, cols, &warmup_periods);
+	init_matrix_prefixes(&mut vpcis_mu, cols, &warmup_periods);
+	
+	// Convert to mutable slices for computation
+	let mut vpci_guard = ManuallyDrop::new(vpci_mu);
+	let mut vpcis_guard = ManuallyDrop::new(vpcis_mu);
+	let vpci: &mut [f64] = unsafe { 
+		std::slice::from_raw_parts_mut(vpci_guard.as_mut_ptr() as *mut f64, rows * cols) 
+	};
+	let vpcis: &mut [f64] = unsafe { 
+		std::slice::from_raw_parts_mut(vpcis_guard.as_mut_ptr() as *mut f64, rows * cols) 
+	};
 
 	let do_row = |row: usize, vpci_out: &mut [f64], vpcis_out: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -578,9 +707,26 @@ fn vpci_batch_inner(
 		}
 	}
 
+	// Convert back to Vec
+	let vpci_vec = unsafe {
+		let ptr = vpci_guard.as_mut_ptr() as *mut f64;
+		let len = rows * cols;
+		let cap = vpci_guard.capacity();
+		std::mem::forget(vpci_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
+	let vpcis_vec = unsafe {
+		let ptr = vpcis_guard.as_mut_ptr() as *mut f64;
+		let len = rows * cols;
+		let cap = vpcis_guard.capacity();
+		std::mem::forget(vpcis_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
 	Ok(VpciBatchOutput {
-		vpci,
-		vpcis,
+		vpci: vpci_vec,
+		vpcis: vpcis_vec,
 		combos,
 		rows,
 		cols,
@@ -822,4 +968,423 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vpci")]
+#[pyo3(signature = (close, volume, short_range, long_range, kernel=None))]
+pub fn vpci_py<'py>(
+	py: Python<'py>,
+	close: numpy::PyReadonlyArray1<'py, f64>,
+	volume: numpy::PyReadonlyArray1<'py, f64>,
+	short_range: usize,
+	long_range: usize,
+	kernel: Option<&str>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>)> {
+	use numpy::{IntoPyArray, PyArrayMethods};
+
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	
+	if close_slice.len() != volume_slice.len() {
+		return Err(PyValueError::new_err("Close and volume arrays must have the same length"));
+	}
+	
+	let kern = validate_kernel(kernel, false)?;
+	let params = VpciParams {
+		short_range: Some(short_range),
+		long_range: Some(long_range),
+	};
+	let input = VpciInput::from_slices(close_slice, volume_slice, params);
+
+	let (vpci_vec, vpcis_vec) = py
+		.allow_threads(|| vpci_with_kernel(&input, kern).map(|o| (o.vpci, o.vpcis)))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	Ok((vpci_vec.into_pyarray(py), vpcis_vec.into_pyarray(py)))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vpci_batch")]
+#[pyo3(signature = (close, volume, short_range_tuple, long_range_tuple, kernel=None))]
+pub fn vpci_batch_py<'py>(
+	py: Python<'py>,
+	close: numpy::PyReadonlyArray1<'py, f64>,
+	volume: numpy::PyReadonlyArray1<'py, f64>,
+	short_range_tuple: (usize, usize, usize),
+	long_range_tuple: (usize, usize, usize),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+	use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
+	use pyo3::types::PyDict;
+
+	let close_slice = close.as_slice()?;
+	let volume_slice = volume.as_slice()?;
+	
+	if close_slice.len() != volume_slice.len() {
+		return Err(PyValueError::new_err("Close and volume arrays must have the same length"));
+	}
+
+	let sweep = VpciBatchRange {
+		short_range: short_range_tuple,
+		long_range: long_range_tuple,
+	};
+
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = close_slice.len();
+
+	// Pre-allocate output arrays for batch operations
+	let vpci_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let vpcis_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let vpci_slice = unsafe { vpci_arr.as_slice_mut()? };
+	let vpcis_slice = unsafe { vpcis_arr.as_slice_mut()? };
+
+	let kern = validate_kernel(kernel, true)?;
+
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			
+			// Map batch kernels to regular kernels for computation
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => kernel,
+			};
+			
+			// Compute batch results
+			let result = vpci_batch_inner(close_slice, volume_slice, &sweep, simd, true)?;
+			
+			// Copy results to pre-allocated arrays
+			vpci_slice.copy_from_slice(&result.vpci);
+			vpcis_slice.copy_from_slice(&result.vpcis);
+			
+			Ok::<Vec<VpciParams>, VpciError>(result.combos)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+	let dict = PyDict::new(py);
+	dict.set_item("vpci", vpci_arr.reshape((rows, cols))?)?;
+	dict.set_item("vpcis", vpcis_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"short_ranges",
+		combos
+			.iter()
+			.map(|p| p.short_range.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"long_ranges",
+		combos
+			.iter()
+			.map(|p| p.long_range.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+
+	Ok(dict)
+}
+
+/// WASM helper: Write directly to output slices - no allocations
+#[cfg(feature = "wasm")]
+pub fn vpci_into_slice(
+	vpci_dst: &mut [f64],
+	vpcis_dst: &mut [f64],
+	input: &VpciInput,
+	kern: Kernel,
+) -> Result<(), VpciError> {
+	let kernel = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		k => k,
+	};
+	
+	let (close, volume) = match &input.data {
+		VpciData::Candles { candles, close_source, volume_source } => {
+			(source_type(candles, close_source), source_type(candles, volume_source))
+		}
+		VpciData::Slices { close, volume } => (*close, *volume),
+	};
+	
+	let len = close.len();
+	if len != volume.len() {
+		return Err(VpciError::MismatchedInputLengths {
+			close_len: len,
+			volume_len: volume.len(),
+		});
+	}
+	
+	if vpci_dst.len() != len || vpcis_dst.len() != len {
+		return Err(VpciError::InvalidRange {
+			period: len,
+			data_len: vpci_dst.len(),
+		});
+	}
+	
+	let short_range = input.get_short_range();
+	let long_range = input.get_long_range();
+	
+	// Find first valid index and calculate warmup
+	let first = close.iter()
+		.zip(volume.iter())
+		.position(|(c, v)| !c.is_nan() && !v.is_nan())
+		.ok_or(VpciError::AllValuesNaN)?;
+	
+	let warmup = first + long_range - 1;
+	
+	// Compute VPCI values
+	let output = unsafe {
+		match kernel {
+			Kernel::Scalar => vpci_scalar(close, volume, short_range, long_range)?,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => vpci_avx2(close, volume, short_range, long_range)?,
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => vpci_avx512(close, volume, short_range, long_range)?,
+			_ => return Err(VpciError::KernelNotAvailable),
+		}
+	};
+	
+	// Copy results to output slices
+	vpci_dst.copy_from_slice(&output.vpci);
+	vpcis_dst.copy_from_slice(&output.vpcis);
+	
+	// Fill warmup with NaN
+	for v in &mut vpci_dst[..warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut vpcis_dst[..warmup] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpci_js(
+	close: &[f64], 
+	volume: &[f64], 
+	short_range: usize, 
+	long_range: usize
+) -> Result<Vec<f64>, JsValue> {
+	if close.len() != volume.len() {
+		return Err(JsValue::from_str(&format!(
+			"Mismatched input lengths: close = {}, volume = {}", 
+			close.len(), 
+			volume.len()
+		)));
+	}
+	
+	let params = VpciParams {
+		short_range: Some(short_range),
+		long_range: Some(long_range),
+	};
+	let input = VpciInput::from_slices(close, volume, params);
+	
+	// Pre-allocate single output vector for flattened results
+	let len = close.len();
+	let mut output = vec![0.0; len * 2];
+	
+	// Split the output into vpci and vpcis slices
+	let (vpci_slice, vpcis_slice) = output.split_at_mut(len);
+	
+	// Use zero-copy helper
+	vpci_into_slice(vpci_slice, vpcis_slice, &input, Kernel::Auto)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpci_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	vpci_ptr: *mut f64,
+	vpcis_ptr: *mut f64,
+	len: usize,
+	short_range: usize,
+	long_range: usize,
+) -> Result<(), JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || vpci_ptr.is_null() || vpcis_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to vpci_into"));
+	}
+	
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let params = VpciParams {
+			short_range: Some(short_range),
+			long_range: Some(long_range),
+		};
+		let input = VpciInput::from_slices(close, volume, params);
+		
+		// Check aliasing for all pointer combinations
+		let need_temp = close_ptr == vpci_ptr as *const f64 || 
+		                close_ptr == vpcis_ptr as *const f64 ||
+		                volume_ptr == vpci_ptr as *const f64 || 
+		                volume_ptr == vpcis_ptr as *const f64 ||
+		                vpci_ptr == vpcis_ptr;
+		
+		if need_temp {
+			// Use temporary buffers if any aliasing detected
+			let mut temp_vpci = vec![0.0; len];
+			let mut temp_vpcis = vec![0.0; len];
+			
+			vpci_into_slice(&mut temp_vpci, &mut temp_vpcis, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, len);
+			let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, len);
+			vpci_out.copy_from_slice(&temp_vpci);
+			vpcis_out.copy_from_slice(&temp_vpcis);
+		} else {
+			// Direct computation when no aliasing
+			let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, len);
+			let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, len);
+			
+			vpci_into_slice(vpci_out, vpcis_out, &input, Kernel::Auto)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+		
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpci_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpci_free(ptr: *mut f64, len: usize) {
+	if !ptr.is_null() {
+		unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VpciBatchConfig {
+	pub short_range: (usize, usize, usize),
+	pub long_range: (usize, usize, usize),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VpciBatchJsOutput {
+	pub vpci: Vec<f64>,
+	pub vpcis: Vec<f64>,
+	pub combos: Vec<VpciParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = vpci_batch)]
+pub fn vpci_batch_js(close: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	if close.len() != volume.len() {
+		return Err(JsValue::from_str(&format!(
+			"Mismatched input lengths: close = {}, volume = {}", 
+			close.len(), 
+			volume.len()
+		)));
+	}
+	
+	let config: VpciBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+	
+	let sweep = VpciBatchRange {
+		short_range: config.short_range,
+		long_range: config.long_range,
+	};
+	
+	let output = vpci_batch_inner(close, volume, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	let js_output = VpciBatchJsOutput {
+		vpci: output.vpci,
+		vpcis: output.vpcis,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+	
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn vpci_batch_into(
+	close_ptr: *const f64,
+	volume_ptr: *const f64,
+	vpci_ptr: *mut f64,
+	vpcis_ptr: *mut f64,
+	len: usize,
+	short_start: usize,
+	short_end: usize,
+	short_step: usize,
+	long_start: usize,
+	long_end: usize,
+	long_step: usize,
+) -> Result<usize, JsValue> {
+	if close_ptr.is_null() || volume_ptr.is_null() || vpci_ptr.is_null() || vpcis_ptr.is_null() {
+		return Err(JsValue::from_str("null pointer passed to vpci_batch_into"));
+	}
+	
+	unsafe {
+		let close = std::slice::from_raw_parts(close_ptr, len);
+		let volume = std::slice::from_raw_parts(volume_ptr, len);
+		
+		let sweep = VpciBatchRange {
+			short_range: (short_start, short_end, short_step),
+			long_range: (long_start, long_end, long_step),
+		};
+		
+		let combos = expand_grid_vpci(&sweep);
+		let rows = combos.len();
+		let total_len = rows * len;
+		
+		// Need to handle aliasing only between outputs and inputs
+		let need_temp = close_ptr == vpci_ptr as *const f64 || 
+		                close_ptr == vpcis_ptr as *const f64 ||
+		                volume_ptr == vpci_ptr as *const f64 || 
+		                volume_ptr == vpcis_ptr as *const f64;
+		
+		if need_temp {
+			// Run batch into temporary buffers
+			let output = vpci_batch_inner(close, volume, &sweep, detect_best_kernel(), false)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			// Copy to output pointers
+			let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, total_len);
+			let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, total_len);
+			vpci_out.copy_from_slice(&output.vpci);
+			vpcis_out.copy_from_slice(&output.vpcis);
+		} else {
+			// Direct computation
+			let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, total_len);
+			let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, total_len);
+			
+			// Call batch_inner_into if it exists, otherwise compute and copy
+			let output = vpci_batch_inner(close, volume, &sweep, detect_best_kernel(), false)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			
+			vpci_out.copy_from_slice(&output.vpci);
+			vpcis_out.copy_from_slice(&output.vpcis);
+		}
+		
+		Ok(rows)
+	}
 }

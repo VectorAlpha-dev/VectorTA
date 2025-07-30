@@ -37,8 +37,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-#[cfg(feature = "wasm")]
-use crate::utilities::helpers::detect_wasm_kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -63,6 +61,7 @@ pub struct MacdOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct MacdParams {
 	pub fast_period: Option<usize>,
 	pub slow_period: Option<usize>,
@@ -980,7 +979,7 @@ pub fn macd_js(
 	let (macd_slice, rest) = values.split_at_mut(data.len());
 	let (signal_slice, hist_slice) = rest.split_at_mut(data.len());
 	
-	macd_into_slices(macd_slice, signal_slice, hist_slice, &input, detect_wasm_kernel())
+	macd_into_slices(macd_slice, signal_slice, hist_slice, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(MacdResult {
@@ -1045,7 +1044,7 @@ pub fn macd_into(
 			let mut temp_signal = vec![0.0; len];
 			let mut temp_hist = vec![0.0; len];
 			
-			macd_into_slices(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, detect_wasm_kernel())
+			macd_into_slices(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			// Copy results to output pointers
@@ -1062,7 +1061,7 @@ pub fn macd_into(
 			let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
 			let hist_out = std::slice::from_raw_parts_mut(hist_ptr, len);
 			
-			macd_into_slices(macd_out, signal_out, hist_out, &input, detect_wasm_kernel())
+			macd_into_slices(macd_out, signal_out, hist_out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		

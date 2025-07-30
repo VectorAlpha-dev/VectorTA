@@ -750,6 +750,8 @@ impl DeviationOutput {
 mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
+	use crate::utilities::data_loader::read_candles_from_csv;
+	use std::error::Error;
 
 	fn check_deviation_partial_params(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -934,6 +936,127 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_deviation_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let data = candles.select_candle_field("close")?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			DeviationParams::default(), // period: 9, devtype: 0
+			DeviationParams {
+				period: Some(2),
+				devtype: Some(0),
+			}, // minimum period, standard deviation
+			DeviationParams {
+				period: Some(5),
+				devtype: Some(0),
+			}, // small period
+			DeviationParams {
+				period: Some(5),
+				devtype: Some(1),
+			}, // small period, mean absolute
+			DeviationParams {
+				period: Some(5),
+				devtype: Some(2),
+			}, // small period, median absolute
+			DeviationParams {
+				period: Some(20),
+				devtype: Some(0),
+			}, // medium period
+			DeviationParams {
+				period: Some(20),
+				devtype: Some(1),
+			}, // medium period, mean absolute
+			DeviationParams {
+				period: Some(20),
+				devtype: Some(2),
+			}, // medium period, median absolute
+			DeviationParams {
+				period: Some(50),
+				devtype: Some(0),
+			}, // large period
+			DeviationParams {
+				period: Some(50),
+				devtype: Some(1),
+			}, // large period, mean absolute
+			DeviationParams {
+				period: Some(100),
+				devtype: Some(0),
+			}, // very large period
+			DeviationParams {
+				period: Some(100),
+				devtype: Some(2),
+			}, // very large period, median absolute
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DeviationInput::from_slice(&data, params.clone());
+			let output = deviation_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, devtype={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, devtype={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, devtype={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_deviation_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_deviation_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -968,7 +1091,8 @@ mod tests {
 		check_deviation_streaming,
 		check_deviation_mean_absolute,
 		check_deviation_median_absolute,
-		check_deviation_invalid_devtype
+		check_deviation_invalid_devtype,
+		check_deviation_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1023,6 +1147,103 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let data = c.select_candle_field("close")?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, devtype_start, devtype_end, devtype_step)
+			(2, 10, 2, 0, 2, 1),      // Small periods, all devtypes
+			(5, 25, 5, 0, 0, 0),      // Medium periods, standard deviation only
+			(5, 25, 5, 1, 1, 0),      // Medium periods, mean absolute only
+			(5, 25, 5, 2, 2, 0),      // Medium periods, median absolute only
+			(30, 60, 15, 0, 2, 1),    // Large periods, all devtypes
+			(2, 5, 1, 0, 2, 1),       // Dense small range, all devtypes
+			(50, 100, 25, 0, 0, 0),   // Very large periods, standard deviation
+			(10, 10, 0, 0, 2, 1),     // Static period, sweep devtypes
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, d_start, d_end, d_step)) in test_configs.iter().enumerate() {
+			let output = DeviationBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.devtype_range(d_start, d_end, d_step)
+				.apply_slice(&data)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, devtype={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, devtype={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, devtype={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1045,4 +1266,5 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_varying_params);
+	gen_batch_tests!(check_batch_no_poison);
 }

@@ -1276,7 +1276,7 @@ pub fn donchian_js(high: &[f64], low: &[f64], period: usize) -> Result<DonchianR
 	let mut middle = vec![0.0; len];
 	let mut lower = vec![0.0; len];
 
-	donchian_into_slice(&mut upper, &mut middle, &mut lower, &input, detect_wasm_kernel())
+	donchian_into_slice(&mut upper, &mut middle, &mut lower, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// Flatten outputs into single array
@@ -1326,7 +1326,7 @@ pub fn donchian_into(
 			let mut temp_middle = vec![0.0; len];
 			let mut temp_lower = vec![0.0; len];
 			
-			donchian_into_slice(&mut temp_upper, &mut temp_middle, &mut temp_lower, &input, detect_wasm_kernel())
+			donchian_into_slice(&mut temp_upper, &mut temp_middle, &mut temp_lower, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
@@ -1342,7 +1342,7 @@ pub fn donchian_into(
 			let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
 			let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
 			
-			donchian_into_slice(upper_out, middle_out, lower_out, &input, detect_wasm_kernel())
+			donchian_into_slice(upper_out, middle_out, lower_out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		
@@ -1407,7 +1407,7 @@ pub fn donchian_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
 	let mut lower = vec![0.0; rows * cols];
 	
 	// Compute batch without parallel processing in WASM
-	donchian_batch_inner_into(high, low, &sweep, detect_wasm_kernel(), false, &mut upper, &mut middle, &mut lower)
+	donchian_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, &mut upper, &mut middle, &mut lower)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = DonchianBatchJsOutput {
@@ -1457,7 +1457,7 @@ pub fn donchian_batch_into(
 		let middle_out = std::slice::from_raw_parts_mut(middle_ptr, rows * cols);
 		let lower_out = std::slice::from_raw_parts_mut(lower_ptr, rows * cols);
 		
-		donchian_batch_inner_into(high, low, &sweep, detect_wasm_kernel(), false, upper_out, middle_out, lower_out)
+		donchian_batch_inner_into(high, low, &sweep, detect_best_kernel(), false, upper_out, middle_out, lower_out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(rows)

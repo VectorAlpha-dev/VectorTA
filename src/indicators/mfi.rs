@@ -36,8 +36,6 @@ use serde_wasm_bindgen;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
-#[cfg(feature = "wasm")]
-use crate::utilities::helpers::detect_wasm_kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -1011,7 +1009,7 @@ pub fn mfi_js(typical_price: &[f64], volume: &[f64], period: usize) -> Result<Ve
 	let input = MfiInput::from_slices(typical_price, volume, params);
 
 	// Get result from the main function which already uses proper allocation
-	let result = mfi_with_kernel(&input, detect_wasm_kernel())
+	let result = mfi_with_kernel(&input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(result.values)
@@ -1041,13 +1039,13 @@ pub fn mfi_into(
 		// Check for aliasing with either input
 		if typical_price_ptr == out_ptr || volume_ptr == out_ptr {
 			// Use main function which handles allocation properly
-			let result = mfi_with_kernel(&input, detect_wasm_kernel())
+			let result = mfi_with_kernel(&input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&result.values);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			mfi_into_slice(out, &input, detect_wasm_kernel())
+			mfi_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -1098,7 +1096,7 @@ pub fn mfi_batch_unified_js(typical_price: &[f64], volume: &[f64], config: JsVal
 		period: config.period_range,
 	};
 
-	let output = mfi_batch_inner(typical_price, volume, &sweep, detect_wasm_kernel(), false)
+	let output = mfi_batch_inner(typical_price, volume, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = MfiBatchJsOutput {
@@ -1135,7 +1133,7 @@ pub fn mfi_batch_into(
 			period: (period_start, period_end, period_step),
 		};
 
-		mfi_batch_inner_into(typical_price, volume, &sweep, detect_wasm_kernel(), false, out)
+		mfi_batch_inner_into(typical_price, volume, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		let combos = expand_grid(&sweep);

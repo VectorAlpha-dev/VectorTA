@@ -66,6 +66,18 @@ use crate::indicators::natr::{natr_batch_py, natr_py, NatrStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::ppo::{ppo_batch_py, ppo_py, PpoStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::rsi::{rsi_batch_py, rsi_py, RsiStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::squeeze_momentum::{squeeze_momentum_batch_py, squeeze_momentum_py, SqueezeMomentumStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::trix::{trix_batch_py, trix_py, TrixStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::var::{var_batch_py, var_py, VarStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::vpci::{vpci_batch_py, vpci_py};
+#[cfg(feature = "python")]
+use crate::indicators::wclprice::{wclprice_batch_py, wclprice_py, WclpriceStreamPy};
+#[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -494,6 +506,35 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(ppo_py, m)?)?;
 	m.add_function(wrap_pyfunction!(ppo_batch_py, m)?)?;
 	m.add_class::<PpoStreamPy>()?;
+
+	// Register RSI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(rsi_py, m)?)?;
+	m.add_function(wrap_pyfunction!(rsi_batch_py, m)?)?;
+	m.add_class::<RsiStreamPy>()?;
+
+	// Register Squeeze Momentum functions with their user-facing names
+	m.add_function(wrap_pyfunction!(squeeze_momentum_py, m)?)?;
+	m.add_function(wrap_pyfunction!(squeeze_momentum_batch_py, m)?)?;
+	m.add_class::<SqueezeMomentumStreamPy>()?;
+
+	// Register TRIX functions with their user-facing names
+	m.add_function(wrap_pyfunction!(trix_py, m)?)?;
+	m.add_function(wrap_pyfunction!(trix_batch_py, m)?)?;
+	m.add_class::<TrixStreamPy>()?;
+
+	// Register VAR functions with their user-facing names
+	m.add_function(wrap_pyfunction!(var_py, m)?)?;
+	m.add_function(wrap_pyfunction!(var_batch_py, m)?)?;
+	m.add_class::<VarStreamPy>()?;
+
+	// Register VPCI functions with their user-facing names
+	m.add_function(wrap_pyfunction!(vpci_py, m)?)?;
+	m.add_function(wrap_pyfunction!(vpci_batch_py, m)?)?;
+
+	// Register WCLPRICE functions with their user-facing names
+	m.add_function(wrap_pyfunction!(wclprice_py, m)?)?;
+	m.add_function(wrap_pyfunction!(wclprice_batch_py, m)?)?;
+	m.add_class::<WclpriceStreamPy>()?;
 
 	// Register AO functions with their user-facing names
 	m.add_function(wrap_pyfunction!(ao_py, m)?)?;

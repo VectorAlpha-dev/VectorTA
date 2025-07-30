@@ -1349,6 +1349,34 @@ const INDICATORS = {
             fastFn: 'trendflex_batch_into'
         }
     },
+    trix: {
+        name: 'TRIX',
+        // Safe API
+        safe: {
+            fn: 'trix_js',
+            params: { period: 18 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'trix_alloc',
+            freeFn: 'trix_free',
+            computeFn: 'trix_into',
+            params: { period: 18 }
+        },
+        // Batch API
+        batch: {
+            fn: 'trix_batch',
+            fastFn: 'trix_batch_into',
+            config: {
+                small: {
+                    period_range: [14, 22, 4]      // 3 values: 14, 18, 22
+                },
+                medium: {
+                    period_range: [10, 30, 5]      // 5 values: 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
     alligator: {
         name: 'Alligator',
         // Safe API
@@ -1889,6 +1917,164 @@ const INDICATORS = {
                     ma_type: 'ema'                   // Total: 36 combinations
                 }
             }
+        }
+    },
+    rsi: {
+        name: 'RSI',
+        // Safe API
+        safe: {
+            fn: 'rsi_js',
+            params: { period: 14 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'rsi_alloc',
+            freeFn: 'rsi_free',
+            computeFn: 'rsi_into',
+            params: { period: 14 }
+        },
+        // Batch API
+        batch: {
+            fn: 'rsi_batch',
+            config: {
+                small: {
+                    period_range: [10, 20, 2]  // 6 values: 10, 12, 14, 16, 18, 20
+                },
+                medium: {
+                    period_range: [5, 30, 5]   // 6 values: 5, 10, 15, 20, 25, 30
+                }
+            }
+        }
+    },
+    squeeze_momentum: {
+        name: 'Squeeze Momentum',
+        needsMultipleInputs: true,  // Uses high, low, close
+        multipleOutputs: 3,         // Returns squeeze, momentum, momentum_signal
+        // Safe API
+        safe: {
+            fn: 'squeeze_momentum_js',
+            params: { length_bb: 20, mult_bb: 2.0, length_kc: 20, mult_kc: 1.5 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'squeeze_momentum_alloc',
+            freeFn: 'squeeze_momentum_free',
+            computeFn: 'squeeze_momentum_into',
+            params: { length_bb: 20, mult_bb: 2.0, length_kc: 20, mult_kc: 1.5 },
+            needsMultipleInputs: true,
+            multipleOutputs: 3
+        },
+        // Batch API
+        batch: {
+            fn: 'squeeze_momentum_batch',
+            config: {
+                small: {
+                    length_bb_range: [15, 25, 5],     // 3 values: 15, 20, 25
+                    mult_bb_range: [2.0, 2.0, 0.0],   // 1 value: 2.0
+                    length_kc_range: [20, 20, 0],     // 1 value: 20
+                    mult_kc_range: [1.0, 2.0, 0.5]    // 3 values: 1.0, 1.5, 2.0 = 9 combinations
+                },
+                medium: {
+                    length_bb_range: [10, 30, 5],     // 5 values: 10, 15, 20, 25, 30
+                    mult_bb_range: [1.5, 2.5, 0.5],   // 3 values: 1.5, 2.0, 2.5
+                    length_kc_range: [15, 25, 5],     // 3 values: 15, 20, 25
+                    mult_kc_range: [1.0, 2.0, 0.5]    // 3 values: 1.0, 1.5, 2.0 = 135 combinations
+                }
+            }
+        }
+    },
+    var: {
+        name: 'VAR',
+        safe: {
+            fn: 'var_js',
+            params: { period: 14, nbdev: 1.0 }
+        },
+        fast: {
+            allocFn: 'var_alloc',
+            freeFn: 'var_free',
+            computeFn: 'var_into',
+            params: { period: 14, nbdev: 1.0 }
+        },
+        batch: {
+            fn: 'var_batch',
+            fastFn: 'var_batch_into',
+            config: {
+                small: {
+                    period_range: [10, 20, 5],      // 3 values: 10, 15, 20
+                    nbdev_range: [1.0, 1.0, 0.0]    // 1 value: 1.0 = 3 combinations
+                },
+                medium: {
+                    period_range: [10, 30, 5],      // 5 values: 10, 15, 20, 25, 30
+                    nbdev_range: [0.5, 2.0, 0.5]    // 4 values: 0.5, 1.0, 1.5, 2.0 = 20 combinations
+                }
+            }
+        }
+    },
+    vpci: {
+        name: 'VPCI',
+        needsMultipleInputs: true,  // Uses close, volume
+        needsVolume: true,
+        dualOutput: true,           // Returns vpci and vpcis
+        // Safe API
+        safe: {
+            fn: 'vpci_js',
+            params: { short_range: 5, long_range: 25 }
+        },
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'vpci_alloc',
+            freeFn: 'vpci_free',
+            computeFn: 'vpci_into',
+            params: { short_range: 5, long_range: 25 },
+            needsMultipleInputs: true,
+            needsVolume: true,
+            dualOutput: true
+        },
+        // Batch API
+        batch: {
+            fn: 'vpci_batch',
+            config: {
+                small: {
+                    short_range: [5, 10, 5],       // 2 values: 5, 10
+                    long_range: [20, 30, 10]       // 2 values: 20, 30 = 4 combinations
+                },
+                medium: {
+                    short_range: [5, 15, 5],       // 3 values: 5, 10, 15
+                    long_range: [20, 40, 5]        // 5 values: 20, 25, 30, 35, 40 = 15 combinations
+                }
+            },
+            // Fast batch API
+            fastFn: 'vpci_batch_into',
+            needsMultipleInputs: true,
+            needsVolume: true
+        }
+    },
+    wclprice: {
+        name: 'WCLPRICE',
+        // Safe API
+        safe: {
+            fn: 'wclprice_js',
+            params: {}  // No parameters
+        },
+        needsMultipleInputs: true,  // Needs high, low, close
+        // Fast/Unsafe API
+        fast: {
+            allocFn: 'wclprice_alloc',
+            freeFn: 'wclprice_free',
+            computeFn: 'wclprice_into',
+            params: {},  // No parameters
+            needsMultipleInputs: true
+        },
+        // Batch API
+        batch: {
+            fn: 'wclprice_batch',
+            fastFn: 'wclprice_batch_into',
+            config: {
+                // WCLPRICE has no parameters, so empty config
+                small: {},
+                medium: {}
+            },
+            needsMultipleInputs: true
         }
     }
 };

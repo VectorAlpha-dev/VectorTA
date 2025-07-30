@@ -20,7 +20,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, detect_wasm_kernel, init_matrix_prefixes, 
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, 
 	make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -1157,7 +1157,7 @@ pub fn cmo_js(data: &[f64], period: Option<usize>) -> Result<Vec<f64>, JsValue> 
 	let input = CmoInput::from_slice(data, params);
 	
 	let mut output = vec![0.0; data.len()];  // Single allocation
-	cmo_into_slice(&mut output, &input, detect_wasm_kernel())
+	cmo_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -1182,13 +1182,13 @@ pub fn cmo_into(
 		
 		if in_ptr == out_ptr {  // CRITICAL: Aliasing check
 			let mut temp = vec![0.0; len];
-			cmo_into_slice(&mut temp, &input, detect_wasm_kernel())
+			cmo_into_slice(&mut temp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			cmo_into_slice(out, &input, detect_wasm_kernel())
+			cmo_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -1239,7 +1239,7 @@ pub fn cmo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 		period: (p_start, p_end, p_step),
 	};
 	
-	let output = cmo_batch_with_kernel(data, &batch_range, detect_wasm_kernel())
+	let output = cmo_batch_with_kernel(data, &batch_range, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = CmoBatchJsOutput {
@@ -1279,7 +1279,7 @@ pub fn cmo_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		cmo_batch_inner_into(data, &sweep, detect_wasm_kernel(), false, out)
+		cmo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)

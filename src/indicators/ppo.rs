@@ -38,8 +38,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -1192,7 +1190,7 @@ pub fn ppo_js(data: &[f64], fast_period: usize, slow_period: usize, ma_type: &st
 	let input = PpoInput::from_slice(data, params);
 	
 	let mut output = vec![0.0; data.len()];  // Single allocation
-	ppo_into_slice(&mut output, &input, detect_wasm_kernel())
+	ppo_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -1242,13 +1240,13 @@ pub fn ppo_into(
 		
 		if in_ptr == out_ptr as *const f64 {  // CRITICAL: Aliasing check
 			let mut temp = vec![0.0; len];
-			ppo_into_slice(&mut temp, &input, detect_wasm_kernel())
+			ppo_into_slice(&mut temp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			ppo_into_slice(out, &input, detect_wasm_kernel())
+			ppo_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -1284,7 +1282,7 @@ pub fn ppo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
 		ma_type: config.ma_type,
 	};
 	
-	let output = ppo_batch_inner(data, &sweep, detect_wasm_kernel(), false)
+	let output = ppo_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = PpoBatchJsOutput {
@@ -1330,7 +1328,7 @@ pub fn ppo_batch_into(
 		
 		let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
 		
-		ppo_batch_inner_into(data, &sweep, detect_wasm_kernel(), false, out)
+		ppo_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(num_combos)

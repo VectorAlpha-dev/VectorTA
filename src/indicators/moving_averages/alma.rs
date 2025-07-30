@@ -17,8 +17,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -2255,7 +2253,7 @@ pub fn alma_js(data: &[f64], period: usize, offset: f64, sigma: f64) -> Result<V
 
 	let mut output = vec![0.0; data.len()];
 
-	alma_into_slice(&mut output, &input, detect_wasm_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	alma_into_slice(&mut output, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	Ok(output)
 }
@@ -2289,7 +2287,7 @@ pub fn alma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
 		sigma: config.sigma_range,
 	};
 
-	let output = alma_batch_inner(data, &sweep, detect_wasm_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let output = alma_batch_inner(data, &sweep, detect_best_kernel(), false).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = AlmaBatchJsOutput {
 		values: output.values,
@@ -2348,12 +2346,12 @@ pub fn alma_into(
 
 		if in_ptr == out_ptr {
 			let mut temp = vec![0.0; len];
-			alma_into_slice(&mut temp, &input, detect_wasm_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			alma_into_slice(&mut temp, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			alma_into_slice(out, &input, detect_wasm_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
+			alma_into_slice(out, &input, detect_best_kernel()).map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 
 		Ok(())
@@ -2503,7 +2501,7 @@ pub fn alma_batch_into(
 
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-		alma_batch_inner_into(data, &sweep, detect_wasm_kernel(), false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
+		alma_batch_inner_into(data, &sweep, detect_best_kernel(), false, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 		Ok(rows)
 	}

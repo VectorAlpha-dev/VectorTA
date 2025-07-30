@@ -16,9 +16,26 @@
 //! - `Ok(VarOutput)` on success, with a `Vec<f64>` matching the input.
 //! - `Err(VarError)` otherwise.
 
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyDict;
+#[cfg(feature = "wasm")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -26,6 +43,7 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 // -- Data Structures --
@@ -52,6 +70,7 @@ pub struct VarOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
 pub struct VarParams {
 	pub period: Option<usize>,
 	pub nbdev: Option<f64>,
@@ -214,16 +233,20 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
 		other => other,
 	};
 
+	let mut out = alloc_with_nan_prefix(len, period - 1);
+
 	unsafe {
 		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => var_scalar(data, period, first, nbdev, &mut vec![f64::NAN; len]),
+			Kernel::Scalar | Kernel::ScalarBatch => var_scalar(data, period, first, nbdev, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => var_avx2(data, period, first, nbdev, &mut vec![f64::NAN; len]),
+			Kernel::Avx2 | Kernel::Avx2Batch => var_avx2(data, period, first, nbdev, &mut out)?,
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => var_avx512(data, period, first, nbdev, &mut vec![f64::NAN; len]),
+			Kernel::Avx512 | Kernel::Avx512Batch => var_avx512(data, period, first, nbdev, &mut out)?,
 			_ => unreachable!(),
 		}
 	}
+	
+	Ok(VarOutput { values: out })
 }
 
 #[inline(always)]
@@ -233,7 +256,7 @@ pub fn var_scalar(
 	first: usize,
 	nbdev: f64,
 	out: &mut [f64],
-) -> Result<VarOutput, VarError> {
+) -> Result<(), VarError> {
 	let len = data.len();
 	let nbdev2 = nbdev * nbdev;
 	let inv_p = 1.0 / (period as f64);
@@ -256,12 +279,12 @@ pub fn var_scalar(
 		out[i] = (sum_sq * inv_p - (sum * inv_p).powi(2)) * nbdev2;
 	}
 
-	Ok(VarOutput { values: out.to_vec() })
+	Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-pub fn var_avx2(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) -> Result<VarOutput, VarError> {
+pub fn var_avx2(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) -> Result<(), VarError> {
 	// Stub: points to scalar logic for API parity
 	var_scalar(data, period, first, nbdev, out)
 }
@@ -274,9 +297,70 @@ pub fn var_avx512(
 	first: usize,
 	nbdev: f64,
 	out: &mut [f64],
-) -> Result<VarOutput, VarError> {
+) -> Result<(), VarError> {
 	// Stub: points to scalar logic for API parity
 	var_scalar(data, period, first, nbdev, out)
+}
+
+// --- WASM Helper Function ---
+
+#[inline]
+pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result<(), VarError> {
+	let data: &[f64] = input.as_ref();
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VarError::AllValuesNaN)?;
+	let len = data.len();
+	let period = input.get_period();
+	let nbdev = input.get_nbdev();
+
+	if period == 0 || period > len {
+		return Err(VarError::InvalidPeriod { period, data_len: len });
+	}
+	if (len - first) < period {
+		return Err(VarError::NotEnoughValidData {
+			needed: period,
+			valid: len - first,
+		});
+	}
+	if nbdev.is_nan() || nbdev.is_infinite() {
+		return Err(VarError::InvalidNbdev { nbdev });
+	}
+	if dst.len() != data.len() {
+		return Err(VarError::InvalidPeriod {
+			period: dst.len(),
+			data_len: data.len(),
+		});
+	}
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Compute directly into dst
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => {
+				var_scalar(data, period, first, nbdev, dst)?;
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => {
+				var_avx2(data, period, first, nbdev, dst)?;
+			}
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => {
+				var_avx512(data, period, first, nbdev, dst)?;
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup with NaN
+	let warmup_end = period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
+	Ok(())
 }
 
 // --- Row variants for batch ---
@@ -506,7 +590,13 @@ fn var_batch_inner(
 	}
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	let warmup_periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap() - 1).collect();
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
+	let out: &mut [f64] =
+		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -517,29 +607,40 @@ fn var_batch_inner(
 			Kernel::Avx2 => var_row_avx2(data, first, period, max_p, nbdev, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 			Kernel::Avx512 => var_row_avx512(data, first, period, max_p, nbdev, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, max_p, nbdev, out_row),
 			_ => unreachable!(),
 		}
 	};
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			values
-				.par_chunks_mut(cols)
+			out.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| do_row(row, slice));
 		}
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in values.chunks_mut(cols).enumerate() {
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
 				do_row(row, slice);
 			}
 		}
 	} else {
-		for (row, slice) in values.chunks_mut(cols).enumerate() {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
 			do_row(row, slice);
 		}
 	}
+	
+	let values = unsafe {
+		Vec::from_raw_parts(
+			buf_guard.as_mut_ptr() as *mut f64,
+			buf_guard.len(),
+			buf_guard.capacity(),
+		)
+	};
+	std::mem::forget(buf_guard);
+	
 	Ok(VarBatchOutput {
 		values,
 		combos,
@@ -616,6 +717,177 @@ impl VarStream {
 		let mean = self.sum * inv_p;
 		let mean_sq = self.sum_sq * inv_p;
 		Some((mean_sq - mean * mean) * self.nbdev * self.nbdev)
+	}
+}
+
+// --- WASM Bindings ---
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn var_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, JsValue> {
+	let params = VarParams {
+		period: Some(period),
+		nbdev: Some(nbdev),
+	};
+	let input = VarInput::from_slice(data, params);
+
+	let mut output = vec![0.0; data.len()];
+
+	var_into_slice(&mut output, &input, detect_best_kernel())
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	Ok(output)
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn var_alloc(len: usize) -> *mut f64 {
+	let mut vec = Vec::<f64>::with_capacity(len);
+	let ptr = vec.as_mut_ptr();
+	std::mem::forget(vec);
+	ptr
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn var_free(ptr: *mut f64, len: usize) {
+	unsafe {
+		let _ = Vec::from_raw_parts(ptr, len, len);
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn var_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period: usize,
+	nbdev: f64,
+) -> Result<(), JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		if period == 0 || period > len {
+			return Err(JsValue::from_str("Invalid period"));
+		}
+
+		let params = VarParams {
+			period: Some(period),
+			nbdev: Some(nbdev),
+		};
+		let input = VarInput::from_slice(data, params);
+
+		if in_ptr == out_ptr as *const f64 {
+			// Handle aliasing - data and output are the same
+			let mut temp = vec![0.0; len];
+			var_into_slice(&mut temp, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, len);
+			var_into_slice(out, &input, detect_best_kernel())
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(())
+	}
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VarBatchConfig {
+	pub period_range: (usize, usize, usize),
+	pub nbdev_range: (f64, f64, f64),
+}
+
+#[cfg(feature = "wasm")]
+#[derive(Serialize, Deserialize)]
+pub struct VarBatchJsOutput {
+	pub values: Vec<f64>,
+	pub combos: Vec<VarParams>,
+	pub rows: usize,
+	pub cols: usize,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = var_batch)]
+pub fn var_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
+	let config: VarBatchConfig =
+		serde_wasm_bindgen::from_value(config).map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+	let sweep = VarBatchRange {
+		period: config.period_range,
+		nbdev: config.nbdev_range,
+	};
+
+	let output = var_batch_inner(data, &sweep, detect_best_kernel(), false)
+		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	let js_output = VarBatchJsOutput {
+		values: output.values,
+		combos: output.combos,
+		rows: output.rows,
+		cols: output.cols,
+	};
+
+	serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn var_batch_into(
+	in_ptr: *const f64,
+	out_ptr: *mut f64,
+	len: usize,
+	period_start: usize,
+	period_end: usize,
+	period_step: usize,
+	nbdev_start: f64,
+	nbdev_end: f64,
+	nbdev_step: f64,
+) -> Result<usize, JsValue> {
+	if in_ptr.is_null() || out_ptr.is_null() {
+		return Err(JsValue::from_str("Null pointer provided"));
+	}
+
+	unsafe {
+		let data = std::slice::from_raw_parts(in_ptr, len);
+
+		let sweep = VarBatchRange {
+			period: (period_start, period_end, period_step),
+			nbdev: (nbdev_start, nbdev_end, nbdev_step),
+		};
+
+		// Calculate output size
+		let combos = expand_grid(&sweep);
+		if combos.is_empty() {
+			return Err(JsValue::from_str("No valid parameter combinations"));
+		}
+
+		let rows = combos.len();
+		let total_size = rows * len;
+
+		// Check for aliasing
+		if in_ptr == out_ptr as *const f64 {
+			// Handle aliasing
+			let mut temp = vec![0.0; total_size];
+			let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, &mut temp)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+			out.copy_from_slice(&temp);
+		} else {
+			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
+			let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
+				.map_err(|e| JsValue::from_str(&e.to_string()))?;
+		}
+
+		Ok(rows)
 	}
 }
 
@@ -900,4 +1172,188 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+}
+
+// Python bindings
+#[cfg(feature = "python")]
+#[pyfunction(name = "var")]
+#[pyo3(signature = (data, period=14, nbdev=1.0, kernel=None))]
+pub fn var_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period: usize,
+	nbdev: f64,
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+	let slice_in = data.as_slice()?;
+	let kern = validate_kernel(kernel, false)?;
+	
+	let params = VarParams {
+		period: Some(period),
+		nbdev: Some(nbdev),
+	};
+	let input = VarInput::from_slice(slice_in, params);
+	
+	let result_vec: Vec<f64> = py
+		.allow_threads(|| var_with_kernel(&input, kern).map(|o| o.values))
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	Ok(result_vec.into_pyarray(py))
+}
+
+#[cfg(feature = "python")]
+#[pyclass(name = "VarStream")]
+pub struct VarStreamPy {
+	stream: VarStream,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VarStreamPy {
+	#[new]
+	fn new(period: usize, nbdev: f64) -> PyResult<Self> {
+		let params = VarParams {
+			period: Some(period),
+			nbdev: Some(nbdev),
+		};
+		let stream = VarStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
+		Ok(VarStreamPy { stream })
+	}
+
+	fn update(&mut self, value: f64) -> Option<f64> {
+		self.stream.update(value)
+	}
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "var_batch")]
+#[pyo3(signature = (data, period_range, nbdev_range=(1.0, 1.0, 0.0), kernel=None))]
+pub fn var_batch_py<'py>(
+	py: Python<'py>,
+	data: PyReadonlyArray1<'py, f64>,
+	period_range: (usize, usize, usize),
+	nbdev_range: (f64, f64, f64),
+	kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+	let slice_in = data.as_slice()?;
+	
+	let sweep = VarBatchRange {
+		period: period_range,
+		nbdev: nbdev_range,
+	};
+	
+	let combos = expand_grid(&sweep);
+	let rows = combos.len();
+	let cols = slice_in.len();
+	
+	let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+	let slice_out = unsafe { out_arr.as_slice_mut()? };
+	
+	let kern = validate_kernel(kernel, true)?;
+	
+	let combos = py
+		.allow_threads(|| {
+			let kernel = match kern {
+				Kernel::Auto => detect_best_batch_kernel(),
+				k => k,
+			};
+			let simd = match kernel {
+				Kernel::Avx512Batch => Kernel::Avx512,
+				Kernel::Avx2Batch => Kernel::Avx2,
+				Kernel::ScalarBatch => Kernel::Scalar,
+				_ => unreachable!(),
+			};
+			var_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
+		})
+		.map_err(|e| PyValueError::new_err(e.to_string()))?;
+	
+	let dict = PyDict::new(py);
+	dict.set_item("values", out_arr.reshape((rows, cols))?)?;
+	dict.set_item(
+		"periods",
+		combos
+			.iter()
+			.map(|p| p.period.unwrap() as u64)
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	dict.set_item(
+		"nbdevs",
+		combos
+			.iter()
+			.map(|p| p.nbdev.unwrap())
+			.collect::<Vec<_>>()
+			.into_pyarray(py),
+	)?;
+	
+	Ok(dict)
+}
+
+// Helper function for batch processing that writes directly to output
+#[inline(always)]
+fn var_batch_inner_into(
+	data: &[f64],
+	sweep: &VarBatchRange,
+	kern: Kernel,
+	parallel: bool,
+	out: &mut [f64],
+) -> Result<Vec<VarParams>, VarError> {
+	let combos = expand_grid(sweep);
+	if combos.is_empty() {
+		return Err(VarError::InvalidPeriod { period: 0, data_len: 0 });
+	}
+	let first = data.iter().position(|x| !x.is_nan()).ok_or(VarError::AllValuesNaN)?;
+	let max_p = combos.iter().map(|c| round_up8(c.period.unwrap())).max().unwrap();
+	if data.len() - first < max_p {
+		return Err(VarError::NotEnoughValidData {
+			needed: max_p,
+			valid: data.len() - first,
+		});
+	}
+	let cols = data.len();
+
+	// Initialize NaN prefixes for each row based on its period
+	for (row, combo) in combos.iter().enumerate() {
+		let period = combo.period.unwrap();
+		let row_start = row * cols;
+		let warmup_end = row_start + period - 1;
+		out[row_start..warmup_end].fill(f64::NAN);
+	}
+
+	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+		let period = combos[row].period.unwrap();
+		let nbdev = combos[row].nbdev.unwrap();
+		match kern {
+			Kernel::Scalar => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 => var_row_avx2(data, first, period, max_p, nbdev, out_row),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 => var_row_avx512(data, first, period, max_p, nbdev, out_row),
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			Kernel::Avx2 | Kernel::Avx512 => var_row_scalar(data, first, period, max_p, nbdev, out_row),
+			_ => unreachable!(),
+		}
+	};
+	
+	if parallel {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			out.par_chunks_mut(cols)
+				.enumerate()
+				.for_each(|(row, slice)| do_row(row, slice));
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		{
+			for (row, slice) in out.chunks_mut(cols).enumerate() {
+				do_row(row, slice);
+			}
+		}
+	} else {
+		for (row, slice) in out.chunks_mut(cols).enumerate() {
+			do_row(row, slice);
+		}
+	}
+	
+	Ok(combos)
 }

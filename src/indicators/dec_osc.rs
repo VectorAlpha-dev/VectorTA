@@ -36,8 +36,6 @@ use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
 	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -1227,7 +1225,7 @@ pub fn dec_osc_js(data: &[f64], hp_period: usize, k: f64) -> Result<Vec<f64>, Js
 	let mut output = vec![0.0; data.len()];
 	
 	#[cfg(target_arch = "wasm32")]
-	let kernel = detect_wasm_kernel();
+	let kernel = detect_best_kernel();
 	#[cfg(not(target_arch = "wasm32"))]
 	let kernel = Kernel::Auto;
 	
@@ -1259,7 +1257,7 @@ pub fn dec_osc_into(
 		let input = DecOscInput::from_slice(data, params);
 		
 		#[cfg(target_arch = "wasm32")]
-		let kernel = detect_wasm_kernel();
+		let kernel = detect_best_kernel();
 		#[cfg(not(target_arch = "wasm32"))]
 		let kernel = Kernel::Auto;
 		
@@ -1325,7 +1323,7 @@ pub fn dec_osc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValu
 	};
 
 	#[cfg(target_arch = "wasm32")]
-	let output = dec_osc_batch_inner(data, &sweep, detect_wasm_kernel(), false)
+	let output = dec_osc_batch_inner(data, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	#[cfg(not(target_arch = "wasm32"))]

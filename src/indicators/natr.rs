@@ -46,8 +46,6 @@ use crate::utilities::kernel_validation::validate_kernel;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 
 #[derive(Debug, Clone)]
 pub enum NatrData<'a> {
@@ -1205,9 +1203,6 @@ pub fn natr_into_slice(
 
 	// Choose kernel
 	let chosen = match kern {
-		#[cfg(target_arch = "wasm32")]
-		Kernel::Auto => detect_wasm_kernel(),
-		#[cfg(not(target_arch = "wasm32"))]
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
@@ -1239,7 +1234,7 @@ pub fn natr_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Resul
 	let input = NatrInput::from_slices(high, low, close, params);
 	
 	let mut output = vec![0.0; high.len().min(low.len()).min(close.len())];
-	natr_into_slice(&mut output, &input, detect_wasm_kernel())
+	natr_into_slice(&mut output, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -1269,13 +1264,13 @@ pub fn natr_into(
 		// Check if any input pointer equals output pointer (aliasing)
 		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
 			let mut temp = vec![0.0; len];
-			natr_into_slice(&mut temp, &input, detect_wasm_kernel())
+			natr_into_slice(&mut temp, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			natr_into_slice(out, &input, detect_wasm_kernel())
+			natr_into_slice(out, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		Ok(())
@@ -1324,7 +1319,7 @@ pub fn natr_batch_js(high: &[f64], low: &[f64], close: &[f64], config: JsValue) 
 		period: config.period_range,
 	};
 	
-	let output = natr_batch_inner(high, low, close, &sweep, detect_wasm_kernel(), false)
+	let output = natr_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = NatrBatchJsOutput {
@@ -1368,7 +1363,7 @@ pub fn natr_batch_into(
 		
 		let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 		
-		natr_batch_inner_into(high, low, close, &sweep, detect_wasm_kernel(), false, out)
+		natr_batch_inner_into(high, low, close, &sweep, detect_best_kernel(), false, out)
 			.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		
 		Ok(rows)

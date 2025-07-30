@@ -270,7 +270,10 @@
       "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
       "Bash(test_bindings.bat cci --python)",
       "Bash(test_bindings.bat natr)",
-      "Bash(.test_bindings.bat natr)"
+      "Bash(.test_bindings.bat natr)",
+      "Bash(test_bindings.bat rsi)",
+      "Bash(cargo doc:*)",
+      "Bash(test -f \"tests/python/test_wclprice.py\")"
     ],
     "deny": []
   }

@@ -46,8 +46,6 @@ use crate::utilities::kernel_validation::validate_kernel;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use crate::utilities::helpers::detect_wasm_kernel;
 
 #[derive(Debug, Clone)]
 pub enum KvoData<'a> {
@@ -1517,7 +1515,7 @@ pub fn kvo_js(
 ) -> Result<Vec<f64>, JsValue> {
 	let mut output = vec![0.0; high.len()];  // Single allocation
 	
-	kvo_into_slice(&mut output, high, low, close, volume, short_period, long_period, detect_wasm_kernel())
+	kvo_into_slice(&mut output, high, low, close, volume, short_period, long_period, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -1551,14 +1549,14 @@ pub fn kvo_into(
 		if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr || volume_ptr == out_ptr {
 			// Need temporary buffer
 			let mut temp = vec![0.0; len];
-			kvo_into_slice(&mut temp, high, low, close, volume, short_period, long_period, detect_wasm_kernel())
+			kvo_into_slice(&mut temp, high, low, close, volume, short_period, long_period, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			// No aliasing, can write directly
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			kvo_into_slice(out, high, low, close, volume, short_period, long_period, detect_wasm_kernel())
+			kvo_into_slice(out, high, low, close, volume, short_period, long_period, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 		
@@ -1623,7 +1621,7 @@ pub fn kvo_batch_js(
 		long_period: config.long_period_range,
 	};
 	
-	let output = kvo_batch_inner(high, low, close, volume, &sweep, detect_wasm_kernel(), false)
+	let output = kvo_batch_inner(high, low, close, volume, &sweep, detect_best_kernel(), false)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	let js_output = KvoBatchJsOutput {
@@ -1684,7 +1682,7 @@ pub fn kvo_batch_into(
 		
 		if aliased {
 			// Need temporary buffer for batch results
-			let output = kvo_batch_inner(high, low, close, volume, &sweep, detect_wasm_kernel(), false)
+			let output = kvo_batch_inner(high, low, close, volume, &sweep, detect_best_kernel(), false)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			let total_size = output.values.len();
@@ -1702,7 +1700,7 @@ pub fn kvo_batch_into(
 			let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 			
 			// Use direct write helper that avoids allocation
-			kvo_batch_inner_into(high, low, close, volume, &sweep, detect_wasm_kernel(), false, out)
+			kvo_batch_inner_into(high, low, close, volume, &sweep, detect_best_kernel(), false, out)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			
 			Ok(rows)

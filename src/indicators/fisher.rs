@@ -803,6 +803,140 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_fisher_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			FisherParams::default(), // period: 9
+			FisherParams { period: Some(1) }, // minimum period
+			FisherParams { period: Some(2) }, // very small period
+			FisherParams { period: Some(3) }, // small period
+			FisherParams { period: Some(5) }, // small period
+			FisherParams { period: Some(10) }, // medium period
+			FisherParams { period: Some(20) }, // medium period
+			FisherParams { period: Some(30) }, // medium-large period
+			FisherParams { period: Some(50) }, // large period
+			FisherParams { period: Some(100) }, // very large period
+			FisherParams { period: Some(200) }, // extra large period
+			FisherParams { period: Some(240) }, // edge case from default batch range
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = FisherInput::from_candles(&candles, params.clone());
+			let output = fisher_with_kernel(&input, kernel)?;
+
+			// Check fisher values
+			for (i, &val) in output.fisher.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in fisher output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in fisher output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in fisher output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+			}
+
+			// Check signal values
+			for (i, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in signal output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in signal output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in signal output with params: period={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(9),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_fisher_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_fisher_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -835,7 +969,8 @@ mod tests {
 		check_fisher_very_small_dataset,
 		check_fisher_reinput,
 		check_fisher_nan_handling,
-		check_fisher_streaming
+		check_fisher_streaming,
+		check_fisher_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -871,6 +1006,159 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step)
+			(1, 10, 1),        // Small periods, every value
+			(2, 20, 2),        // Small to medium, even values
+			(5, 50, 5),        // Medium range, step 5
+			(10, 100, 10),     // Medium to large, step 10
+			(20, 240, 20),     // Large range, step 20
+			(9, 9, 0),         // Static default period
+			(50, 200, 50),     // Large periods only
+			(1, 5, 1),         // Very small periods only
+			(100, 240, 40),    // Very large periods
+			(3, 30, 3),        // Multiples of 3
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = FisherBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+
+			// Check fisher values
+			for (idx, &val) in output.fisher.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in fisher output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in fisher output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in fisher output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+			}
+
+			// Check signal values
+			for (idx, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in signal output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in signal output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in signal output with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(9)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -892,4 +1180,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

@@ -915,6 +915,131 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_dti_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			DtiParams::default(), // r: 14, s: 10, u: 5
+			DtiParams {
+				r: Some(1),
+				s: Some(1),
+				u: Some(1),
+			}, // minimum values
+			DtiParams {
+				r: Some(5),
+				s: Some(5),
+				u: Some(5),
+			}, // small values
+			DtiParams {
+				r: Some(20),
+				s: Some(15),
+				u: Some(10),
+			}, // medium values
+			DtiParams {
+				r: Some(50),
+				s: Some(30),
+				u: Some(20),
+			}, // large values
+			DtiParams {
+				r: Some(100),
+				s: Some(50),
+				u: Some(25),
+			}, // very large values
+			DtiParams {
+				r: Some(14),
+				s: Some(5),
+				u: Some(20),
+			}, // asymmetric - u > r
+			DtiParams {
+				r: Some(30),
+				s: Some(10),
+				u: Some(5),
+			}, // asymmetric - r > s > u
+			DtiParams {
+				r: Some(10),
+				s: Some(20),
+				u: Some(15),
+			}, // asymmetric - s > u > r
+			DtiParams {
+				r: Some(2),
+				s: Some(10),
+				u: Some(5),
+			}, // small r, normal s and u
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = DtiInput::from_candles(&candles, params.clone());
+			let output = dti_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: r={}, s={}, u={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.r.unwrap_or(14),
+						params.s.unwrap_or(10),
+						params.u.unwrap_or(5),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_dti_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! generate_all_dti_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -946,7 +1071,8 @@ mod tests {
 		check_dti_period_exceeds_length,
 		check_dti_all_nan,
 		check_dti_empty_data,
-		check_dti_streaming
+		check_dti_streaming,
+		check_dti_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -972,6 +1098,111 @@ mod tests {
 		}
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)
+			(1, 5, 1, 1, 5, 1, 1, 5, 1),           // Small ranges, all params
+			(5, 15, 5, 5, 15, 5, 5, 15, 5),       // Medium ranges, step 5
+			(10, 30, 10, 10, 20, 10, 5, 15, 5),   // Mixed ranges
+			(14, 14, 0, 10, 10, 0, 1, 10, 1),     // Static r,s, sweep u
+			(1, 20, 5, 10, 10, 0, 5, 5, 0),       // Sweep r, static s,u
+			(20, 50, 15, 15, 30, 15, 10, 20, 10), // Large ranges
+			(2, 6, 2, 8, 12, 2, 3, 9, 3),         // Different steps
+			(50, 100, 25, 30, 60, 30, 20, 40, 20), // Very large ranges
+			(14, 14, 0, 5, 20, 5, 5, 20, 5),      // Default r, sweep s,u
+			(5, 5, 0, 5, 5, 0, 1, 10, 1),         // Static r,s, sweep u only
+		];
+
+		for (cfg_idx, &(r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = DtiBatchBuilder::new()
+				.kernel(kernel)
+				.r_range(r_start, r_end, r_step)
+				.s_range(s_start, s_end, s_step)
+				.u_range(u_start, u_end, u_step)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: r={}, s={}, u={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.r.unwrap_or(14),
+						combo.s.unwrap_or(10),
+						combo.u.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -994,4 +1225,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
