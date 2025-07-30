@@ -1,3 +1,6 @@
-[submodule "third_party/sleef"]
-	path = third_party/sleef
-	url = https://github.com/shibatch/sleef.git
+[submodule "third_party/tulipindicators"]
+	path = third_party/tulipindicators
+	url = https://github.com/TulipCharts/tulipindicators
+[submodule "third_party/ta-lib"]
+	path = third_party/ta-lib
+	url = https://github.com/TA-Lib/ta-lib

@@ -267,7 +267,12 @@
       "Bash(touch:*)",
       "Bash(./run_wasm_benchmark.bat --rebuild wma)",
       "Bash(./run_python_benchmark.bat alligator)",
-      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)"
+      "Bash(.venvScriptspython benchmarks/criterion_comparable_benchmark.py alligator)",
+      "WebFetch(domain:tulipindicators.org)",
+      "Bash(git submodule add:*)",
+      "Bash(git submodule:*)",
+      "Bash(git rm:*)",
+      "Bash(git config:*)"
     ],
     "deny": []
   }
