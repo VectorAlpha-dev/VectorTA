@@ -261,6 +261,11 @@ pub fn var_scalar(
 	let nbdev2 = nbdev * nbdev;
 	let inv_p = 1.0 / (period as f64);
 
+	// Initialize NaN prefix for initial invalid data
+	for i in 0..first {
+		out[i] = f64::NAN;
+	}
+
 	let mut sum = 0.0;
 	let mut sum_sq = 0.0;
 
@@ -352,12 +357,6 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
 			}
 			_ => unreachable!(),
 		}
-	}
-
-	// Fill warmup with NaN
-	let warmup_end = period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -1091,6 +1090,87 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_var_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			VarParams::default(),                                   // period: 14, nbdev: 1.0
+			VarParams { period: Some(2), nbdev: Some(1.0) },      // minimum period
+			VarParams { period: Some(5), nbdev: Some(1.0) },      // small period
+			VarParams { period: Some(10), nbdev: Some(1.0) },     // small-medium period
+			VarParams { period: Some(20), nbdev: Some(1.0) },     // medium period
+			VarParams { period: Some(30), nbdev: Some(1.0) },     // medium-large period
+			VarParams { period: Some(50), nbdev: Some(1.0) },     // large period
+			VarParams { period: Some(100), nbdev: Some(1.0) },    // very large period
+			VarParams { period: Some(200), nbdev: Some(1.0) },    // extreme period
+			VarParams { period: Some(14), nbdev: Some(0.5) },     // small nbdev
+			VarParams { period: Some(14), nbdev: Some(2.0) },     // double nbdev
+			VarParams { period: Some(14), nbdev: Some(3.0) },     // triple nbdev
+			VarParams { period: Some(7), nbdev: Some(1.5) },      // mixed 1
+			VarParams { period: Some(21), nbdev: Some(2.5) },     // mixed 2
+			VarParams { period: Some(50), nbdev: Some(0.75) },    // mixed 3
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VarInput::from_candles(&candles, "close", params.clone());
+			let output = var_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, nbdev={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(14),
+						params.nbdev.unwrap_or(1.0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, nbdev={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.nbdev.unwrap_or(1.0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, nbdev={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.nbdev.unwrap_or(1.0),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_var_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_var_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1123,7 +1203,8 @@ mod tests {
 		check_var_very_small_dataset,
 		check_var_reinput,
 		check_var_nan_handling,
-		check_var_streaming
+		check_var_streaming,
+		check_var_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1151,6 +1232,84 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_range, nbdev_range)
+			((2, 10, 2), (1.0, 1.0, 0.0)),       // Small periods, single nbdev
+			((10, 30, 5), (1.0, 2.0, 0.5)),      // Medium periods, varying nbdev
+			((30, 100, 10), (0.5, 1.5, 0.5)),    // Large periods, varying nbdev
+			((2, 5, 1), (1.0, 3.0, 1.0)),        // Dense small range, varying nbdev
+			((14, 14, 0), (1.0, 1.0, 0.0)),      // Single value (default)
+			((5, 25, 5), (2.0, 2.0, 0.0)),       // Mixed range, fixed nbdev
+			((50, 100, 25), (1.0, 2.0, 0.25)),   // Large step, fine nbdev
+			((14, 28, 7), (0.5, 2.5, 0.5)),      // Common periods, wide nbdev range
+		];
+		
+		for (cfg_idx, &(period_range, nbdev_range)) in test_configs.iter().enumerate() {
+			let output = VarBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(period_range.0, period_range.1, period_range.2)
+				.nbdev_range(nbdev_range.0, nbdev_range.1, nbdev_range.2)
+				.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, nbdev={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.nbdev.unwrap_or(1.0)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, nbdev={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.nbdev.unwrap_or(1.0)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, nbdev={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.nbdev.unwrap_or(1.0)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste! {
@@ -1172,6 +1331,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Python bindings
@@ -1311,14 +1471,6 @@ fn var_batch_inner_into(
 		});
 	}
 	let cols = data.len();
-
-	// Initialize NaN prefixes for each row based on its period
-	for (row, combo) in combos.iter().enumerate() {
-		let period = combo.period.unwrap();
-		let row_start = row * cols;
-		let warmup_end = row_start + period - 1;
-		out[row_start..warmup_end].fill(f64::NAN);
-	}
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();

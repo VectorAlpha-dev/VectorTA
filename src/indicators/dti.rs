@@ -435,8 +435,9 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
 		}
 	}
 
-	// Fill NaN prefix
-	for v in &mut dst[..first_valid_idx] {
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + 1;
+	for v in &mut dst[..warmup_end] {
 		*v = f64::NAN;
 	}
 

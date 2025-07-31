@@ -1529,6 +1529,280 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_wavetrend_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			WavetrendParams::default(), // channel=9, average=12, ma=3, factor=0.015
+			WavetrendParams {
+				channel_length: Some(1),
+				average_length: Some(1),
+				ma_length: Some(1),
+				factor: Some(0.001),
+			}, // minimum viable parameters
+			WavetrendParams {
+				channel_length: Some(2),
+				average_length: Some(2),
+				ma_length: Some(2),
+				factor: Some(0.005),
+			}, // very small parameters
+			WavetrendParams {
+				channel_length: Some(5),
+				average_length: Some(7),
+				ma_length: Some(3),
+				factor: Some(0.01),
+			}, // small parameters
+			WavetrendParams {
+				channel_length: Some(10),
+				average_length: Some(15),
+				ma_length: Some(5),
+				factor: Some(0.02),
+			}, // medium parameters
+			WavetrendParams {
+				channel_length: Some(20),
+				average_length: Some(25),
+				ma_length: Some(7),
+				factor: Some(0.025),
+			}, // medium-large parameters
+			WavetrendParams {
+				channel_length: Some(30),
+				average_length: Some(40),
+				ma_length: Some(10),
+				factor: Some(0.03),
+			}, // large parameters
+			WavetrendParams {
+				channel_length: Some(50),
+				average_length: Some(60),
+				ma_length: Some(15),
+				factor: Some(0.04),
+			}, // very large parameters
+			WavetrendParams {
+				channel_length: Some(100),
+				average_length: Some(120),
+				ma_length: Some(20),
+				factor: Some(0.05),
+			}, // extreme parameters
+			WavetrendParams {
+				channel_length: Some(7),
+				average_length: Some(11),
+				ma_length: Some(3),
+				factor: Some(0.013),
+			}, // prime numbers
+			WavetrendParams {
+				channel_length: Some(13),
+				average_length: Some(17),
+				ma_length: Some(5),
+				factor: Some(0.017),
+			}, // more primes
+			WavetrendParams {
+				channel_length: Some(9),
+				average_length: Some(3),
+				ma_length: Some(12),
+				factor: Some(0.015),
+			}, // inverted typical sizes
+			WavetrendParams {
+				channel_length: Some(15),
+				average_length: Some(15),
+				ma_length: Some(15),
+				factor: Some(0.015),
+			}, // all equal
+			WavetrendParams {
+				channel_length: Some(9),
+				average_length: Some(12),
+				ma_length: Some(3),
+				factor: Some(0.0001),
+			}, // very small factor
+			WavetrendParams {
+				channel_length: Some(9),
+				average_length: Some(12),
+				ma_length: Some(3),
+				factor: Some(1.0),
+			}, // large factor
+			WavetrendParams {
+				channel_length: Some(3),
+				average_length: Some(5),
+				ma_length: Some(1),
+				factor: Some(0.008),
+			}, // fibonacci-like
+			WavetrendParams {
+				channel_length: Some(8),
+				average_length: Some(13),
+				ma_length: Some(2),
+				factor: Some(0.021),
+			}, // more fibonacci
+			WavetrendParams {
+				channel_length: Some(21),
+				average_length: Some(34),
+				ma_length: Some(8),
+				factor: Some(0.034),
+			}, // larger fibonacci
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = WavetrendInput::from_candles(&candles, "hlc3", params.clone());
+			let output = wavetrend_with_kernel(&input, kernel)?;
+			
+			// Check wt1 output
+			for (i, &val) in output.wt1.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i, 
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+			}
+			
+			// Check wt2 output
+			for (i, &val) in output.wt2.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+			}
+			
+			// Check wt_diff output
+			for (i, &val) in output.wt_diff.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.channel_length.unwrap_or(9),
+						params.average_length.unwrap_or(12),
+						params.ma_length.unwrap_or(3),
+						params.factor.unwrap_or(0.015),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_wavetrend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	fn check_wavetrend_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 
@@ -1666,7 +1940,8 @@ mod tests {
 		check_wavetrend_channel_exceeds_length,
 		check_wavetrend_very_small_dataset,
 		check_wavetrend_nan_handling,
-		check_wavetrend_streaming
+		check_wavetrend_streaming,
+		check_wavetrend_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1722,6 +1997,191 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (channel_start, channel_end, channel_step, avg_start, avg_end, avg_step, ma_start, ma_end, ma_step, factor_start, factor_end, factor_step)
+			(2, 10, 2, 3, 12, 3, 1, 5, 1, 0.005, 0.015, 0.005),      // Small ranges
+			(5, 25, 5, 10, 30, 5, 2, 8, 2, 0.01, 0.03, 0.01),        // Medium ranges
+			(20, 60, 10, 25, 75, 10, 5, 15, 5, 0.02, 0.05, 0.015),   // Large ranges
+			(2, 5, 1, 2, 5, 1, 1, 3, 1, 0.001, 0.005, 0.001),        // Dense small range
+			(10, 30, 10, 15, 45, 15, 3, 9, 3, 0.015, 0.045, 0.015),  // Medium spaced
+			(50, 100, 25, 60, 120, 30, 10, 20, 5, 0.03, 0.06, 0.03), // Very large ranges
+			(9, 9, 0, 12, 12, 0, 3, 3, 0, 0.015, 0.015, 0.0),        // Static defaults
+			(1, 3, 1, 1, 3, 1, 1, 2, 1, 0.001, 0.003, 0.001),        // Minimum ranges
+		];
+		
+		for (cfg_idx, config) in test_configs.iter().enumerate() {
+			let output = WavetrendBatchBuilder::new()
+				.kernel(kernel)
+				.channel_range(config.0, config.1, config.2)
+				.avg_range(config.3, config.4, config.5)
+				.ma_range(config.6, config.7, config.8)
+				.factor_range(config.9, config.10, config.11)
+				.apply_candles(&c, "hlc3")?;
+			
+			// Check wt1 output
+			for (idx, &val) in output.wt1.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt1 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+			}
+			
+			// Check wt2 output
+			for (idx, &val) in output.wt2.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt2 output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+			}
+			
+			// Check wt_diff output
+			for (idx, &val) in output.wt_diff.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in wt_diff output with params: channel_length={}, average_length={}, ma_length={}, factor={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.channel_length.unwrap_or(9),
+						combo.average_length.unwrap_or(12),
+						combo.ma_length.unwrap_or(3),
+						combo.factor.unwrap_or(0.015)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1743,6 +2203,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

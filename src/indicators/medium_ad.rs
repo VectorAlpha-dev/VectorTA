@@ -210,6 +210,11 @@ pub fn medium_ad_with_kernel(input: &MediumAdInput, kernel: Kernel) -> Result<Me
 
 #[inline]
 pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+	// Initialize NaN prefix for initial invalid data
+	for i in 0..first_valid {
+		out[i] = f64::NAN;
+	}
+	
 	for i in (first_valid + period - 1)..data.len() {
 		let window = &data[i + 1 - period..=i];
 		if window.iter().any(|&v| v.is_nan()) {

@@ -361,6 +361,11 @@ pub fn rsmk_scalar(
 	first_valid: usize,
 	mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
+	// Initialize NaN prefix for initial invalid data
+	for i in 0..first_valid {
+		mom[i] = f64::NAN;
+	}
+	
 	for i in (first_valid + lookback)..lr.len() {
 		mom[i] = if lr[i].is_nan() || lr[i - lookback].is_nan() {
 			f64::NAN
@@ -503,12 +508,6 @@ pub fn rsmk_into_slice(
 	
 	// Copy signal result to dst_signal
 	dst_signal.copy_from_slice(&signal_result);
-	
-	// Fill warmup with NaN
-	for i in 0..warmup_period {
-		dst_indicator[i] = f64::NAN;
-		dst_signal[i] = f64::NAN;
-	}
 	
 	Ok(())
 }
@@ -1513,6 +1512,177 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_rsmk_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			RsmkParams::default(),                                    // lookback: 90, period: 3, signal_period: 20
+			RsmkParams {
+				lookback: Some(1),
+				period: Some(1),
+				signal_period: Some(1),
+				matype: Some("ema".to_string()),
+				signal_matype: Some("ema".to_string()),
+			},                                                       // minimum values
+			RsmkParams {
+				lookback: Some(10),
+				period: Some(2),
+				signal_period: Some(5),
+				matype: Some("ema".to_string()),
+				signal_matype: Some("ema".to_string()),
+			},                                                       // small values
+			RsmkParams {
+				lookback: Some(50),
+				period: Some(10),
+				signal_period: Some(15),
+				matype: Some("sma".to_string()),
+				signal_matype: Some("sma".to_string()),
+			},                                                       // medium values
+			RsmkParams {
+				lookback: Some(100),
+				period: Some(20),
+				signal_period: Some(30),
+				matype: Some("ema".to_string()),
+				signal_matype: Some("sma".to_string()),
+			},                                                       // large values
+			RsmkParams {
+				lookback: Some(200),
+				period: Some(50),
+				signal_period: Some(50),
+				matype: Some("sma".to_string()),
+				signal_matype: Some("ema".to_string()),
+			},                                                       // very large values
+			RsmkParams {
+				lookback: Some(5),
+				period: Some(20),
+				signal_period: Some(10),
+				matype: Some("ema".to_string()),
+				signal_matype: Some("ema".to_string()),
+			},                                                       // edge case: period > lookback
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = RsmkInput::from_candles(&candles, &candles, "close", params.clone());
+			let output = rsmk_with_kernel(&input, kernel)?;
+			
+			// Check indicator values for poison
+			for (i, &val) in output.indicator.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i, 
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in indicator at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i,
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in indicator at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i,
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+			}
+			
+			// Check signal values for poison
+			for (i, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i,
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in signal at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i,
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in signal at index {} \
+						 with params: lookback={}, period={}, signal_period={}, matype={}, signal_matype={} (param set {})",
+						test_name, val, bits, i,
+						params.lookback.unwrap_or(90),
+						params.period.unwrap_or(3),
+						params.signal_period.unwrap_or(20),
+						params.matype.as_deref().unwrap_or("ema"),
+						params.signal_matype.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_rsmk_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_rsmk_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1545,7 +1715,8 @@ mod tests {
 		check_rsmk_very_small_dataset,
 		check_rsmk_all_nan,
 		check_rsmk_not_enough_valid_data,
-		check_rsmk_ma_error
+		check_rsmk_ma_error,
+		check_rsmk_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1618,6 +1789,153 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file)?;
+		let main = &candles.close;
+		let compare = &candles.close;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (lookback_range, period_range, signal_period_range)
+			((10, 20, 5), (2, 5, 1), (5, 10, 5)),        // Small ranges
+			((50, 100, 25), (5, 15, 5), (10, 30, 10)),   // Medium ranges
+			((100, 200, 50), (20, 40, 10), (30, 60, 15)), // Large ranges
+			((1, 5, 1), (1, 3, 1), (1, 5, 1)),           // Dense small ranges
+			((90, 90, 0), (3, 3, 0), (20, 20, 0)),       // Single value (default)
+			((200, 250, 25), (50, 70, 10), (50, 100, 25)), // Very large ranges
+		];
+		
+		for (cfg_idx, &(lookback_range, period_range, signal_period_range)) in test_configs.iter().enumerate() {
+			let output = RsmkBatchBuilder::new()
+				.kernel(kernel)
+				.lookback_range(lookback_range.0, lookback_range.1, lookback_range.2)
+				.period_range(period_range.0, period_range.1, period_range.2)
+				.signal_period_range(signal_period_range.0, signal_period_range.1, signal_period_range.2)
+				.apply_slices(main, compare)?;
+			
+			// Check indicator values for poison
+			for (idx, &val) in output.indicator.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in indicator \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in indicator \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+			}
+			
+			// Check signal values for poison
+			for (idx, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in signal \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in signal \
+						 at row {} col {} (flat index {}) with params: lookback={}, period={}, signal_period={}, \
+						 matype={}, signal_matype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.lookback.unwrap_or(90),
+						combo.period.unwrap_or(3),
+						combo.signal_period.unwrap_or(20),
+						combo.matype.as_deref().unwrap_or("ema"),
+						combo.signal_matype.as_deref().unwrap_or("ema")
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1639,4 +1957,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

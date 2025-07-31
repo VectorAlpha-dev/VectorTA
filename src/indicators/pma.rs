@@ -258,12 +258,6 @@ fn pma_compute_into(
 ) {
 	let warmup_period = first_valid_idx + 7;
 	
-	// Fill warmup period with NaN
-	for i in 0..warmup_period.min(data.len()) {
-		predict_out[i] = f64::NAN;
-		trigger_out[i] = f64::NAN;
-	}
-	
 	// Use a sliding window for wma1 values - only need last 7 values
 	let mut wma1_window = [0.0; 7];
 	
@@ -1029,12 +1023,111 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_pma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Test with different candle sources since PMA has no other parameters
+		let test_sources = vec![
+			"close",
+			"open", 
+			"high",
+			"low",
+			"hl2",
+			"hlc3",
+			"ohlc4",
+			"volume",
+		];
+
+		for (source_idx, source) in test_sources.iter().enumerate() {
+			let input = PmaInput::from_candles(&candles, source, PmaParams {});
+			let output = pma_with_kernel(&input, kernel)?;
+
+			// Check predict values
+			for (i, &val) in output.predict.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in predict array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in predict array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in predict array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+			}
+
+			// Check trigger values
+			for (i, &val) in output.trigger.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in trigger array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in trigger array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in trigger array with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_pma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	generate_all_pma_tests!(
 		check_pma_default_candles,
 		check_pma_with_slice,
 		check_pma_not_enough_data,
 		check_pma_all_values_nan,
-		check_pma_expected_values
+		check_pma_expected_values,
+		check_pma_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1098,5 +1191,104 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test with different candle sources since PMA has no parameters to sweep
+		let test_sources = vec![
+			"close",
+			"open",
+			"high", 
+			"low",
+			"hl2",
+			"hlc3",
+			"ohlc4",
+		];
+
+		for (source_idx, source) in test_sources.iter().enumerate() {
+			let output = PmaBatchBuilder::new()
+				.kernel(kernel)
+				.apply_candles(&c, source)?;
+
+			// Check predict values
+			for (idx, &val) in output.predict.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Source {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at index {} in predict array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Source {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at index {} in predict array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Source {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at index {} in predict array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+			}
+
+			// Check trigger values
+			for (idx, &val) in output.trigger.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Source {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at index {} in trigger array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Source {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at index {} in trigger array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Source {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at index {} in trigger array with source: {}",
+						test, source_idx, val, bits, idx, source
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

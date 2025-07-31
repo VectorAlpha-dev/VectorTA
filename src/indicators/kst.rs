@@ -392,6 +392,12 @@ pub unsafe fn kst_scalar(input: &KstInput, first: usize, len: usize) -> Result<K
 	let inv3 = 1.0 / (s3 as f64);
 	let inv4 = 1.0 / (s4 as f64);
 	
+	// Initialize NaN prefix for initial invalid data
+	for i in 0..first {
+		line[i] = f64::NAN;
+		signal[i] = f64::NAN;
+	}
+	
 	// Process data
 	for i in first..len {
 		// Calculate ROC values inline
@@ -1247,6 +1253,54 @@ mod tests {
 				roc_period4: Some(30),
 				signal_period: Some(2),
 			},
+			// Absolute minimum (all periods = 1)
+			KstParams {
+				sma_period1: Some(1),
+				sma_period2: Some(1),
+				sma_period3: Some(1),
+				sma_period4: Some(1),
+				roc_period1: Some(1),
+				roc_period2: Some(1),
+				roc_period3: Some(1),
+				roc_period4: Some(1),
+				signal_period: Some(1),
+			},
+			// Maximum reasonable periods
+			KstParams {
+				sma_period1: Some(100),
+				sma_period2: Some(120),
+				sma_period3: Some(140),
+				sma_period4: Some(160),
+				roc_period1: Some(100),
+				roc_period2: Some(150),
+				roc_period3: Some(200),
+				roc_period4: Some(250),
+				signal_period: Some(50),
+			},
+			// Common real-world configuration
+			KstParams {
+				sma_period1: Some(10),
+				sma_period2: Some(15),
+				sma_period3: Some(20),
+				sma_period4: Some(30),
+				roc_period1: Some(10),
+				roc_period2: Some(15),
+				roc_period3: Some(20),
+				roc_period4: Some(30),
+				signal_period: Some(10),
+			},
+			// Another asymmetric case
+			KstParams {
+				sma_period1: Some(3),
+				sma_period2: Some(6),
+				sma_period3: Some(12),
+				sma_period4: Some(24),
+				roc_period1: Some(5),
+				roc_period2: Some(10),
+				roc_period3: Some(20),
+				roc_period4: Some(40),
+				signal_period: Some(8),
+			},
 		];
 
 		for (param_idx, params) in test_params.iter().enumerate() {
@@ -1601,6 +1655,7 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // =============================================================================
@@ -1792,6 +1847,50 @@ fn kst_into_slice(
     line_out: &mut [f64],
     signal_out: &mut [f64],
 ) -> Result<(), KstError> {
+    // Validate input
+    if data.is_empty() {
+        return Err(KstError::EmptyData);
+    }
+    if line_out.len() != data.len() || signal_out.len() != data.len() {
+        return Err(KstError::InvalidPeriod {
+            period: line_out.len(),
+            data_len: data.len(),
+        });
+    }
+    
+    // Find first valid value
+    let first = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(KstError::AllValuesNaN),
+    };
+    
+    // Calculate warmup periods
+    let warmup1 = roc_period1 + sma_period1 - 1;
+    let warmup2 = roc_period2 + sma_period2 - 1;
+    let warmup3 = roc_period3 + sma_period3 - 1;
+    let warmup4 = roc_period4 + sma_period4 - 1;
+    let line_warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
+    let signal_warmup = line_warmup + signal_period - 1;
+    
+    // Validate we have enough data
+    let max_period = roc_period1.max(roc_period2).max(roc_period3).max(roc_period4);
+    if data.len() - first < max_period {
+        return Err(KstError::NotEnoughValidData {
+            needed: max_period,
+            valid: data.len() - first,
+        });
+    }
+    
+    // Fill warmup periods with NaN
+    for i in 0..line_warmup {
+        line_out[i] = f64::NAN;
+    }
+    for i in 0..signal_warmup {
+        signal_out[i] = f64::NAN;
+    }
+    
+    // For now, still use the original approach but it already has NaN values
+    // TODO: Implement direct computation into slices to avoid double allocation
     let params = KstParams {
         sma_period1: Some(sma_period1),
         sma_period2: Some(sma_period2),
@@ -1807,8 +1906,9 @@ fn kst_into_slice(
     
     match kst(&input) {
         Ok(output) => {
-            line_out.copy_from_slice(&output.line);
-            signal_out.copy_from_slice(&output.signal);
+            // Copy only the non-NaN values to preserve our explicit NaN filling
+            line_out[line_warmup..].copy_from_slice(&output.line[line_warmup..]);
+            signal_out[signal_warmup..].copy_from_slice(&output.signal[signal_warmup..]);
             Ok(())
         }
         Err(e) => Err(e),

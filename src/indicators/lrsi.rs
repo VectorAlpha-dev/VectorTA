@@ -1053,6 +1053,91 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_lrsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Fill poison values
+		let len = candles.close.len();
+		let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		
+		high.resize(len, f64::from_bits(0x11111111_11111111));
+		low.resize(len, f64::from_bits(0x22222222_22222222));
+		
+		// Copy real data
+		high.copy_from_slice(&candles.high);
+		low.copy_from_slice(&candles.low);
+		
+		// Test with different alpha values
+		let test_params = vec![
+			LrsiParams { alpha: Some(0.1) },
+			LrsiParams { alpha: Some(0.2) },  // default
+			LrsiParams { alpha: Some(0.5) },
+			LrsiParams { alpha: Some(0.8) },
+			LrsiParams { alpha: Some(0.95) },
+		];
+		
+		for params in test_params {
+			let input = LrsiInput::from_slices(&high, &low, params.clone());
+			let result = lrsi_with_kernel(&input, kernel)?;
+			
+			// Check for poison values after warmup period
+			for (i, &val) in result.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						with params: alpha={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.alpha.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						with params: alpha={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.alpha.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found third poison value {} (0x{:016X}) at index {} \
+						with params: alpha={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.alpha.unwrap_or(0.2)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_lrsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_lrsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1085,7 +1170,8 @@ mod tests {
 		check_lrsi_empty_data,
 		check_lrsi_all_nan,
 		check_lrsi_very_small_dataset,
-		check_lrsi_streaming
+		check_lrsi_streaming,
+		check_lrsi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1111,6 +1197,99 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Use smaller dataset for batch testing
+		let slice_end = c.close.len().min(1000);
+		let high_slice = &c.high[..slice_end];
+		let low_slice = &c.low[..slice_end];
+		
+		// Test with different parameter sweeps
+		let test_configs = vec![
+			(0.1, 0.3, 0.1),    // Small alpha values
+			(0.2, 0.8, 0.2),    // Medium range
+			(0.5, 0.9, 0.1),    // Higher alpha values
+			(0.1, 0.95, 0.15),  // Wide range
+			(0.85, 0.95, 0.05), // High alpha values
+		];
+		
+		for (cfg_idx, &(a_start, a_end, a_step)) in test_configs.iter().enumerate() {
+			let output = LrsiBatchBuilder::new()
+				.kernel(kernel)
+				.alpha_range(a_start, a_end, a_step)
+				.apply_slices(high_slice, low_slice)?;
+			
+			// Check for poison values in output
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: alpha={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.alpha.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: alpha={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.alpha.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found third poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: alpha={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.alpha.unwrap_or(0.2)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1132,6 +1311,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Batch function that writes directly to output slice for Python bindings
