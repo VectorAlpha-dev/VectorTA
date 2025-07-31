@@ -2622,6 +2622,276 @@ mod tests {
             }
         }
     }
+	#[cfg(debug_assertions)]
+	fn check_vwmacd_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			VwmacdParams::default(),
+			// Minimum viable parameters
+			VwmacdParams {
+				fast_period: Some(2),
+				slow_period: Some(3),
+				signal_period: Some(2),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+				signal_ma_type: Some("ema".to_string()),
+			},
+			// Small periods
+			VwmacdParams {
+				fast_period: Some(5),
+				slow_period: Some(10),
+				signal_period: Some(3),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+				signal_ma_type: Some("sma".to_string()),
+			},
+			// Medium periods with different MA types
+			VwmacdParams {
+				fast_period: Some(10),
+				slow_period: Some(20),
+				signal_period: Some(5),
+				fast_ma_type: Some("wma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+				signal_ma_type: Some("ema".to_string()),
+			},
+			// Standard MACD-like parameters
+			VwmacdParams {
+				fast_period: Some(12),
+				slow_period: Some(26),
+				signal_period: Some(9),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+				signal_ma_type: Some("ema".to_string()),
+			},
+			// Large periods
+			VwmacdParams {
+				fast_period: Some(20),
+				slow_period: Some(40),
+				signal_period: Some(10),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("wma".to_string()),
+				signal_ma_type: Some("sma".to_string()),
+			},
+			// Very large periods
+			VwmacdParams {
+				fast_period: Some(50),
+				slow_period: Some(100),
+				signal_period: Some(20),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+				signal_ma_type: Some("wma".to_string()),
+			},
+			// Edge case: fast period close to slow period
+			VwmacdParams {
+				fast_period: Some(25),
+				slow_period: Some(26),
+				signal_period: Some(9),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+				signal_ma_type: Some("ema".to_string()),
+			},
+			// Different MA type combinations
+			VwmacdParams {
+				fast_period: Some(8),
+				slow_period: Some(21),
+				signal_period: Some(5),
+				fast_ma_type: Some("wma".to_string()),
+				slow_ma_type: Some("wma".to_string()),
+				signal_ma_type: Some("wma".to_string()),
+			},
+			// Another edge case
+			VwmacdParams {
+				fast_period: Some(15),
+				slow_period: Some(30),
+				signal_period: Some(15),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("wma".to_string()),
+				signal_ma_type: Some("ema".to_string()),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VwmacdInput::from_candles(&candles, "close", "volume", params.clone());
+			let output = vwmacd_with_kernel(&input, kernel)?;
+			
+			// Check MACD values
+			for (i, &val) in output.macd.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in MACD at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i, 
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in MACD at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in MACD at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+			}
+			
+			// Check Signal values
+			for (i, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in Signal at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in Signal at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in Signal at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+			}
+			
+			// Check Histogram values
+			for (i, &val) in output.hist.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in Histogram at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in Histogram at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in Histogram at index {} \
+						 with params: fast={}, slow={}, signal={}, fast_ma={}, slow_ma={}, signal_ma={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.signal_period.unwrap_or(9),
+						params.fast_ma_type.as_deref().unwrap_or("sma"),
+						params.slow_ma_type.as_deref().unwrap_or("sma"),
+						params.signal_ma_type.as_deref().unwrap_or("ema"),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_vwmacd_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	generate_all_vwmacd_tests!(
 		check_vwmacd_partial_params,
 		check_vwmacd_accuracy,
@@ -2629,7 +2899,8 @@ mod tests {
 		check_vwmacd_nan_data,
 		check_vwmacd_zero_period,
 		check_vwmacd_period_exceeds,
-		check_vwmacd_streaming
+		check_vwmacd_streaming,
+		check_vwmacd_no_poison
 	);
 
 	fn check_vwmacd_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -2924,10 +3195,177 @@ mod tests {
 		};
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		let close = &c.close;
+		let volume = &c.volume;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, signal_start, signal_end, signal_step)
+			(2, 10, 2, 11, 20, 3, 2, 5, 1),       // Small periods
+			(5, 15, 5, 16, 30, 5, 3, 9, 3),      // Medium periods
+			(10, 30, 10, 31, 60, 10, 5, 15, 5),  // Large periods
+			(2, 5, 1, 6, 10, 1, 2, 4, 1),        // Dense small range
+			(12, 12, 0, 26, 26, 0, 9, 9, 0),     // Single default config
+			(8, 16, 4, 20, 40, 10, 5, 10, 5),    // Mixed ranges
+		];
+		
+		for (cfg_idx, &(fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, signal_start, signal_end, signal_step)) in test_configs.iter().enumerate() {
+			let mut builder = VwmacdBatchBuilder::new().kernel(kernel);
+			
+			// Configure fast range
+			if fast_step > 0 {
+				builder = builder.fast_range(fast_start, fast_end, fast_step);
+			} else {
+				builder = builder.fast_range(fast_start, fast_start, 1);
+			}
+			
+			// Configure slow range
+			if slow_step > 0 {
+				builder = builder.slow_range(slow_start, slow_end, slow_step);
+			} else {
+				builder = builder.slow_range(slow_start, slow_start, 1);
+			}
+			
+			// Configure signal range
+			if signal_step > 0 {
+				builder = builder.signal_range(signal_start, signal_end, signal_step);
+			} else {
+				builder = builder.signal_range(signal_start, signal_start, 1);
+			}
+			
+			let output = builder.apply_slices(close, volume)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, signal={}, \
+						 fast_ma={}, slow_ma={}, signal_ma={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.signal_period.unwrap_or(9),
+						combo.fast_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_ma_type.as_deref().unwrap_or("sma"),
+						combo.signal_ma_type.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, signal={}, \
+						 fast_ma={}, slow_ma={}, signal_ma={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.signal_period.unwrap_or(9),
+						combo.fast_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_ma_type.as_deref().unwrap_or("sma"),
+						combo.signal_ma_type.as_deref().unwrap_or("ema")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, signal={}, \
+						 fast_ma={}, slow_ma={}, signal_ma={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.signal_period.unwrap_or(9),
+						combo.fast_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_ma_type.as_deref().unwrap_or("sma"),
+						combo.signal_ma_type.as_deref().unwrap_or("ema")
+					);
+				}
+			}
+		}
+		
+		// Test with different MA types
+		let ma_type_configs = vec![
+			("ema", "ema", "ema"),
+			("sma", "wma", "ema"),
+			("wma", "wma", "sma"),
+		];
+		
+		for (cfg_idx, &(fast_ma, slow_ma, signal_ma)) in ma_type_configs.iter().enumerate() {
+			let output = VwmacdBatchBuilder::new()
+				.kernel(kernel)
+				.fast_range(10, 15, 5)
+				.slow_range(20, 30, 10)
+				.signal_range(5, 10, 5)
+				.fast_ma_type(fast_ma.to_string())
+				.slow_ma_type(slow_ma.to_string())
+				.signal_ma_type(signal_ma.to_string())
+				.apply_slices(close, volume)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+					let poison_type = if bits == 0x11111111_11111111 {
+						"alloc_with_nan_prefix"
+					} else if bits == 0x22222222_22222222 {
+						"init_matrix_prefixes"
+					} else {
+						"make_uninit_matrix"
+					};
+					
+					panic!(
+						"[{}] MA Type Config {}: Found {} poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, signal={}, \
+						 fast_ma={}, slow_ma={}, signal_ma={}",
+						test, cfg_idx, poison_type, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.signal_period.unwrap_or(9),
+						combo.fast_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_ma_type.as_deref().unwrap_or("sma"),
+						combo.signal_ma_type.as_deref().unwrap_or("ema")
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_grid);
 	gen_batch_tests!(check_batch_param_map);
 	gen_batch_tests!(check_batch_custom_ma_types);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

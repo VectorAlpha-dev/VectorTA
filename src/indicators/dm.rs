@@ -210,6 +210,87 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
 }
 
 #[inline]
+pub fn dm_into_slice(
+	plus_dst: &mut [f64],
+	minus_dst: &mut [f64],
+	input: &DmInput,
+	kernel: Kernel,
+) -> Result<(), DmError> {
+	let (high, low) = match &input.data {
+		DmData::Candles { candles } => {
+			let high = candles.select_candle_field("high").map_err(|_| DmError::EmptyData)?;
+			let low = candles.select_candle_field("low").map_err(|_| DmError::EmptyData)?;
+			(high, low)
+		}
+		DmData::Slices { high, low } => (*high, *low),
+	};
+
+	if high.is_empty() || low.is_empty() || high.len() != low.len() {
+		return Err(DmError::EmptyData);
+	}
+	
+	if plus_dst.len() != high.len() || minus_dst.len() != high.len() {
+		return Err(DmError::InvalidPeriod {
+			period: plus_dst.len(),
+			data_len: high.len(),
+		});
+	}
+
+	let period = input.get_period();
+	if period == 0 || period > high.len() {
+		return Err(DmError::InvalidPeriod {
+			period,
+			data_len: high.len(),
+		});
+	}
+
+	let first_valid_idx = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+		.ok_or(DmError::AllValuesNaN)?;
+
+	if (high.len() - first_valid_idx) < period {
+		return Err(DmError::NotEnoughValidData {
+			needed: period,
+			valid: high.len() - first_valid_idx,
+		});
+	}
+
+	let chosen = match kernel {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Call the regular dm function to get results
+	let result = unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => dm_scalar(high, low, period, first_valid_idx),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => dm_avx2(high, low, period, first_valid_idx),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => dm_avx512(high, low, period, first_valid_idx),
+			_ => unreachable!(),
+		}
+	}?;
+
+	// Copy results to output slices
+	plus_dst.copy_from_slice(&result.plus);
+	minus_dst.copy_from_slice(&result.minus);
+	
+	// Fill warmup period with NaN
+	let warmup_period = first_valid_idx + period;
+	for v in &mut plus_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut minus_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
+	Ok(())
+}
+
+#[inline]
 pub unsafe fn dm_scalar(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize) -> Result<DmOutput, DmError> {
 	let mut plus_dm = vec![f64::NAN; high.len()];
 	let mut minus_dm = vec![f64::NAN; high.len()];

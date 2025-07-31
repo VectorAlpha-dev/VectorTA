@@ -1013,6 +1013,215 @@ mod tests {
 		assert!(result.is_err());
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_stoch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			StochParams::default(),
+			// Minimum periods
+			StochParams {
+				fastk_period: Some(2),
+				slowk_period: Some(1),
+				slowd_period: Some(1),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+			// Small periods
+			StochParams {
+				fastk_period: Some(5),
+				slowk_period: Some(2),
+				slowd_period: Some(2),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+			// Medium periods with EMA
+			StochParams {
+				fastk_period: Some(10),
+				slowk_period: Some(5),
+				slowd_period: Some(3),
+				slowk_ma_type: Some("ema".to_string()),
+				slowd_ma_type: Some("ema".to_string()),
+			},
+			// Default fastk with different smoothing
+			StochParams {
+				fastk_period: Some(14),
+				slowk_period: Some(5),
+				slowd_period: Some(5),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("ema".to_string()),
+			},
+			// Large fastk period
+			StochParams {
+				fastk_period: Some(20),
+				slowk_period: Some(3),
+				slowd_period: Some(3),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+			// Very large periods
+			StochParams {
+				fastk_period: Some(50),
+				slowk_period: Some(10),
+				slowd_period: Some(10),
+				slowk_ma_type: Some("ema".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+			// Maximum practical periods
+			StochParams {
+				fastk_period: Some(100),
+				slowk_period: Some(20),
+				slowd_period: Some(15),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+			// Asymmetric smoothing periods
+			StochParams {
+				fastk_period: Some(7),
+				slowk_period: Some(1),
+				slowd_period: Some(7),
+				slowk_ma_type: Some("sma".to_string()),
+				slowd_ma_type: Some("ema".to_string()),
+			},
+			// Another edge case
+			StochParams {
+				fastk_period: Some(3),
+				slowk_period: Some(3),
+				slowd_period: Some(1),
+				slowk_ma_type: Some("ema".to_string()),
+				slowd_ma_type: Some("sma".to_string()),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = StochInput::from_candles(&candles, params.clone());
+			let output = stoch_with_kernel(&input, kernel)?;
+			
+			// Check K values
+			for (i, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in K values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in K values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+			
+			// Check D values
+			for (i, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in D values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in D values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in D values \
+						 with params: fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fastk_period.unwrap_or(14),
+						params.slowk_period.unwrap_or(3),
+						params.slowd_period.unwrap_or(3),
+						params.slowk_ma_type.as_deref().unwrap_or("sma"),
+						params.slowd_ma_type.as_deref().unwrap_or("sma"),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_stoch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_stoch_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1030,7 +1239,8 @@ mod tests {
 		check_stoch_default_candles,
 		check_stoch_zero_period,
 		check_stoch_period_exceeds_length,
-		check_stoch_all_nan
+		check_stoch_all_nan,
+		check_stoch_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1076,6 +1286,163 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (fastk_start, fastk_end, fastk_step, slowk_start, slowk_end, slowk_step, slowd_start, slowd_end, slowd_step)
+			(2, 10, 2, 1, 5, 1, 1, 5, 1),      // Small periods with dense steps
+			(5, 25, 5, 2, 10, 2, 2, 10, 2),    // Medium periods
+			(10, 30, 10, 3, 9, 3, 3, 9, 3),    // Large steps
+			(14, 14, 0, 1, 5, 1, 1, 5, 1),     // Static fastk, sweep smoothing
+			(2, 5, 1, 3, 3, 0, 3, 3, 0),       // Dense small range, static smoothing
+			(20, 50, 15, 5, 15, 5, 5, 15, 5),  // Large periods
+			(7, 21, 7, 2, 6, 2, 2, 6, 2),      // Weekly periods
+			(3, 12, 3, 1, 3, 1, 1, 3, 1),      // Small range all params
+		];
+		
+		for (cfg_idx, &(fk_start, fk_end, fk_step, sk_start, sk_end, sk_step, sd_start, sd_end, sd_step)) in 
+			test_configs.iter().enumerate() 
+		{
+			let output = StochBatchBuilder::new()
+				.kernel(kernel)
+				.fastk_period_range(fk_start, fk_end, fk_step)
+				.slowk_period_range(sk_start, sk_end, sk_step)
+				.slowd_period_range(sd_start, sd_end, sd_step)
+				.slowk_ma_type_static("sma")
+				.slowd_ma_type_static("sma")
+				.apply_candles(&c)?;
+			
+			// Check K values
+			for (idx, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+			
+			// Check D values
+			for (idx, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D values with params: \
+						 fastk_period={}, slowk_period={}, slowd_period={}, \
+						 slowk_ma_type={}, slowd_ma_type={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fastk_period.unwrap_or(14),
+						combo.slowk_period.unwrap_or(3),
+						combo.slowd_period.unwrap_or(3),
+						combo.slowk_ma_type.as_deref().unwrap_or("sma"),
+						combo.slowd_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1098,4 +1465,5 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

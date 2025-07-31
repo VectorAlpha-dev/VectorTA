@@ -823,6 +823,88 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_ttm_trend_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let src = source_type(&candles, "hl2");
+		let close = source_type(&candles, "close");
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default period
+			TtmTrendParams::default(),
+			// Minimum period
+			TtmTrendParams { period: Some(1) },
+			// Small periods
+			TtmTrendParams { period: Some(2) },
+			TtmTrendParams { period: Some(3) },
+			TtmTrendParams { period: Some(7) },
+			// Medium periods
+			TtmTrendParams { period: Some(10) },
+			TtmTrendParams { period: Some(14) },
+			TtmTrendParams { period: Some(20) },
+			// Large periods
+			TtmTrendParams { period: Some(50) },
+			TtmTrendParams { period: Some(100) },
+			// Very large period
+			TtmTrendParams { period: Some(200) },
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = TtmTrendInput::from_slices(src, close, params.clone());
+			let output = ttm_trend_with_kernel(&input, kernel)?;
+			
+			// Find first valid index to calculate expected warmup
+			let first_valid = src.iter()
+				.zip(close.iter())
+				.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+				.unwrap_or(0);
+			let period = params.period.unwrap_or(5);
+			let warmup_end = first_valid + period - 1;
+			
+			// Check warmup period values should be false
+			for i in 0..warmup_end.min(output.values.len()) {
+				if output.values[i] {
+					panic!(
+						"[{}] Found unexpected true value (poison) at index {} in warmup period \
+						 with params: period={} (param set {}). \
+						 Expected false during warmup (indices 0-{})",
+						test_name, i, period, param_idx, warmup_end - 1
+					);
+				}
+			}
+			
+			// Additionally check for any unexpected patterns in the output
+			// In debug mode, uninitialized memory would be filled with true (poison)
+			// So we check that after warmup, values vary (not all true)
+			if warmup_end < output.values.len() {
+				let after_warmup = &output.values[warmup_end..];
+				let all_true = after_warmup.iter().all(|&v| v);
+				let all_false = after_warmup.iter().all(|&v| !v);
+				
+				// If all values after warmup are true, this might indicate poison
+				if all_true && after_warmup.len() > 10 {
+					panic!(
+						"[{}] All values after warmup are true, possible poison pattern \
+						 with params: period={} (param set {}). This is highly unlikely \
+						 for real TTM trend calculations.",
+						test_name, period, param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_ttm_trend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_ttm_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -854,7 +936,8 @@ mod tests {
 		check_ttm_period_exceeds_length,
 		check_ttm_very_small_dataset,
 		check_ttm_all_nan,
-		check_ttm_streaming
+		check_ttm_streaming,
+		check_ttm_trend_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -872,6 +955,91 @@ mod tests {
 		for (i, &v) in row[start..].iter().enumerate() {
 			assert_eq!(v, expected[i]);
 		}
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let src = source_type(&c, "hl2");
+		let close = source_type(&c, "close");
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step)
+			(1, 10, 1),      // Dense small periods
+			(2, 10, 2),      // Small periods with step
+			(5, 25, 5),      // Medium periods
+			(10, 50, 10),    // Large periods
+			(1, 5, 1),       // Very small dense range
+			(20, 100, 20),   // Very large periods
+			(7, 21, 7),      // Weekly periods
+			(3, 30, 3),      // Multiples of 3
+			(15, 15, 0),     // Single period test
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = TtmTrendBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_slices(src, close)?;
+			
+			// Find first valid index
+			let first_valid = src.iter()
+				.zip(close.iter())
+				.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
+				.unwrap_or(0);
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				let period = combo.period.unwrap_or(5);
+				let warmup_end = first_valid + period - 1;
+				
+				// Check if this index is in the warmup period
+				if col < warmup_end {
+					if val {
+						panic!(
+							"[{}] Config {}: Found unexpected true value (poison) \
+							 at row {} col {} (flat index {}) in warmup period \
+							 with params: period={} (warmup ends at col {})",
+							test, cfg_idx, row, col, idx, period, warmup_end - 1
+						);
+					}
+				}
+			}
+			
+			// Additionally check each row for suspicious patterns
+			for row in 0..output.rows {
+				let start_idx = row * output.cols;
+				let row_values = &output.values[start_idx..start_idx + output.cols];
+				let period = output.combos[row].period.unwrap_or(5);
+				let warmup_end = first_valid + period - 1;
+				
+				// Check if all values after warmup are true (suspicious)
+				if warmup_end < row_values.len() {
+					let after_warmup = &row_values[warmup_end..];
+					if after_warmup.len() > 10 && after_warmup.iter().all(|&v| v) {
+						panic!(
+							"[{}] Config {}: Row {} has all true values after warmup, \
+							 possible poison pattern with period={}. This is highly unlikely \
+							 for real TTM trend calculations.",
+							test, cfg_idx, row, period
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(())
 	}
 
@@ -896,6 +1064,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ============================
@@ -1079,12 +1248,6 @@ pub fn ttm_trend_into_slice(
 	}
 	
 	// The warmup should already be filled by alloc_with_false_prefix when called properly
-	// But ensure it's false just in case this is called with a regular slice
-	let warmup_end = first.saturating_add(period.saturating_sub(1));
-	let dst_len = dst.len();
-	for v in &mut dst[..warmup_end.min(dst_len)] {
-		*v = false;
-	}
 	
 	Ok(())
 }
@@ -1184,11 +1347,7 @@ pub fn ttm_trend_into(
 				.position(|(&s, &c)| !s.is_nan() && !c.is_nan())
 				.ok_or(JsValue::from_str("All values are NaN"))?;
 			
-			// Fill warmup with 0 (false)
-			let warmup_end = first.saturating_add(period.saturating_sub(1));
-			for v in &mut out[..warmup_end.min(len)] {
-				*v = 0;
-			}
+			// Warmup already handled by alloc_with_false_prefix
 			
 			// Direct computation into u8 buffer
 			let mut sum = 0.0;

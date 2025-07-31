@@ -298,6 +298,10 @@ pub unsafe fn zscore_scalar(
 		*v *= nbdev;
 	}
 	let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
+	// Fill remaining values with NaN for binding compatibility
+	for i in (first + period - 1)..out.len() {
+		out[i] = f64::NAN;
+	}
 	for i in (first + period - 1)..data.len() {
 		let mean = means[i - first];
 		let sigma = sigmas[i - first];
@@ -687,6 +691,14 @@ fn zscore_batch_inner(
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
 	let out: &mut [f64] = 
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	
+	// Fill remaining values with NaN for binding compatibility
+	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col in *warmup..cols {
+			out[row_start + col] = f64::NAN;
+		}
+	}
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let prm = &combos[row];
@@ -1458,13 +1470,172 @@ mod tests {
             }
         }
     }
+	#[cfg(debug_assertions)]
+	fn check_zscore_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			ZscoreParams::default(),
+			// Minimum viable period
+			ZscoreParams {
+				period: Some(2),
+				ma_type: Some("sma".to_string()),
+				nbdev: Some(1.0),
+				devtype: Some(0),
+			},
+			// Small periods with different MA types
+			ZscoreParams {
+				period: Some(5),
+				ma_type: Some("ema".to_string()),
+				nbdev: Some(1.0),
+				devtype: Some(0),
+			},
+			ZscoreParams {
+				period: Some(10),
+				ma_type: Some("wma".to_string()),
+				nbdev: Some(2.0),
+				devtype: Some(0),
+			},
+			// Medium periods with different deviation types
+			ZscoreParams {
+				period: Some(20),
+				ma_type: Some("sma".to_string()),
+				nbdev: Some(1.5),
+				devtype: Some(1), // mean abs dev
+			},
+			ZscoreParams {
+				period: Some(30),
+				ma_type: Some("ema".to_string()),
+				nbdev: Some(2.5),
+				devtype: Some(2), // median abs dev
+			},
+			// Large periods
+			ZscoreParams {
+				period: Some(50),
+				ma_type: Some("wma".to_string()),
+				nbdev: Some(3.0),
+				devtype: Some(0),
+			},
+			ZscoreParams {
+				period: Some(100),
+				ma_type: Some("sma".to_string()),
+				nbdev: Some(1.0),
+				devtype: Some(1),
+			},
+			// Edge cases with different nbdev values
+			ZscoreParams {
+				period: Some(14),
+				ma_type: Some("ema".to_string()),
+				nbdev: Some(0.5),
+				devtype: Some(0),
+			},
+			ZscoreParams {
+				period: Some(14),
+				ma_type: Some("sma".to_string()),
+				nbdev: Some(0.1),
+				devtype: Some(2),
+			},
+			ZscoreParams {
+				period: Some(25),
+				ma_type: Some("wma".to_string()),
+				nbdev: Some(4.0),
+				devtype: Some(1),
+			},
+			// Mixed parameter combinations
+			ZscoreParams {
+				period: Some(7),
+				ma_type: Some("ema".to_string()),
+				nbdev: Some(1.618), // golden ratio
+				devtype: Some(0),
+			},
+			ZscoreParams {
+				period: Some(21),
+				ma_type: Some("sma".to_string()),
+				nbdev: Some(2.718), // e
+				devtype: Some(1),
+			},
+			ZscoreParams {
+				period: Some(42),
+				ma_type: Some("wma".to_string()),
+				nbdev: Some(3.14159), // pi
+				devtype: Some(2),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = ZscoreInput::from_candles(&candles, "close", params.clone());
+			let output = zscore_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, ma_type={}, nbdev={}, devtype={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(14),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						params.nbdev.unwrap_or(1.0),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, ma_type={}, nbdev={}, devtype={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						params.nbdev.unwrap_or(1.0),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, ma_type={}, nbdev={}, devtype={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.ma_type.as_deref().unwrap_or("sma"),
+						params.nbdev.unwrap_or(1.0),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_zscore_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	generate_all_zscore_tests!(
 		check_zscore_partial_params,
 		check_zscore_with_zero_period,
 		check_zscore_period_exceeds_length,
 		check_zscore_very_small_dataset,
 		check_zscore_all_nan,
-		check_zscore_input_with_default_candles
+		check_zscore_input_with_default_candles,
+		check_zscore_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1496,5 +1667,151 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, nbdev_start, nbdev_end, nbdev_step, devtype)
+			(2, 10, 2, 0.5, 2.0, 0.5, 0),       // Small periods, standard deviation
+			(5, 25, 5, 1.0, 3.0, 1.0, 1),       // Medium periods, mean abs dev
+			(10, 50, 10, 1.5, 3.5, 1.0, 2),     // Large periods, median abs dev
+			(2, 5, 1, 0.1, 1.0, 0.3, 0),        // Dense small range
+			(14, 14, 0, 1.0, 4.0, 0.5, 0),      // Single period, multiple nbdev
+			(20, 40, 10, 2.0, 2.0, 0.0, 1),     // Multiple periods, single nbdev
+		];
+		
+		// Test with different MA types
+		let ma_types = vec!["sma", "ema", "wma"];
+		
+		for (cfg_idx, &(period_start, period_end, period_step, nbdev_start, nbdev_end, nbdev_step, devtype)) in test_configs.iter().enumerate() {
+			for ma_type in &ma_types {
+				let mut builder = ZscoreBatchBuilder::new().kernel(kernel);
+				
+				// Configure period range
+				if period_step > 0 {
+					builder = builder.period_range(period_start, period_end, period_step);
+				} else {
+					builder = builder.period_static(period_start);
+				}
+				
+				// Configure nbdev range
+				if nbdev_step > 0.0 {
+					builder = builder.nbdev_range(nbdev_start, nbdev_end, nbdev_step);
+				} else {
+					builder = builder.nbdev_static(nbdev_start);
+				}
+				
+				// Configure MA type
+				builder = builder.ma_type_static(ma_type.to_string());
+				
+				// Configure devtype
+				builder = builder.devtype_static(devtype);
+				
+				let output = builder.apply_candles(&c, "close")?;
+				
+				for (idx, &val) in output.values.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+					
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {} (MA: {}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) with params: period={}, ma_type={}, nbdev={}, devtype={}",
+							test, cfg_idx, ma_type, val, bits, row, col, idx,
+							combo.period.unwrap_or(14),
+							combo.ma_type.as_deref().unwrap_or("sma"),
+							combo.nbdev.unwrap_or(1.0),
+							combo.devtype.unwrap_or(0)
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {} (MA: {}): Found init_matrix_prefixes poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) with params: period={}, ma_type={}, nbdev={}, devtype={}",
+							test, cfg_idx, ma_type, val, bits, row, col, idx,
+							combo.period.unwrap_or(14),
+							combo.ma_type.as_deref().unwrap_or("sma"),
+							combo.nbdev.unwrap_or(1.0),
+							combo.devtype.unwrap_or(0)
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {} (MA: {}): Found make_uninit_matrix poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) with params: period={}, ma_type={}, nbdev={}, devtype={}",
+							test, cfg_idx, ma_type, val, bits, row, col, idx,
+							combo.period.unwrap_or(14),
+							combo.ma_type.as_deref().unwrap_or("sma"),
+							combo.nbdev.unwrap_or(1.0),
+							combo.devtype.unwrap_or(0)
+						);
+					}
+				}
+			}
+		}
+		
+		// Additional test with all devtypes
+		let devtype_test = ZscoreBatchBuilder::new()
+			.kernel(kernel)
+			.period_range(10, 30, 10)
+			.nbdev_static(2.0)
+			.ma_type_static("ema")
+			.devtype_range(0, 2, 1)
+			.apply_candles(&c, "close")?;
+		
+		for (idx, &val) in devtype_test.values.iter().enumerate() {
+			if val.is_nan() {
+				continue;
+			}
+			
+			let bits = val.to_bits();
+			let row = idx / devtype_test.cols;
+			let col = idx % devtype_test.cols;
+			let combo = &devtype_test.combos[row];
+			
+			if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+				let poison_type = if bits == 0x11111111_11111111 {
+					"alloc_with_nan_prefix"
+				} else if bits == 0x22222222_22222222 {
+					"init_matrix_prefixes"
+				} else {
+					"make_uninit_matrix"
+				};
+				
+				panic!(
+					"[{}] Devtype test: Found {} poison value {} (0x{:016X}) \
+					 at row {} col {} (flat index {}) with params: period={}, ma_type={}, nbdev={}, devtype={}",
+					test, poison_type, val, bits, row, col, idx,
+					combo.period.unwrap_or(14),
+					combo.ma_type.as_deref().unwrap_or("sma"),
+					combo.nbdev.unwrap_or(1.0),
+					combo.devtype.unwrap_or(0)
+				);
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

@@ -266,6 +266,10 @@ pub fn marketefi_with_kernel(input: &MarketefiInput, kernel: Kernel) -> Result<M
 		})
 		.ok_or(MarketefiError::AllValuesNaN)?;
 	let mut out = alloc_with_nan_prefix(len, first);
+	// Fill remaining values with NaN for binding compatibility
+	for i in first..out.len() {
+		out[i] = f64::NAN;
+	}
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -459,6 +463,10 @@ fn marketefi_batch_inner(
 		})
 		.ok_or(MarketefiError::AllValuesNaN)?;
 	let mut out = alloc_with_nan_prefix(len, first);
+	// Fill remaining values with NaN for binding compatibility
+	for i in first..out.len() {
+		out[i] = f64::NAN;
+	}
 	unsafe {
 		match kernel {
 			Kernel::ScalarBatch | Kernel::Scalar => marketefi_row_scalar(high, low, volume, first, &mut out),

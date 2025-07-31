@@ -279,6 +279,10 @@ pub fn vlma_with_kernel(input: &VlmaInput, kernel: Kernel) -> Result<VlmaOutput,
 	};
 
 	let mut out = alloc_with_nan_prefix(data.len(), first + max_period - 1);
+	// Fill remaining values with NaN for binding compatibility
+	for i in (first + max_period - 1)..out.len() {
+		out[i] = f64::NAN;
+	}
 	
 	vlma_compute_into(data, min_period, max_period, &matype, devtype, first, chosen, &mut out)?;
 	
@@ -371,6 +375,10 @@ unsafe fn vlma_scalar(
 ) -> Result<VlmaOutput, VlmaError> {
 	let warmup_period = first_valid + max_period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 	vlma_scalar_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
 	Ok(VlmaOutput { values: out })
 }
@@ -399,6 +407,13 @@ unsafe fn vlma_scalar_into(
 	let mut b = alloc_with_nan_prefix(data.len(), warmup_period);
 	let mut c = alloc_with_nan_prefix(data.len(), warmup_period);
 	let mut d = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..data.len() {
+		a[i] = f64::NAN;
+		b[i] = f64::NAN;
+		c[i] = f64::NAN;
+		d[i] = f64::NAN;
+	}
 
 	for i in 0..data.len() {
 		if !mean[i].is_nan() && !dev[i].is_nan() {
@@ -482,6 +497,10 @@ unsafe fn vlma_avx2(
 ) -> Result<VlmaOutput, VlmaError> {
 	let warmup_period = first_valid + max_period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 	vlma_avx2_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
 	Ok(VlmaOutput { values: out })
 }
@@ -527,6 +546,10 @@ unsafe fn vlma_avx512(
 ) -> Result<VlmaOutput, VlmaError> {
 	let warmup_period = first_valid + max_period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 	vlma_avx512_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
 	Ok(VlmaOutput { values: out })
 }
@@ -575,6 +598,10 @@ unsafe fn vlma_avx512_short(
 ) -> Result<VlmaOutput, VlmaError> {
 	let warmup_period = first_valid + max_period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 	vlma_avx512_short_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
 	Ok(VlmaOutput { values: out })
 }
@@ -606,6 +633,10 @@ unsafe fn vlma_avx512_long(
 ) -> Result<VlmaOutput, VlmaError> {
 	let warmup_period = first_valid + max_period - 1;
 	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 	vlma_avx512_long_into(data, min_period, max_period, &matype, devtype, first_valid, &mut out)?;
 	Ok(VlmaOutput { values: out })
 }
@@ -959,6 +990,14 @@ fn vlma_batch_inner(
 	// Convert to initialized slice for computation
 	let values_ptr = uninit_values.as_mut_ptr() as *mut f64;
 	let values = unsafe { std::slice::from_raw_parts_mut(values_ptr, rows * cols) };
+	
+	// Fill remaining values with NaN for binding compatibility
+	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col in *warmup..cols {
+			values[row_start + col] = f64::NAN;
+		}
+	}
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let min_period = combos[row].min_period.unwrap();
 		let max_period = combos[row].max_period.unwrap();
@@ -1597,6 +1636,151 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_vlma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			VlmaParams::default(),
+			// Minimum periods
+			VlmaParams {
+				min_period: Some(1),
+				max_period: Some(2),
+				matype: Some("sma".to_string()),
+				devtype: Some(0),
+			},
+			// Small periods
+			VlmaParams {
+				min_period: Some(2),
+				max_period: Some(10),
+				matype: Some("sma".to_string()),
+				devtype: Some(0),
+			},
+			// Medium periods with EMA
+			VlmaParams {
+				min_period: Some(10),
+				max_period: Some(30),
+				matype: Some("ema".to_string()),
+				devtype: Some(0),
+			},
+			// Large periods
+			VlmaParams {
+				min_period: Some(20),
+				max_period: Some(100),
+				matype: Some("sma".to_string()),
+				devtype: Some(0),
+			},
+			// Very large periods with WMA
+			VlmaParams {
+				min_period: Some(50),
+				max_period: Some(200),
+				matype: Some("wma".to_string()),
+				devtype: Some(0),
+			},
+			// Different deviation type (MAD)
+			VlmaParams {
+				min_period: Some(5),
+				max_period: Some(25),
+				matype: Some("sma".to_string()),
+				devtype: Some(1),
+			},
+			// Different deviation type (Median)
+			VlmaParams {
+				min_period: Some(5),
+				max_period: Some(25),
+				matype: Some("ema".to_string()),
+				devtype: Some(2),
+			},
+			// Edge case: min close to max
+			VlmaParams {
+				min_period: Some(19),
+				max_period: Some(20),
+				matype: Some("sma".to_string()),
+				devtype: Some(0),
+			},
+			// Another combination
+			VlmaParams {
+				min_period: Some(3),
+				max_period: Some(15),
+				matype: Some("wma".to_string()),
+				devtype: Some(1),
+			},
+			// Large range
+			VlmaParams {
+				min_period: Some(5),
+				max_period: Some(100),
+				matype: Some("ema".to_string()),
+				devtype: Some(2),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VlmaInput::from_candles(&candles, "close", params.clone());
+			let output = vlma_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: min_period={}, max_period={}, matype={}, devtype={} (param set {})",
+						test_name, val, bits, i,
+						params.min_period.unwrap_or(5),
+						params.max_period.unwrap_or(50),
+						params.matype.as_deref().unwrap_or("sma"),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: min_period={}, max_period={}, matype={}, devtype={} (param set {})",
+						test_name, val, bits, i,
+						params.min_period.unwrap_or(5),
+						params.max_period.unwrap_or(50),
+						params.matype.as_deref().unwrap_or("sma"),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: min_period={}, max_period={}, matype={}, devtype={} (param set {})",
+						test_name, val, bits, i,
+						params.min_period.unwrap_or(5),
+						params.max_period.unwrap_or(50),
+						params.matype.as_deref().unwrap_or("sma"),
+						params.devtype.unwrap_or(0),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_vlma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_vlma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1627,7 +1811,8 @@ mod tests {
 		check_vlma_not_enough_data,
 		check_vlma_all_nan,
 		check_vlma_slice_reinput,
-		check_vlma_streaming
+		check_vlma_streaming,
+		check_vlma_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1653,6 +1838,116 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (min_start, min_end, min_step, max_start, max_end, max_step, matype, dev_start, dev_end, dev_step)
+			(2, 10, 2, 10, 20, 2, "sma", 0, 0, 0),      // Small periods
+			(5, 25, 5, 25, 50, 5, "sma", 0, 2, 1),      // Medium periods with devtype sweep
+			(10, 50, 10, 50, 100, 10, "ema", 0, 0, 0),  // Large periods with EMA
+			(1, 5, 1, 5, 10, 1, "sma", 0, 0, 0),        // Dense small range
+			(5, 5, 0, 20, 100, 20, "wma", 0, 2, 2),     // Static min, sweep max
+			(2, 10, 4, 20, 20, 0, "sma", 1, 1, 0),      // Sweep min, static max, MAD
+			(3, 15, 3, 15, 30, 3, "ema", 2, 2, 0),      // Median deviation
+			(20, 50, 15, 60, 150, 30, "sma", 0, 2, 1),  // Large ranges
+			(5, 5, 0, 50, 50, 0, "sma", 0, 2, 1),       // Default with devtype sweep
+		];
+		
+		for (cfg_idx, &(min_start, min_end, min_step, max_start, max_end, max_step, matype, dev_start, dev_end, dev_step)) in 
+			test_configs.iter().enumerate() 
+		{
+			let mut builder = VlmaBatchBuilder::new().kernel(kernel);
+			
+			// Configure ranges
+			if min_step > 0 {
+				builder = builder.min_period_range(min_start, min_end, min_step);
+			} else {
+				builder = builder.min_period_range(min_start, min_start, 0);
+			}
+			
+			if max_step > 0 {
+				builder = builder.max_period_range(max_start, max_end, max_step);
+			} else {
+				builder = builder.max_period_range(max_start, max_start, 0);
+			}
+			
+			builder = builder.matype_static(matype);
+			
+			if dev_step > 0 {
+				builder = builder.devtype_range(dev_start, dev_end, dev_step);
+			} else {
+				builder = builder.devtype_range(dev_start, dev_start, 0);
+			}
+			
+			let output = builder.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: \
+						 min_period={}, max_period={}, matype={}, devtype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.min_period.unwrap_or(5),
+						combo.max_period.unwrap_or(50),
+						combo.matype.as_deref().unwrap_or("sma"),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: \
+						 min_period={}, max_period={}, matype={}, devtype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.min_period.unwrap_or(5),
+						combo.max_period.unwrap_or(50),
+						combo.matype.as_deref().unwrap_or("sma"),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: \
+						 min_period={}, max_period={}, matype={}, devtype={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.min_period.unwrap_or(5),
+						combo.max_period.unwrap_or(50),
+						combo.matype.as_deref().unwrap_or("sma"),
+						combo.devtype.unwrap_or(0)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1674,4 +1969,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

@@ -398,6 +398,12 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
 			_ => unreachable!(),
 		}
 	}
+	
+	// Fill warmup period with NaN
+	for v in &mut out[..=first_valid_idx] {
+		*v = f64::NAN;
+	}
+	
 	Ok(())
 }
 

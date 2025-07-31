@@ -272,6 +272,10 @@ pub fn safezonestop_with_kernel(
 	
 	// Use proper memory allocation
 	let mut out = alloc_with_nan_prefix(len, warmup_period);
+	// Fill remaining values with NaN for binding compatibility
+	for i in warmup_period..out.len() {
+		out[i] = f64::NAN;
+	}
 
 	unsafe {
 		match chosen {
@@ -840,6 +844,14 @@ fn safezonestop_batch_inner(
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_uninit);
 	let values_slice: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	
+	// Fill remaining values with NaN for binding compatibility
+	for (row_idx, warmup) in warmup_periods.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col in *warmup..cols {
+			values_slice[row_start + col] = f64::NAN;
+		}
+	}
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -1327,6 +1339,142 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_safezonestop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Test diverse parameter combinations with both directions
+		let test_params = vec![
+			// Default parameters
+			(SafeZoneStopParams::default(), "long"),
+			(SafeZoneStopParams::default(), "short"),
+			// Minimum viable period
+			(SafeZoneStopParams {
+				period: Some(2),
+				mult: Some(2.5),
+				max_lookback: Some(3),
+			}, "long"),
+			// Small period variations
+			(SafeZoneStopParams {
+				period: Some(5),
+				mult: Some(1.0),
+				max_lookback: Some(2),
+			}, "long"),
+			(SafeZoneStopParams {
+				period: Some(5),
+				mult: Some(2.5),
+				max_lookback: Some(3),
+			}, "short"),
+			// Medium period variations
+			(SafeZoneStopParams {
+				period: Some(10),
+				mult: Some(3.0),
+				max_lookback: Some(5),
+			}, "long"),
+			(SafeZoneStopParams {
+				period: Some(14),
+				mult: Some(2.0),
+				max_lookback: Some(4),
+			}, "short"),
+			// Default period with different mult/lookback
+			(SafeZoneStopParams {
+				period: Some(22),
+				mult: Some(1.5),
+				max_lookback: Some(2),
+			}, "long"),
+			(SafeZoneStopParams {
+				period: Some(22),
+				mult: Some(5.0),
+				max_lookback: Some(10),
+			}, "short"),
+			// Large periods
+			(SafeZoneStopParams {
+				period: Some(50),
+				mult: Some(2.5),
+				max_lookback: Some(5),
+			}, "long"),
+			(SafeZoneStopParams {
+				period: Some(100),
+				mult: Some(3.0),
+				max_lookback: Some(10),
+			}, "short"),
+			// Edge cases
+			(SafeZoneStopParams {
+				period: Some(2),
+				mult: Some(0.5),
+				max_lookback: Some(1),
+			}, "long"),
+			(SafeZoneStopParams {
+				period: Some(30),
+				mult: Some(10.0),
+				max_lookback: Some(15),
+			}, "short"),
+		];
+
+		for (param_idx, (params, direction)) in test_params.iter().enumerate() {
+			let input = SafeZoneStopInput::from_candles(&candles, direction, params.clone());
+			let output = safezonestop_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, max_lookback={}, direction='{}' (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(22),
+						params.mult.unwrap_or(2.5),
+						params.max_lookback.unwrap_or(3),
+						direction,
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, max_lookback={}, direction='{}' (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(22),
+						params.mult.unwrap_or(2.5),
+						params.max_lookback.unwrap_or(3),
+						direction,
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, mult={}, max_lookback={}, direction='{}' (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(22),
+						params.mult.unwrap_or(2.5),
+						params.max_lookback.unwrap_or(3),
+						direction,
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_safezonestop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_safezonestop_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1356,7 +1504,8 @@ mod tests {
 		check_safezonestop_default_candles,
 		check_safezonestop_zero_period,
 		check_safezonestop_mismatched_lengths,
-		check_safezonestop_nan_handling
+		check_safezonestop_nan_handling,
+		check_safezonestop_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1392,6 +1541,95 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let high = source_type(&c, "high");
+		let low = source_type(&c, "low");
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, mult_start, mult_end, mult_step, max_lookback_start, max_lookback_end, max_lookback_step, direction)
+			(2, 10, 2, 1.0, 3.0, 0.5, 1, 5, 1, "long"),
+			(5, 25, 5, 2.5, 2.5, 0.0, 3, 3, 0, "short"),
+			(10, 10, 0, 1.5, 5.0, 0.5, 2, 8, 2, "long"),
+			(2, 5, 1, 0.5, 2.0, 0.5, 1, 3, 1, "short"),
+			(30, 60, 15, 2.0, 4.0, 1.0, 5, 10, 5, "long"),
+			(22, 22, 0, 1.0, 5.0, 1.0, 3, 3, 0, "short"),
+			(8, 12, 1, 2.5, 3.5, 0.25, 2, 6, 1, "long"),
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, l_start, l_end, l_step, direction)) in
+			test_configs.iter().enumerate()
+		{
+			let output = SafeZoneStopBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.mult_range(m_start, m_end, m_step)
+				.max_lookback_range(l_start, l_end, l_step)
+				.direction(direction)
+				.apply_slices(high, low)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, max_lookback={}, direction='{}'",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.5),
+						combo.max_lookback.unwrap_or(3),
+						direction
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, max_lookback={}, direction='{}'",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.5),
+						combo.max_lookback.unwrap_or(3),
+						direction
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, mult={}, max_lookback={}, direction='{}'",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(22),
+						combo.mult.unwrap_or(2.5),
+						combo.max_lookback.unwrap_or(3),
+						direction
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1413,6 +1651,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

@@ -220,6 +220,10 @@ pub fn qstick_with_kernel(input: &QstickInput, kernel: Kernel) -> Result<QstickO
 	}
 
 	let mut out = alloc_with_nan_prefix(len, first + period - 1);
+	// Fill remaining values with NaN for binding compatibility
+	for i in (first + period - 1)..out.len() {
+		out[i] = f64::NAN;
+	}
 
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
@@ -461,6 +465,14 @@ fn qstick_batch_inner(
 	let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
 	let out: &mut [f64] =
 		unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len()) };
+	
+	// Fill remaining values with NaN for binding compatibility
+	for (row_idx, warmup) in warm.iter().enumerate() {
+		let row_start = row_idx * cols;
+		for col in *warmup..cols {
+			out[row_start + col] = f64::NAN;
+		}
+	}
 	
 	qstick_batch_inner_into(open, close, sweep, kern, parallel, out)?;
 	
@@ -736,6 +748,72 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_qstick_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			QstickParams::default(),                    // period: 5
+			QstickParams { period: Some(2) },          // minimum viable
+			QstickParams { period: Some(3) },          // small
+			QstickParams { period: Some(7) },          // small-medium
+			QstickParams { period: Some(10) },         // medium
+			QstickParams { period: Some(20) },         // medium-large
+			QstickParams { period: Some(30) },         // large
+			QstickParams { period: Some(50) },         // very large
+			QstickParams { period: Some(100) },        // extra large
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = QstickInput::from_candles(&candles, "open", "close", params.clone());
+			let output = qstick_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_qstick_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
 	macro_rules! generate_all_qstick_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -766,7 +844,8 @@ mod tests {
 		check_qstick_period_exceeds_length,
 		check_qstick_very_small_dataset,
 		check_qstick_reinput,
-		check_qstick_nan_handling
+		check_qstick_nan_handling,
+		check_qstick_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -788,6 +867,76 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods  
+			(30, 60, 15),    // Large periods
+			(2, 5, 1),       // Dense small range
+			(10, 50, 10),    // Wide range medium step
+			(15, 30, 5),     // Medium range small step
+			(2, 100, 20),    // Full range large step
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = QstickBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c, "open", "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -809,6 +958,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -982,11 +1132,6 @@ pub fn qstick_into_slice(
 		_ => unreachable!(),
 	}
 	
-	// Fill warmup with NaN
-	let warmup = first_valid + period - 1;
-	for v in &mut dst[..warmup] {
-		*v = f64::NAN;
-	}
 	
 	Ok(())
 }

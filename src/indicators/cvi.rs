@@ -1151,7 +1151,7 @@ pub fn cvi_into_slice(output: &mut [f64], input: &CviInput, kernel: Kernel) -> R
 	}
 
 	// Fill prefix with NaN
-	let out_start = first_valid_idx + warmup + period - 1;
+	let out_start = first_valid_idx + 2 * period - 1;
 	for i in 0..out_start {
 		output[i] = f64::NAN;
 	}

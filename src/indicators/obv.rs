@@ -155,6 +155,10 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
 		.ok_or(ObvError::AllValuesNaN)?;
 
 	let mut out = alloc_with_nan_prefix(close.len(), first);
+	// Fill remaining values with NaN for binding compatibility
+	for i in first..out.len() {
+		out[i] = f64::NAN;
+	}
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -410,6 +414,10 @@ fn obv_batch_inner(close: &[f64], volume: &[f64], kern: Kernel, _parallel: bool)
 		.ok_or(ObvError::AllValuesNaN)?;
 
 	let mut out = alloc_with_nan_prefix(close.len(), first);
+	// Fill remaining values with NaN for binding compatibility
+	for i in first..out.len() {
+		out[i] = f64::NAN;
+	}
 	unsafe {
 		match kern {
 			Kernel::ScalarBatch | Kernel::Scalar => {
@@ -563,11 +571,132 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_obv_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close = source_type(&candles, "close");
+		let volume = source_type(&candles, "volume");
+
+		// OBV has no parameters, so we just test with default params
+		let test_params = vec![ObvParams::default()];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = ObvInput::from_candles(&candles, params.clone());
+			let output = obv_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_obv_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// OBV has no parameters, so batch output is always 1 row
+		// We test with different kernels and data configurations
+		let test_configs = vec![
+			"Testing OBV batch with default configuration",
+		];
+
+		for (cfg_idx, _config_name) in test_configs.iter().enumerate() {
+			let output = ObvBatchBuilder::new()
+				.kernel(kernel)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols; // Should always be 0 for OBV
+				let col = idx % output.cols;
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with OBV (no params)",
+						test, cfg_idx, val, bits, row, col, idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with OBV (no params)",
+						test, cfg_idx, val, bits, row, col, idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with OBV (no params)",
+						test, cfg_idx, val, bits, row, col, idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_obv_tests!(
 		check_obv_empty_data,
 		check_obv_data_length_mismatch,
 		check_obv_all_nan,
-		check_obv_csv_accuracy
+		check_obv_csv_accuracy,
+		check_obv_no_poison
 	);
 }
 
@@ -599,11 +728,6 @@ pub fn obv_into_slice(dst: &mut [f64], close: &[f64], volume: &[f64], kern: Kern
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	
-	// Fill NaN prefix
-	for v in &mut dst[..first] {
-		*v = f64::NAN;
-	}
 	
 	// Compute OBV directly into destination
 	unsafe {
