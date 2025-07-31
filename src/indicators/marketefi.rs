@@ -207,10 +207,6 @@ pub fn marketefi_into_slice(
 		})
 		.ok_or(MarketefiError::AllValuesNaN)?;
 
-	// Fill warmup period with NaN
-	for v in &mut dst[..first] {
-		*v = f64::NAN;
-	}
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
@@ -684,7 +680,8 @@ mod tests {
 		check_marketefi_accuracy,
 		check_marketefi_nan_handling,
 		check_marketefi_empty_data,
-		check_marketefi_streaming
+		check_marketefi_streaming,
+		check_marketefi_no_poison
 	);
 
 	#[test]
@@ -721,6 +718,56 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_marketefi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Since marketefi has no parameters, we just test with default params
+		let params = MarketefiParams::default();
+		let input = MarketefiInput::from_candles(&candles, "high", "low", "volume", params.clone());
+		let output = marketefi_with_kernel(&input, kernel)?;
+		
+		for (i, &val) in output.values.iter().enumerate() {
+			if val.is_nan() {
+				continue; // NaN values are expected during warmup
+			}
+			
+			let bits = val.to_bits();
+			
+			// Check all three poison patterns
+			if bits == 0x11111111_11111111 {
+				panic!(
+					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
+					test_name, val, bits, i
+				);
+			}
+			
+			if bits == 0x22222222_22222222 {
+				panic!(
+					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
+					test_name, val, bits, i
+				);
+			}
+			
+			if bits == 0x33333333_33333333 {
+				panic!(
+					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
+					test_name, val, bits, i
+				);
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_marketefi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -749,6 +796,65 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Since marketefi has no parameters, we only have one configuration to test
+		let output = MarketefiBatchBuilder::new()
+			.kernel(kernel)
+			.apply_slices(
+				source_type(&c, "high"),
+				source_type(&c, "low"), 
+				source_type(&c, "volume")
+			)?;
+		
+		for (idx, &val) in output.values.iter().enumerate() {
+			if val.is_nan() {
+				continue;
+			}
+			
+			let bits = val.to_bits();
+			let row = idx / output.cols;
+			let col = idx % output.cols;
+			
+			// Check all three poison patterns with detailed context
+			if bits == 0x11111111_11111111 {
+				panic!(
+					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+					at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+			
+			if bits == 0x22222222_22222222 {
+				panic!(
+					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) \
+					at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+			
+			if bits == 0x33333333_33333333 {
+				panic!(
+					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) \
+					at row {} col {} (flat index {})",
+					test, val, bits, row, col, idx
+				);
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste! {
@@ -770,6 +876,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // WASM bindings
