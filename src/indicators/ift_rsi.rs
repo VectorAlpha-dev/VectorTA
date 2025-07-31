@@ -24,7 +24,7 @@ use crate::indicators::wma::{wma, WmaError, WmaInput, WmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -367,12 +367,6 @@ pub fn ift_rsi_into_slice(
 			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
 		}
 		_ => unreachable!(),
-	}
-
-	// Fill warmup with NaN
-	let warmup_period = first + rsi_period + wma_period - 2;
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
 	}
 	
 	Ok(())
@@ -1290,6 +1284,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
