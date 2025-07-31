@@ -2308,6 +2308,19 @@ pub fn kdj_into_slice(
 	d_dst.copy_from_slice(&result.d);
 	j_dst.copy_from_slice(&result.j);
 
+	// Calculate warmup periods
+	let k_warmup = first_valid_idx + fast_k_period + slow_k_period - 2;
+	let d_warmup = k_warmup + slow_d_period - 1;
+	
+	// Fill warmup periods with NaN
+	for i in 0..k_warmup.min(k_dst.len()) {
+		k_dst[i] = f64::NAN;
+	}
+	for i in 0..d_warmup.min(d_dst.len()) {
+		d_dst[i] = f64::NAN;
+		j_dst[i] = f64::NAN;
+	}
+
 	Ok(())
 }
 

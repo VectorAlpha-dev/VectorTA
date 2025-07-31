@@ -895,6 +895,126 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_vpci_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			VpciParams::default(),                                    // short: 5, long: 25
+			VpciParams { short_range: Some(2), long_range: Some(3) },   // minimum viable
+			VpciParams { short_range: Some(2), long_range: Some(10) },  // small short, medium long
+			VpciParams { short_range: Some(5), long_range: Some(20) },  // medium both
+			VpciParams { short_range: Some(10), long_range: Some(30) }, // medium-large both
+			VpciParams { short_range: Some(20), long_range: Some(50) }, // large both
+			VpciParams { short_range: Some(3), long_range: Some(100) }, // small short, very large long
+			VpciParams { short_range: Some(50), long_range: Some(100) },// very large both
+			VpciParams { short_range: Some(7), long_range: Some(21) },  // common Fibonacci values
+			VpciParams { short_range: Some(14), long_range: Some(28) }, // double common values
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VpciInput::from_candles(&candles, "close", "volume", params.clone());
+			let output = vpci_with_kernel(&input, kernel)?;
+			
+			// Check VPCI values
+			for (i, &val) in output.vpci.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in VPCI with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in VPCI with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in VPCI with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+			}
+			
+			// Check VPCIS values
+			for (i, &val) in output.vpcis.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in VPCIS with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in VPCIS with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in VPCIS with params: short_range={}, long_range={} (param set {})",
+						test_name, val, bits, i,
+						params.short_range.unwrap_or(5),
+						params.long_range.unwrap_or(25),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_vpci_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_vpci_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -912,7 +1032,8 @@ mod tests {
 		check_vpci_partial_params,
 		check_vpci_accuracy,
 		check_vpci_default_candles,
-		check_vpci_slice_input
+		check_vpci_slice_input,
+		check_vpci_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -947,6 +1068,130 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		let close = &c.close;
+		let volume = &c.volume;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (short_start, short_end, short_step, long_start, long_end, long_step)
+			(2, 10, 2, 5, 25, 5),        // Small to medium ranges
+			(5, 15, 5, 20, 40, 10),      // Medium ranges
+			(10, 20, 5, 30, 60, 15),     // Medium to large ranges
+			(2, 5, 1, 10, 15, 1),        // Dense small ranges
+			(20, 30, 2, 40, 60, 5),      // Large ranges
+			(3, 7, 2, 21, 35, 7),        // Fibonacci-inspired ranges
+			(8, 12, 1, 25, 30, 1),       // Narrow dense ranges
+			(2, 50, 10, 10, 100, 20),    // Wide sparse ranges
+		];
+		
+		for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in test_configs.iter().enumerate() {
+			let output = VpciBatchBuilder::new()
+				.kernel(kernel)
+				.short_range(short_start, short_end, short_step)
+				.long_range(long_start, long_end, long_step)
+				.apply_slices(close, volume)?;
+			
+			// Check VPCI values
+			for (idx, &val) in output.vpci.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 in VPCI at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 in VPCI at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 in VPCI at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+			}
+			
+			// Check VPCIS values
+			for (idx, &val) in output.vpcis.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 in VPCIS at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 in VPCIS at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 in VPCIS at row {} col {} (flat index {}) with params: short_range={}, long_range={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_range.unwrap_or(5),
+						combo.long_range.unwrap_or(25)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -968,6 +1213,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

@@ -1334,6 +1334,12 @@ pub fn mean_ad_into_slice(
 		}
 	}
 	
+	// Fill warmup with NaN
+	let warmup_period = first + 2 * period - 2;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	
 	Ok(())
 }
 

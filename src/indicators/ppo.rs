@@ -967,6 +967,141 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_ppo_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			PpoParams::default(),
+			// Minimum viable periods
+			PpoParams {
+				fast_period: Some(2),
+				slow_period: Some(3),
+				ma_type: Some("sma".to_string()),
+			},
+			// Small periods
+			PpoParams {
+				fast_period: Some(5),
+				slow_period: Some(10),
+				ma_type: Some("sma".to_string()),
+			},
+			// Different MA types with default periods
+			PpoParams {
+				fast_period: Some(12),
+				slow_period: Some(26),
+				ma_type: Some("ema".to_string()),
+			},
+			PpoParams {
+				fast_period: Some(12),
+				slow_period: Some(26),
+				ma_type: Some("wma".to_string()),
+			},
+			// Medium periods
+			PpoParams {
+				fast_period: Some(20),
+				slow_period: Some(40),
+				ma_type: Some("sma".to_string()),
+			},
+			// Large periods
+			PpoParams {
+				fast_period: Some(50),
+				slow_period: Some(100),
+				ma_type: Some("sma".to_string()),
+			},
+			// Edge case: fast and slow close together
+			PpoParams {
+				fast_period: Some(10),
+				slow_period: Some(11),
+				ma_type: Some("sma".to_string()),
+			},
+			// Different ratios
+			PpoParams {
+				fast_period: Some(3),
+				slow_period: Some(21),
+				ma_type: Some("ema".to_string()),
+			},
+			// More edge cases
+			PpoParams {
+				fast_period: Some(7),
+				slow_period: Some(14),
+				ma_type: Some("wma".to_string()),
+			},
+			PpoParams {
+				fast_period: Some(9),
+				slow_period: Some(21),
+				ma_type: Some("sma".to_string()),
+			},
+			// Very large period
+			PpoParams {
+				fast_period: Some(100),
+				slow_period: Some(200),
+				ma_type: Some("ema".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = PpoInput::from_candles(&candles, "close", params.clone());
+			let output = ppo_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: fast_period={}, slow_period={}, ma_type={:?} (param set {})",
+						test_name, val, bits, i, 
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: fast_period={}, slow_period={}, ma_type={:?} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: fast_period={}, slow_period={}, ma_type={:?} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(12),
+						params.slow_period.unwrap_or(26),
+						params.ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_ppo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_ppo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -999,7 +1134,8 @@ mod tests {
 		check_ppo_period_exceeds_length,
 		check_ppo_very_small_dataset,
 		check_ppo_nan_handling,
-		check_ppo_streaming
+		check_ppo_streaming,
+		check_ppo_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1047,7 +1183,90 @@ mod tests {
 			}
 		};
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, ma_type)
+			(2, 10, 2, 12, 30, 3, "sma"),      // Small periods
+			(5, 25, 5, 26, 50, 5, "sma"),      // Medium periods  
+			(30, 60, 15, 65, 100, 10, "sma"),  // Large periods
+			(2, 5, 1, 6, 10, 1, "ema"),        // Dense small range with EMA
+			(10, 20, 2, 21, 40, 4, "wma"),     // Medium range with WMA
+			(3, 9, 3, 12, 21, 3, "sma"),       // Classic ratios
+			(7, 14, 7, 21, 28, 7, "ema"),      // Weekly/monthly periods
+		];
+
+		for (cfg_idx, &(f_start, f_end, f_step, s_start, s_end, s_step, ma_type)) in test_configs.iter().enumerate() {
+			let output = PpoBatchBuilder::new()
+				.kernel(kernel)
+				.fast_period_range(f_start, f_end, f_step)
+				.slow_period_range(s_start, s_end, s_step)
+				.ma_type(ma_type)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, ma_type={:?}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.ma_type.as_ref().unwrap_or(&"sma".to_string())
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, ma_type={:?}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.ma_type.as_ref().unwrap_or(&"sma".to_string())
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, ma_type={:?}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(12),
+						combo.slow_period.unwrap_or(26),
+						combo.ma_type.as_ref().unwrap_or(&"sma".to_string())
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ┌────────────────────────────────────────────────────────────────────────────┐

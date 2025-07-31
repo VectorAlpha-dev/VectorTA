@@ -645,15 +645,6 @@ fn natr_batch_inner_into(
 	}
 	let rows = combos.len();
 	let cols = len;
-	
-	// Initialize NaN prefixes directly in the provided buffer
-	for (row, combo) in combos.iter().enumerate() {
-		let warmup = first + combo.period.unwrap() - 1;
-		let row_start = row * cols;
-		for i in 0..warmup {
-			out[row_start + i] = f64::NAN;
-		}
-	}
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
@@ -955,6 +946,72 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_natr_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			NatrParams::default(),                    // period: 14
+			NatrParams { period: Some(2) },          // minimum viable period
+			NatrParams { period: Some(5) },          // small period
+			NatrParams { period: Some(7) },          // small period
+			NatrParams { period: Some(10) },         // small-medium period
+			NatrParams { period: Some(20) },         // medium period
+			NatrParams { period: Some(30) },         // medium-large period
+			NatrParams { period: Some(50) },         // large period
+			NatrParams { period: Some(100) },        // very large period
+			NatrParams { period: Some(200) },        // extra large period
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = NatrInput::from_candles(&candles, params.clone());
+			let output = natr_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_natr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -963,6 +1020,75 @@ mod tests {
 		let def = NatrParams::default();
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods
+			(30, 60, 15),    // Large periods
+			(2, 5, 1),       // Dense small range
+			(10, 20, 2),     // Mid-range with small step
+			(50, 100, 10),   // Large range
+			(14, 14, 0),     // Single period (default)
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = NatrBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(())
 	}
 
@@ -1008,7 +1134,8 @@ mod tests {
 		check_natr_slice_data_reinput,
 		check_natr_nan_check,
 		check_natr_default_candles,
-		check_natr_streaming
+		check_natr_streaming,
+		check_natr_no_poison
 	);
 
 	macro_rules! gen_batch_tests {
@@ -1032,6 +1159,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
