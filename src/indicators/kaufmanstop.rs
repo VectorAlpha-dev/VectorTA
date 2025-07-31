@@ -1075,11 +1075,95 @@ pub fn kaufmanstop_into_slice(
 		});
 	}
 
-	// Compute the indicator
-	let result = kaufmanstop_with_kernel(input, kern)?;
-	
-	// Copy result to destination slice
-	dst.copy_from_slice(&result.values);
+	let period = input.get_period();
+	let mult = input.get_mult();
+	let direction = input.get_direction();
+	let ma_type = input.get_ma_type();
+
+	if period == 0 || period > high.len() || period > low.len() {
+		return Err(KaufmanstopError::InvalidPeriod {
+			period,
+			data_len: high.len().min(low.len()),
+		});
+	}
+
+	let first_valid_idx = high
+		.iter()
+		.zip(low.iter())
+		.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+		.ok_or(KaufmanstopError::AllValuesNaN)?;
+
+	if (high.len() - first_valid_idx) < period {
+		return Err(KaufmanstopError::NotEnoughValidData {
+			needed: period,
+			valid: high.len() - first_valid_idx,
+		});
+	}
+
+	// Calculate high-low differences in a temporary buffer
+	let mut hl_diff = vec![f64::NAN; high.len()];
+	for i in first_valid_idx..high.len() {
+		if high[i].is_nan() || low[i].is_nan() {
+			hl_diff[i] = f64::NAN;
+		} else {
+			hl_diff[i] = high[i] - low[i];
+		}
+	}
+
+	// Calculate moving average of the differences
+	let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
+	let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|_| KaufmanstopError::AllValuesNaN)?;
+
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+
+	// Apply the kaufmanstop formula
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => kaufmanstop_scalar(
+				high,
+				low,
+				&hl_diff_ma,
+				period,
+				first_valid_idx,
+				mult,
+				direction,
+				dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => kaufmanstop_avx2(
+				high,
+				low,
+				&hl_diff_ma,
+				period,
+				first_valid_idx,
+				mult,
+				direction,
+				dst,
+			),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => kaufmanstop_avx512(
+				high,
+				low,
+				&hl_diff_ma,
+				period,
+				first_valid_idx,
+				mult,
+				direction,
+				dst,
+			),
+			_ => unreachable!(),
+		}
+	}
+
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
 	Ok(())
 }
 

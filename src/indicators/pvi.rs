@@ -286,10 +286,7 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
 		return Err(PviError::NotEnoughValidData);
 	}
 
-	// Fill warmup period with NaN
-	for v in &mut dst[..first_valid_idx] {
-		*v = f64::NAN;
-	}
+	// Helper functions already handle NaN prefix initialization
 
 	let chosen = match kern {
 		Kernel::Auto => detect_best_kernel(),
@@ -311,6 +308,11 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
 			}
 			_ => unreachable!(),
 		}
+	}
+
+	// Fill warmup period with NaN
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
 	}
 
 	Ok(())
@@ -912,6 +914,73 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_pvi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			PviParams::default(),                          // initial_value: 1000.0
+			PviParams { initial_value: Some(100.0) },       // small value
+			PviParams { initial_value: Some(500.0) },       // medium-small
+			PviParams { initial_value: Some(5000.0) },      // medium-large
+			PviParams { initial_value: Some(10000.0) },     // large value
+			PviParams { initial_value: Some(0.0) },         // edge case: zero
+			PviParams { initial_value: Some(1.0) },         // edge case: one
+			PviParams { initial_value: Some(-1000.0) },     // edge case: negative
+			PviParams { initial_value: Some(999999.0) },    // very large
+			PviParams { initial_value: None },              // None (uses default)
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = PviInput::from_candles(&candles, "close", "volume", params.clone());
+			let output = pvi_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: initial_value={:?} (param set {})",
+						test_name, val, bits, i, params.initial_value, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: initial_value={:?} (param set {})",
+						test_name, val, bits, i, params.initial_value, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: initial_value={:?} (param set {})",
+						test_name, val, bits, i, params.initial_value, param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_pvi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_pvi_tests!(
 		check_pvi_partial_params,
 		check_pvi_accuracy,
@@ -920,7 +989,8 @@ mod tests {
 		check_pvi_mismatched_length,
 		check_pvi_all_values_nan,
 		check_pvi_not_enough_valid_data,
-		check_pvi_streaming
+		check_pvi_streaming,
+		check_pvi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -956,7 +1026,81 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various initial_value sweep configurations
+		let test_configs = vec![
+			(100.0, 500.0, 100.0),      // Small values
+			(1000.0, 5000.0, 1000.0),   // Default range
+			(10000.0, 50000.0, 10000.0), // Large values
+			(900.0, 1100.0, 50.0),      // Dense range around default
+			(0.0, 100.0, 25.0),         // Edge case: starting at zero
+			(-1000.0, 1000.0, 500.0),   // Edge case: negative to positive
+			(1.0, 10.0, 1.0),           // Very small values
+			(999999.0, 1000001.0, 1.0), // Very large values
+		];
+		
+		for (cfg_idx, &(start, end, step)) in test_configs.iter().enumerate() {
+			let output = PviBatchBuilder::new()
+				.kernel(kernel)
+				.initial_value_range(start, end, step)
+				.apply_candles(&c, "close", "volume")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: initial_value={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.initial_value.unwrap_or(1000.0)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: initial_value={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.initial_value.unwrap_or(1000.0)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: initial_value={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.initial_value.unwrap_or(1000.0)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

@@ -266,7 +266,15 @@ pub fn decycler_into_slice(
 			Kernel::Avx512 | Kernel::Avx512Batch => decycler_scalar_into(data, hp_period, k, first, out), // AVX512 not implemented, fallback
 			_ => unreachable!(),
 		}
+	}?;
+
+	// Fill warmup period with NaN
+	let warmup_period = first + 2;
+	for v in &mut out[..warmup_period] {
+		*v = f64::NAN;
 	}
+
+	Ok(())
 }
 
 #[inline]

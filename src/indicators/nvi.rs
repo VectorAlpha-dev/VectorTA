@@ -455,6 +455,68 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_nvi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Since NVI has no parameters, we test with different data scenarios
+		// Test with default candles data
+		let test_scenarios = vec![
+			("default_candles", NviInput::with_default_candles(&candles)),
+			("close_source", NviInput::from_candles(&candles, "close", NviParams)),
+			("high_source", NviInput::from_candles(&candles, "high", NviParams)),
+			("low_source", NviInput::from_candles(&candles, "low", NviParams)),
+			("open_source", NviInput::from_candles(&candles, "open", NviParams)),
+		];
+		
+		for (scenario_idx, (scenario_name, input)) in test_scenarios.iter().enumerate() {
+			let output = nvi_with_kernel(input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with scenario: {} (scenario set {})",
+						test_name, val, bits, i, scenario_name, scenario_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with scenario: {} (scenario set {})",
+						test_name, val, bits, i, scenario_name, scenario_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with scenario: {} (scenario set {})",
+						test_name, val, bits, i, scenario_name, scenario_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_nvi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_nvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -472,7 +534,8 @@ mod tests {
 		check_nvi_accuracy,
 		check_nvi_empty_data,
 		check_nvi_not_enough_valid_data,
-		check_nvi_streaming
+		check_nvi_streaming,
+		check_nvi_no_poison
 	);
 }
 

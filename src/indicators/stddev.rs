@@ -709,7 +709,6 @@ pub fn stddev_batch_inner_into(
 	let rows = combos.len();
 	let cols = data.len();
 	
-	// Initialize warmup periods
 	for (row, combo) in combos.iter().enumerate() {
 		let warmup = first + combo.period.unwrap() - 1;
 		let row_start = row * cols;
@@ -1270,6 +1269,114 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_stddev_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			StdDevParams::default(),
+			StdDevParams {
+				period: Some(2),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(3),
+				nbdev: Some(0.5),
+			},
+			StdDevParams {
+				period: Some(5),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(5),
+				nbdev: Some(2.0),
+			},
+			StdDevParams {
+				period: Some(7),
+				nbdev: Some(1.5),
+			},
+			StdDevParams {
+				period: Some(10),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(10),
+				nbdev: Some(3.0),
+			},
+			StdDevParams {
+				period: Some(20),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(20),
+				nbdev: Some(2.5),
+			},
+			StdDevParams {
+				period: Some(30),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(50),
+				nbdev: Some(2.0),
+			},
+			StdDevParams {
+				period: Some(100),
+				nbdev: Some(1.0),
+			},
+			StdDevParams {
+				period: Some(100),
+				nbdev: Some(3.0),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = StdDevInput::from_candles(&candles, "close", params.clone());
+			let output = stddev_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_stddev_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_stddev_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1302,7 +1409,8 @@ mod tests {
 		check_stddev_very_small_dataset,
 		check_stddev_reinput,
 		check_stddev_nan_handling,
-		check_stddev_streaming
+		check_stddev_streaming,
+		check_stddev_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1335,6 +1443,75 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			// (period_start, period_end, period_step, nbdev_start, nbdev_end, nbdev_step)
+			(2, 10, 2, 1.0, 1.0, 0.0),      // Small periods, static nbdev
+			(5, 25, 5, 0.5, 2.5, 0.5),      // Medium periods, varying nbdev
+			(30, 60, 15, 1.0, 1.0, 0.0),    // Large periods, static nbdev
+			(2, 5, 1, 1.0, 3.0, 1.0),       // Dense small range, varying nbdev
+			(10, 10, 0, 0.5, 3.0, 0.5),     // Static period, varying nbdev
+			(20, 50, 10, 2.0, 2.0, 0.0),    // Medium to large periods, static nbdev=2
+			(100, 100, 0, 1.0, 3.0, 1.0),   // Large static period, varying nbdev
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, n_start, n_end, n_step)) in test_configs.iter().enumerate() {
+			let output = StdDevBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.nbdev_range(n_start, n_end, n_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1356,4 +1533,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

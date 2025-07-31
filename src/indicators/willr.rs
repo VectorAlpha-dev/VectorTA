@@ -952,6 +952,72 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_willr_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			WillrParams::default(),                    // period: 14
+			WillrParams { period: Some(2) },          // minimum viable period
+			WillrParams { period: Some(5) },          // small period
+			WillrParams { period: Some(10) },         // medium-small period
+			WillrParams { period: Some(20) },         // medium period
+			WillrParams { period: Some(30) },         // medium-large period
+			WillrParams { period: Some(50) },         // large period
+			WillrParams { period: Some(100) },        // very large period
+			WillrParams { period: Some(200) },        // edge case large period
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = WillrInput::from_candles(&candles, params.clone());
+			let output = willr_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_willr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_willr_tests!(
 		check_willr_partial_params,
 		check_willr_accuracy,
@@ -959,7 +1025,8 @@ mod tests {
 		check_willr_zero_period,
 		check_willr_period_exceeds_length,
 		check_willr_all_nan,
-		check_willr_not_enough_valid_data
+		check_willr_not_enough_valid_data,
+		check_willr_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1007,7 +1074,78 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods with step 2
+			(5, 25, 5),      // Medium periods with step 5
+			(10, 50, 10),    // Large periods with step 10
+			(2, 5, 1),       // Dense small range
+			(14, 14, 0),     // Single period (default)
+			(30, 60, 15),    // Large periods with large step
+			(50, 100, 25),   // Very large periods
+			(100, 200, 50),  // Edge case large periods
+		];
+		
+		for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
+			let output = WillrBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(period_start, period_end, period_step)
+				.apply_candles(&c)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // --- Python bindings ---

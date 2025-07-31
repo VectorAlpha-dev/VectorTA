@@ -1255,6 +1255,106 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_rvi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			RviParams::default(), // period: 10, ma_len: 14, matype: 1, devtype: 0
+			RviParams {
+				period: Some(2),  // minimum viable period
+				ma_len: Some(2),  // minimum viable ma_len
+				matype: Some(0),  // SMA
+				devtype: Some(0), // StdDev
+			},
+			RviParams {
+				period: Some(5),
+				ma_len: Some(5),
+				matype: Some(1),  // EMA
+				devtype: Some(1), // MeanAbsDev
+			},
+			RviParams {
+				period: Some(10),
+				ma_len: Some(20),
+				matype: Some(0),  // SMA
+				devtype: Some(2), // MedianAbsDev
+			},
+			RviParams {
+				period: Some(20),
+				ma_len: Some(30),
+				matype: Some(1),  // EMA
+				devtype: Some(0), // StdDev
+			},
+			RviParams {
+				period: Some(50),
+				ma_len: Some(50),
+				matype: Some(0),  // SMA
+				devtype: Some(1), // MeanAbsDev
+			},
+			RviParams {
+				period: Some(100), // large period
+				ma_len: Some(20),
+				matype: Some(1),   // EMA
+				devtype: Some(2),  // MedianAbsDev
+			},
+			RviParams {
+				period: Some(14),
+				ma_len: Some(100), // large ma_len
+				matype: Some(0),   // SMA
+				devtype: Some(0),  // StdDev
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = RviInput::from_candles(&candles, "close", params.clone());
+			let output = rvi_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_rvi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_rvi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1287,7 +1387,8 @@ mod tests {
 		check_rvi_error_period_exceeds_data_length,
 		check_rvi_all_nan_input,
 		check_rvi_not_enough_valid_data,
-		check_rvi_example_values
+		check_rvi_example_values,
+		check_rvi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1299,6 +1400,83 @@ mod tests {
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
 		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, ma_len_start, ma_len_end, ma_len_step)
+			(2, 10, 2, 2, 10, 2),      // Small periods and ma_lens
+			(5, 25, 5, 10, 30, 5),     // Medium periods and ma_lens
+			(30, 60, 15, 20, 40, 10),  // Large periods and ma_lens
+			(2, 5, 1, 2, 5, 1),        // Dense small range
+			(10, 20, 5, 50, 100, 25),  // Medium period, large ma_len
+			(50, 100, 50, 10, 20, 10), // Large period, small ma_len
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in test_configs.iter().enumerate() {
+			// Test with different matype and devtype combinations
+			for matype in [0, 1].iter() {
+				for devtype in [0, 1, 2].iter() {
+					let output = RviBatchBuilder::new()
+						.kernel(kernel)
+						.period_range(p_start, p_end, p_step)
+						.ma_len_range(m_start, m_end, m_step)
+						.matype_static(*matype)
+						.devtype_static(*devtype)
+						.apply_candles(&c, "close")?;
+					
+					for (idx, &val) in output.values.iter().enumerate() {
+						if val.is_nan() {
+							continue;
+						}
+						
+						let bits = val.to_bits();
+						let row = idx / output.cols;
+						let col = idx % output.cols;
+						let combo = &output.combos[row];
+						
+						// Check all three poison patterns with detailed context
+						if bits == 0x11111111_11111111 {
+							panic!(
+								"[{}] Config {} (matype={}, devtype={}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+								 at row {} col {} (flat index {}) with params: {:?}",
+								test, cfg_idx, matype, devtype, val, bits, row, col, idx, combo
+							);
+						}
+						
+						if bits == 0x22222222_22222222 {
+							panic!(
+								"[{}] Config {} (matype={}, devtype={}): Found init_matrix_prefixes poison value {} (0x{:016X}) \
+								 at row {} col {} (flat index {}) with params: {:?}",
+								test, cfg_idx, matype, devtype, val, bits, row, col, idx, combo
+							);
+						}
+						
+						if bits == 0x33333333_33333333 {
+							panic!(
+								"[{}] Config {} (matype={}, devtype={}): Found make_uninit_matrix poison value {} (0x{:016X}) \
+								 at row {} col {} (flat index {}) with params: {:?}",
+								test, cfg_idx, matype, devtype, val, bits, row, col, idx, combo
+							);
+						}
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
 	}
 
 	macro_rules! gen_batch_tests {
@@ -1322,6 +1500,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "wasm")]

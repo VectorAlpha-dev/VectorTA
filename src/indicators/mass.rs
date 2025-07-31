@@ -315,6 +315,11 @@ pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Resu
 		}
 	}
 
+	let warmup_end = first_valid_idx + 16 + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
 	Ok(())
 }
 
@@ -1234,6 +1239,10 @@ fn mass_batch_inner_into(
 
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let period = combos[row].period.unwrap();
+		let warmup_end = first + 16 + period - 1;
+		for v in &mut out_row[..warmup_end] {
+			*v = f64::NAN;
+		}
 		match kern {
 			Kernel::Scalar => mass_row_scalar(high, low, period, first, out_row),
 			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
