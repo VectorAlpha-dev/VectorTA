@@ -1472,6 +1472,189 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_eri_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			EriParams::default(),
+			// Minimum period
+			EriParams {
+				period: Some(2),
+				ma_type: Some("ema".to_string()),
+			},
+			// Small periods with different MA types
+			EriParams {
+				period: Some(5),
+				ma_type: Some("sma".to_string()),
+			},
+			EriParams {
+				period: Some(7),
+				ma_type: Some("ema".to_string()),
+			},
+			EriParams {
+				period: Some(10),
+				ma_type: Some("wma".to_string()),
+			},
+			// Medium periods
+			EriParams {
+				period: Some(13),
+				ma_type: Some("ema".to_string()),
+			},
+			EriParams {
+				period: Some(20),
+				ma_type: Some("sma".to_string()),
+			},
+			EriParams {
+				period: Some(30),
+				ma_type: Some("ema".to_string()),
+			},
+			// Large periods
+			EriParams {
+				period: Some(50),
+				ma_type: Some("sma".to_string()),
+			},
+			EriParams {
+				period: Some(100),
+				ma_type: Some("ema".to_string()),
+			},
+			// Edge cases
+			EriParams {
+				period: Some(3),
+				ma_type: Some("hma".to_string()),
+			},
+			EriParams {
+				period: Some(21),
+				ma_type: Some("dema".to_string()),
+			},
+			EriParams {
+				period: Some(14),
+				ma_type: Some("tema".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = EriInput::from_candles(&candles, "close", params.clone());
+			let output = eri_with_kernel(&input, kernel)?;
+
+			// Check bull values
+			for (i, &val) in output.bull.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bull index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at bull index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at bull index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+			}
+
+			// Check bear values
+			for (i, &val) in output.bear.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bear index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at bear index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at bear index {} \
+						 with params: period={}, ma_type={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.period.unwrap_or(13),
+						params.ma_type.as_ref().unwrap_or(&"ema".to_string()),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_eri_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	// Macro to generate kernel-variant tests as in alma.rs
 	macro_rules! generate_all_eri_tests {
         ($($test_fn:ident),*) => {
@@ -1505,7 +1688,8 @@ mod tests {
 		check_eri_period_exceeds_length,
 		check_eri_very_small_dataset,
 		check_eri_reinput,
-		check_eri_nan_handling
+		check_eri_nan_handling,
+		check_eri_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1545,6 +1729,166 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let high = c.select_candle_field("high").unwrap();
+		let low = c.select_candle_field("low").unwrap();
+		let src = c.select_candle_field("close").unwrap();
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step)
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods
+			(30, 60, 15),    // Large periods
+			(2, 5, 1),       // Dense small range
+			(10, 20, 2),     // Medium dense range
+			(20, 50, 10),    // Large sparse range
+			(13, 13, 0),     // Single period (default)
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = EriBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_slices(high, low, src)?;
+
+			// Check bull values
+			for (idx, &val) in output.bull.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.params[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at bull row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at bull row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at bull row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+			}
+
+			// Check bear values
+			for (idx, &val) in output.bear.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.params[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at bear row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at bear row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at bear row {} col {} (flat index {}) with params: period={}, ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(13),
+						combo.ma_type.as_ref().unwrap_or(&"ema".to_string())
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1566,4 +1910,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

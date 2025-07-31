@@ -1182,17 +1182,6 @@ pub fn mab_batch_py<'py>(
 			first + fast.max(slow) - 1
 		})
 		.collect();
-	
-	// Initialize NaN prefixes for all three output arrays
-	for (row, &warmup) in warmup_periods.iter().enumerate() {
-		let row_start = row * cols;
-		let row_end = row_start + warmup.min(cols);
-		for i in row_start..row_end {
-			slice_upper[i] = f64::NAN;
-			slice_middle[i] = f64::NAN;
-			slice_lower[i] = f64::NAN;
-		}
-	}
 
 	let combos = py
 		.allow_threads(|| {
@@ -1508,4 +1497,533 @@ pub fn mab_batch_into(
 
 		Ok(rows)
 	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::utilities::data_loader::read_candles_from_csv;
+	use std::error::Error;
+
+	macro_rules! skip_if_unsupported {
+		($kernel:expr, $test_name:expr) => {
+			#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+			if matches!($kernel, Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+				eprintln!("[{}] Skipping - {:?} not supported on WASM", $test_name, $kernel);
+				return Ok(());
+			}
+			#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+			if matches!($kernel, Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+				eprintln!("[{}] Skipping - {:?} requires 'nightly-avx' feature", $test_name, $kernel);
+				return Ok(());
+			}
+		};
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_mab_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			MabParams::default(),
+			// Minimum periods
+			MabParams {
+				fast_period: Some(2),
+				slow_period: Some(3),
+				devup: Some(1.0),
+				devdn: Some(1.0),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+			},
+			// Small periods with different multipliers
+			MabParams {
+				fast_period: Some(5),
+				slow_period: Some(10),
+				devup: Some(0.5),
+				devdn: Some(0.5),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+			},
+			// Medium periods with EMA
+			MabParams {
+				fast_period: Some(15),
+				slow_period: Some(30),
+				devup: Some(2.0),
+				devdn: Some(2.0),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			// Large periods
+			MabParams {
+				fast_period: Some(50),
+				slow_period: Some(100),
+				devup: Some(3.0),
+				devdn: Some(3.0),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+			},
+			// Mixed MA types - SMA/EMA
+			MabParams {
+				fast_period: Some(10),
+				slow_period: Some(20),
+				devup: Some(1.5),
+				devdn: Some(1.5),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			// Mixed MA types - EMA/SMA
+			MabParams {
+				fast_period: Some(8),
+				slow_period: Some(21),
+				devup: Some(2.5),
+				devdn: Some(2.5),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+			},
+			// Asymmetric deviations
+			MabParams {
+				fast_period: Some(12),
+				slow_period: Some(26),
+				devup: Some(2.0),
+				devdn: Some(1.0),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			// Very close periods
+			MabParams {
+				fast_period: Some(9),
+				slow_period: Some(10),
+				devup: Some(1.0),
+				devdn: Some(2.0),
+				fast_ma_type: Some("sma".to_string()),
+				slow_ma_type: Some("sma".to_string()),
+			},
+			// Maximum typical periods
+			MabParams {
+				fast_period: Some(30),
+				slow_period: Some(200),
+				devup: Some(1.0),
+				devdn: Some(1.0),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = MabInput::from_candles(&candles, "close", params.clone());
+			let output = mab_with_kernel(&input, kernel)?;
+
+			// Check upperband
+			for (i, &val) in output.upperband.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in upperband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+			}
+
+			// Check middleband
+			for (i, &val) in output.middleband.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in middleband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+			}
+
+			// Check lowerband
+			for (i, &val) in output.lowerband.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in lowerband \
+						 with params: fast_period={}, slow_period={}, devup={}, devdn={}, fast_ma_type={}, slow_ma_type={} (param set {})",
+						test_name, val, bits, i,
+						params.fast_period.unwrap_or(10),
+						params.slow_period.unwrap_or(50),
+						params.devup.unwrap_or(1.0),
+						params.devdn.unwrap_or(1.0),
+						params.fast_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						params.slow_ma_type.as_ref().unwrap_or(&"sma".to_string()),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_mab_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// Small period ranges
+			((2, 10, 2), (10, 20, 5), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
+			// Medium period ranges with deviation variations
+			((5, 15, 5), (20, 40, 10), (0.5, 2.0, 0.5), (0.5, 2.0, 0.5)),
+			// Large period ranges
+			((20, 40, 10), (50, 100, 25), (1.0, 3.0, 1.0), (1.0, 3.0, 1.0)),
+			// Dense small range
+			((2, 5, 1), (6, 10, 1), (1.0, 2.0, 0.5), (1.0, 2.0, 0.5)),
+			// Single fast period, multiple slow periods
+			((10, 10, 0), (20, 50, 10), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
+			// Multiple fast periods, single slow period
+			((5, 20, 5), (50, 50, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0)),
+			// Asymmetric deviations
+			((8, 12, 2), (26, 26, 0), (1.0, 3.0, 0.5), (0.5, 2.0, 0.5)),
+		];
+
+		for (cfg_idx, &(fast_range, slow_range, devup_range, devdn_range)) in test_configs.iter().enumerate() {
+			let sweep = MabBatchRange {
+				fast_period: fast_range,
+				slow_period: slow_range,
+				devup: devup_range,
+				devdn: devdn_range,
+				fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
+				slow_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
+			};
+
+			let output = mab_batch_inner(c.close.as_slice(), &sweep, kernel, false)?;
+
+			// Check upperbands
+			for (idx, &val) in output.upperbands.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in upperbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in upperbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in upperbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+			}
+
+			// Check middlebands
+			for (idx, &val) in output.middlebands.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in middlebands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in middlebands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in middlebands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+			}
+
+			// Check lowerbands
+			for (idx, &val) in output.lowerbands.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in lowerbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in lowerbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in lowerbands \
+						 at row {} col {} (flat index {}) with params: fast_period={}, slow_period={}, devup={}, devdn={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.fast_period.unwrap_or(10),
+						combo.slow_period.unwrap_or(50),
+						combo.devup.unwrap_or(1.0),
+						combo.devdn.unwrap_or(1.0)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
+	macro_rules! generate_all_mab_tests {
+		($($test_fn:ident),*) => {
+			paste::paste! {
+				$(
+					#[test]
+					fn [<$test_fn _scalar_f64>]() {
+						let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
+					}
+				)*
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				$(
+					#[test]
+					fn [<$test_fn _avx2_f64>]() {
+						let _ = $test_fn(stringify!([<$test_fn _avx2_f64>]), Kernel::Avx2);
+					}
+					#[test]
+					fn [<$test_fn _avx512_f64>]() {
+						let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
+					}
+				)*
+			}
+		}
+	}
+
+	macro_rules! gen_batch_tests {
+		($fn_name:ident) => {
+			paste::paste! {
+				#[test] fn [<$fn_name _scalar>]() {
+					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx2>]() {
+					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx512>]() {
+					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+				}
+				#[test] fn [<$fn_name _auto_detect>]() {
+					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), Kernel::Auto);
+				}
+			}
+		};
+	}
+
+	generate_all_mab_tests!(check_mab_no_poison);
+	gen_batch_tests!(check_batch_no_poison);
 }
