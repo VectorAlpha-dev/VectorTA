@@ -262,7 +262,8 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
 	}
 	
 	// Fill warmup with NaN
-	for v in &mut dst[..period - 1] {
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
 		*v = f64::NAN;
 	}
 	

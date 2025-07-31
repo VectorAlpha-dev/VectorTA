@@ -974,13 +974,24 @@ pub fn macd_js(
 	};
 	let input = MacdInput::from_slice(data, params);
 	
-	// Single allocation for all outputs
-	let mut values = vec![0.0; data.len() * 3];
-	let (macd_slice, rest) = values.split_at_mut(data.len());
-	let (signal_slice, hist_slice) = rest.split_at_mut(data.len());
+	// Calculate warmup periods
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let macd_warmup = first + slow_period - 1;
+	let signal_warmup = first + slow_period + signal_period - 2;
 	
-	macd_into_slices(macd_slice, signal_slice, hist_slice, &input, detect_best_kernel())
+	// Allocate with proper NaN prefixes
+	let mut macd_vec = alloc_with_nan_prefix(data.len(), macd_warmup);
+	let mut signal_vec = alloc_with_nan_prefix(data.len(), signal_warmup);
+	let mut hist_vec = alloc_with_nan_prefix(data.len(), signal_warmup);
+	
+	macd_into_slices(&mut macd_vec, &mut signal_vec, &mut hist_vec, &input, detect_best_kernel())
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
+	
+	// Combine into single allocation for WASM return
+	let mut values = Vec::with_capacity(data.len() * 3);
+	values.extend_from_slice(&macd_vec);
+	values.extend_from_slice(&signal_vec);
+	values.extend_from_slice(&hist_vec);
 	
 	Ok(MacdResult {
 		values,
@@ -1039,10 +1050,15 @@ pub fn macd_into(
 						 in_ptr == hist_ptr as *const f64;
 		
 		if needs_temp {
-			// Use temporary buffers for all outputs
-			let mut temp_macd = vec![0.0; len];
-			let mut temp_signal = vec![0.0; len];
-			let mut temp_hist = vec![0.0; len];
+			// Calculate warmup periods
+			let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+			let macd_warmup = first + slow_period - 1;
+			let signal_warmup = first + slow_period + signal_period - 2;
+			
+			// Use temporary buffers with proper NaN prefixes
+			let mut temp_macd = alloc_with_nan_prefix(len, macd_warmup);
+			let mut temp_signal = alloc_with_nan_prefix(len, signal_warmup);
+			let mut temp_hist = alloc_with_nan_prefix(len, signal_warmup);
 			
 			macd_into_slices(&mut temp_macd, &mut temp_signal, &mut temp_hist, &input, detect_best_kernel())
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1109,10 +1125,42 @@ pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
 	let rows = combos.len();
 	let cols = data.len();
 	
-	// Allocate output arrays
-	let mut macd = vec![0.0; rows * cols];
-	let mut signal = vec![0.0; rows * cols];
-	let mut hist = vec![0.0; rows * cols];
+	// Calculate warmup periods for each combination
+	let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|p| {
+			let slow = p.slow_period.unwrap_or(26);
+			let signal = p.signal_period.unwrap_or(9);
+			// Signal warmup is MACD warmup + signal period - 1
+			first + slow + signal - 2
+		})
+		.collect();
+	
+	// Use uninitialized memory with NaN prefixes
+	let mut macd_buf = make_uninit_matrix(rows, cols);
+	let mut signal_buf = make_uninit_matrix(rows, cols);
+	let mut hist_buf = make_uninit_matrix(rows, cols);
+	
+	// Initialize NaN prefixes for warmup periods
+	init_matrix_prefixes(&mut macd_buf, cols, &warmup_periods);
+	init_matrix_prefixes(&mut signal_buf, cols, &warmup_periods);
+	init_matrix_prefixes(&mut hist_buf, cols, &warmup_periods);
+	
+	// Convert to mutable slices for computation
+	let mut macd_guard = core::mem::ManuallyDrop::new(macd_buf);
+	let mut signal_guard = core::mem::ManuallyDrop::new(signal_buf);
+	let mut hist_guard = core::mem::ManuallyDrop::new(hist_buf);
+	
+	let macd: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(macd_guard.as_mut_ptr() as *mut f64, macd_guard.len())
+	};
+	let signal: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
+	};
+	let hist: &mut [f64] = unsafe {
+		core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
+	};
 	
 	// Use the shared batch function
 	let kernel = detect_best_batch_kernel();
@@ -1123,13 +1171,36 @@ pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
 		_ => Kernel::Scalar,
 	};
 	
-	let result_combos = macd_batch_inner_into(data, &sweep, simd, true, &mut macd, &mut signal, &mut hist)
+	let result_combos = macd_batch_inner_into(data, &sweep, simd, true, macd, signal, hist)
 		.map_err(|e| JsValue::from_str(&format!("Batch computation error: {}", e)))?;
 	
+	// Convert to owned vectors for return
+	let macd_vec = unsafe {
+		let ptr = macd_guard.as_mut_ptr() as *mut f64;
+		let len = macd_guard.len();
+		let cap = macd_guard.capacity();
+		core::mem::forget(macd_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	let signal_vec = unsafe {
+		let ptr = signal_guard.as_mut_ptr() as *mut f64;
+		let len = signal_guard.len();
+		let cap = signal_guard.capacity();
+		core::mem::forget(signal_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	let hist_vec = unsafe {
+		let ptr = hist_guard.as_mut_ptr() as *mut f64;
+		let len = hist_guard.len();
+		let cap = hist_guard.capacity();
+		core::mem::forget(hist_guard);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
 	let js_output = MacdBatchJsResult {
-		macd,
-		signal,
-		hist,
+		macd: macd_vec,
+		signal: signal_vec,
+		hist: hist_vec,
 		rows,
 		cols,
 		fast_periods: result_combos.iter().map(|p| p.fast_period.unwrap()).collect(),

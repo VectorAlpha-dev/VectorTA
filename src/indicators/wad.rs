@@ -548,6 +548,135 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_wad_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// WAD has no parameters, so we test with default configuration
+		let test_configs = vec![
+			WadParams::default(),
+			// Since WAD has no parameters, we only have one configuration
+		];
+
+		for (param_idx, params) in test_configs.iter().enumerate() {
+			let input = WadInput {
+				data: WadData::Candles { candles: &candles },
+				params: params.clone(),
+			};
+			let output = wad_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_wad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Since WAD has no parameters, batch processing is simplified
+		// We test with different input data configurations to ensure proper initialization
+		let test_configs = vec![
+			"high",
+			"low", 
+			"close",
+		];
+
+		for (cfg_idx, &source) in test_configs.iter().enumerate() {
+			let output = wad_batch_with_kernel(
+				source_type(&candles, "high"),
+				source_type(&candles, "low"),
+				source_type(&candles, "close"),
+				kernel,
+			)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) - source: {}",
+						test_name, cfg_idx, val, bits, row, col, idx, source
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) - source: {}",
+						test_name, cfg_idx, val, bits, row, col, idx, source
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) - source: {}",
+						test_name, cfg_idx, val, bits, row, col, idx, source
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_wad_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -579,8 +708,29 @@ mod tests {
 		check_wad_all_values_nan,
 		check_wad_basic_slice,
 		check_wad_streaming,
-		check_wad_small_example
+		check_wad_small_example,
+		check_wad_no_poison
 	);
+
+	macro_rules! gen_batch_tests {
+		($fn_name:ident) => {
+			paste::paste! {
+				#[test] fn [<$fn_name _scalar>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx2>]()        {
+					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx512>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+				}
+			}
+		}
+	}
+
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Helper functions for WASM zero-copy optimization
