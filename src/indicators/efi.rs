@@ -279,9 +279,6 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 		other => other,
 	};
 
-	// Fill warmup with NaN (EFI warmup period is 1)
-	dst[0] = f64::NAN;
-
 	unsafe {
 		match chosen {
 			Kernel::Scalar | Kernel::ScalarBatch => efi_scalar(price, volume, period, first_valid_idx, dst),
@@ -291,6 +288,20 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 			Kernel::Avx512 | Kernel::Avx512Batch => efi_avx512(price, volume, period, first_valid_idx, dst),
 			_ => unreachable!(),
 		}
+	}
+
+	// Fill warmup with NaN - find first valid difference position
+	let mut warmup_end = len; // default to entire array if no valid values found
+	for i in (first_valid_idx + 1)..len {
+		if !price[i].is_nan() && !price[i - 1].is_nan() && !volume[i].is_nan() {
+			warmup_end = i;
+			break;
+		}
+	}
+	
+	// Fill all positions before the first valid EFI value with NaN
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
 	}
 
 	Ok(())

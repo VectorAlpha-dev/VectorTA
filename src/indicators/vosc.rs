@@ -25,7 +25,7 @@
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -601,7 +601,30 @@ fn vosc_batch_inner(
 
 	let rows = combos.len();
 	let cols = data.len();
-	let mut values = vec![f64::NAN; rows * cols];
+	
+	// Use uninitialized memory with proper prefixes, matching ALMA pattern
+	let mut buf_mu = make_uninit_matrix(rows, cols);
+	
+	// Calculate warmup periods for each parameter combination
+	let warmup_periods: Vec<usize> = combos
+		.iter()
+		.map(|c| first + c.long_period.unwrap() - 1)
+		.collect();
+	
+	init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
+	
+	// Convert to Vec<f64> from MaybeUninit
+	let values = unsafe {
+		let ptr = buf_mu.as_mut_ptr() as *mut f64;
+		let len = buf_mu.len();
+		let cap = buf_mu.capacity();
+		std::mem::forget(buf_mu);
+		Vec::from_raw_parts(ptr, len, cap)
+	};
+	
+	// Convert back to mutable slices for processing
+	let mut values = values;
+	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let short = combos[row].short_period.unwrap();
 		let long = combos[row].long_period.unwrap();
@@ -807,16 +830,51 @@ mod tests {
 		
 		// Define comprehensive parameter combinations
 		let test_params = vec![
-			VoscParams::default(),  // short_period: 2, long_period: 5
-			VoscParams { short_period: Some(1), long_period: Some(2) },  // minimum viable
-			VoscParams { short_period: Some(3), long_period: Some(7) },  // small periods
-			VoscParams { short_period: Some(5), long_period: Some(20) }, // medium periods
-			VoscParams { short_period: Some(10), long_period: Some(50) }, // large periods
-			VoscParams { short_period: Some(50), long_period: Some(200) }, // very large periods
-			VoscParams { short_period: Some(9), long_period: Some(10) },  // edge case: close periods
-			VoscParams { short_period: Some(2), long_period: Some(100) }, // extreme difference
-			VoscParams { short_period: Some(7), long_period: Some(14) },  // common ratio
-			VoscParams { short_period: Some(1), long_period: Some(50) },  // minimum short, large long
+			VoscParams::default(),  // short: 2, long: 5
+			VoscParams {
+				short_period: Some(1),  // minimum viable
+				long_period: Some(2),
+			},
+			VoscParams {
+				short_period: Some(1),  // minimum short with larger long
+				long_period: Some(5),
+			},
+			VoscParams {
+				short_period: Some(2),  // small
+				long_period: Some(10),
+			},
+			VoscParams {
+				short_period: Some(5),  // medium
+				long_period: Some(20),
+			},
+			VoscParams {
+				short_period: Some(10),  // large
+				long_period: Some(50),
+			},
+			VoscParams {
+				short_period: Some(20),  // very large
+				long_period: Some(100),
+			},
+			VoscParams {
+				short_period: Some(3),  // edge case: close periods
+				long_period: Some(5),
+			},
+			VoscParams {
+				short_period: Some(10),  // edge case: equal ratio
+				long_period: Some(10),
+			},
+			VoscParams {
+				short_period: Some(4),  // specific combinations
+				long_period: Some(12),
+			},
+			VoscParams {
+				short_period: Some(7),
+				long_period: Some(21),
+			},
+			VoscParams {
+				short_period: Some(14),
+				long_period: Some(28),
+			},
 		];
 		
 		for (param_idx, params) in test_params.iter().enumerate() {
@@ -943,24 +1001,23 @@ mod tests {
 		
 		// Test various parameter sweep configurations
 		let test_configs = vec![
-			// (short_period_start, short_period_end, short_period_step, long_period_start, long_period_end, long_period_step)
-			(1, 5, 1, 2, 10, 2),      // Small periods with dense short range
-			(5, 15, 5, 10, 30, 5),    // Medium periods
-			(10, 30, 10, 20, 60, 15), // Large periods
-			(1, 3, 1, 2, 5, 1),       // Very dense small range
-			(2, 10, 2, 5, 20, 5),     // Common practical ranges
-			(1, 2, 1, 3, 6, 3),       // Minimal ranges
-			(7, 14, 7, 15, 30, 15),   // Weekly/monthly patterns
-			(5, 5, 0, 10, 50, 10),    // Static short, varying long
+			// (short_start, short_end, short_step, long_start, long_end, long_step)
+			(1, 5, 1, 2, 10, 2),      // Small periods
+			(2, 10, 2, 5, 20, 5),     // Medium periods
+			(10, 20, 5, 20, 50, 10),  // Large periods
+			(1, 3, 1, 3, 6, 1),       // Dense small range
+			(5, 15, 2, 10, 30, 5),    // Medium range with overlap
+			(2, 2, 0, 5, 25, 5),      // Static short, varying long
+			(1, 10, 3, 10, 10, 0),    // Varying short, static long
+			(3, 9, 3, 9, 27, 9),      // Specific ratio patterns
+			(1, 5, 1, 5, 5, 0),       // Edge case: converging to equal
 		];
 		
-		for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in 
-			test_configs.iter().enumerate() 
-		{
+		for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in test_configs.iter().enumerate() {
 			let output = VoscBatchBuilder::new()
 				.kernel(kernel)
-				.short_period_range(short_start, short_end, short_step)
-				.long_period_range(long_start, long_end, long_step)
+				.short_period_range(s_start, s_end, s_step)
+				.long_period_range(l_start, l_end, l_step)
 				.apply_candles(&c, "volume")?;
 			
 			for (idx, &val) in output.values.iter().enumerate() {
@@ -1243,11 +1300,6 @@ pub fn vosc_into_slice(
 	};
 
 	let warmup_period = first + long_period - 1;
-	
-	// Fill warmup with NaN
-	for v in &mut dst[..warmup_period] {
-		*v = f64::NAN;
-	}
 
 	unsafe {
 		match chosen {
@@ -1258,6 +1310,11 @@ pub fn vosc_into_slice(
 			Kernel::Avx512 | Kernel::Avx512Batch => vosc_avx512(data, short_period, long_period, first, dst),
 			_ => unreachable!(),
 		}
+	}
+	
+	// Fill warmup with NaN
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
 	}
 
 	Ok(())

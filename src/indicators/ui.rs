@@ -916,7 +916,7 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
 		Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, dst),
 		_ => unreachable!(),
 	}
-
+	
 	// Fill warmup with NaN
 	let warmup_period = period * 2 - 2;
 	for v in &mut dst[..warmup_period.min(len)] {
@@ -1190,6 +1190,117 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_ui_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			UiParams::default(),  // period: 14, scalar: 100.0
+			UiParams {
+				period: Some(2),  // minimum viable
+				scalar: Some(100.0),
+			},
+			UiParams {
+				period: Some(5),  // small
+				scalar: Some(50.0),
+			},
+			UiParams {
+				period: Some(10),  // medium
+				scalar: Some(100.0),
+			},
+			UiParams {
+				period: Some(20),  // large
+				scalar: Some(200.0),
+			},
+			UiParams {
+				period: Some(50),  // very large
+				scalar: Some(100.0),
+			},
+			UiParams {
+				period: Some(100),  // extreme
+				scalar: Some(100.0),
+			},
+			UiParams {
+				period: Some(14),  // default period with different scalars
+				scalar: Some(1.0),
+			},
+			UiParams {
+				period: Some(14),
+				scalar: Some(500.0),
+			},
+			UiParams {
+				period: Some(14),
+				scalar: Some(1000.0),
+			},
+			UiParams {
+				period: Some(7),  // edge case combinations
+				scalar: Some(75.0),
+			},
+			UiParams {
+				period: Some(30),
+				scalar: Some(150.0),
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = UiInput::from_candles(&candles, "close", params.clone());
+			let output = ui_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, scalar={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(14),
+						params.scalar.unwrap_or(100.0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, scalar={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.scalar.unwrap_or(100.0),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, scalar={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(14),
+						params.scalar.unwrap_or(100.0),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_ui_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_ui_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1220,7 +1331,8 @@ mod tests {
 		check_ui_default_candles,
 		check_ui_zero_period,
 		check_ui_period_exceeds_length,
-		check_ui_very_small_dataset
+		check_ui_very_small_dataset,
+		check_ui_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1253,6 +1365,85 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, scalar_start, scalar_end, scalar_step)
+			(2, 10, 2, 100.0, 100.0, 0.0),     // Small periods, static scalar
+			(5, 25, 5, 50.0, 150.0, 50.0),     // Medium periods with scalar sweep
+			(30, 60, 15, 100.0, 100.0, 0.0),   // Large periods
+			(2, 5, 1, 1.0, 100.0, 33.0),       // Dense small range with scalar sweep
+			(10, 20, 2, 200.0, 200.0, 0.0),    // Medium range, high scalar
+			(14, 14, 0, 1.0, 1000.0, 199.0),   // Static period with scalar sweep
+			(3, 12, 3, 75.0, 125.0, 25.0),     // Small to medium with scalar variations
+			(50, 100, 25, 100.0, 500.0, 200.0), // Very large periods with scalar sweep
+			(7, 21, 7, 50.0, 50.0, 0.0),       // Specific periods, static scalar
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step, s_start, s_end, s_step)) in test_configs.iter().enumerate() {
+			let output = UiBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.scalar_range(s_start, s_end, s_step)
+				.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, scalar={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.scalar.unwrap_or(100.0)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, scalar={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.scalar.unwrap_or(100.0)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, scalar={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(14),
+						combo.scalar.unwrap_or(100.0)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1275,4 +1466,5 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

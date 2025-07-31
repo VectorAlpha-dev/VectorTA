@@ -1213,6 +1213,83 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_sar_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			SarParams::default(),  // acceleration: 0.02, maximum: 0.2
+			SarParams { acceleration: Some(0.001), maximum: Some(0.001) },  // minimum viable
+			SarParams { acceleration: Some(0.01), maximum: Some(0.1) },     // small values
+			SarParams { acceleration: Some(0.02), maximum: Some(0.3) },     // default acceleration, higher max
+			SarParams { acceleration: Some(0.05), maximum: Some(0.2) },     // higher acceleration, default max
+			SarParams { acceleration: Some(0.05), maximum: Some(0.5) },     // medium values
+			SarParams { acceleration: Some(0.1), maximum: Some(0.5) },      // large values
+			SarParams { acceleration: Some(0.1), maximum: Some(0.9) },      // very large values
+			SarParams { acceleration: Some(0.2), maximum: Some(0.9) },      // edge case values
+			SarParams { acceleration: Some(0.001), maximum: Some(0.9) },    // min acceleration, max maximum
+			SarParams { acceleration: Some(0.2), maximum: Some(0.01) },     // max acceleration, small maximum
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = SarInput::from_candles(&candles, params.clone());
+			let output = sar_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: acceleration={}, maximum={} (param set {})",
+						test_name, val, bits, i, 
+						params.acceleration.unwrap_or(0.02),
+						params.maximum.unwrap_or(0.2),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: acceleration={}, maximum={} (param set {})",
+						test_name, val, bits, i,
+						params.acceleration.unwrap_or(0.02),
+						params.maximum.unwrap_or(0.2),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: acceleration={}, maximum={} (param set {})",
+						test_name, val, bits, i,
+						params.acceleration.unwrap_or(0.02),
+						params.maximum.unwrap_or(0.2),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_sar_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_sar_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1248,7 +1325,8 @@ mod tests {
 		check_sar_partial_params,
 		check_sar_accuracy,
 		check_sar_from_slices,
-		check_sar_all_nan
+		check_sar_all_nan,
+		check_sar_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1281,6 +1359,83 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (accel_start, accel_end, accel_step, max_start, max_end, max_step)
+			(0.01, 0.05, 0.01, 0.1, 0.3, 0.1),     // Small acceleration/maximum ranges
+			(0.02, 0.1, 0.02, 0.2, 0.5, 0.1),      // Medium ranges
+			(0.05, 0.2, 0.05, 0.3, 0.9, 0.2),      // Large ranges
+			(0.001, 0.005, 0.001, 0.05, 0.1, 0.05), // Very small values
+			(0.02, 0.02, 0.0, 0.2, 0.2, 0.0),      // Static values (default)
+			(0.1, 0.2, 0.025, 0.5, 0.9, 0.1),      // Edge case ranges
+			(0.001, 0.01, 0.003, 0.1, 0.5, 0.2),   // Mixed small/large
+		];
+		
+		for (cfg_idx, &(a_start, a_end, a_step, m_start, m_end, m_step)) in test_configs.iter().enumerate() {
+			let output = SarBatchBuilder::new()
+				.kernel(kernel)
+				.acceleration_range(a_start, a_end, a_step)
+				.maximum_range(m_start, m_end, m_step)
+				.apply_candles(&c)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: acceleration={}, maximum={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.acceleration.unwrap_or(0.02),
+						combo.maximum.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: acceleration={}, maximum={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.acceleration.unwrap_or(0.02),
+						combo.maximum.unwrap_or(0.2)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: acceleration={}, maximum={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.acceleration.unwrap_or(0.02),
+						combo.maximum.unwrap_or(0.2)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1302,4 +1457,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

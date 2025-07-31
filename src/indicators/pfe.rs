@@ -1184,6 +1184,109 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_pfe_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			PfeParams::default(),  // period: 10, smoothing: 5
+			PfeParams {
+				period: Some(2),   // minimum viable period
+				smoothing: Some(1), // minimum smoothing
+			},
+			PfeParams {
+				period: Some(5),
+				smoothing: Some(2),
+			},
+			PfeParams {
+				period: Some(10),
+				smoothing: Some(3),
+			},
+			PfeParams {
+				period: Some(14),
+				smoothing: Some(5),
+			},
+			PfeParams {
+				period: Some(20),
+				smoothing: Some(5),
+			},
+			PfeParams {
+				period: Some(20),
+				smoothing: Some(10),
+			},
+			PfeParams {
+				period: Some(50),  // large period
+				smoothing: Some(15),
+			},
+			PfeParams {
+				period: Some(100), // very large period
+				smoothing: Some(20),
+			},
+			PfeParams {
+				period: Some(3),
+				smoothing: Some(30), // smoothing > period case
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = PfeInput::from_candles(&candles, "close", params.clone());
+			let output = pfe_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, smoothing={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(10), 
+						params.smoothing.unwrap_or(5), 
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, smoothing={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(10), 
+						params.smoothing.unwrap_or(5), 
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={}, smoothing={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(10), 
+						params.smoothing.unwrap_or(5), 
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_pfe_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_pfe_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1217,7 +1320,8 @@ mod tests {
 		check_pfe_very_small_dataset,
 		check_pfe_reinput,
 		check_pfe_nan_handling,
-		check_pfe_streaming
+		check_pfe_streaming,
+		check_pfe_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1244,6 +1348,84 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, smoothing_start, smoothing_end, smoothing_step)
+			(2, 10, 2, 1, 5, 1),       // Small periods and smoothing
+			(5, 25, 5, 2, 10, 2),      // Medium periods and smoothing  
+			(30, 60, 15, 5, 20, 5),    // Large periods and smoothing
+			(2, 5, 1, 1, 3, 1),        // Dense small range
+			(10, 10, 0, 1, 20, 1),     // Static period, varying smoothing
+			(2, 100, 10, 5, 5, 0),     // Varying period, static smoothing
+			(14, 21, 7, 3, 9, 3),      // Medium focused range
+			(50, 100, 25, 10, 30, 10), // Large focused range
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, s_start, s_end, s_step)) in test_configs.iter().enumerate() {
+			let output = PfeBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.smoothing_range(s_start, s_end, s_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, smoothing={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.period.unwrap_or(10), 
+						combo.smoothing.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, smoothing={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.period.unwrap_or(10), 
+						combo.smoothing.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}, smoothing={}",
+						test, cfg_idx, val, bits, row, col, idx, 
+						combo.period.unwrap_or(10), 
+						combo.smoothing.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1265,4 +1447,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

@@ -924,6 +924,80 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_adx_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			AdxParams::default(),
+			AdxParams { period: Some(5) },
+			AdxParams { period: Some(10) },
+			AdxParams { period: Some(20) },
+			AdxParams { period: Some(50) },
+		];
+
+		for params in test_params {
+			// Test with high/low/close slices
+			let input = AdxInput::from_slices(&candles.high, &candles.low, &candles.close, params.clone());
+			let output = adx_with_kernel(&input, kernel)?;
+
+			// Check every value in the output
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() || val.is_infinite() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						with params: period={}",
+						test_name,
+						val,
+						bits,
+						idx,
+						params.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						with params: period={}",
+						test_name,
+						val,
+						bits,
+						idx,
+						params.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						with params: period={}",
+						test_name,
+						val,
+						bits,
+						idx,
+						params.period.unwrap_or(14)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_adx_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_adx_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -957,7 +1031,8 @@ mod tests {
 		check_adx_very_small_dataset,
 		check_adx_reinput,
 		check_adx_nan_handling,
-		check_adx_streaming
+		check_adx_streaming,
+		check_adx_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -988,6 +1063,118 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			(5, 20, 5),   // period_start, period_end, period_step
+			(10, 30, 10),
+			(14, 14, 1),  // default period only
+			(20, 50, 15),
+			(2, 10, 2),
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = AdxBatchBuilder::new()
+				.kernel(kernel)
+				.period(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+
+			// Check every value in the flat output matrix
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() || val.is_infinite() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: period={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(14)
+					);
+				}
+			}
+
+			// Also check intermediate buffers if exposed via from_raw
+			let params = expand_grid(&AdxBatchRange {
+				period: (p_start, p_end, p_step),
+			});
+
+			// Test slicing back to individual outputs
+			for p in &params {
+				if let Some(slice) = output.values_for(p) {
+					for (idx, &val) in slice.iter().enumerate() {
+						if val.is_nan() || val.is_infinite() {
+							continue;
+						}
+
+						let bits = val.to_bits();
+						if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
+							panic!(
+								"[{}] Config {}: Found poison value {} (0x{:016X}) in sliced output \
+								at index {} with params: period={}",
+								test, cfg_idx, val, bits, idx, p.period.unwrap_or(14)
+							);
+						}
+					}
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1009,6 +1196,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
