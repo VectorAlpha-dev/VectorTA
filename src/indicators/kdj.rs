@@ -1734,7 +1734,8 @@ mod tests {
 		check_kdj_very_small_dataset,
 		check_kdj_all_nan,
 		check_kdj_reinput,
-		check_kdj_nan_handling
+		check_kdj_nan_handling,
+		check_kdj_no_poison
 	);
 
 	// Batch test, matches alma batch style
@@ -1755,6 +1756,270 @@ mod tests {
 		for &v in &row[row.len().saturating_sub(5)..] {
 			assert!(!v.is_nan(), "[{test}] default-row unexpected NaN at tail");
 		}
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		// Each tuple: (fast_k_start, fast_k_end, fast_k_step, slow_k_start, slow_k_end, slow_k_step, 
+		//              slow_d_start, slow_d_end, slow_d_step, slow_k_ma_type, slow_d_ma_type)
+		let test_configs = vec![
+			// Small periods with default MA types
+			(2, 10, 2, 2, 6, 2, 2, 6, 2, "sma", "sma"),
+			// Medium periods with EMA
+			(5, 25, 5, 3, 9, 3, 3, 9, 3, "ema", "ema"),
+			// Large periods with mixed MA types
+			(30, 60, 15, 5, 15, 5, 5, 15, 5, "sma", "ema"),
+			// Dense small range with WMA
+			(2, 5, 1, 2, 4, 1, 2, 4, 1, "wma", "wma"),
+			// Edge case: minimum periods
+			(2, 2, 0, 2, 2, 0, 2, 2, 0, "sma", "sma"),
+			// Common trading setup
+			(9, 15, 3, 3, 6, 3, 3, 6, 3, "sma", "sma"),
+			// Large periods with HMA
+			(50, 100, 25, 10, 20, 10, 10, 20, 10, "hma", "hma"),
+		];
+
+		for (cfg_idx, &(fk_start, fk_end, fk_step, sk_start, sk_end, sk_step, 
+		                sd_start, sd_end, sd_step, sk_ma, sd_ma)) in test_configs.iter().enumerate() 
+		{
+			let output = KdjBatchBuilder::new()
+				.kernel(kernel)
+				.fast_k_period_range(fk_start, fk_end, fk_step)
+				.slow_k_period_range(sk_start, sk_end, sk_step)
+				.slow_k_ma_type_static(sk_ma)
+				.slow_d_period_range(sd_start, sd_end, sd_step)
+				.slow_d_ma_type_static(sd_ma)
+				.apply_candles(&c)?;
+
+			// Check K values
+			for (idx, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in K with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+
+			// Check D values
+			for (idx, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in D with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+
+			// Check J values
+			for (idx, &val) in output.j.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in J with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in J with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in J with params: fast_k_period={}, \
+						 slow_k_period={}, slow_k_ma_type={}, slow_d_period={}, slow_d_ma_type={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_k_period.unwrap_or(9),
+						combo.slow_k_period.unwrap_or(3),
+						combo.slow_k_ma_type.as_deref().unwrap_or("sma"),
+						combo.slow_d_period.unwrap_or(3),
+						combo.slow_d_ma_type.as_deref().unwrap_or("sma")
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(())
 	}
 
@@ -1779,6 +2044,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ========== Python Bindings ==========

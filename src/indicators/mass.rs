@@ -315,12 +315,6 @@ pub fn mass_into_slice(dst: &mut [f64], input: &MassInput, kern: Kernel) -> Resu
 		}
 	}
 
-	// Fill warmup period with NaN
-	let warmup_end = first_valid_idx + 16 + period - 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
-
 	Ok(())
 }
 
@@ -875,6 +869,75 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_mass_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Comprehensive parameter combinations for mass
+		let test_params = vec![
+			MassParams::default(),           // period: 5
+			MassParams { period: Some(2) },  // minimum period
+			MassParams { period: Some(3) },  // small
+			MassParams { period: Some(4) },  // small
+			MassParams { period: Some(5) },  // default
+			MassParams { period: Some(10) }, // medium
+			MassParams { period: Some(20) }, // medium-large
+			MassParams { period: Some(30) }, // large
+			MassParams { period: Some(50) }, // large
+			MassParams { period: Some(100) }, // very large
+			MassParams { period: Some(200) }, // very large
+			MassParams { period: Some(255) }, // edge case
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = MassInput::from_candles(&candles, "high", "low", params.clone());
+			let output = mass_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_mass_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_mass_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -907,7 +970,8 @@ mod tests {
 		check_mass_period_exceeds_length,
 		check_mass_very_small_data_set,
 		check_mass_reinput,
-		check_mass_nan_handling
+		check_mass_nan_handling,
+		check_mass_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -935,6 +999,76 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),    // Small periods with step 2
+			(5, 25, 5),    // Medium periods with step 5
+			(30, 60, 15),  // Large periods with step 15
+			(2, 5, 1),     // Dense small range
+			(10, 10, 0),   // Static period
+			(50, 100, 25), // Very large periods
+			(3, 15, 3),    // Another small/medium range
+			(20, 40, 10),  // Medium range
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = MassBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	// Macro for batch testing like alma.rs
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
@@ -957,6 +1091,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Python bindings
