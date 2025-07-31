@@ -712,6 +712,25 @@ pub fn gatorosc_into_slice(
 		lower_change_dst,
 	);
 	
+	// Fill warmup period with NaN for all outputs
+	let upper_warmup = first + jaws_length.max(teeth_length) - 1;
+	let lower_warmup = first + teeth_length.max(lips_length) - 1;
+	let upper_change_warmup = first + jaws_length.max(teeth_length);
+	let lower_change_warmup = first + teeth_length.max(lips_length);
+	
+	for v in &mut upper_dst[..upper_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut lower_dst[..lower_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut upper_change_dst[..upper_change_warmup] {
+		*v = f64::NAN;
+	}
+	for v in &mut lower_change_dst[..lower_change_warmup] {
+		*v = f64::NAN;
+	}
+	
 	Ok(())
 }
 

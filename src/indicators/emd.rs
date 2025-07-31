@@ -1938,6 +1938,17 @@ pub fn emd_into_slice(
 	middleband_dst.copy_from_slice(&result.middleband);
 	lowerband_dst.copy_from_slice(&result.lowerband);
 
+	// Fill warmup period with NaN for all outputs
+	for v in &mut upperband_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut middleband_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+	for v in &mut lowerband_dst[..warmup_period] {
+		*v = f64::NAN;
+	}
+
 	Ok(())
 }
 
