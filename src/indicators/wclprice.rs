@@ -805,6 +805,116 @@ mod tests {
 		assert!((output.values[1] - (59000.0 + 58950.0 + 2.0 * 58975.0) / 4.0).abs() < 1e-8);
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_wclprice_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test with real candle data
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Test with full candle data
+		let input = WclpriceInput::from_candles(&candles);
+		let output = wclprice_with_kernel(&input, kernel)?;
+		
+		for (i, &val) in output.values.iter().enumerate() {
+			if val.is_nan() {
+				continue; // NaN values are expected during warmup
+			}
+			
+			let bits = val.to_bits();
+			
+			// Check all three poison patterns
+			if bits == 0x11111111_11111111 {
+				panic!(
+					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+					 in WCLPRICE with candle data",
+					test_name, val, bits, i
+				);
+			}
+			
+			if bits == 0x22222222_22222222 {
+				panic!(
+					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+					 in WCLPRICE with candle data",
+					test_name, val, bits, i
+				);
+			}
+			
+			if bits == 0x33333333_33333333 {
+				panic!(
+					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+					 in WCLPRICE with candle data",
+					test_name, val, bits, i
+				);
+			}
+		}
+		
+		// Test with various slice patterns to ensure no poison in different scenarios
+		let test_patterns = vec![
+			// (description, high, low, close)
+			("small dataset", vec![100.0, 101.0, 102.0], vec![99.0, 100.0, 101.0], vec![100.5, 101.5, 102.5]),
+			("large values", vec![59000.0, 60000.0, 61000.0], vec![58900.0, 59900.0, 60900.0], vec![58950.0, 59950.0, 60950.0]),
+			("with leading NaN", vec![f64::NAN, 100.0, 101.0], vec![f64::NAN, 99.0, 100.0], vec![f64::NAN, 100.5, 101.5]),
+			("with trailing NaN", vec![100.0, 101.0, f64::NAN], vec![99.0, 100.0, f64::NAN], vec![100.5, 101.5, f64::NAN]),
+			("mixed NaN pattern", vec![100.0, f64::NAN, 101.0, f64::NAN, 102.0], vec![99.0, f64::NAN, 100.0, f64::NAN, 101.0], vec![100.5, f64::NAN, 101.5, f64::NAN, 102.5]),
+			("single valid value", vec![f64::NAN, f64::NAN, 100.0], vec![f64::NAN, f64::NAN, 99.0], vec![f64::NAN, f64::NAN, 100.5]),
+			("extreme values", vec![1e-10, 1e10, 1e-10], vec![1e-10, 1e10, 1e-10], vec![1e-10, 1e10, 1e-10]),
+			("zero values", vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0], vec![0.0, 0.5, 0.0]),
+			("negative values", vec![-100.0, -50.0, -25.0], vec![-101.0, -51.0, -26.0], vec![-100.5, -50.5, -25.5]),
+			("large dataset", 
+				(0..1000).map(|i| 100.0 + i as f64).collect(), 
+				(0..1000).map(|i| 99.0 + i as f64).collect(),
+				(0..1000).map(|i| 100.5 + i as f64).collect()
+			),
+		];
+		
+		for (pattern_idx, (desc, high, low, close)) in test_patterns.iter().enumerate() {
+			let input = WclpriceInput::from_slices(high, low, close);
+			let output = wclprice_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in WCLPRICE with pattern '{}' (pattern {})",
+						test_name, val, bits, i, desc, pattern_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in WCLPRICE with pattern '{}' (pattern {})",
+						test_name, val, bits, i, desc, pattern_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in WCLPRICE with pattern '{}' (pattern {})",
+						test_name, val, bits, i, desc, pattern_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_wclprice_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! generate_all_wclprice_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -820,7 +930,8 @@ mod tests {
 		check_wclprice_candles,
 		check_wclprice_empty_data,
 		check_wclprice_all_nan,
-		check_wclprice_partial_nan
+		check_wclprice_partial_nan,
+		check_wclprice_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -831,6 +942,136 @@ mod tests {
 		assert_eq!(row.len(), c.close.len());
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test batch processing with candle data
+		let output = WclpriceBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
+		
+		// WCLPRICE has no parameters, so there's only one row
+		assert_eq!(output.rows, 1);
+		assert_eq!(output.cols, c.close.len());
+		
+		// Check for poison values in the batch output
+		for (idx, &val) in output.values.iter().enumerate() {
+			if val.is_nan() {
+				continue;
+			}
+			
+			let bits = val.to_bits();
+			
+			if bits == 0x11111111_11111111 {
+				panic!(
+					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+					 in WCLPRICE batch at index {} (candle data)",
+					test, val, bits, idx
+				);
+			}
+			
+			if bits == 0x22222222_22222222 {
+				panic!(
+					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) \
+					 in WCLPRICE batch at index {} (candle data)",
+					test, val, bits, idx
+				);
+			}
+			
+			if bits == 0x33333333_33333333 {
+				panic!(
+					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) \
+					 in WCLPRICE batch at index {} (candle data)",
+					test, val, bits, idx
+				);
+			}
+		}
+		
+		// Test batch processing with various slice patterns
+		let test_configs = vec![
+			// (description, high, low, close)
+			("small data", vec![100.0, 101.0, 102.0], vec![99.0, 100.0, 101.0], vec![100.5, 101.5, 102.5]),
+			("medium data", 
+				(0..100).map(|i| 100.0 + i as f64).collect(), 
+				(0..100).map(|i| 99.0 + i as f64).collect(),
+				(0..100).map(|i| 100.5 + i as f64).collect()
+			),
+			("large data", 
+				(0..5000).map(|i| 100.0 + (i as f64 * 0.1)).collect(), 
+				(0..5000).map(|i| 99.0 + (i as f64 * 0.1)).collect(),
+				(0..5000).map(|i| 100.5 + (i as f64 * 0.1)).collect()
+			),
+			("with NaN prefix",
+				[vec![f64::NAN; 10], (0..90).map(|i| 100.0 + i as f64).collect()].concat(),
+				[vec![f64::NAN; 10], (0..90).map(|i| 99.0 + i as f64).collect()].concat(),
+				[vec![f64::NAN; 10], (0..90).map(|i| 100.5 + i as f64).collect()].concat()
+			),
+			("sparse NaN pattern",
+				(0..50).map(|i| if i % 5 == 0 { f64::NAN } else { 100.0 + i as f64 }).collect(),
+				(0..50).map(|i| if i % 5 == 0 { f64::NAN } else { 99.0 + i as f64 }).collect(),
+				(0..50).map(|i| if i % 5 == 0 { f64::NAN } else { 100.5 + i as f64 }).collect()
+			),
+			("extreme values",
+				vec![1e-100, 1e100, 1e-50, 1e50],
+				vec![1e-100, 1e100, 1e-50, 1e50],
+				vec![1e-100, 1e100, 1e-50, 1e50]
+			),
+		];
+		
+		for (cfg_idx, (desc, high, low, close)) in test_configs.iter().enumerate() {
+			let output = WclpriceBatchBuilder::new()
+				.kernel(kernel)
+				.apply_slices(high, low, close)?;
+			
+			// Verify batch structure
+			assert_eq!(output.rows, 1, "[{}] Config {}: Expected 1 row for WCLPRICE", test, cfg_idx);
+			assert_eq!(output.cols, high.len(), "[{}] Config {}: Cols mismatch", test, cfg_idx);
+			
+			// Check for poison values
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {} ({}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 in WCLPRICE batch at index {}",
+						test, cfg_idx, desc, val, bits, idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {} ({}): Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 in WCLPRICE batch at index {}",
+						test, cfg_idx, desc, val, bits, idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {} ({}): Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 in WCLPRICE batch at index {}",
+						test, cfg_idx, desc, val, bits, idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+	
 	macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -844,4 +1085,5 @@ mod tests {
         }
     }
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

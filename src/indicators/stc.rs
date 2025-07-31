@@ -1368,6 +1368,154 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_stc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			StcParams::default(), // fast: 23, slow: 50, k: 10, d: 3
+			StcParams {
+				fast_period: Some(2),
+				slow_period: Some(3),
+				k_period: Some(2),
+				d_period: Some(1),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			StcParams {
+				fast_period: Some(5),
+				slow_period: Some(10),
+				k_period: Some(5),
+				d_period: Some(2),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			StcParams {
+				fast_period: Some(10),
+				slow_period: Some(20),
+				k_period: Some(7),
+				d_period: Some(3),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			StcParams {
+				fast_period: Some(20),
+				slow_period: Some(40),
+				k_period: Some(10),
+				d_period: Some(5),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			StcParams {
+				fast_period: Some(30),
+				slow_period: Some(60),
+				k_period: Some(15),
+				d_period: Some(7),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			StcParams {
+				fast_period: Some(50),
+				slow_period: Some(100),
+				k_period: Some(20),
+				d_period: Some(10),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			// Edge case: minimum periods
+			StcParams {
+				fast_period: Some(2),
+				slow_period: Some(2),
+				k_period: Some(2),
+				d_period: Some(1),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+			// Edge case: fast > slow (unusual but valid)
+			StcParams {
+				fast_period: Some(25),
+				slow_period: Some(15),
+				k_period: Some(10),
+				d_period: Some(3),
+				fast_ma_type: Some("ema".to_string()),
+				slow_ma_type: Some("ema".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = StcInput::from_candles(&candles, "close", params.clone());
+			let output = stc_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: fast={}, slow={}, k={}, d={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_period.unwrap_or(23),
+						params.slow_period.unwrap_or(50),
+						params.k_period.unwrap_or(10),
+						params.d_period.unwrap_or(3),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: fast={}, slow={}, k={}, d={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_period.unwrap_or(23),
+						params.slow_period.unwrap_or(50),
+						params.k_period.unwrap_or(10),
+						params.d_period.unwrap_or(3),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: fast={}, slow={}, k={}, d={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.fast_period.unwrap_or(23),
+						params.slow_period.unwrap_or(50),
+						params.k_period.unwrap_or(10),
+						params.d_period.unwrap_or(3),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_stc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_stc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1386,7 +1534,8 @@ mod tests {
 		check_stc_with_slice_data,
 		check_stc_empty_data,
 		check_stc_all_nan_data,
-		check_stc_not_enough_valid_data
+		check_stc_not_enough_valid_data,
+		check_stc_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1398,6 +1547,111 @@ mod tests {
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
 		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, k_start, k_end, k_step, d_start, d_end, d_step)
+			(2, 10, 2, 3, 15, 3, 2, 8, 2, 1, 3, 1),      // Small periods
+			(5, 25, 5, 10, 50, 10, 5, 15, 5, 2, 5, 1),  // Medium periods
+			(20, 40, 10, 40, 80, 20, 10, 20, 5, 3, 6, 1), // Large periods
+			(2, 5, 1, 3, 6, 1, 2, 4, 1, 1, 2, 1),       // Dense small range
+			(10, 10, 0, 20, 20, 0, 10, 10, 0, 3, 3, 0), // Single values (step=0)
+			(15, 30, 5, 30, 60, 10, 7, 14, 7, 3, 5, 2), // Mixed ranges
+			(50, 100, 25, 100, 200, 50, 20, 30, 10, 5, 10, 5), // Very large periods
+		];
+
+		for (cfg_idx, &(f_start, f_end, f_step, s_start, s_end, s_step, k_start, k_end, k_step, d_start, d_end, d_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = StcBatchBuilder::new()
+				.kernel(kernel)
+				.fast_period_range(f_start, f_end, f_step)
+				.slow_period_range(s_start, s_end, s_step)
+				.k_period_range(k_start, k_end, k_step)
+				.d_period_range(d_start, d_end, d_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, k={}, d={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_period.unwrap_or(23),
+						combo.slow_period.unwrap_or(50),
+						combo.k_period.unwrap_or(10),
+						combo.d_period.unwrap_or(3)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, k={}, d={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_period.unwrap_or(23),
+						combo.slow_period.unwrap_or(50),
+						combo.k_period.unwrap_or(10),
+						combo.d_period.unwrap_or(3)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: fast={}, slow={}, k={}, d={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.fast_period.unwrap_or(23),
+						combo.slow_period.unwrap_or(50),
+						combo.k_period.unwrap_or(10),
+						combo.d_period.unwrap_or(3)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
 	}
 
 	macro_rules! gen_batch_tests {
@@ -1421,4 +1675,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

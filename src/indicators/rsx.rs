@@ -948,6 +948,75 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_rsx_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			RsxParams::default(),                    // period: 14
+			RsxParams { period: Some(2) },          // minimum viable
+			RsxParams { period: Some(7) },          // small
+			RsxParams { period: Some(21) },         // medium
+			RsxParams { period: Some(50) },         // large
+			RsxParams { period: Some(100) },        // very large
+			RsxParams { period: Some(200) },        // extra large
+			RsxParams { period: Some(5) },          // another small
+			RsxParams { period: Some(10) },         // round number
+			RsxParams { period: Some(20) },         // another round number
+			RsxParams { period: Some(30) },         // medium-large
+			RsxParams { period: Some(40) },         // another medium-large
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = RsxInput::from_candles(&candles, "close", params.clone());
+			let output = rsx_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_rsx_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_rsx_tests!(
 		check_rsx_partial_params,
 		check_rsx_accuracy,
@@ -957,7 +1026,8 @@ mod tests {
 		check_rsx_very_small_dataset,
 		check_rsx_reinput,
 		check_rsx_nan_handling,
-		check_rsx_streaming
+		check_rsx_streaming,
+		check_rsx_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1010,7 +1080,78 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods
+			(30, 60, 15),    // Large periods
+			(2, 5, 1),       // Dense small range
+			(10, 100, 10),   // Wide range with large step
+			(14, 28, 7),     // Multiples of default
+			(3, 9, 3),       // Small odd periods
+			(50, 150, 25),   // Very large periods
+		];
+		
+		for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
+			let output = RsxBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(period_start, period_end, period_step)
+				.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
