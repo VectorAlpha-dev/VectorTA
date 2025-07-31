@@ -1567,14 +1567,22 @@ mod tests {
 			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // default period
 			KaufmanstopParams { period: Some(50), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // medium period
 			KaufmanstopParams { period: Some(100), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },  // large period
+			KaufmanstopParams { period: Some(200), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },  // very large period
+			KaufmanstopParams { period: Some(22), mult: Some(0.1), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // very small multiplier
 			KaufmanstopParams { period: Some(22), mult: Some(0.5), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // small multiplier
 			KaufmanstopParams { period: Some(22), mult: Some(1.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // multiplier 1.0
 			KaufmanstopParams { period: Some(22), mult: Some(3.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // large multiplier
 			KaufmanstopParams { period: Some(22), mult: Some(5.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // very large multiplier
+			KaufmanstopParams { period: Some(22), mult: Some(10.0), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },  // extreme multiplier
 			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("short".to_string()), ma_type: Some("sma".to_string()) },  // short direction
 			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("ema".to_string()) },   // ema type
+			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("smma".to_string()) },  // smma type
+			KaufmanstopParams { period: Some(22), mult: Some(2.0), direction: Some("long".to_string()), ma_type: Some("wma".to_string()) },   // wma type
 			KaufmanstopParams { period: Some(14), mult: Some(1.5), direction: Some("short".to_string()), ma_type: Some("ema".to_string()) },  // mixed params 1
 			KaufmanstopParams { period: Some(30), mult: Some(2.5), direction: Some("long".to_string()), ma_type: Some("sma".to_string()) },   // mixed params 2
+			KaufmanstopParams { period: Some(7), mult: Some(0.85), direction: Some("short".to_string()), ma_type: Some("wma".to_string()) },  // mixed params 3
+			KaufmanstopParams { period: Some(3), mult: Some(4.0), direction: Some("long".to_string()), ma_type: Some("ema".to_string()) },    // edge case: very small period, large mult
+			KaufmanstopParams { period: Some(150), mult: Some(0.25), direction: Some("short".to_string()), ma_type: Some("smma".to_string()) }, // edge case: large period, small mult
 		];
 		
 		for (param_idx, params) in test_params.iter().enumerate() {
@@ -1730,21 +1738,26 @@ mod tests {
 		
 		// Test various parameter sweep configurations for Kaufmanstop
 		let test_configs = vec![
-			// (period_start, period_end, period_step, mult_start, mult_end, mult_step, direction)
-			(2, 10, 2, 2.0, 2.0, 0.0, "long"),       // Small periods, fixed mult
-			(10, 50, 10, 2.0, 2.0, 0.0, "long"),     // Medium periods, fixed mult
-			(20, 100, 20, 2.0, 2.0, 0.0, "long"),    // Large periods, fixed mult
-			(22, 22, 0, 0.5, 3.0, 0.5, "long"),      // Fixed period, varying mult
-			(22, 22, 0, 1.0, 5.0, 1.0, "short"),     // Fixed period, varying mult, short
-			(5, 20, 5, 1.0, 3.0, 1.0, "long"),       // Mixed period and mult sweep
-			(10, 30, 10, 1.5, 2.5, 0.5, "short"),    // Mixed sweep, short direction
+			// (period_start, period_end, period_step, mult_start, mult_end, mult_step, direction, ma_type)
+			(2, 10, 2, 2.0, 2.0, 0.0, "long", "sma"),       // Small periods, fixed mult
+			(10, 50, 10, 2.0, 2.0, 0.0, "long", "sma"),     // Medium periods, fixed mult
+			(20, 100, 20, 2.0, 2.0, 0.0, "long", "sma"),    // Large periods, fixed mult
+			(22, 22, 0, 0.5, 3.0, 0.5, "long", "sma"),      // Fixed period, varying mult
+			(22, 22, 0, 1.0, 5.0, 1.0, "short", "sma"),     // Fixed period, varying mult, short
+			(5, 20, 5, 1.0, 3.0, 1.0, "long", "sma"),       // Mixed period and mult sweep
+			(10, 30, 10, 1.5, 2.5, 0.5, "short", "sma"),    // Mixed sweep, short direction
+			(2, 5, 1, 0.1, 0.5, 0.1, "long", "ema"),        // Dense small range, small mult, ema
+			(50, 150, 50, 3.0, 5.0, 1.0, "short", "wma"),   // Large periods, large mult, wma
+			(3, 15, 3, 0.25, 2.0, 0.25, "long", "smma"),    // Small-medium periods, varied mult, smma
+			(14, 14, 0, 0.5, 4.0, 0.5, "short", "ema"),     // Fixed period, wide mult range, ema
+			(100, 200, 100, 1.0, 1.0, 0.0, "long", "sma"),  // Very large periods, fixed mult
 		];
 		
-		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, dir)) in test_configs.iter().enumerate() {
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, dir, ma_type)) in test_configs.iter().enumerate() {
 			let mut builder = KaufmanstopBatchBuilder::new()
 				.kernel(kernel)
 				.direction_static(dir)
-				.ma_type_static("sma");
+				.ma_type_static(ma_type);
 			
 			// Configure period range
 			if p_step > 0 {
