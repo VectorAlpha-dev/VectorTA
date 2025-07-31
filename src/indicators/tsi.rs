@@ -335,18 +335,14 @@ pub unsafe fn tsi_scalar(data: &[f64], long: usize, short: usize, first: usize) 
 	let ema_short_denom = EmaInput::from_slice(&ema_long_denom.values, EmaParams { period: Some(short) });
 	let ema_short_denom: EmaOutput = ema(&ema_short_denom)?;
 
-	for i in 0..data.len() {
-		if i < first {
+	for i in first..data.len() {
+		let idx = i - first;
+		let numer = ema_short_numer.values[idx];
+		let denom = ema_short_denom.values[idx];
+		if numer.is_nan() || denom.is_nan() || denom == 0.0 {
 			out[i] = f64::NAN;
 		} else {
-			let idx = i - first;
-			let numer = ema_short_numer.values[idx];
-			let denom = ema_short_denom.values[idx];
-			if numer.is_nan() || denom.is_nan() || denom == 0.0 {
-				out[i] = f64::NAN;
-			} else {
-				out[i] = 100.0 * (numer / denom);
-			}
+			out[i] = 100.0 * (numer / denom);
 		}
 	}
 	Ok(TsiOutput { values: out })
@@ -927,6 +923,115 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_tsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			TsiParams::default(),
+			TsiParams {
+				long_period: Some(2),
+				short_period: Some(2),
+			},
+			TsiParams {
+				long_period: Some(5),
+				short_period: Some(3),
+			},
+			TsiParams {
+				long_period: Some(10),
+				short_period: Some(5),
+			},
+			TsiParams {
+				long_period: Some(15),
+				short_period: Some(7),
+			},
+			TsiParams {
+				long_period: Some(25),
+				short_period: Some(13),
+			},
+			TsiParams {
+				long_period: Some(30),
+				short_period: Some(15),
+			},
+			TsiParams {
+				long_period: Some(40),
+				short_period: Some(20),
+			},
+			TsiParams {
+				long_period: Some(50),
+				short_period: Some(25),
+			},
+			TsiParams {
+				long_period: Some(100),
+				short_period: Some(50),
+			},
+			TsiParams {
+				long_period: Some(200),
+				short_period: Some(100),
+			},
+			// Edge cases with extreme ratios
+			TsiParams {
+				long_period: Some(50),
+				short_period: Some(2),
+			},
+			TsiParams {
+				long_period: Some(100),
+				short_period: Some(5),
+			},
+			TsiParams {
+				long_period: Some(10),
+				short_period: Some(9),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = TsiInput::from_candles(&candles, "close", params.clone());
+			let output = tsi_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_tsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_tsi_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -958,7 +1063,8 @@ mod tests {
 		check_tsi_very_small_dataset,
 		check_tsi_default_candles,
 		check_tsi_reinput,
-		check_tsi_nan_handling
+		check_tsi_nan_handling,
+		check_tsi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -986,6 +1092,77 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			// (long_start, long_end, long_step, short_start, short_end, short_step)
+			(5, 10, 1, 2, 5, 1),          // Small ranges, dense
+			(10, 30, 5, 5, 15, 5),        // Medium ranges
+			(25, 50, 5, 10, 25, 5),       // Medium to large
+			(50, 100, 10, 25, 50, 5),     // Large ranges
+			(25, 25, 0, 2, 20, 2),        // Static long, varying short
+			(10, 50, 10, 13, 13, 0),      // Varying long, static short
+			(100, 200, 50, 50, 100, 25),  // Very large ranges
+			(2, 5, 1, 2, 5, 1),           // Minimum periods
+			(30, 30, 0, 5, 25, 5),        // Static long=30, varying short
+		];
+
+		for (cfg_idx, &(l_start, l_end, l_step, s_start, s_end, s_step)) in test_configs.iter().enumerate() {
+			let output = TsiBatchBuilder::new()
+				.kernel(kernel)
+				.long_range(l_start, l_end, l_step)
+				.short_range(s_start, s_end, s_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste! {
@@ -1007,6 +1184,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Python bindings

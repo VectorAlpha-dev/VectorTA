@@ -1074,6 +1074,12 @@ pub fn linearreg_angle_into_slice(
 		}
 	}
 
+	// Fill warmup period with NaN
+	let warmup_end = first + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+
 	Ok(())
 }
 

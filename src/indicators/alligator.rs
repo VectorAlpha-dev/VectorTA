@@ -1424,6 +1424,242 @@ mod tests {
 		);
 		Ok(())
 	}
+
+	#[cfg(debug_assertions)]
+	fn check_alligator_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			AlligatorParams::default(),
+			AlligatorParams {
+				jaw_period: Some(5),
+				jaw_offset: Some(3),
+				teeth_period: Some(3),
+				teeth_offset: Some(2),
+				lips_period: Some(2),
+				lips_offset: Some(1),
+			},
+			AlligatorParams {
+				jaw_period: Some(21),
+				jaw_offset: Some(13),
+				teeth_period: Some(13),
+				teeth_offset: Some(8),
+				lips_period: Some(8),
+				lips_offset: Some(5),
+			},
+			AlligatorParams {
+				jaw_period: Some(30),
+				jaw_offset: Some(15),
+				teeth_period: Some(20),
+				teeth_offset: Some(10),
+				lips_period: Some(10),
+				lips_offset: Some(5),
+			},
+			AlligatorParams {
+				jaw_period: Some(50),
+				jaw_offset: Some(25),
+				teeth_period: Some(30),
+				teeth_offset: Some(15),
+				lips_period: Some(20),
+				lips_offset: Some(10),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = AlligatorInput::from_candles(&candles, "hl2", params.clone());
+			let output = alligator_with_kernel(&input, kernel)?;
+
+			// Check jaw values
+			for (i, &val) in output.jaw.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at jaw index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at jaw index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at jaw index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+
+			// Check teeth values
+			for (i, &val) in output.teeth.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at teeth index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at teeth index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at teeth index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+
+			// Check lips values
+			for (i, &val) in output.lips.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at lips index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at lips index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at lips index {} \
+						with params: jaw_period={}, jaw_offset={}, teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test_name,
+						val,
+						bits,
+						i,
+						params.jaw_period.unwrap_or(13),
+						params.jaw_offset.unwrap_or(8),
+						params.teeth_period.unwrap_or(8),
+						params.teeth_offset.unwrap_or(5),
+						params.lips_period.unwrap_or(5),
+						params.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_alligator_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
 	macro_rules! generate_all_alligator_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1453,7 +1689,8 @@ mod tests {
 		check_alligator_default_candles,
 		check_alligator_with_slice_data_reinput,
 		check_alligator_nan_handling,
-		check_alligator_zero_jaw_period
+		check_alligator_zero_jaw_period,
+		check_alligator_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1493,7 +1730,271 @@ mod tests {
 			}
 		};
 	}
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			(5, 15, 2, 3, 10, 2, 3, 10, 2, 2, 8, 2, 2, 8, 2, 1, 5, 2),
+			(10, 20, 5, 5, 10, 5, 8, 15, 5, 3, 8, 5, 3, 8, 3, 1, 5, 2),
+			(13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),
+			(20, 30, 10, 10, 15, 5, 15, 20, 5, 8, 10, 2, 10, 12, 2, 5, 6, 1),
+		];
+
+		for (cfg_idx, &(jp_start, jp_end, jp_step, jo_start, jo_end, jo_step, 
+			tp_start, tp_end, tp_step, to_start, to_end, to_step,
+			lp_start, lp_end, lp_step, lo_start, lo_end, lo_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = AlligatorBatchBuilder::new()
+				.kernel(kernel)
+				.jaw_period_range(jp_start, jp_end, jp_step)
+				.jaw_offset_range(jo_start, jo_end, jo_step)
+				.teeth_period_range(tp_start, tp_end, tp_step)
+				.teeth_offset_range(to_start, to_end, to_step)
+				.lips_period_range(lp_start, lp_end, lp_step)
+				.lips_offset_range(lo_start, lo_end, lo_step)
+				.apply_candles(&c, "hl2")?;
+
+			// Check jaw values
+			for (idx, &val) in output.jaw.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at jaw row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at jaw row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at jaw row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+
+			// Check teeth values
+			for (idx, &val) in output.teeth.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at teeth row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at teeth row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at teeth row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+
+			// Check lips values
+			for (idx, &val) in output.lips.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at lips row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at lips row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at lips row {} col {} (flat index {}) with params: jaw_period={}, jaw_offset={}, \
+						teeth_period={}, teeth_offset={}, lips_period={}, lips_offset={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.jaw_period.unwrap_or(13),
+						combo.jaw_offset.unwrap_or(8),
+						combo.teeth_period.unwrap_or(8),
+						combo.teeth_offset.unwrap_or(5),
+						combo.lips_period.unwrap_or(5),
+						combo.lips_offset.unwrap_or(3),
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

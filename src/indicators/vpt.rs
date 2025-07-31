@@ -910,12 +910,162 @@ mod tests {
         }
     }
 
+	#[cfg(debug_assertions)]
+	fn check_vpt_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Since VPT has no parameters, we'll test with different data sources
+		let test_sources = vec![
+			"close",
+			"open",
+			"high",
+			"low",
+		];
+		
+		for (source_idx, &source) in test_sources.iter().enumerate() {
+			let input = VptInput::from_candles(&candles, source);
+			let output = vpt_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with source: {} (source set {})",
+						test_name, val, bits, i, source, source_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_vpt_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	generate_all_vpt_tests!(
 		check_vpt_basic_candles,
 		check_vpt_basic_slices,
 		check_vpt_not_enough_data,
 		check_vpt_empty_data,
 		check_vpt_all_nan,
-		check_vpt_accuracy_from_csv
+		check_vpt_accuracy_from_csv,
+		check_vpt_no_poison
 	);
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various data sources since VPT has no parameters
+		let test_sources = vec![
+			"close",
+			"open", 
+			"high",
+			"low",
+		];
+		
+		for (src_idx, &source) in test_sources.iter().enumerate() {
+			let output = VptBatchBuilder::new()
+				.kernel(kernel)
+				.apply_candles(&c, source)?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Source {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with source: {}",
+						test, src_idx, val, bits, row, col, idx, source
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Source {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with source: {}",
+						test, src_idx, val, bits, row, col, idx, source
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Source {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with source: {}",
+						test, src_idx, val, bits, row, col, idx, source
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
+	macro_rules! gen_batch_tests {
+		($fn_name:ident) => {
+			paste::paste! {
+				#[test] fn [<$fn_name _scalar>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _scalar>]), Kernel::ScalarBatch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx2>]()        {
+					let _ = $fn_name(stringify!([<$fn_name _avx2>]), Kernel::Avx2Batch);
+				}
+				#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+				#[test] fn [<$fn_name _avx512>]()      {
+					let _ = $fn_name(stringify!([<$fn_name _avx512>]), Kernel::Avx512Batch);
+				}
+				#[test] fn [<$fn_name _auto_detect>]() {
+					let kernel = detect_best_batch_kernel();
+					let _ = $fn_name(stringify!([<$fn_name _auto_detect>]), kernel);
+				}
+			}
+		}
+	}
+
+	gen_batch_tests!(check_batch_no_poison);
 }

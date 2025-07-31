@@ -1234,6 +1234,134 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_vidya_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			VidyaParams::default(),
+			VidyaParams {
+				short_period: Some(1),
+				long_period: Some(2),
+				alpha: Some(0.1),
+			},
+			VidyaParams {
+				short_period: Some(2),
+				long_period: Some(3),
+				alpha: Some(0.2),
+			},
+			VidyaParams {
+				short_period: Some(2),
+				long_period: Some(5),
+				alpha: Some(0.5),
+			},
+			VidyaParams {
+				short_period: Some(3),
+				long_period: Some(7),
+				alpha: Some(0.3),
+			},
+			VidyaParams {
+				short_period: Some(4),
+				long_period: Some(10),
+				alpha: Some(0.2),
+			},
+			VidyaParams {
+				short_period: Some(5),
+				long_period: Some(20),
+				alpha: Some(0.4),
+			},
+			VidyaParams {
+				short_period: Some(10),
+				long_period: Some(30),
+				alpha: Some(0.2),
+			},
+			VidyaParams {
+				short_period: Some(15),
+				long_period: Some(50),
+				alpha: Some(0.3),
+			},
+			VidyaParams {
+				short_period: Some(20),
+				long_period: Some(100),
+				alpha: Some(0.2),
+			},
+			VidyaParams {
+				short_period: Some(50),
+				long_period: Some(200),
+				alpha: Some(0.1),
+			},
+			// Test various alpha values
+			VidyaParams {
+				short_period: Some(2),
+				long_period: Some(10),
+				alpha: Some(0.8),
+			},
+			VidyaParams {
+				short_period: Some(3),
+				long_period: Some(15),
+				alpha: Some(1.0),
+			},
+			// Edge cases
+			VidyaParams {
+				short_period: Some(1),
+				long_period: Some(100),
+				alpha: Some(0.01),
+			},
+			VidyaParams {
+				short_period: Some(99),
+				long_period: Some(100),
+				alpha: Some(0.99),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VidyaInput::from_candles(&candles, "close", params.clone());
+			let output = vidya_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_vidya_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_vidya_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1274,7 +1402,8 @@ mod tests {
 		check_vidya_very_small_data_set,
 		check_vidya_reinput,
 		check_vidya_nan_handling,
-		check_vidya_streaming
+		check_vidya_streaming,
+		check_vidya_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1307,6 +1436,78 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			// (short_start, short_end, short_step, long_start, long_end, long_step, alpha_start, alpha_end, alpha_step)
+			(2, 5, 1, 5, 10, 1, 0.2, 0.2, 0.0),           // Small ranges, static alpha
+			(2, 10, 2, 10, 30, 5, 0.1, 0.5, 0.1),         // Medium ranges, varying alpha
+			(5, 20, 5, 30, 60, 10, 0.2, 0.2, 0.0),        // Medium to large, static alpha
+			(10, 30, 10, 50, 100, 25, 0.3, 0.3, 0.0),     // Large ranges, static alpha
+			(2, 2, 0, 5, 50, 5, 0.1, 0.9, 0.2),           // Static short, varying long and alpha
+			(5, 15, 5, 20, 20, 0, 0.2, 0.8, 0.3),         // Varying short, static long, varying alpha
+			(1, 3, 1, 4, 8, 2, 0.5, 0.5, 0.0),            // Small dense ranges
+			(20, 50, 15, 100, 200, 50, 0.1, 0.3, 0.1),    // Very large ranges
+			(2, 2, 0, 3, 3, 0, 0.1, 1.0, 0.1),            // Static both, full alpha range
+		];
+
+		for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step, a_start, a_end, a_step)) in test_configs.iter().enumerate() {
+			let output = VidyaBatchBuilder::new()
+				.kernel(kernel)
+				.short_period_range(s_start, s_end, s_step)
+				.long_period_range(l_start, l_end, l_step)
+				.alpha_range(a_start, a_end, a_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste! {
@@ -1328,6 +1529,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Python bindings section
