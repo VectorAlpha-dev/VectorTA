@@ -1290,6 +1290,195 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_macd_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			MacdParams::default(),
+			MacdParams {
+				fast_period: Some(2),
+				slow_period: Some(3),
+				signal_period: Some(2),
+				ma_type: Some("ema".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(5),
+				slow_period: Some(10),
+				signal_period: Some(5),
+				ma_type: Some("ema".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(8),
+				slow_period: Some(21),
+				signal_period: Some(8),
+				ma_type: Some("sma".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(20),
+				slow_period: Some(50),
+				signal_period: Some(15),
+				ma_type: Some("ema".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(50),
+				slow_period: Some(100),
+				signal_period: Some(20),
+				ma_type: Some("wma".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(3),
+				slow_period: Some(6),
+				signal_period: Some(3),
+				ma_type: Some("sma".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(10),
+				slow_period: Some(30),
+				signal_period: Some(10),
+				ma_type: Some("wma".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(15),
+				slow_period: Some(35),
+				signal_period: Some(12),
+				ma_type: Some("ema".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(25),
+				slow_period: Some(75),
+				signal_period: Some(18),
+				ma_type: Some("sma".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(6),
+				slow_period: Some(13),
+				signal_period: Some(4),
+				ma_type: Some("ema".to_string()),
+			},
+			MacdParams {
+				fast_period: Some(9),
+				slow_period: Some(18),
+				signal_period: Some(7),
+				ma_type: Some("wma".to_string()),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = MacdInput::from_candles(&candles, "close", params.clone());
+			let output = macd_with_kernel(&input, kernel)?;
+
+			// Check MACD values
+			for (i, &val) in output.macd.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						in MACD output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						in MACD output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						in MACD output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+
+			// Check signal values
+			for (i, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						in signal output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						in signal output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						in signal output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+
+			// Check histogram values
+			for (i, &val) in output.hist.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						in histogram output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						in histogram output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						in histogram output with params: {:?} (param set {})",
+						test_name, val, bits, i, params, param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_macd_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_macd_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1320,7 +1509,8 @@ mod tests {
 		check_macd_period_exceeds_length,
 		check_macd_very_small_dataset,
 		check_macd_reinput,
-		check_macd_nan_handling
+		check_macd_nan_handling,
+		check_macd_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1358,6 +1548,158 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			// Small fast periods, moderate slow and signal
+			(2, 10, 2, 10, 20, 2, 2, 6, 2),
+			// Medium periods across all parameters
+			(5, 25, 5, 26, 50, 5, 5, 15, 5),
+			// Large periods
+			(20, 40, 10, 50, 100, 10, 10, 20, 5),
+			// Edge case: minimal ranges
+			(2, 5, 1, 6, 10, 1, 2, 4, 1),
+			// Standard MACD variations
+			(10, 15, 1, 20, 30, 2, 8, 12, 1),
+			// Wide period sweep
+			(3, 30, 3, 26, 52, 13, 5, 20, 5),
+			// Dense small range
+			(2, 6, 1, 8, 12, 1, 3, 5, 1),
+		];
+
+		for (cfg_idx, &(f_start, f_end, f_step, s_start, s_end, s_step, g_start, g_end, g_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = MacdBatchBuilder::new()
+				.kernel(kernel)
+				.fast_period_range(f_start, f_end, f_step)
+				.slow_period_range(s_start, s_end, s_step)
+				.signal_period_range(g_start, g_end, g_step)
+				.ma_type_static("ema")
+				.apply_candles(&c, "close")?;
+
+			// Check MACD values
+			for (idx, &val) in output.macd.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in MACD output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in MACD output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in MACD output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+
+			// Check signal values
+			for (idx, &val) in output.signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in signal output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in signal output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in signal output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+
+			// Check histogram values
+			for (idx, &val) in output.hist.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in histogram output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in histogram output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in histogram output with params: {:?}",
+						test, cfg_idx, val, bits, row, col, idx, combo
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1379,4 +1721,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

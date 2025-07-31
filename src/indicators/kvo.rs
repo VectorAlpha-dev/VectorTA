@@ -356,9 +356,6 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
 		});
 	}
 
-	// Fill prefix with NaN
-	out[..first_valid_idx + 1].fill(f64::NAN);
-
 	let chosen = match kernel {
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
@@ -1183,6 +1180,116 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_kvo_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			KvoParams::default(),  // short_period: 2, long_period: 5
+			KvoParams {
+				short_period: Some(1),
+				long_period: Some(1),
+			},
+			KvoParams {
+				short_period: Some(1),
+				long_period: Some(2),
+			},
+			KvoParams {
+				short_period: Some(2),
+				long_period: Some(2),
+			},
+			KvoParams {
+				short_period: Some(3),
+				long_period: Some(5),
+			},
+			KvoParams {
+				short_period: Some(5),
+				long_period: Some(10),
+			},
+			KvoParams {
+				short_period: Some(10),
+				long_period: Some(20),
+			},
+			KvoParams {
+				short_period: Some(20),
+				long_period: Some(50),
+			},
+			KvoParams {
+				short_period: Some(50),
+				long_period: Some(100),
+			},
+			KvoParams {
+				short_period: Some(100),
+				long_period: Some(200),
+			},
+			KvoParams {
+				short_period: Some(2),
+				long_period: Some(100),
+			},
+			KvoParams {
+				short_period: Some(1),
+				long_period: Some(200),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = KvoInput::from_candles(&candles, params.clone());
+			let output = kvo_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i, 
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i,
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i,
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_kvo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_kvo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1216,7 +1323,8 @@ mod tests {
 		check_kvo_very_small_dataset,
 		check_kvo_reinput,
 		check_kvo_nan_handling,
-		check_kvo_streaming
+		check_kvo_streaming,
+		check_kvo_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1244,6 +1352,83 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (short_start, short_end, short_step, long_start, long_end, long_step)
+			(1, 5, 1, 2, 10, 2),      // Small periods
+			(2, 10, 2, 5, 20, 5),     // Medium periods
+			(5, 25, 5, 10, 50, 10),   // Large periods
+			(1, 3, 1, 1, 5, 1),       // Dense small range
+			(10, 20, 2, 20, 40, 4),   // Mid-range dense
+			(2, 2, 0, 5, 50, 5),      // Static short, varying long
+			(1, 10, 1, 20, 20, 0),    // Varying short, static long
+		];
+
+		for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in test_configs.iter().enumerate() {
+			let output = KvoBatchBuilder::new()
+				.kernel(kernel)
+				.short_range(short_start, short_end, short_step)
+				.long_range(long_start, long_end, long_step)
+				.apply_candles(&c)?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1265,6 +1450,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1420,12 +1606,6 @@ fn kvo_batch_inner_into(
 	
 	let rows = combos.len();
 	let cols = high.len();
-	
-	// Initialize NaN prefixes for each row
-	for row in 0..rows {
-		let row_start = row * cols;
-		out[row_start..row_start + first + 1].fill(f64::NAN);
-	}
 	
 	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
 		let short = combos[row].short_period.unwrap();
