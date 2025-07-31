@@ -497,7 +497,7 @@ fn medprice_batch_inner_into(
 // =============================================================================
 
 #[inline]
-pub fn medprice_into_slice(dst: &mut [f64], high: &[f64], low: &[f64], kern: Kernel) -> Result<(), MedpriceError> {
+pub fn medprice_into_slice_raw(dst: &mut [f64], high: &[f64], low: &[f64], kern: Kernel) -> Result<(), MedpriceError> {
 	if high.is_empty() || low.is_empty() {
 		return Err(MedpriceError::EmptyData);
 	}
@@ -540,6 +540,57 @@ pub fn medprice_into_slice(dst: &mut [f64], high: &[f64], low: &[f64], kern: Ker
 		}
 	}
 
+	Ok(())
+}
+
+/// Write medprice results directly into pre-allocated slice.
+/// This version takes MedpriceInput and follows the ALMA pattern.
+#[inline]
+pub fn medprice_into_slice(dst: &mut [f64], input: &MedpriceInput, kern: Kernel) -> Result<(), MedpriceError> {
+	let (high, low) = input.get_high_low();
+	
+	if high.is_empty() || low.is_empty() {
+		return Err(MedpriceError::EmptyData);
+	}
+	if high.len() != low.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: low.len(),
+		});
+	}
+	if dst.len() != high.len() {
+		return Err(MedpriceError::DifferentLength {
+			high_len: high.len(),
+			low_len: dst.len(),
+		});
+	}
+	
+	let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+		Some(idx) => idx,
+		None => return Err(MedpriceError::AllValuesNaN),
+	};
+	
+	let chosen = match kern {
+		Kernel::Auto => detect_best_kernel(),
+		other => other,
+	};
+	
+	unsafe {
+		match chosen {
+			Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx2 | Kernel::Avx2Batch => medprice_avx2(high, low, first_valid_idx, dst),
+			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+			Kernel::Avx512 | Kernel::Avx512Batch => medprice_avx512(high, low, first_valid_idx, dst),
+			_ => unreachable!(),
+		}
+	}
+	
+	// Fill warmup period with NaN
+	for v in &mut dst[..first_valid_idx] {
+		*v = f64::NAN;
+	}
+	
 	Ok(())
 }
 
@@ -858,7 +909,7 @@ mod tests {
 pub fn medprice_js(high: &[f64], low: &[f64]) -> Result<Vec<f64>, JsValue> {
 	let mut output = vec![0.0; high.len()];
 	
-	medprice_into_slice(&mut output, high, low, Kernel::Auto)
+	medprice_into_slice_raw(&mut output, high, low, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
 	Ok(output)
@@ -902,13 +953,13 @@ pub fn medprice_into(
 		// Check if any input pointer equals output pointer (aliasing)
 		if high_ptr == out_ptr || low_ptr == out_ptr {
 			let mut temp = vec![0.0; len];
-			medprice_into_slice(&mut temp, high, low, Kernel::Auto)
+			medprice_into_slice_raw(&mut temp, high, low, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
 			out.copy_from_slice(&temp);
 		} else {
 			let out = std::slice::from_raw_parts_mut(out_ptr, len);
-			medprice_into_slice(out, high, low, Kernel::Auto)
+			medprice_into_slice_raw(out, high, low, Kernel::Auto)
 				.map_err(|e| JsValue::from_str(&e.to_string()))?;
 		}
 
@@ -942,7 +993,7 @@ pub fn medprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
 	};
 
 	let mut output = vec![0.0; high.len()];
-	medprice_into_slice(&mut output, high, low, Kernel::Auto)
+	medprice_into_slice_raw(&mut output, high, low, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	let js_output = MedpriceBatchJsOutput {

@@ -273,7 +273,9 @@
       "Bash(cargo:*)",
       "Bash(set RUST_TEST_THREADS=1)",
       "Bash(.venv/Scripts/pip install:*)",
-      "Bash(.venvScriptspython testspythontest_willr.py)"
+      "Bash(.venvScriptspython testspythontest_willr.py)",
+      "Bash(./test_nan_filling.exe)",
+      "Bash(./test_medprice_nan.exe)"
     ],
     "deny": []
   }

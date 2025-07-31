@@ -232,10 +232,6 @@ pub fn ift_rsi_with_kernel(input: &IftRsiInput, kernel: Kernel) -> Result<IftRsi
 		other => other,
 	};
 
-	// Calculate warmup period for IFT RSI (RSI warmup + WMA warmup - 1)
-	let warmup_period = first + rsi_period + wma_period - 2;
-	let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
-
 	// Calculate warmup period: rsi_period + wma_period - 1
 	let warmup_period = rsi_period + wma_period - 1;
 	let mut out = alloc_with_nan_prefix(len, warmup_period);
@@ -367,6 +363,12 @@ pub fn ift_rsi_into_slice(
 			ift_rsi_compute_into(data, rsi_period, wma_period, first, dst)?;
 		}
 		_ => unreachable!(),
+	}
+	
+	// Fill warmup with NaN
+	let warmup_period = first + rsi_period + wma_period - 2;
+	for v in &mut dst[..warmup_period] {
+		*v = f64::NAN;
 	}
 	
 	Ok(())

@@ -798,6 +798,82 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_vosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			VoscParams::default(),  // short_period: 2, long_period: 5
+			VoscParams { short_period: Some(1), long_period: Some(2) },  // minimum viable
+			VoscParams { short_period: Some(3), long_period: Some(7) },  // small periods
+			VoscParams { short_period: Some(5), long_period: Some(20) }, // medium periods
+			VoscParams { short_period: Some(10), long_period: Some(50) }, // large periods
+			VoscParams { short_period: Some(50), long_period: Some(200) }, // very large periods
+			VoscParams { short_period: Some(9), long_period: Some(10) },  // edge case: close periods
+			VoscParams { short_period: Some(2), long_period: Some(100) }, // extreme difference
+			VoscParams { short_period: Some(7), long_period: Some(14) },  // common ratio
+			VoscParams { short_period: Some(1), long_period: Some(50) },  // minimum short, large long
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VoscInput::from_candles(&candles, "volume", params.clone());
+			let output = vosc_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i, 
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i,
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: short_period={}, long_period={} (param set {})",
+						test_name, val, bits, i,
+						params.short_period.unwrap_or(2),
+						params.long_period.unwrap_or(5),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_vosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_vosc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -828,7 +904,8 @@ mod tests {
 		check_vosc_short_gt_long,
 		check_vosc_not_enough_valid,
 		check_vosc_all_nan,
-		check_vosc_streaming
+		check_vosc_streaming,
+		check_vosc_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -857,6 +934,86 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (short_period_start, short_period_end, short_period_step, long_period_start, long_period_end, long_period_step)
+			(1, 5, 1, 2, 10, 2),      // Small periods with dense short range
+			(5, 15, 5, 10, 30, 5),    // Medium periods
+			(10, 30, 10, 20, 60, 15), // Large periods
+			(1, 3, 1, 2, 5, 1),       // Very dense small range
+			(2, 10, 2, 5, 20, 5),     // Common practical ranges
+			(1, 2, 1, 3, 6, 3),       // Minimal ranges
+			(7, 14, 7, 15, 30, 15),   // Weekly/monthly patterns
+			(5, 5, 0, 10, 50, 10),    // Static short, varying long
+		];
+		
+		for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in 
+			test_configs.iter().enumerate() 
+		{
+			let output = VoscBatchBuilder::new()
+				.kernel(kernel)
+				.short_period_range(short_start, short_end, short_step)
+				.long_period_range(long_start, long_end, long_step)
+				.apply_candles(&c, "volume")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short_period={}, long_period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(2),
+						combo.long_period.unwrap_or(5)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -878,6 +1035,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ================================================================================================

@@ -968,6 +968,72 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_rsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		let test_params = vec![
+			RsiParams::default(),
+			RsiParams { period: Some(2) },    // minimum
+			RsiParams { period: Some(5) },    // small
+			RsiParams { period: Some(7) },    // small
+			RsiParams { period: Some(10) },   // small
+			RsiParams { period: Some(14) },   // default/typical
+			RsiParams { period: Some(20) },   // medium
+			RsiParams { period: Some(30) },   // medium
+			RsiParams { period: Some(50) },   // large
+			RsiParams { period: Some(100) },  // very large
+			RsiParams { period: Some(200) },  // extremely large
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = RsiInput::from_candles(&candles, "close", params.clone());
+			let output = rsi_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(14), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_rsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! generate_all_rsi_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1001,7 +1067,8 @@ mod tests {
 		check_rsi_very_small_dataset,
 		check_rsi_reinput,
 		check_rsi_nan_handling,
-		check_rsi_streaming
+		check_rsi_streaming,
+		check_rsi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1020,6 +1087,73 @@ mod tests {
 				"[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
 			);
 		}
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(5, 25, 5),      // Medium periods
+			(30, 60, 15),    // Large periods
+			(2, 5, 1),       // Dense small range
+			(7, 21, 7),      // Common RSI periods (weekly)
+			(10, 50, 10),    // Extended range
+			(14, 28, 14),    // Double default period
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = RsiBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(14)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(())
 	}
 
@@ -1044,6 +1178,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // --- Python Bindings ---

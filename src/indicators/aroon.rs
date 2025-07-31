@@ -878,6 +878,137 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_aroon_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			AroonParams::default(), // length: 14
+			AroonParams { length: Some(1) }, // minimum length
+			AroonParams { length: Some(2) }, // very small length
+			AroonParams { length: Some(5) }, // small length
+			AroonParams { length: Some(10) }, // medium length
+			AroonParams { length: Some(20) }, // medium length
+			AroonParams { length: Some(50) }, // large length
+			AroonParams { length: Some(100) }, // very large length
+			AroonParams { length: Some(200) }, // extra large length
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = AroonInput::from_candles(&candles, params.clone());
+			let output = aroon_with_kernel(&input, kernel)?;
+
+			// Check aroon_up values
+			for (i, &val) in output.aroon_up.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in aroon_up output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in aroon_up output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in aroon_up output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+			}
+
+			// Check aroon_down values
+			for (i, &val) in output.aroon_down.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in aroon_down output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in aroon_down output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in aroon_down output with params: length={} (param set {})",
+						test_name,
+						val,
+						bits,
+						i,
+						params.length.unwrap_or(14),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_aroon_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_aroon_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -911,7 +1042,8 @@ mod tests {
 		check_aroon_very_small_data_set,
 		check_aroon_reinput,
 		check_aroon_nan_handling,
-		check_aroon_streaming
+		check_aroon_streaming,
+		check_aroon_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -935,6 +1067,158 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (length_start, length_end, length_step)
+			(1, 10, 1),        // Small lengths, every value
+			(2, 20, 2),        // Small to medium, even values
+			(5, 50, 5),        // Medium range, step 5
+			(10, 100, 10),     // Medium to large, step 10
+			(14, 14, 0),       // Static default length
+			(50, 200, 50),     // Large lengths only
+			(1, 5, 1),         // Very small lengths only
+			(100, 200, 50),    // Very large lengths
+			(3, 30, 3),        // Multiples of 3
+		];
+
+		for (cfg_idx, &(l_start, l_end, l_step)) in test_configs.iter().enumerate() {
+			let output = AroonBatchBuilder::new()
+				.kernel(kernel)
+				.length_range(l_start, l_end, l_step)
+				.apply_candles(&c)?;
+
+			// Check aroon_up values
+			for (idx, &val) in output.up.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_up output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_up output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_up output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+			}
+
+			// Check aroon_down values
+			for (idx, &val) in output.down.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_down output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_down output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in aroon_down output with params: length={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length.unwrap_or(14)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -956,6 +1240,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]

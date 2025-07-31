@@ -453,6 +453,14 @@ pub fn keltner_into_slice(
 		}
 	}
 	
+	// Fill warmup with NaN
+	let warmup_period = period - 1;
+	for i in 0..warmup_period {
+		upper_dst[i] = f64::NAN;
+		middle_dst[i] = f64::NAN;
+		lower_dst[i] = f64::NAN;
+	}
+	
 	Ok(())
 }
 

@@ -1499,6 +1499,84 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_pivot_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations covering all modes
+		let test_params = vec![
+			PivotParams::default(),                    // mode: 3 (Camarilla)
+			PivotParams { mode: Some(0) },            // Standard
+			PivotParams { mode: Some(1) },            // Fibonacci
+			PivotParams { mode: Some(2) },            // Demark
+			PivotParams { mode: Some(3) },            // Camarilla (explicit)
+			PivotParams { mode: Some(4) },            // Woodie
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = PivotInput::from_candles(&candles, params.clone());
+			let output = pivot_with_kernel(&input, kernel)?;
+			
+			// Check all 9 output arrays
+			let arrays = vec![
+				("r4", &output.r4),
+				("r3", &output.r3),
+				("r2", &output.r2),
+				("r1", &output.r1),
+				("pp", &output.pp),
+				("s1", &output.s1),
+				("s2", &output.s2),
+				("s3", &output.s3),
+				("s4", &output.s4),
+			];
+			
+			for (array_name, values) in arrays {
+				for (i, &val) in values.iter().enumerate() {
+					if val.is_nan() {
+						continue; // NaN values are expected during warmup
+					}
+					
+					let bits = val.to_bits();
+					
+					// Check all three poison patterns
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+							 in array {} with params: {:?} (param set {})",
+							test_name, val, bits, i, array_name, params, param_idx
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+							 in array {} with params: {:?} (param set {})",
+							test_name, val, bits, i, array_name, params, param_idx
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+							 in array {} with params: {:?} (param set {})",
+							test_name, val, bits, i, array_name, params, param_idx
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_pivot_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	fn check_pivot_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1548,7 +1626,8 @@ mod tests {
 		check_pivot_standard_mode,
 		check_pivot_demark_mode,
 		check_pivot_woodie_mode,
-		check_pivot_batch_default_row
+		check_pivot_batch_default_row,
+		check_pivot_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1585,6 +1664,93 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations for mode
+		let test_configs = vec![
+			(0, 2, 1),      // Small range: Standard, Fibonacci, Demark
+			(0, 4, 1),      // Full range: all modes
+			(0, 4, 2),      // Skip modes: Standard, Demark, Woodie
+			(1, 3, 1),      // Middle modes: Fibonacci, Demark, Camarilla
+			(3, 4, 1),      // Last two: Camarilla, Woodie
+			(2, 2, 1),      // Single mode: Demark only
+			(0, 0, 1),      // Single mode: Standard only
+		];
+		
+		for (cfg_idx, &(mode_start, mode_end, mode_step)) in test_configs.iter().enumerate() {
+			let output = PivotBatchBuilder::new()
+				.kernel(kernel)
+				.mode_range(mode_start, mode_end, mode_step)
+				.apply_candles(&c)?;
+			
+			// Check all 9 arrays for each parameter combination
+			for (row_idx, levels) in output.levels.iter().enumerate() {
+				let combo = &output.combos[row_idx];
+				
+				// Check each of the 9 arrays
+				for (level_idx, level_array) in levels.iter().enumerate() {
+					let level_name = match level_idx {
+						0 => "r4",
+						1 => "r3",
+						2 => "r2",
+						3 => "r1",
+						4 => "pp",
+						5 => "s1",
+						6 => "s2",
+						7 => "s3",
+						8 => "s4",
+						_ => "unknown",
+					};
+					
+					for (col, &val) in level_array.iter().enumerate() {
+						if val.is_nan() {
+							continue;
+						}
+						
+						let bits = val.to_bits();
+						
+						// Check all three poison patterns with detailed context
+						if bits == 0x11111111_11111111 {
+							panic!(
+								"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+								 at row {} col {} in array {} with params: {:?}",
+								test, cfg_idx, val, bits, row_idx, col, level_name, combo
+							);
+						}
+						
+						if bits == 0x22222222_22222222 {
+							panic!(
+								"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+								 at row {} col {} in array {} with params: {:?}",
+								test, cfg_idx, val, bits, row_idx, col, level_name, combo
+							);
+						}
+						
+						if bits == 0x33333333_33333333 {
+							panic!(
+								"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+								 at row {} col {} in array {} with params: {:?}",
+								test, cfg_idx, val, bits, row_idx, col, level_name, combo
+							);
+						}
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	// Kernel variant macro expansion (as in alma.rs)
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
@@ -1608,4 +1774,5 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

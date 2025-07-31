@@ -1052,6 +1052,144 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_ultosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			UltOscParams::default(),
+			// Minimum periods
+			UltOscParams {
+				timeperiod1: Some(1),
+				timeperiod2: Some(2),
+				timeperiod3: Some(3),
+			},
+			// Small periods
+			UltOscParams {
+				timeperiod1: Some(2),
+				timeperiod2: Some(4),
+				timeperiod3: Some(8),
+			},
+			// Small to medium periods
+			UltOscParams {
+				timeperiod1: Some(5),
+				timeperiod2: Some(10),
+				timeperiod3: Some(20),
+			},
+			// Standard periods
+			UltOscParams {
+				timeperiod1: Some(7),
+				timeperiod2: Some(14),
+				timeperiod3: Some(28),
+			},
+			// Medium periods
+			UltOscParams {
+				timeperiod1: Some(10),
+				timeperiod2: Some(20),
+				timeperiod3: Some(40),
+			},
+			// Large periods
+			UltOscParams {
+				timeperiod1: Some(14),
+				timeperiod2: Some(28),
+				timeperiod3: Some(56),
+			},
+			// Very large periods
+			UltOscParams {
+				timeperiod1: Some(20),
+				timeperiod2: Some(40),
+				timeperiod3: Some(80),
+			},
+			// Asymmetric periods - close together
+			UltOscParams {
+				timeperiod1: Some(5),
+				timeperiod2: Some(6),
+				timeperiod3: Some(7),
+			},
+			// Asymmetric periods - far apart
+			UltOscParams {
+				timeperiod1: Some(3),
+				timeperiod2: Some(10),
+				timeperiod3: Some(50),
+			},
+			// Edge case - all same
+			UltOscParams {
+				timeperiod1: Some(14),
+				timeperiod2: Some(14),
+				timeperiod3: Some(14),
+			},
+			// Edge case - reverse order
+			UltOscParams {
+				timeperiod1: Some(28),
+				timeperiod2: Some(14),
+				timeperiod3: Some(7),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = UltOscInput::from_candles(&candles, "high", "low", "close", params.clone());
+			let output = ultosc_with_kernel(&input, kernel)?;
+
+			// Check values
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: timeperiod1={}, timeperiod2={}, timeperiod3={} (param set {})",
+						test_name, val, bits, i,
+						params.timeperiod1.unwrap_or(7),
+						params.timeperiod2.unwrap_or(14),
+						params.timeperiod3.unwrap_or(28),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: timeperiod1={}, timeperiod2={}, timeperiod3={} (param set {})",
+						test_name, val, bits, i,
+						params.timeperiod1.unwrap_or(7),
+						params.timeperiod2.unwrap_or(14),
+						params.timeperiod3.unwrap_or(28),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: timeperiod1={}, timeperiod2={}, timeperiod3={} (param set {})",
+						test_name, val, bits, i,
+						params.timeperiod1.unwrap_or(7),
+						params.timeperiod2.unwrap_or(14),
+						params.timeperiod3.unwrap_or(28),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_ultosc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_ultosc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1081,7 +1219,8 @@ mod tests {
 		check_ultosc_accuracy,
 		check_ultosc_default_candles,
 		check_ultosc_zero_periods,
-		check_ultosc_period_exceeds_data_length
+		check_ultosc_period_exceeds_data_length,
+		check_ultosc_no_poison
 	);
 	fn check_ultosc_batch_default(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1138,6 +1277,109 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (tp1_start, tp1_end, tp1_step, tp2_start, tp2_end, tp2_step, tp3_start, tp3_end, tp3_step)
+			(2, 8, 2, 4, 16, 4, 8, 32, 8),       // Small to medium ranges
+			(5, 7, 1, 10, 14, 2, 20, 28, 4),     // Dense small ranges
+			(7, 7, 0, 14, 14, 0, 14, 42, 7),     // Static tp1/tp2, varying tp3
+			(1, 5, 1, 10, 10, 0, 20, 20, 0),     // Varying tp1, static tp2/tp3
+			(10, 20, 5, 20, 40, 10, 40, 80, 20), // Large ranges
+			(3, 9, 3, 6, 18, 6, 12, 36, 12),     // Multiples of 3
+			(5, 10, 1, 10, 20, 2, 20, 40, 4),    // Different step sizes
+		];
+
+		for (cfg_idx, &(tp1_start, tp1_end, tp1_step, tp2_start, tp2_end, tp2_step, tp3_start, tp3_end, tp3_step)) in
+			test_configs.iter().enumerate()
+		{
+			let sweep = UltOscBatchRange {
+				timeperiod1: (tp1_start, tp1_end, tp1_step),
+				timeperiod2: (tp2_start, tp2_end, tp2_step),
+				timeperiod3: (tp3_start, tp3_end, tp3_step),
+			};
+			
+			let batch_builder = UltOscBatchBuilder::new().kernel(kernel);
+			let output = batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
+
+			// Check values
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: timeperiod1={}, timeperiod2={}, timeperiod3={}",
+						test_name,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.timeperiod1.unwrap_or(7),
+						combo.timeperiod2.unwrap_or(14),
+						combo.timeperiod3.unwrap_or(28)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: timeperiod1={}, timeperiod2={}, timeperiod3={}",
+						test_name,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.timeperiod1.unwrap_or(7),
+						combo.timeperiod2.unwrap_or(14),
+						combo.timeperiod3.unwrap_or(28)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: timeperiod1={}, timeperiod2={}, timeperiod3={}",
+						test_name,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.timeperiod1.unwrap_or(7),
+						combo.timeperiod2.unwrap_or(14),
+						combo.timeperiod3.unwrap_or(28)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1160,6 +1402,7 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_ultosc_batch_default);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ============================================================================

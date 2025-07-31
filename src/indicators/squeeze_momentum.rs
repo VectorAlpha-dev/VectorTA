@@ -1155,6 +1155,244 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_smi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			SqueezeMomentumParams::default(),
+			// Minimum periods
+			SqueezeMomentumParams {
+				length_bb: Some(2),
+				mult_bb: Some(1.0),
+				length_kc: Some(2),
+				mult_kc: Some(1.0),
+			},
+			// Small periods with default multipliers
+			SqueezeMomentumParams {
+				length_bb: Some(5),
+				mult_bb: Some(2.0),
+				length_kc: Some(5),
+				mult_kc: Some(1.5),
+			},
+			// Medium periods with various multipliers
+			SqueezeMomentumParams {
+				length_bb: Some(10),
+				mult_bb: Some(1.5),
+				length_kc: Some(10),
+				mult_kc: Some(2.0),
+			},
+			SqueezeMomentumParams {
+				length_bb: Some(14),
+				mult_bb: Some(2.5),
+				length_kc: Some(14),
+				mult_kc: Some(1.0),
+			},
+			// Standard periods with edge multipliers
+			SqueezeMomentumParams {
+				length_bb: Some(20),
+				mult_bb: Some(0.5),
+				length_kc: Some(20),
+				mult_kc: Some(0.5),
+			},
+			SqueezeMomentumParams {
+				length_bb: Some(20),
+				mult_bb: Some(3.0),
+				length_kc: Some(20),
+				mult_kc: Some(3.0),
+			},
+			// Large periods
+			SqueezeMomentumParams {
+				length_bb: Some(50),
+				mult_bb: Some(2.0),
+				length_kc: Some(50),
+				mult_kc: Some(1.5),
+			},
+			// Very large periods
+			SqueezeMomentumParams {
+				length_bb: Some(100),
+				mult_bb: Some(1.5),
+				length_kc: Some(100),
+				mult_kc: Some(2.0),
+			},
+			// Asymmetric periods
+			SqueezeMomentumParams {
+				length_bb: Some(10),
+				mult_bb: Some(2.0),
+				length_kc: Some(20),
+				mult_kc: Some(1.5),
+			},
+			SqueezeMomentumParams {
+				length_bb: Some(30),
+				mult_bb: Some(1.5),
+				length_kc: Some(15),
+				mult_kc: Some(2.5),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = SqueezeMomentumInput::from_candles(&candles, params.clone());
+			let output = squeeze_momentum_with_kernel(&input, kernel)?;
+
+			// Check squeeze values
+			for (i, &val) in output.squeeze.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in squeeze \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in squeeze \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in squeeze \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+			}
+
+			// Check momentum values
+			for (i, &val) in output.momentum.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in momentum \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in momentum \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in momentum \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+			}
+
+			// Check momentum_signal values
+			for (i, &val) in output.momentum_signal.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in momentum_signal \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in momentum_signal \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in momentum_signal \
+						 with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={} (param set {})",
+						test_name, val, bits, i,
+						params.length_bb.unwrap_or(20),
+						params.mult_bb.unwrap_or(2.0),
+						params.length_kc.unwrap_or(20),
+						params.mult_kc.unwrap_or(1.5),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_smi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_smi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1187,7 +1425,8 @@ mod tests {
 		check_smi_length_exceeds,
 		check_smi_all_nan,
 		check_smi_inconsistent_lengths,
-		check_smi_minimum_data
+		check_smi_minimum_data,
+		check_smi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1203,6 +1442,113 @@ mod tests {
 		};
 		let row = output.values_for(&def).expect("default row missing");
 		assert_eq!(row.len(), c.close.len());
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (length_bb_start, length_bb_end, length_bb_step, mult_bb_start, mult_bb_end, mult_bb_step,
+			//  length_kc_start, length_kc_end, length_kc_step, mult_kc_start, mult_kc_end, mult_kc_step)
+			(2, 10, 2, 1.0, 2.0, 0.5, 2, 10, 2, 1.0, 2.0, 0.5),      // Small periods
+			(5, 25, 5, 2.0, 2.0, 0.0, 5, 25, 5, 1.5, 1.5, 0.0),      // Medium periods, static multipliers
+			(10, 10, 0, 1.0, 3.0, 0.5, 10, 10, 0, 1.0, 3.0, 0.5),    // Static periods, varying multipliers
+			(2, 5, 1, 1.5, 1.5, 0.0, 2, 5, 1, 2.0, 2.0, 0.0),        // Dense small range
+			(30, 60, 15, 2.0, 2.0, 0.0, 30, 60, 15, 1.5, 1.5, 0.0),  // Large periods
+			(20, 30, 5, 1.0, 2.5, 0.5, 15, 25, 5, 1.0, 2.0, 0.5),    // Mixed ranges
+			(8, 12, 1, 0.5, 3.0, 0.5, 8, 12, 1, 0.5, 2.5, 0.5),      // Dense medium range with wide multipliers
+		];
+
+		for (cfg_idx, &(lbb_start, lbb_end, lbb_step, mbb_start, mbb_end, mbb_step,
+		                lkc_start, lkc_end, lkc_step, mkc_start, mkc_end, mkc_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = SqueezeMomentumBatchBuilder::new()
+				.kernel(kernel)
+				.length_bb_range(lbb_start, lbb_end, lbb_step)
+				.mult_bb_range(mbb_start, mbb_end, mbb_step)
+				.length_kc_range(lkc_start, lkc_end, lkc_step)
+				.mult_kc_range(mkc_start, mkc_end, mkc_step)
+				.apply_candles(&c)?;
+
+			// Only check momentum values (as per SqueezeMomentumBatchOutput structure)
+			for (idx, &val) in output.momentum.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length_bb,
+						combo.mult_bb,
+						combo.length_kc,
+						combo.mult_kc
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length_bb,
+						combo.mult_bb,
+						combo.length_kc,
+						combo.mult_kc
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) with params: length_bb={}, mult_bb={}, length_kc={}, mult_kc={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.length_bb,
+						combo.mult_bb,
+						combo.length_kc,
+						combo.mult_kc
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(())
 	}
 
@@ -1227,6 +1573,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // --- Python Bindings ---

@@ -1820,6 +1820,166 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_supertrend_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			// Default parameters
+			SuperTrendParams::default(),
+			// Minimum period
+			SuperTrendParams {
+				period: Some(2),
+				factor: Some(1.0),
+			},
+			// Small period with various factors
+			SuperTrendParams {
+				period: Some(5),
+				factor: Some(0.5),
+			},
+			SuperTrendParams {
+				period: Some(5),
+				factor: Some(2.0),
+			},
+			SuperTrendParams {
+				period: Some(5),
+				factor: Some(3.5),
+			},
+			// Medium periods
+			SuperTrendParams {
+				period: Some(10),
+				factor: Some(1.5),
+			},
+			SuperTrendParams {
+				period: Some(14),
+				factor: Some(2.5),
+			},
+			SuperTrendParams {
+				period: Some(20),
+				factor: Some(3.0),
+			},
+			// Large periods
+			SuperTrendParams {
+				period: Some(50),
+				factor: Some(2.0),
+			},
+			SuperTrendParams {
+				period: Some(100),
+				factor: Some(1.0),
+			},
+			// Edge case factors
+			SuperTrendParams {
+				period: Some(10),
+				factor: Some(0.1),
+			},
+			SuperTrendParams {
+				period: Some(10),
+				factor: Some(5.0),
+			},
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = SuperTrendInput::from_candles(&candles, params.clone());
+			let output = supertrend_with_kernel(&input, kernel)?;
+
+			// Check trend values
+			for (i, &val) in output.trend.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in trend \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in trend \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in trend \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+			}
+
+			// Check changed values
+			for (i, &val) in output.changed.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in changed \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in changed \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in changed \
+						 with params: period={}, factor={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(10),
+						params.factor.unwrap_or(3.0),
+						param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_supertrend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_supertrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1853,7 +2013,8 @@ mod tests {
 		check_supertrend_very_small_dataset,
 		check_supertrend_reinput,
 		check_supertrend_nan_handling,
-		check_supertrend_streaming
+		check_supertrend_streaming,
+		check_supertrend_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
@@ -1887,6 +2048,163 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, factor_start, factor_end, factor_step)
+			(2, 10, 2, 1.0, 3.0, 0.5),      // Small periods
+			(5, 25, 5, 2.0, 2.0, 0.0),      // Medium periods, static factor
+			(10, 10, 0, 0.5, 4.0, 0.5),     // Static period, varying factors
+			(2, 5, 1, 1.5, 1.5, 0.0),       // Dense small range
+			(30, 60, 15, 3.0, 3.0, 0.0),    // Large periods
+			(20, 30, 5, 1.0, 3.0, 1.0),     // Mixed ranges
+			(8, 12, 1, 0.5, 2.5, 0.5),      // Dense medium range
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step, f_start, f_end, f_step)) in
+			test_configs.iter().enumerate()
+		{
+			let output = SuperTrendBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.factor_range(f_start, f_end, f_step)
+				.apply_candles(&c)?;
+
+			// Check trend values
+			for (idx, &val) in output.trend.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in trend with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in trend with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in trend with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+			}
+
+			// Check changed values
+			for (idx, &val) in output.changed.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in changed with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in changed with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						at row {} col {} (flat index {}) in changed with params: period={}, factor={}",
+						test,
+						cfg_idx,
+						val,
+						bits,
+						row,
+						col,
+						idx,
+						combo.period.unwrap_or(10),
+						combo.factor.unwrap_or(3.0)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1908,4 +2226,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

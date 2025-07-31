@@ -1271,7 +1271,13 @@ pub fn mab_into_slice(
 	middle_dst.copy_from_slice(&output.middleband);
 	lower_dst.copy_from_slice(&output.lowerband);
 
-	// Fill warmup with NaN (already done by alloc_with_nan_prefix)
+	// Fill warmup with NaN
+	for i in 0..warmup {
+		upper_dst[i] = f64::NAN;
+		middle_dst[i] = f64::NAN;
+		lower_dst[i] = f64::NAN;
+	}
+
 	Ok(())
 }
 
