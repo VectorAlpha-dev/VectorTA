@@ -1301,6 +1301,192 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_srsi_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			SrsiParams::default(),  // rsi: 14, stoch: 14, k: 3, d: 3
+			SrsiParams {
+				rsi_period: Some(2),    // minimum viable
+				stoch_period: Some(2),
+				k: Some(2),
+				d: Some(2),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(5),    // small periods
+				stoch_period: Some(5),
+				k: Some(3),
+				d: Some(3),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(10),   // medium periods
+				stoch_period: Some(10),
+				k: Some(5),
+				d: Some(5),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(20),   // large periods
+				stoch_period: Some(20),
+				k: Some(7),
+				d: Some(7),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(50),   // very large periods
+				stoch_period: Some(50),
+				k: Some(10),
+				d: Some(10),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(7),    // mixed periods 1
+				stoch_period: Some(14),
+				k: Some(3),
+				d: Some(5),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(14),   // mixed periods 2
+				stoch_period: Some(7),
+				k: Some(5),
+				d: Some(3),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(21),   // mixed periods 3
+				stoch_period: Some(14),
+				k: Some(6),
+				d: Some(4),
+				source: None,
+			},
+			SrsiParams {
+				rsi_period: Some(100),  // extreme case
+				stoch_period: Some(100),
+				k: Some(20),
+				d: Some(20),
+				source: None,
+			},
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = SrsiInput::from_candles(&candles, "close", params.clone());
+			let output = srsi_with_kernel(&input, kernel)?;
+			
+			// Check k values
+			for (i, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i, 
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in K output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in K output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+			}
+			
+			// Check d values
+			for (i, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in D output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in D output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in D output \
+						 with params: rsi_period={}, stoch_period={}, k={}, d={} (param set {})",
+						test_name, val, bits, i,
+						params.rsi_period.unwrap_or(14),
+						params.stoch_period.unwrap_or(14),
+						params.k.unwrap_or(3),
+						params.d.unwrap_or(3),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_srsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_srsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1329,7 +1515,8 @@ mod tests {
 		check_srsi_partial_params,
 		check_srsi_accuracy,
 		check_srsi_custom_params,
-		check_srsi_from_slice
+		check_srsi_from_slice,
+		check_srsi_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1343,6 +1530,141 @@ mod tests {
 		assert_eq!(k_row.len(), c.close.len());
 		assert_eq!(d_row.len(), c.close.len());
 		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (rsi_period_range, stoch_period_range, k_range, d_range)
+			((2, 10, 2), (2, 10, 2), (2, 4, 1), (2, 4, 1)),        // Small periods
+			((5, 25, 5), (5, 25, 5), (3, 7, 2), (3, 7, 2)),        // Medium periods
+			((30, 60, 15), (30, 60, 15), (5, 10, 5), (5, 10, 5)),  // Large periods
+			((2, 5, 1), (2, 5, 1), (2, 3, 1), (2, 3, 1)),          // Dense small range
+			((10, 30, 10), (5, 15, 5), (3, 6, 3), (3, 6, 3)),      // Mixed ranges
+			((14, 14, 0), (14, 14, 0), (3, 3, 0), (3, 3, 0)),      // Single value (default)
+			((7, 21, 7), (14, 28, 14), (3, 9, 3), (3, 9, 3)),      // Different step sizes
+		];
+		
+		for (cfg_idx, &(rsi_range, stoch_range, k_range, d_range)) in test_configs.iter().enumerate() {
+			let output = SrsiBatchBuilder::new()
+				.kernel(kernel)
+				.rsi_period_range(rsi_range.0, rsi_range.1, rsi_range.2)
+				.stoch_period_range(stoch_range.0, stoch_range.1, stoch_range.2)
+				.k_range(k_range.0, k_range.1, k_range.2)
+				.d_range(d_range.0, d_range.1, d_range.2)
+				.apply_slice(&c.close)?;
+			
+			// Check k values
+			for (idx, &val) in output.k.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in K output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in K output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in K output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+			}
+			
+			// Check d values
+			for (idx, &val) in output.d.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in D output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) in D output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) in D output \
+						 at row {} col {} (flat index {}) with params: rsi_period={}, stoch_period={}, k={}, d={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.rsi_period.unwrap_or(14),
+						combo.stoch_period.unwrap_or(14),
+						combo.k.unwrap_or(3),
+						combo.d.unwrap_or(3)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
 	}
 
 	macro_rules! gen_batch_tests {
@@ -1366,4 +1688,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }

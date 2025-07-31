@@ -354,20 +354,12 @@ pub unsafe fn voss_scalar(
 	let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
 	let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
 
-	for i in first..(first + min_index) {
-		filt[i] = 0.0;
-	}
-
 	for i in (first + min_index)..data.len() {
 		let current = data[i];
 		let prev_2 = data[i - 2];
 		let prev_filt_1 = filt[i - 1];
 		let prev_filt_2 = filt[i - 2];
 		filt[i] = 0.5 * (1.0 - s1) * (current - prev_2) + f1 * (1.0 + s1) * prev_filt_1 - s1 * prev_filt_2;
-	}
-
-	for i in first..(first + min_index) {
-		voss[i] = 0.0;
 	}
 
 	for i in (first + min_index)..data.len() {
@@ -402,11 +394,6 @@ unsafe fn voss_simd128(
 	let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
 	let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
 	
-	// Initialize filt values
-	for i in first..(first + min_idx) {
-		filt[i] = 0.0;
-	}
-	
 	// First pass: compute filt values (scalar for dependencies)
 	let coeff1 = 0.5 * (1.0 - s1);
 	let coeff2 = f1 * (1.0 + s1);
@@ -418,11 +405,6 @@ unsafe fn voss_simd128(
 		let prev_filt_1 = filt[i - 1];
 		let prev_filt_2 = filt[i - 2];
 		filt[i] = coeff1 * (current - prev_2) + coeff2 * prev_filt_1 + coeff3 * prev_filt_2;
-	}
-	
-	// Initialize voss values
-	for i in first..(first + min_idx) {
-		voss[i] = 0.0;
 	}
 	
 	// Second pass: compute voss values
@@ -1095,6 +1077,193 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_voss_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			VossParams::default(), // period: 20, predict: 3, bandwidth: 0.25
+			VossParams {
+				period: Some(2),
+				predict: Some(1),
+				bandwidth: Some(0.1),
+			}, // minimum viable parameters
+			VossParams {
+				period: Some(5),
+				predict: Some(2),
+				bandwidth: Some(0.2),
+			}, // small period
+			VossParams {
+				period: Some(10),
+				predict: Some(3),
+				bandwidth: Some(0.3),
+			}, // medium-small period
+			VossParams {
+				period: Some(15),
+				predict: Some(4),
+				bandwidth: Some(0.4),
+			}, // medium period
+			VossParams {
+				period: Some(30),
+				predict: Some(5),
+				bandwidth: Some(0.5),
+			}, // medium-large period
+			VossParams {
+				period: Some(50),
+				predict: Some(8),
+				bandwidth: Some(0.6),
+			}, // large period
+			VossParams {
+				period: Some(100),
+				predict: Some(10),
+				bandwidth: Some(0.75),
+			}, // very large period
+			VossParams {
+				period: Some(20),
+				predict: Some(1),
+				bandwidth: Some(0.1),
+			}, // small predict
+			VossParams {
+				period: Some(20),
+				predict: Some(10),
+				bandwidth: Some(0.9),
+			}, // large predict
+			VossParams {
+				period: Some(20),
+				predict: Some(3),
+				bandwidth: Some(0.05),
+			}, // very small bandwidth
+			VossParams {
+				period: Some(20),
+				predict: Some(3),
+				bandwidth: Some(1.0),
+			}, // maximum bandwidth
+			VossParams {
+				period: Some(3),
+				predict: Some(1),
+				bandwidth: Some(0.15),
+			}, // edge case: very small period
+			VossParams {
+				period: Some(7),
+				predict: Some(2),
+				bandwidth: Some(0.35),
+			}, // prime number period
+			VossParams {
+				period: Some(13),
+				predict: Some(3),
+				bandwidth: Some(0.45),
+			}, // another prime period
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = VossInput::from_candles(&candles, "close", params.clone());
+			let output = voss_with_kernel(&input, kernel)?;
+			
+			// Check voss output
+			for (i, &val) in output.voss.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in voss output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in voss output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in voss output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+			}
+			
+			// Check filt output
+			for (i, &val) in output.filt.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 in filt output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 in filt output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 in filt output with params: period={}, predict={}, bandwidth={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(20),
+						params.predict.unwrap_or(3),
+						params.bandwidth.unwrap_or(0.25),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_voss_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_voss_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1125,7 +1294,8 @@ mod tests {
 		check_voss_zero_period,
 		check_voss_period_exceeds_length,
 		check_voss_very_small_dataset,
-		check_voss_reinput
+		check_voss_reinput,
+		check_voss_no_poison
 	);
 
 	fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1216,6 +1386,133 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, predict_start, predict_end, predict_step, bandwidth_start, bandwidth_end, bandwidth_step)
+			(2, 10, 2, 1, 3, 1, 0.1, 0.3, 0.1),      // Small periods and predicts
+			(5, 25, 5, 2, 4, 1, 0.2, 0.4, 0.1),      // Medium periods
+			(30, 60, 15, 5, 8, 1, 0.3, 0.6, 0.15),   // Large periods
+			(2, 5, 1, 1, 2, 1, 0.1, 0.2, 0.05),      // Dense small range
+			(10, 30, 10, 3, 5, 1, 0.25, 0.5, 0.25),  // Medium range
+			(50, 100, 25, 8, 10, 1, 0.5, 0.75, 0.25), // Very large periods
+		];
+		
+		for (cfg_idx, config) in test_configs.iter().enumerate() {
+			let output = VossBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(config.0, config.1, config.2)
+				.predict_range(config.3, config.4, config.5)
+				.bandwidth_range(config.6, config.7, config.8)
+				.apply_candles(&c, "close")?;
+			
+			// Check voss output
+			for (idx, &val) in output.voss.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in voss output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in voss output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in voss output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+			}
+			
+			// Check filt output
+			for (idx, &val) in output.filt.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in filt output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in filt output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) in filt output with params: period={}, predict={}, bandwidth={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(20),
+						combo.predict.unwrap_or(3),
+						combo.bandwidth.unwrap_or(0.25)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(())
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1241,6 +1538,7 @@ mod tests {
 	gen_batch_tests!(check_batch_param_grid);
 	gen_batch_tests!(check_batch_nan_propagation);
 	gen_batch_tests!(check_batch_invalid_range);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // ============================================================================

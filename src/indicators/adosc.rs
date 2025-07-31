@@ -1175,6 +1175,158 @@ mod tests {
         }
     }
 
+	fn check_adosc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Fill poison values
+		let len = candles.close.len();
+		let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		let mut close = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		let mut volume = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
+		
+		high.resize(len, f64::from_bits(0x11111111_11111111));
+		low.resize(len, f64::from_bits(0x22222222_22222222));
+		close.resize(len, f64::from_bits(0x33333333_33333333));
+		volume.resize(len, f64::from_bits(0x11111111_11111111));
+		
+		// Copy real data
+		high.copy_from_slice(&candles.high);
+		low.copy_from_slice(&candles.low);
+		close.copy_from_slice(&candles.close);
+		volume.copy_from_slice(&candles.volume);
+		
+		// Run calculation
+		let params = AdoscParams {
+			short_period: Some(3),
+			long_period: Some(10),
+		};
+		let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
+		let result = adosc_with_kernel(&input, kernel)?;
+		
+		// Check for poison values - ADOSC has no warmup period
+		for (i, &val) in result.values.iter().enumerate() {
+			assert_ne!(
+				val.to_bits(),
+				0x11111111_11111111,
+				"[{}] Poison value 0x11111111_11111111 found at index {}",
+				test_name,
+				i
+			);
+			assert_ne!(
+				val.to_bits(),
+				0x22222222_22222222,
+				"[{}] Poison value 0x22222222_22222222 found at index {}",
+				test_name,
+				i
+			);
+			assert_ne!(
+				val.to_bits(),
+				0x33333333_33333333,
+				"[{}] Poison value 0x33333333_33333333 found at index {}",
+				test_name,
+				i
+			);
+		}
+		
+		Ok(())
+	}
+
+	fn check_batch_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Use smaller dataset for batch testing
+		let slice_end = candles.close.len().min(1000);
+		let high_slice = &candles.high[..slice_end];
+		let low_slice = &candles.low[..slice_end];
+		let close_slice = &candles.close[..slice_end];
+		let volume_slice = &candles.volume[..slice_end];
+		
+		// Create configuration with comprehensive parameter sweep
+		let batch_config = AdoscBatchRange {
+			short_period: (2, 5, 1),    // 2, 3, 4, 5
+			long_period: (8, 12, 2),    // 8, 10, 12
+		};
+		
+		// Run batch calculation
+		let result = adosc_batch_with_kernel(
+			high_slice,
+			low_slice,
+			close_slice,
+			volume_slice,
+			&batch_config,
+			kernel
+		)?;
+		
+		// Check for poison values
+		for (i, &val) in result.values.iter().enumerate() {
+			// ADOSC has no warmup, so no NaN values expected
+			assert_ne!(
+				val.to_bits(),
+				0x11111111_11111111,
+				"[{}] Poison value 0x11111111_11111111 found in batch output at index {}",
+				test_name,
+				i
+			);
+			assert_ne!(
+				val.to_bits(),
+				0x22222222_22222222,
+				"[{}] Poison value 0x22222222_22222222 found in batch output at index {}",
+				test_name,
+				i
+			);
+			assert_ne!(
+				val.to_bits(),
+				0x33333333_33333333,
+				"[{}] Poison value 0x33333333_33333333 found in batch output at index {}",
+				test_name,
+				i
+			);
+		}
+		
+		// Verify dimensions
+		let expected_rows = result.combos.len();
+		let expected_cols = slice_end;
+		assert_eq!(
+			result.values.len(),
+			expected_rows * expected_cols,
+			"[{}] Batch output size mismatch",
+			test_name
+		);
+		
+		// Test with different sweep ranges
+		let batch_config2 = AdoscBatchRange {
+			short_period: (3, 7, 2),    // 3, 5, 7
+			long_period: (10, 20, 5),   // 10, 15, 20
+		};
+		
+		let result2 = adosc_batch_with_kernel(
+			high_slice,
+			low_slice,
+			close_slice,
+			volume_slice,
+			&batch_config2,
+			kernel
+		)?;
+		
+		// Check second configuration
+		for (i, &val) in result2.values.iter().enumerate() {
+			assert_ne!(
+				val.to_bits(),
+				0x11111111_11111111,
+				"[{}] Poison value found in second batch config at index {}",
+				test_name,
+				i
+			);
+		}
+		
+		Ok(())
+	}
+
 	generate_all_adosc_tests!(
 		check_adosc_accuracy,
 		check_adosc_partial_params,
@@ -1184,7 +1336,8 @@ mod tests {
 		check_adosc_very_small_dataset,
 		check_adosc_reinput,
 		check_adosc_nan_handling,
-		check_adosc_streaming
+		check_adosc_streaming,
+		check_adosc_no_poison
 	);
 
 	macro_rules! gen_batch_tests {
@@ -1201,6 +1354,7 @@ mod tests {
     }
 
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 /// Write ADOSC directly to output slice - no allocations

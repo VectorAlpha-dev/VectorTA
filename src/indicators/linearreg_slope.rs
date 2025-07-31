@@ -783,6 +783,13 @@ pub fn linearreg_slope_into_slice(
 			_ => unreachable!(),
 		}
 	}
+	
+	// Fill warmup period with NaN
+	let warmup_end = first_valid_idx + period - 1;
+	for v in &mut dst[..warmup_end] {
+		*v = f64::NAN;
+	}
+	
 	Ok(())
 }
 

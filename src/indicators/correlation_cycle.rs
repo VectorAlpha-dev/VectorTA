@@ -1768,8 +1768,9 @@ pub fn correlation_cycle_into_slice(
 	for v in &mut dst_angle[..warmup_period] {
 		*v = f64::NAN;
 	}
-	// State has different warmup
-	for v in &mut dst_state[..(period + 1)] {
+	// State has different warmup (starts writing at first_valid + period + 1)
+	let state_warmup = first_valid + period + 1;
+	for v in &mut dst_state[..state_warmup.min(dst_state.len())] {
 		*v = f64::NAN;
 	}
 

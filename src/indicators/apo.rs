@@ -1195,6 +1195,82 @@ mod tests {
 		assert_eq!(row.len(), c.close.len());
 		Ok(())
 	}
+	
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (short_start, short_end, short_step, long_start, long_end, long_step)
+			(2, 10, 2, 15, 30, 5),      // Small to medium periods
+			(5, 25, 5, 30, 50, 10),     // Medium periods
+			(10, 20, 5, 25, 45, 10),    // Common trading periods
+			(12, 12, 0, 26, 26, 0),     // Static periods (default-like)
+			(3, 9, 3, 10, 20, 5),       // Small range sweep
+		];
+		
+		for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in test_configs.iter().enumerate() {
+			let output = ApoBatchBuilder::new()
+				.kernel(kernel)
+				.short_range(s_start, s_end, s_step)
+				.long_range(l_start, l_end, l_step)
+				.apply_candles(&c, "close")?;
+				
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short={}, long={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(12),
+						combo.long_period.unwrap_or(26)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short={}, long={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(12),
+						combo.long_period.unwrap_or(26)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: short={}, long={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.short_period.unwrap_or(12),
+						combo.long_period.unwrap_or(26)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+	
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste::paste! {
@@ -1216,6 +1292,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 
 	#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 	#[test]

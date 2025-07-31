@@ -226,6 +226,11 @@ unsafe fn trix_scalar(data: &[f64], period: usize, first: usize) -> Result<TrixO
 	// Allocate output with NaN prefix
 	let mut out = alloc_with_nan_prefix(len, triple_ema_start + 1);
 	
+	// Initialize NaN prefix for initial invalid data
+	for i in 0..first {
+		out[i] = f64::NAN;
+	}
+	
 	// We need to compute triple EMA on log data
 	// For efficiency, we'll compute in stages, reusing buffers where possible
 	
@@ -1211,6 +1216,79 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_trix_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			TrixParams::default(),              // period: 18
+			TrixParams { period: Some(2) },     // minimum viable
+			TrixParams { period: Some(5) },     // small period
+			TrixParams { period: Some(10) },    // small-medium period
+			TrixParams { period: Some(14) },    // medium period
+			TrixParams { period: Some(20) },    // medium-large period
+			TrixParams { period: Some(30) },    // large period
+			TrixParams { period: Some(50) },    // very large period
+			TrixParams { period: Some(100) },   // extreme period
+			TrixParams { period: Some(200) },   // maximum reasonable
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = TrixInput::from_candles(&candles, "close", params.clone());
+			let output = trix_with_kernel(&input, kernel)?;
+			
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+				
+				let bits = val.to_bits();
+				
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, 
+						params.period.unwrap_or(18),
+						param_idx
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(18),
+						param_idx
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i,
+						params.period.unwrap_or(18),
+						param_idx
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_trix_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_trix_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1241,7 +1319,8 @@ mod tests {
 		check_trix_zero_period,
 		check_trix_period_exceeds_length,
 		check_trix_very_small_dataset,
-		check_trix_reinput
+		check_trix_reinput,
+		check_trix_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1261,6 +1340,79 @@ mod tests {
 			);
 		}
 		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods
+			(10, 30, 5),     // Medium periods  
+			(30, 100, 10),   // Large periods
+			(2, 5, 1),       // Dense small range
+			(18, 18, 0),     // Single value (default)
+			(5, 25, 5),      // Mixed range
+			(50, 100, 25),   // Large step
+			(14, 28, 7),     // Common technical periods
+		];
+		
+		for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
+			let output = TrixBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(period_start, period_end, period_step)
+				.apply_candles(&c, "close")?;
+			
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+				
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+				
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(18)
+					);
+				}
+				
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(18)
+					);
+				}
+				
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx,
+						combo.period.unwrap_or(18)
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
 	}
 
 	macro_rules! gen_batch_tests {
@@ -1284,4 +1436,5 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
