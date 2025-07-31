@@ -391,14 +391,6 @@ pub fn keltner_into_slice(
 		Kernel::Auto => detect_best_kernel(),
 		other => other,
 	};
-	
-	// Fill warmup period with NaN
-	let warmup_period = period - 1;
-	for i in 0..warmup_period {
-		upper_dst[i] = f64::NAN;
-		middle_dst[i] = f64::NAN;
-		lower_dst[i] = f64::NAN;
-	}
 
 	unsafe {
 		match chosen {
@@ -1413,6 +1405,94 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_keltner_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			KeltnerParams::default(),  // period: 20, multiplier: 2.0, ma_type: "ema"
+			KeltnerParams { period: Some(2), multiplier: Some(1.0), ma_type: Some("ema".to_string()) },    // minimum period
+			KeltnerParams { period: Some(5), multiplier: Some(0.5), ma_type: Some("ema".to_string()) },    // small period, small multiplier
+			KeltnerParams { period: Some(10), multiplier: Some(1.5), ma_type: Some("sma".to_string()) },   // medium period with SMA
+			KeltnerParams { period: Some(20), multiplier: Some(3.0), ma_type: Some("ema".to_string()) },   // default period, large multiplier
+			KeltnerParams { period: Some(50), multiplier: Some(2.5), ma_type: Some("sma".to_string()) },   // large period
+			KeltnerParams { period: Some(100), multiplier: Some(1.0), ma_type: Some("ema".to_string()) },  // very large period
+			KeltnerParams { period: Some(14), multiplier: Some(2.0), ma_type: Some("sma".to_string()) },   // common period with SMA
+			KeltnerParams { period: Some(7), multiplier: Some(1.0), ma_type: Some("ema".to_string()) },    // week period
+			KeltnerParams { period: Some(21), multiplier: Some(1.5), ma_type: Some("ema".to_string()) },   // 3-week period
+			KeltnerParams { period: Some(30), multiplier: Some(2.0), ma_type: Some("sma".to_string()) },   // month period
+			KeltnerParams { period: Some(3), multiplier: Some(0.75), ma_type: Some("ema".to_string()) },   // very small period
+		];
+		
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = KeltnerInput::from_candles(&candles, "close", params.clone());
+			let output = keltner_with_kernel(&input, kernel)?;
+			
+			// Check all three output bands
+			for (band_name, band_values) in [
+				("upper", &output.upper_band),
+				("middle", &output.middle_band),
+				("lower", &output.lower_band),
+			] {
+				for (i, &val) in band_values.iter().enumerate() {
+					if val.is_nan() {
+						continue; // NaN values are expected during warmup
+					}
+					
+					let bits = val.to_bits();
+					
+					// Check all three poison patterns
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+							 in {} band with params: period={}, multiplier={}, ma_type={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20),
+							params.multiplier.unwrap_or(2.0),
+							params.ma_type.as_deref().unwrap_or("ema"),
+							param_idx
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+							 in {} band with params: period={}, multiplier={}, ma_type={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20),
+							params.multiplier.unwrap_or(2.0),
+							params.ma_type.as_deref().unwrap_or("ema"),
+							param_idx
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+							 in {} band with params: period={}, multiplier={}, ma_type={} (param set {})",
+							test_name, val, bits, i, band_name,
+							params.period.unwrap_or(20),
+							params.multiplier.unwrap_or(2.0),
+							params.ma_type.as_deref().unwrap_or("ema"),
+							param_idx
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_keltner_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
 
@@ -1427,6 +1507,90 @@ mod tests {
 		assert_eq!(middle.len(), c.close.len());
 		assert_eq!(lower.len(), c.close.len());
 
+		Ok(())
+	}
+
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+		
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+		
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			// (period_start, period_end, period_step, multiplier_start, multiplier_end, multiplier_step)
+			(2, 10, 2, 0.5, 2.5, 0.5),      // Small periods with various multipliers
+			(5, 25, 5, 1.0, 3.0, 1.0),      // Medium periods
+			(30, 60, 15, 2.0, 2.0, 0.0),    // Large periods, static multiplier
+			(2, 5, 1, 1.5, 2.5, 0.25),      // Dense small range
+			(10, 30, 10, 0.75, 2.25, 0.75), // Common trading periods
+			(14, 21, 7, 1.0, 2.0, 0.5),     // Week-based periods
+			(20, 20, 0, 0.5, 3.0, 0.5),     // Static period, varying multipliers
+		];
+		
+		for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in test_configs.iter().enumerate() {
+			let output = KeltnerBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.multiplier_range(m_start, m_end, m_step)
+				.apply_candles(&c, "close")?;
+			
+			// Check all three output bands
+			for (band_name, band_values) in [
+				("upper", &output.upper_band),
+				("middle", &output.middle_band),
+				("lower", &output.lower_band),
+			] {
+				for (idx, &val) in band_values.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					
+					let bits = val.to_bits();
+					let row = idx / output.cols;
+					let col = idx % output.cols;
+					let combo = &output.combos[row];
+					
+					// Check all three poison patterns with detailed context
+					if bits == 0x11111111_11111111 {
+						panic!(
+							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) in {} band with params: period={}, multiplier={}",
+							test, cfg_idx, val, bits, row, col, idx, band_name,
+							combo.period.unwrap_or(20),
+							combo.multiplier.unwrap_or(2.0)
+						);
+					}
+					
+					if bits == 0x22222222_22222222 {
+						panic!(
+							"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) in {} band with params: period={}, multiplier={}",
+							test, cfg_idx, val, bits, row, col, idx, band_name,
+							combo.period.unwrap_or(20),
+							combo.multiplier.unwrap_or(2.0)
+						);
+					}
+					
+					if bits == 0x33333333_33333333 {
+						panic!(
+							"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+							 at row {} col {} (flat index {}) in {} band with params: period={}, multiplier={}",
+							test, cfg_idx, val, bits, row, col, idx, band_name,
+							combo.period.unwrap_or(20),
+							combo.multiplier.unwrap_or(2.0)
+						);
+					}
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(())
 	}
 
@@ -1460,7 +1624,8 @@ mod tests {
 		check_keltner_zero_period,
 		check_keltner_large_period,
 		check_keltner_nan_handling,
-		check_keltner_streaming
+		check_keltner_streaming,
+		check_keltner_no_poison
 	);
 
 	macro_rules! gen_batch_tests {
@@ -1484,6 +1649,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 // Python bindings
