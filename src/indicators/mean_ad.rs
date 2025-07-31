@@ -895,6 +895,75 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_mean_ad_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+
+		// Define comprehensive parameter combinations
+		let test_params = vec![
+			MeanAdParams::default(),                    // period: 5 (default)
+			MeanAdParams { period: Some(2) },           // minimum viable period
+			MeanAdParams { period: Some(3) },           // very small
+			MeanAdParams { period: Some(5) },           // small (same as default)
+			MeanAdParams { period: Some(7) },           // small-medium
+			MeanAdParams { period: Some(10) },          // medium
+			MeanAdParams { period: Some(14) },          // medium
+			MeanAdParams { period: Some(20) },          // medium-large
+			MeanAdParams { period: Some(30) },          // large
+			MeanAdParams { period: Some(50) },          // very large
+			MeanAdParams { period: Some(100) },         // extra large
+			MeanAdParams { period: Some(200) },         // extreme
+		];
+
+		for (param_idx, params) in test_params.iter().enumerate() {
+			let input = MeanAdInput::from_candles(&candles, "close", params.clone());
+			let output = mean_ad_with_kernel(&input, kernel)?;
+
+			for (i, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue; // NaN values are expected during warmup
+				}
+
+				let bits = val.to_bits();
+
+				// Check all three poison patterns
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
+						 with params: period={} (param set {})",
+						test_name, val, bits, i, params.period.unwrap_or(5), param_idx
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_mean_ad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! generate_all_mean_ad_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -927,7 +996,8 @@ mod tests {
 		check_mean_ad_very_small_dataset,
 		check_mean_ad_reinput,
 		check_mean_ad_nan_handling,
-		check_mean_ad_streaming
+		check_mean_ad_streaming,
+		check_mean_ad_no_poison
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -959,6 +1029,77 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(debug_assertions)]
+	fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		skip_if_unsupported!(kernel, test);
+
+		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let c = read_candles_from_csv(file)?;
+
+		// Test various parameter sweep configurations
+		let test_configs = vec![
+			(2, 10, 2),      // Small periods with step 2
+			(5, 25, 5),      // Medium periods with step 5
+			(30, 60, 15),    // Large periods with step 15
+			(2, 5, 1),       // Dense small range
+			(10, 50, 10),    // Wide range with step 10
+			(3, 15, 3),      // Small to medium range
+			(20, 30, 2),     // Medium range, dense sampling
+			(7, 21, 7),      // Week-based periods
+			(100, 200, 50),  // Very large periods
+		];
+
+		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
+			let output = MeanAdBatchBuilder::new()
+				.kernel(kernel)
+				.period_range(p_start, p_end, p_step)
+				.apply_candles(&c, "close")?;
+
+			for (idx, &val) in output.values.iter().enumerate() {
+				if val.is_nan() {
+					continue;
+				}
+
+				let bits = val.to_bits();
+				let row = idx / output.cols;
+				let col = idx % output.cols;
+				let combo = &output.combos[row];
+
+				// Check all three poison patterns with detailed context
+				if bits == 0x11111111_11111111 {
+					panic!(
+						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x22222222_22222222 {
+					panic!(
+						"[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+
+				if bits == 0x33333333_33333333 {
+					panic!(
+						"[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
+						 at row {} col {} (flat index {}) with params: period={}",
+						test, cfg_idx, val, bits, row, col, idx, combo.period.unwrap_or(5)
+					);
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(not(debug_assertions))]
+	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		Ok(()) // No-op in release builds
+	}
+
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {
 			paste! {
@@ -980,6 +1121,7 @@ mod tests {
 		};
 	}
 	gen_batch_tests!(check_batch_default_row);
+	gen_batch_tests!(check_batch_no_poison);
 }
 
 #[cfg(feature = "python")]
@@ -1128,10 +1270,7 @@ pub fn mean_ad_into_slice(
 	unsafe {
 		let warmup_period = first + 2 * period - 2;
 		
-		// Initialize warmup with NaN
-		for i in 0..warmup_period.min(dst.len()) {
-			dst[i] = f64::NAN;
-		}
+		// Helper functions already handle NaN initialization
 		
 		if first + period > data.len() {
 			return Ok(());
