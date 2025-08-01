@@ -44,7 +44,7 @@ use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes, init_matrix_prefixes, make_uninit_matrix,
+	alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix, init_matrix_prefixes,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1380,37 +1380,6 @@ fn vwmacd_compute_into(
 	Ok(())
 }
 
-/// Write VWMACD directly to output slices - no allocations
-/// This is the core helper for zero-copy WASM bindings
-pub fn vwmacd_into_slice(
-	macd_dst: &mut [f64],
-	signal_dst: &mut [f64], 
-	hist_dst: &mut [f64],
-	input: &VwmacdInput,
-	kern: Kernel,
-) -> Result<(), VwmacdError> {
-	let (close, volume, fast, slow, signal, fast_ma_type, slow_ma_type, signal_ma_type, 
-		 first, macd_warmup, total_warmup, chosen) = vwmacd_prepare(input, kern)?;
-	
-	// Validate output slice lengths
-	if macd_dst.len() != close.len() || signal_dst.len() != close.len() || hist_dst.len() != close.len() {
-		return Err(VwmacdError::InvalidPeriod {
-			fast,
-			slow,
-			signal,
-			data_len: close.len(),
-		});
-	}
-	
-	vwmacd_compute_into(
-		close, volume, fast, slow, signal,
-		fast_ma_type, slow_ma_type, signal_ma_type,
-		first, macd_warmup, total_warmup, chosen,
-		macd_dst, signal_dst, hist_dst
-	)?;
-	
-	Ok(())
-}
 
 #[derive(Clone, Debug)]
 pub struct VwmacdBatchRange {
@@ -1697,7 +1666,7 @@ fn vwmacd_batch_inner(
 	if parallel {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
-			out_uninit.par_chunks_mut(cols)
+			macd_uninit.par_chunks_mut(cols)
 				.enumerate()
 				.for_each(|(row, slice)| {
 					let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
@@ -1707,13 +1676,13 @@ fn vwmacd_batch_inner(
 
 		#[cfg(target_arch = "wasm32")]
 		{
-			for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+			for (row, slice) in macd_uninit.chunks_mut(cols).enumerate() {
 				let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
 				do_row(row, out_row);
 			}
 		}
 	} else {
-		for (row, slice) in out_uninit.chunks_mut(cols).enumerate() {
+		for (row, slice) in macd_uninit.chunks_mut(cols).enumerate() {
 			let out_row = unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, cols) };
 			do_row(row, out_row);
 		}
@@ -1722,7 +1691,12 @@ fn vwmacd_batch_inner(
 	// Convert to Vec<f64>
 	let macd: Vec<f64> = unsafe { std::mem::transmute(macd_uninit) };
 	
-	Ok(())
+	Ok(VwmacdBatchOutput {
+		macd,
+		params,
+		rows,
+		cols,
+	})
 }
 
 // --- WASM Bindings ---

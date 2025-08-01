@@ -373,78 +373,6 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
 }
 
 #[inline]
-pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result<(), DtiError> {
-	let (high, low) = match &input.data {
-		DtiData::Candles { candles } => {
-			let high = candles
-				.select_candle_field("high")
-				.map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-			let low = candles
-				.select_candle_field("low")
-				.map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-			(high, low)
-		}
-		DtiData::Slices { high, low } => (*high, *low),
-	};
-
-	if high.is_empty() || low.is_empty() {
-		return Err(DtiError::EmptyData);
-	}
-	let len = high.len();
-	if low.len() != len {
-		return Err(DtiError::EmptyData);
-	}
-	if dst.len() != len {
-		return Err(DtiError::InvalidPeriod { period: dst.len(), data_len: len });
-	}
-
-	let first_valid_idx = match (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-		Some(idx) => idx,
-		None => return Err(DtiError::AllValuesNaN),
-	};
-
-	let r = input.get_r();
-	let s = input.get_s();
-	let u = input.get_u();
-
-	for &period in &[r, s, u] {
-		if period == 0 || period > len {
-			return Err(DtiError::InvalidPeriod { period, data_len: len });
-		}
-		if (len - first_valid_idx) < period {
-			return Err(DtiError::NotEnoughValidData {
-				needed: period,
-				valid: len - first_valid_idx,
-			});
-		}
-	}
-
-	let chosen = match kern {
-		Kernel::Auto => detect_best_kernel(),
-		other => other,
-	};
-
-	unsafe {
-		match chosen {
-			Kernel::Scalar | Kernel::ScalarBatch => dti_scalar(high, low, r, s, u, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 | Kernel::Avx2Batch => dti_avx2(high, low, r, s, u, first_valid_idx, dst),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 | Kernel::Avx512Batch => dti_avx512(high, low, r, s, u, first_valid_idx, dst),
-			_ => unreachable!(),
-		}
-	}
-
-	// Fill warmup period with NaN
-	let warmup_end = first_valid_idx + 1;
-	for v in &mut dst[..warmup_end] {
-		*v = f64::NAN;
-	}
-
-	Ok(())
-}
-
-#[inline]
 pub fn dti_scalar(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
 	let len = high.len();
 	let alpha_r = 2.0 / (r as f64 + 1.0);
@@ -1352,15 +1280,6 @@ fn dti_batch_inner(
 	};
 	std::mem::forget(buf_mu);
 	
-	let values = unsafe {
-		Vec::from_raw_parts(
-			buf_guard.as_mut_ptr() as *mut f64,
-			buf_guard.len(),
-			buf_guard.capacity(),
-		)
-	};
-	mem::forget(buf_guard);
-	
 	Ok(DtiBatchOutput {
 		values,
 		combos,
@@ -1678,110 +1597,6 @@ pub fn dti_batch_into(
 		
 		Ok(total_rows)
 	}
-}
-
-#[inline(always)]
-pub fn dti_batch_inner_into(
-	high: &[f64],
-	low: &[f64],
-	sweep: &DtiBatchRange,
-	kern: Kernel,
-	parallel: bool,
-	out: &mut [f64],
-) -> Result<Vec<DtiParams>, DtiError> {
-	let combos = expand_grid(sweep);
-	if combos.is_empty() {
-		return Err(DtiError::InvalidPeriod { period: 0, data_len: 0 });
-	}
-	let len = high.len();
-	if low.len() != len {
-		return Err(DtiError::EmptyData);
-	}
-	
-	let first_valid = (0..len)
-		.find(|&i| !high[i].is_nan() && !low[i].is_nan())
-		.ok_or(DtiError::AllValuesNaN)?;
-		
-	let max_p = combos
-		.iter()
-		.map(|c| c.r.unwrap().max(c.s.unwrap()).max(c.u.unwrap()))
-		.max()
-		.unwrap();
-		
-	if len - first_valid < max_p {
-		return Err(DtiError::NotEnoughValidData {
-			needed: max_p,
-			valid: len - first_valid,
-		});
-	}
-	
-	let rows = combos.len();
-	let cols = len;
-	
-	if out.len() != rows * cols {
-		return Err(DtiError::InvalidPeriod { 
-			period: out.len(), 
-			data_len: rows * cols 
-		});
-	}
-	
-	let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-		let prm = &combos[row];
-		match kern {
-			Kernel::Scalar => dti_row_scalar(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx2 => dti_row_avx2(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
-			#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-			Kernel::Avx512 => dti_row_avx512(
-				high,
-				low,
-				prm.r.unwrap(),
-				prm.s.unwrap(),
-				prm.u.unwrap(),
-				first_valid,
-				out_row,
-			),
-			_ => unreachable!(),
-		}
-	};
-	
-	if parallel {
-		#[cfg(not(target_arch = "wasm32"))]
-		{
-			out.par_chunks_mut(cols)
-				.enumerate()
-				.for_each(|(row, slice)| do_row(row, slice));
-		}
-
-		#[cfg(target_arch = "wasm32")]
-		{
-			for (row, slice) in out.chunks_mut(cols).enumerate() {
-				do_row(row, slice);
-			}
-		}
-	} else {
-		for (row, slice) in out.chunks_mut(cols).enumerate() {
-			do_row(row, slice);
-		}
-	}
-	
-	Ok(combos)
 }
 
 #[cfg(test)]

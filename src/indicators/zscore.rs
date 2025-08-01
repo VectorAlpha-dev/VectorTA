@@ -1133,7 +1133,7 @@ unsafe fn zscore_compute_into_scalar(
 	let means = ma(ma_type, MaData::Slice(data), period)
 		.map_err(|e| ZscoreError::MaError(e.to_string()))?;
 	let dev_input = DevInput {
-		data,
+		data: DeviationData::Slice(data),
 		params: DevParams {
 			period: Some(period),
 			devtype: Some(devtype),
