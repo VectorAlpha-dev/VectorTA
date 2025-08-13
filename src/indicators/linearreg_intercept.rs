@@ -64,6 +64,7 @@ pub struct LinearRegInterceptOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct LinearRegInterceptParams {
 	pub period: Option<usize>,
 }
@@ -1317,10 +1318,11 @@ pub fn linearreg_intercept_batch_unified_js(data: &[f64], config: JsValue) -> Re
 	let batch_output = linearreg_intercept_batch_with_kernel(data, &sweep, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 	
+	let rows = batch_output.values.len() / data.len();
 	let result = LinearRegInterceptBatchJsOutput {
 		values: batch_output.values,
 		combos: batch_output.combos,
-		rows: batch_output.values.len() / data.len(),
+		rows,
 		cols: data.len(),
 	};
 	

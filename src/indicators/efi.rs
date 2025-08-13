@@ -66,6 +66,7 @@ pub struct EfiOutput {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct EfiParams {
 	pub period: Option<usize>,
 }

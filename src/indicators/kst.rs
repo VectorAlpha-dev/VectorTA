@@ -1849,7 +1849,10 @@ fn kst_into_slice(
 ) -> Result<(), KstError> {
     // Validate input
     if data.is_empty() {
-        return Err(KstError::EmptyData);
+        return Err(KstError::InvalidPeriod {
+            period: 0,
+            data_len: 0,
+        });
     }
     if line_out.len() != data.len() || signal_out.len() != data.len() {
         return Err(KstError::InvalidPeriod {

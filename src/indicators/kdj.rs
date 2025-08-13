@@ -116,6 +116,7 @@ impl<'a> KdjInput<'a> {
 // ======== Parameters ========
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub struct KdjParams {
 	pub fast_k_period: Option<usize>,
 	pub slow_k_period: Option<usize>,
@@ -2343,7 +2344,7 @@ pub fn kdj_js(
 	slow_k_ma_type: &str,
 	slow_d_period: usize,
 	slow_d_ma_type: &str,
-) -> Result<KdjResult, JsValue> {
+) -> Result<JsValue, JsValue> {
 	let params = KdjParams {
 		fast_k_period: Some(fast_k_period),
 		slow_k_period: Some(slow_k_period),
@@ -2364,11 +2365,14 @@ pub fn kdj_js(
 	kdj_into_slice(k_slice, d_slice, j_slice, &input, Kernel::Auto)
 		.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	Ok(KdjResult {
+	let result = KdjResult {
 		values,
 		rows: 3,
 		cols: high.len(),
-	})
+	};
+	
+	serde_wasm_bindgen::to_value(&result)
+		.map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(feature = "wasm")]

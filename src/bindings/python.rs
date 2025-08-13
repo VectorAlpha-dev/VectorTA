@@ -170,8 +170,6 @@ use crate::indicators::vosc::{vosc_batch_py, vosc_py, VoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::wad::{wad_batch_py, wad_py, WadStreamPy};
 #[cfg(feature = "python")]
-use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
-#[cfg(feature = "python")]
 use crate::indicators::dx::{dx_batch_py, dx_py, DxStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::fisher::{fisher_batch_py, fisher_py, FisherStreamPy};
@@ -303,8 +301,6 @@ use crate::indicators::stc::{stc_batch_py, stc_py, StcStreamPy};
 use crate::indicators::tsi::{tsi_batch_py, tsi_py, TsiStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
-#[cfg(feature = "python")]
-use crate::indicators::vwmacd::{vwmacd_batch_py, vwmacd_py, VwmacdStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::willr::{willr_batch_py, willr_py, WillrStreamPy};
 #[cfg(feature = "python")]

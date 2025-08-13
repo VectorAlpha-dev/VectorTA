@@ -2025,28 +2025,3 @@ pub fn deviation_batch_into(
 	}
 }
 
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-pub struct DeviationStream {
-	inner: crate::indicators::deviation::DeviationStream,
-}
-
-#[cfg(feature = "wasm")]
-#[wasm_bindgen]
-impl DeviationStream {
-	#[wasm_bindgen(constructor)]
-	pub fn new(period: usize, devtype: usize) -> Result<DeviationStream, JsValue> {
-		let params = DeviationParams {
-			period: Some(period),
-			devtype: Some(devtype),
-		};
-		let inner = crate::indicators::deviation::DeviationStream::try_new(params)
-			.map_err(|e| JsValue::from_str(&e.to_string()))?;
-		Ok(DeviationStream { inner })
-	}
-	
-	#[wasm_bindgen]
-	pub fn update(&mut self, value: f64) -> Option<f64> {
-		self.inner.update(value)
-	}
-}

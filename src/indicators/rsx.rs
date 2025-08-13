@@ -1266,7 +1266,7 @@ pub fn rsx_batch_py<'py>(
 }
 
 // Helper function for batch computation
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "wasm"))]
 #[inline(always)]
 fn rsx_batch_inner_into(
 	data: &[f64],

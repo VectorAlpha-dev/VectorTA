@@ -35,7 +35,7 @@ use thiserror::Error;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::{exceptions::PyValueError, pyclass, pyfunction, pymethods, types::PyDict, Bound, PyErr, PyResult, Python};
+use pyo3::{exceptions::PyValueError, pyclass, pyfunction, pymethods, types::{PyDict, PyDictMethods}, Bound, PyErr, PyResult, Python};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "wasm")]
@@ -676,7 +676,7 @@ pub fn fosc_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
 	let data_slice = data.as_slice()?;
-	let kernel_enum = validate_kernel(kernel)?;
+	let kernel_enum = validate_kernel(kernel, false)?;
 
 	let params = FoscParams { period: Some(period) };
 	let input = FoscInput::from_slice(data_slice, params);
@@ -687,7 +687,7 @@ pub fn fosc_py<'py>(
 		})?;
 		Ok(output)
 	})
-	.map(|result| result.values.into_pyarray_bound(py))
+	.map(|result| result.values.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
@@ -700,7 +700,7 @@ pub fn fosc_batch_py<'py>(
 	kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
 	let data_slice = data.as_slice()?;
-	let kernel_enum = validate_kernel(kernel).map(|k| match k {
+	let kernel_enum = validate_kernel(kernel, true).map(|k| match k {
 		Kernel::Scalar => Kernel::ScalarBatch,
 		Kernel::Avx2 => Kernel::Avx2Batch,
 		Kernel::Avx512 => Kernel::Avx512Batch,
@@ -716,7 +716,7 @@ pub fn fosc_batch_py<'py>(
 	let cols = data_slice.len();
 
 	// Pre-allocate output array
-	let output_array = unsafe { PyArray1::<f64>::new_bound(py, rows * cols) };
+	let output_array = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
 	let output_slice = unsafe { output_array.as_slice_mut()? };
 
 	// Compute directly into the pre-allocated array
@@ -730,10 +730,10 @@ pub fn fosc_batch_py<'py>(
 		
 		// Copy results to pre-allocated array
 		output_slice.copy_from_slice(&batch_result.values);
-		Ok(batch_result)
+		Ok::<FoscBatchOutput, PyErr>(batch_result)
 	})
 	.map(|result| {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("values", output_array)?;
 		
 		// Create combos as list of tuples

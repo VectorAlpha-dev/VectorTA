@@ -1118,8 +1118,8 @@ pub fn eri_into(
 		let input = EriInput::from_slices(high, low, source, params);
 		
 		// Check for aliasing - any output pointer matches any input pointer
-		let needs_temp = bull_ptr == high_ptr || bull_ptr == low_ptr || bull_ptr == source_ptr ||
-		                 bear_ptr == high_ptr || bear_ptr == low_ptr || bear_ptr == source_ptr ||
+		let needs_temp = bull_ptr as *const f64 == high_ptr || bull_ptr as *const f64 == low_ptr || bull_ptr as *const f64 == source_ptr ||
+		                 bear_ptr as *const f64 == high_ptr || bear_ptr as *const f64 == low_ptr || bear_ptr as *const f64 == source_ptr ||
 		                 bull_ptr == bear_ptr;
 		
 		if needs_temp {
