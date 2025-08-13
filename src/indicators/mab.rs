@@ -126,6 +126,10 @@ impl<'a> MabInput<'a> {
 		}
 	}
 
+	pub fn with_default_candles(candles: &'a Candles) -> Self {
+		Self::from_candles(candles, "close", MabParams::default())
+	}
+
 	pub fn get_fast_period(&self) -> usize {
 		self.params.fast_period.unwrap_or(10)
 	}
