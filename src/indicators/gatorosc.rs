@@ -2165,13 +2165,6 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _scalar_f64>]), Kernel::Scalar);
                     }
                 )*
-                #[cfg(all(target_feature = "simd128", target_arch = "wasm32"))]
-                $(
-                    #[test]
-                    fn [<$test_fn _simd128_f64>]() {
-                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Simd128);
-                    }
-                )*
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 $(
                     #[test]

@@ -2068,7 +2068,7 @@ mod tests {
 		// Test with NaN threshold
 		let mut params = DamianiVolatmeterParams::default();
 		params.threshold = Some(f64::NAN);
-		let input = DamianiVolatmeterInput::from_candles(&candles, "close", params);
+		let input = DamianiVolatmeterInput::from_candles(&candles, "close", params.clone());
 		let res = damiani_volatmeter_with_kernel(&input, kernel);
 		// Unlike alma which has explicit threshold validation, damiani will compute but produce NaN results
 		// This is acceptable behavior - the indicator doesn't fail but produces NaN outputs

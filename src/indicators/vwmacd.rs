@@ -2661,7 +2661,7 @@ mod tests {
 			
 			let output = builder.apply_slices(close, volume)?;
 			
-			for (idx, &val) in output.values.iter().enumerate() {
+			for (idx, &val) in output.macd.iter().enumerate() {
 				if val.is_nan() {
 					continue;
 				}
@@ -2669,7 +2669,7 @@ mod tests {
 				let bits = val.to_bits();
 				let row = idx / output.cols;
 				let col = idx % output.cols;
-				let combo = &output.combos[row];
+				let combo = &output.params[row];
 				
 				// Check all three poison patterns with detailed context
 				if bits == 0x11111111_11111111 {
@@ -2737,7 +2737,7 @@ mod tests {
 				.signal_ma_type(signal_ma.to_string())
 				.apply_slices(close, volume)?;
 			
-			for (idx, &val) in output.values.iter().enumerate() {
+			for (idx, &val) in output.macd.iter().enumerate() {
 				if val.is_nan() {
 					continue;
 				}
@@ -2745,7 +2745,7 @@ mod tests {
 				let bits = val.to_bits();
 				let row = idx / output.cols;
 				let col = idx % output.cols;
-				let combo = &output.combos[row];
+				let combo = &output.params[row];
 				
 				if bits == 0x11111111_11111111 || bits == 0x22222222_22222222 || bits == 0x33333333_33333333 {
 					let poison_type = if bits == 0x11111111_11111111 {

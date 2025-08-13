@@ -1310,13 +1310,6 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
-                #[cfg(all(feature = "simd128", target_arch = "wasm32"))]
-                $(
-                    #[test]
-                    fn [<$test_fn _simd128_f64>]() {
-                        let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Simd128);
-                    }
-                )*
             }
         }
     }

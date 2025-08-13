@@ -1081,7 +1081,7 @@ mod tests {
 		for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
 			let output = AdxBatchBuilder::new()
 				.kernel(kernel)
-				.period(p_start, p_end, p_step)
+				.period_range(p_start, p_end, p_step)
 				.apply_candles(&c)?;
 
 			// Check every value in the flat output matrix
