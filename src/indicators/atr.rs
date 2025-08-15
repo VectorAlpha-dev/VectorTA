@@ -706,6 +706,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use crate::utilities::enums::Kernel;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_atr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -896,6 +898,234 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_atr_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic OHLC data with proper constraints
+		let strat = (2usize..=50)
+			.prop_flat_map(|length| {
+				// First choose the data length, then generate vectors of that exact size
+				(length..400).prop_flat_map(move |data_len| {
+					(
+						// High prices
+						prop::collection::vec(
+							(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							data_len,
+						),
+						// Low prices (will be adjusted to be <= high)
+						prop::collection::vec(
+							(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							data_len,
+						),
+						// Close prices (will be adjusted to be between low and high)
+						prop::collection::vec(
+							(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							data_len,
+						),
+						Just(length),
+					)
+				})
+			})
+			.prop_map(|(high_raw, low_raw, close_raw, length)| {
+				// Ensure OHLC constraints are met
+				let len = high_raw.len();
+				assert_eq!(low_raw.len(), len);
+				assert_eq!(close_raw.len(), len);
+				
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				let mut close = Vec::with_capacity(len);
+				
+				for i in 0..len {
+					// Ensure low <= high
+					let h = high_raw[i].max(low_raw[i]);
+					let l = high_raw[i].min(low_raw[i]);
+					
+					// Ensure close is between low and high
+					let c = close_raw[i].max(l).min(h);
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+				
+				(high, low, close, length)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, length)| {
+				let params = AtrParams { length: Some(length) };
+				let input = AtrInput::from_slices(&high, &low, &close, params);
+				
+				// Get outputs from kernel under test and reference scalar
+				let AtrOutput { values: out } = atr_with_kernel(&input, kernel)?;
+				let AtrOutput { values: ref_out } = atr_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Check output length matches input
+				prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
+				
+				// Test 1: Warmup validation - first (length-1) values should be NaN
+				// This assumes clean input data with no leading NaNs
+				for i in 0..(length - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+				
+				// Test 2: Non-negative values - ATR measures volatility, must be >= 0
+				for (i, &val) in out.iter().enumerate().skip(length - 1) {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= 0.0,
+							"ATR must be non-negative at index {}: got {}",
+							i,
+							val
+						);
+					}
+				}
+				
+				// Test 3: Bounded by maximum true range in the data
+				// Calculate actual maximum true range (not just high-low)
+				let mut max_true_range = 0.0f64;
+				for i in 0..high.len() {
+					let tr = if i == 0 {
+						high[0] - low[0]
+					} else {
+						let hl = high[i] - low[i];
+						let hc = (high[i] - close[i - 1]).abs();
+						let lc = (low[i] - close[i - 1]).abs();
+						hl.max(hc).max(lc)
+					};
+					max_true_range = max_true_range.max(tr);
+				}
+				
+				// ATR is an exponential average, so it should never exceed the max true range
+				for (i, &val) in out.iter().enumerate().skip(length - 1) {
+					if !val.is_nan() && val.is_finite() {
+						prop_assert!(
+							val <= max_true_range + 1e-9,
+							"ATR at index {} exceeds max true range: {} > {}",
+							i,
+							val,
+							max_true_range
+						);
+					}
+				}
+				
+				// Test 4: Kernel consistency - all kernels should produce identical results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Handle NaN/infinite values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(), r.to_bits(),
+							"NaN/infinite mismatch at index {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+					
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				// Test 5: Constant price convergence - when all prices are identical
+				// Check if all high, low, and close values are the same
+				let first_price = high[0];
+				let is_constant = high.iter().all(|&h| (h - first_price).abs() < 1e-10) &&
+					low.iter().all(|&l| (l - first_price).abs() < 1e-10) &&
+					close.iter().all(|&c| (c - first_price).abs() < 1e-10);
+				
+				if is_constant {
+					// For constant prices, ATR should converge to 0
+					// Check the last few values after sufficient iterations
+					if out.len() >= length * 3 {
+						let last_values = &out[out.len().saturating_sub(5)..];
+						for &val in last_values {
+							if !val.is_nan() && val.is_finite() {
+								prop_assert!(
+									val < 1e-6,
+									"ATR should converge to 0 for constant prices, got {}",
+									val
+								);
+							}
+						}
+					}
+				}
+				
+				// Test 6: RMA smoothness property - ATR should change smoothly
+				// Check that consecutive ATR values don't jump erratically
+				if out.len() >= length + 10 {
+					for i in (length + 1)..out.len() {
+						if !out[i].is_nan() && !out[i-1].is_nan() {
+							// Calculate true range for current period
+							let tr = {
+								let hl = high[i] - low[i];
+								let hc = (high[i] - close[i - 1]).abs();
+								let lc = (low[i] - close[i - 1]).abs();
+								hl.max(hc).max(lc)
+							};
+							
+							// ATR uses RMA: new_atr = old_atr + (tr - old_atr) / length
+							// So the change should be bounded by |tr - old_atr| / length
+							let expected_change_bound = (tr - out[i-1]).abs() / length as f64;
+							let actual_change = (out[i] - out[i-1]).abs();
+							
+							prop_assert!(
+								actual_change <= expected_change_bound + 1e-9,
+								"ATR change at index {} exceeds RMA bound: {} > {}",
+								i,
+								actual_change,
+								expected_change_bound
+							);
+						}
+					}
+				}
+				
+				// Test 7: Single period edge case
+				if length == 1 {
+					// For length=1, ATR should equal the true range exactly
+					for i in 0..out.len() {
+						if !out[i].is_nan() {
+							let tr = if i == 0 {
+								high[0] - low[0]
+							} else {
+								let hl = high[i] - low[i];
+								let hc = (high[i] - close[i - 1]).abs();
+								let lc = (low[i] - close[i - 1]).abs();
+								hl.max(hc).max(lc)
+							};
+							prop_assert!(
+								(out[i] - tr).abs() <= 1e-9,
+								"Length=1 ATR should equal TR at index {}: {} vs {}",
+								i, out[i], tr
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_atr_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -931,6 +1161,9 @@ mod tests {
 		check_atr_accuracy_nan_check,
 		check_atr_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_atr_tests!(check_atr_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

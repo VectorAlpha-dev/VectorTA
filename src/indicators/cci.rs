@@ -767,6 +767,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use paste::paste;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_cci_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1044,6 +1046,205 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_cci_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with period and price data
+		let strat = (1usize..=64).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = CciParams { period: Some(period) };
+				let input = CciInput::from_slice(&data, params);
+
+				// Calculate CCI with the specified kernel
+				let CciOutput { values: out } = cci_with_kernel(&input, kernel).unwrap();
+				// Calculate reference output with scalar kernel for comparison
+				let CciOutput { values: ref_out } = cci_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Test 1: Warmup period validation - first (period - 1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN at index {} during warmup period, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Test 2: Non-NaN values after warmup
+				for i in (period - 1)..data.len() {
+					prop_assert!(
+						!out[i].is_nan(),
+						"[{}] Expected valid value at index {} after warmup, got NaN",
+						test_name,
+						i
+					);
+				}
+
+				// Test 3: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if y.is_nan() && r.is_nan() {
+						continue; // Both NaN is ok
+					}
+					
+					// Use ULP comparison for floating point equality
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = if y_bits > r_bits {
+						y_bits - r_bits
+					} else {
+						r_bits - y_bits
+					};
+					
+					prop_assert!(
+						ulp_diff <= 8,
+						"[{}] Kernel mismatch at index {}: {} != {} (ULP diff: {})",
+						test_name,
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Test 4: Constant price property - when all prices are equal, CCI should be 0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= period {
+					for i in (period - 1)..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"[{}] CCI should be ~0 for constant prices, got {} at index {}",
+							test_name,
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Test 5: Mathematical correctness - verify CCI calculation
+				for i in (period - 1)..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					// Calculate SMA
+					let sum: f64 = window.iter().sum();
+					let sma = sum / period as f64;
+					
+					// Calculate Mean Absolute Deviation
+					let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
+					
+					// Calculate expected CCI
+					let price = data[i];
+					let expected_cci = if mad == 0.0 {
+						0.0
+					} else {
+						(price - sma) / (0.015 * mad)
+					};
+					
+					// Compare with actual output
+					let actual_cci = out[i];
+					let diff = (actual_cci - expected_cci).abs();
+					
+					prop_assert!(
+						diff < 1e-10,
+						"[{}] CCI calculation mismatch at index {}: expected {}, got {}, diff {}",
+						test_name,
+						i,
+						expected_cci,
+						actual_cci,
+						diff
+					);
+				}
+
+				// Test 6: Edge case - period = 1
+				if period == 1 {
+					// With period=1, SMA is just the current value, MAD is 0, so CCI should be 0
+					for i in 0..data.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"[{}] CCI should be ~0 for period=1, got {} at index {}",
+							test_name,
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Test 7: Reasonable bounds - CCI typically ranges between -300 and 300
+				// (this is a soft check, extreme values are possible but rare)
+				for i in (period - 1)..data.len() {
+					if out[i].abs() > 500.0 {
+						// Just a warning, not a failure - extreme values are mathematically possible
+						eprintln!(
+							"[{}] Warning: Extreme CCI value {} at index {} (typical range is -300 to 300)",
+							test_name,
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Test 8: Very small MAD values - ensure no overflow/underflow issues
+				// When prices vary by tiny amounts, MAD can be very small, producing extreme CCIs
+				for i in (period - 1)..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					let sum: f64 = window.iter().sum();
+					let sma = sum / period as f64;
+					let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
+					
+					// If MAD is extremely small but non-zero
+					if mad > 0.0 && mad < 1e-12 {
+						let actual_cci = out[i];
+						// CCI should still be finite (not infinite or NaN)
+						prop_assert!(
+							actual_cci.is_finite(),
+							"[{}] CCI should be finite even with very small MAD ({}) at index {}, got {}",
+							test_name,
+							mad,
+							i,
+							actual_cci
+						);
+						
+						// The calculation should still be mathematically correct
+						let price = data[i];
+						let expected_cci = (price - sma) / (0.015 * mad);
+						let relative_error = ((actual_cci - expected_cci) / expected_cci).abs();
+						
+						// Allow slightly more tolerance for extreme values due to floating point precision
+						prop_assert!(
+							relative_error < 1e-8 || (actual_cci - expected_cci).abs() < 1e-10,
+							"[{}] CCI calculation with small MAD at index {}: expected {}, got {}, relative error {}",
+							test_name,
+							i,
+							expected_cci,
+							actual_cci,
+							relative_error
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_cci_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1081,6 +1282,9 @@ mod tests {
 		check_cci_empty_input,
 		check_cci_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_cci_tests!(check_cci_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

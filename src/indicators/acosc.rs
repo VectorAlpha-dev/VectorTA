@@ -1067,6 +1067,209 @@ mod tests {
 		check_acosc_streaming,
 		check_acosc_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_acosc_tests!(check_acosc_property);
+	
+	#[cfg(feature = "proptest")]
+	fn check_acosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate valid high/low price pairs
+		// Length must be >= 39 for ACOSC to work
+		let strat = (40usize..=400).prop_flat_map(|len| {
+			// Generate a base price and spread percentage
+			prop::collection::vec(
+				(1.0f64..10000.0f64)
+					.prop_flat_map(|base_price| {
+						(0.0f64..0.1f64).prop_map(move |spread_pct| {
+							// Calculate high/low with spread
+							let half_spread = base_price * spread_pct * 0.5;
+							let high = base_price + half_spread;
+							let low = base_price - half_spread;
+							(high, low)
+						})
+					})
+					.prop_filter("prices must be finite", |(h, l)| h.is_finite() && l.is_finite()),
+				len,
+			)
+		});
+
+		// Run property-based tests with random data
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |price_pairs| {
+				let (high_vec, low_vec): (Vec<f64>, Vec<f64>) = price_pairs.into_iter().unzip();
+				let params = AcoscParams::default();
+				let input = AcoscInput::from_slices(&high_vec, &low_vec, params);
+
+				// Get results from tested kernel and reference scalar
+				let result = acosc_with_kernel(&input, kernel).unwrap();
+				let scalar_result = acosc_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Test 1: Kernel consistency
+				for i in 0..result.osc.len() {
+					let y = result.osc[i];
+					let r = scalar_result.osc[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"NaN/finite mismatch in osc at idx {}: {} vs {}", i, y, r);
+						continue;
+					}
+					
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch in osc at idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				for i in 0..result.change.len() {
+					let y = result.change[i];
+					let r = scalar_result.change[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"NaN/finite mismatch in change at idx {}: {} vs {}", i, y, r);
+						continue;
+					}
+					
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch in change at idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+
+				// Test 2: Warmup period - first 38 values should be NaN
+				for i in 0..38.min(result.osc.len()) {
+					prop_assert!(
+						result.osc[i].is_nan(),
+						"Expected NaN in osc warmup at idx {}, got {}",
+						i, result.osc[i]
+					);
+					prop_assert!(
+						result.change[i].is_nan(),
+						"Expected NaN in change warmup at idx {}, got {}",
+						i, result.change[i]
+					);
+				}
+				
+				// First non-NaN should be at index 38
+				if result.osc.len() > 38 {
+					prop_assert!(
+						result.osc[38].is_finite(),
+						"Expected finite value at idx 38 in osc, got {}",
+						result.osc[38]
+					);
+					prop_assert!(
+						result.change[38].is_finite(),
+						"Expected finite value at idx 38 in change, got {}",
+						result.change[38]
+					);
+				}
+
+				// Test 3: Mathematical property - change[i] = osc[i] - osc[i-1]
+				for i in 39..result.osc.len() {
+					if result.osc[i].is_finite() && result.osc[i-1].is_finite() {
+						let expected_change = result.osc[i] - result.osc[i-1];
+						let actual_change = result.change[i];
+						
+						prop_assert!(
+							(expected_change - actual_change).abs() <= 1e-9,
+							"Change formula mismatch at idx {}: expected {} ({}−{}), got {}",
+							i, expected_change, result.osc[i], result.osc[i-1], actual_change
+						);
+					}
+				}
+
+				// Test 4: Special case - constant prices
+				if high_vec.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+				   low_vec.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// With constant median price, oscillator should converge to near zero
+					for i in 39..result.osc.len() {
+						prop_assert!(
+							result.osc[i].abs() <= 1e-6,
+							"Expected near-zero osc with constant prices at idx {}, got {}",
+							i, result.osc[i]
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		// Additional test with real market data for streaming consistency
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let test_len = candles.high.len().min(200);
+		let high_data = &candles.high[..test_len];
+		let low_data = &candles.low[..test_len];
+		
+		// Test streaming vs batch consistency with real data
+		{
+			let params = AcoscParams::default();
+			let input = AcoscInput::from_slices(high_data, low_data, params.clone());
+			let batch_result = acosc_with_kernel(&input, kernel)?;
+			
+			let mut stream = AcoscStream::try_new(params)?;
+			let mut stream_osc = Vec::with_capacity(test_len);
+			let mut stream_change = Vec::with_capacity(test_len);
+			
+			for i in 0..test_len {
+				match stream.update(high_data[i], low_data[i]) {
+					Some((osc, change)) => {
+						stream_osc.push(osc);
+						stream_change.push(change);
+					}
+					None => {
+						stream_osc.push(f64::NAN);
+						stream_change.push(f64::NAN);
+					}
+				}
+			}
+			
+			// Compare results
+			for i in 0..test_len {
+				let batch_o = batch_result.osc[i];
+				let stream_o = stream_osc[i];
+				
+				if batch_o.is_nan() && stream_o.is_nan() {
+					continue;
+				}
+				
+				assert!(
+					(batch_o - stream_o).abs() <= 1e-9,
+					"[{}] Streaming vs batch mismatch in osc at idx {}: {} vs {}",
+					test_name, i, batch_o, stream_o
+				);
+				
+				let batch_c = batch_result.change[i];
+				let stream_c = stream_change[i];
+				
+				if batch_c.is_nan() && stream_c.is_nan() {
+					continue;
+				}
+				
+				assert!(
+					(batch_c - stream_c).abs() <= 1e-9,
+					"[{}] Streaming vs batch mismatch in change at idx {}: {} vs {}",
+					test_name, i, batch_c, stream_c
+				);
+			}
+		}
+		
+		Ok(())
+	}
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

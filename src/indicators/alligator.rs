@@ -1425,6 +1425,260 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_alligator_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic parameter ranges for the three SMMA lines
+		let strat = (6usize..=50)
+			.prop_flat_map(|max_period| {
+				(
+					// Data vector with length sufficient for the largest period
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						max_period..400,
+					),
+					// Jaw parameters (typically the slowest/longest)
+					((max_period/2).max(2)..=max_period),  // jaw_period
+					(0usize..=10),                        // jaw_offset
+					// Teeth parameters (typically medium)
+					((max_period/3).max(2)..=(max_period*2/3).max(2)),  // teeth_period
+					(0usize..=8),                                       // teeth_offset
+					// Lips parameters (typically the fastest/shortest)
+					(2usize..=(max_period/3).max(2)),      // lips_period
+					(0usize..=5),                          // lips_offset
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset)| {
+				let params = AlligatorParams {
+					jaw_period: Some(jaw_period),
+					jaw_offset: Some(jaw_offset),
+					teeth_period: Some(teeth_period),
+					teeth_offset: Some(teeth_offset),
+					lips_period: Some(lips_period),
+					lips_offset: Some(lips_offset),
+				};
+				let input = AlligatorInput::from_slice(&data, params);
+
+				let AlligatorOutput { jaw: out_jaw, teeth: out_teeth, lips: out_lips } = 
+					alligator_with_kernel(&input, kernel).unwrap();
+				let AlligatorOutput { jaw: ref_jaw, teeth: ref_teeth, lips: ref_lips } = 
+					alligator_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index in data
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+
+				// Calculate warmup periods for each line
+				let jaw_warmup = first + jaw_period - 1 + jaw_offset;
+				let teeth_warmup = first + teeth_period - 1 + teeth_offset;
+				let lips_warmup = first + lips_period - 1 + lips_offset;
+
+				// Verify warmup periods have NaN values
+				for i in 0..jaw_warmup.min(out_jaw.len()) {
+					prop_assert!(out_jaw[i].is_nan(), "Expected NaN in jaw warmup at index {}", i);
+				}
+				for i in 0..teeth_warmup.min(out_teeth.len()) {
+					prop_assert!(out_teeth[i].is_nan(), "Expected NaN in teeth warmup at index {}", i);
+				}
+				for i in 0..lips_warmup.min(out_lips.len()) {
+					prop_assert!(out_lips[i].is_nan(), "Expected NaN in lips warmup at index {}", i);
+				}
+
+				// Verify that offset shifts output correctly
+				// The SMMA value calculated at position i should appear at output position i + offset
+				if jaw_warmup > 0 && jaw_warmup < data.len() {
+					// Check the first non-NaN value appears at the correct position
+					prop_assert!(out_jaw[jaw_warmup].is_finite(), 
+						"Expected first jaw value at index {} after warmup", jaw_warmup);
+					if jaw_warmup > 0 {
+						prop_assert!(out_jaw[jaw_warmup - 1].is_nan(), 
+							"Expected NaN before jaw warmup at index {}", jaw_warmup - 1);
+					}
+				}
+				if teeth_warmup > 0 && teeth_warmup < data.len() {
+					prop_assert!(out_teeth[teeth_warmup].is_finite(), 
+						"Expected first teeth value at index {} after warmup", teeth_warmup);
+					if teeth_warmup > 0 {
+						prop_assert!(out_teeth[teeth_warmup - 1].is_nan(), 
+							"Expected NaN before teeth warmup at index {}", teeth_warmup - 1);
+					}
+				}
+				if lips_warmup > 0 && lips_warmup < data.len() {
+					prop_assert!(out_lips[lips_warmup].is_finite(), 
+						"Expected first lips value at index {} after warmup", lips_warmup);
+					if lips_warmup > 0 {
+						prop_assert!(out_lips[lips_warmup - 1].is_nan(), 
+							"Expected NaN before lips warmup at index {}", lips_warmup - 1);
+					}
+				}
+
+				// Check consistency between kernels for all values
+				for i in 0..data.len() {
+					// Check jaw kernel consistency
+					let y_jaw = out_jaw[i];
+					let r_jaw = ref_jaw[i];
+					if !y_jaw.is_finite() || !r_jaw.is_finite() {
+						prop_assert!(y_jaw.to_bits() == r_jaw.to_bits(), 
+							"jaw finite/NaN mismatch idx {}: {} vs {}", i, y_jaw, r_jaw);
+					} else {
+						let ulp_diff: u64 = y_jaw.to_bits().abs_diff(r_jaw.to_bits());
+						prop_assert!(
+							(y_jaw - r_jaw).abs() <= 1e-9 || ulp_diff <= 4,
+							"jaw mismatch idx {}: {} vs {} (ULP={})",
+							i, y_jaw, r_jaw, ulp_diff
+						);
+					}
+
+					// Check teeth kernel consistency
+					let y_teeth = out_teeth[i];
+					let r_teeth = ref_teeth[i];
+					if !y_teeth.is_finite() || !r_teeth.is_finite() {
+						prop_assert!(y_teeth.to_bits() == r_teeth.to_bits(), 
+							"teeth finite/NaN mismatch idx {}: {} vs {}", i, y_teeth, r_teeth);
+					} else {
+						let ulp_diff: u64 = y_teeth.to_bits().abs_diff(r_teeth.to_bits());
+						prop_assert!(
+							(y_teeth - r_teeth).abs() <= 1e-9 || ulp_diff <= 4,
+							"teeth mismatch idx {}: {} vs {} (ULP={})",
+							i, y_teeth, r_teeth, ulp_diff
+						);
+					}
+
+					// Check lips kernel consistency
+					let y_lips = out_lips[i];
+					let r_lips = ref_lips[i];
+					if !y_lips.is_finite() || !r_lips.is_finite() {
+						prop_assert!(y_lips.to_bits() == r_lips.to_bits(), 
+							"lips finite/NaN mismatch idx {}: {} vs {}", i, y_lips, r_lips);
+					} else {
+						let ulp_diff: u64 = y_lips.to_bits().abs_diff(r_lips.to_bits());
+						prop_assert!(
+							(y_lips - r_lips).abs() <= 1e-9 || ulp_diff <= 4,
+							"lips mismatch idx {}: {} vs {} (ULP={})",
+							i, y_lips, r_lips, ulp_diff
+						);
+					}
+				}
+
+				// SMMA-specific property: smoothness check
+				// SMMA output should be smoother (less volatile) than input
+				if data.len() > jaw_warmup + 10 {
+					// Calculate variance of a segment of input data
+					let segment_start = jaw_warmup;
+					let segment_end = (jaw_warmup + 20).min(data.len());
+					
+					let input_variance = if segment_end > segment_start + 1 {
+						let input_segment = &data[segment_start..segment_end];
+						let input_mean: f64 = input_segment.iter().sum::<f64>() / input_segment.len() as f64;
+						let var: f64 = input_segment.iter()
+							.map(|x| (x - input_mean).powi(2))
+							.sum::<f64>() / input_segment.len() as f64;
+						var
+					} else {
+						0.0
+					};
+
+					let output_variance = if segment_end > segment_start + 1 {
+						let output_segment = &out_jaw[segment_start..segment_end];
+						let valid_outputs: Vec<f64> = output_segment.iter()
+							.filter(|x| x.is_finite())
+							.cloned()
+							.collect();
+						if valid_outputs.len() > 1 {
+							let output_mean: f64 = valid_outputs.iter().sum::<f64>() / valid_outputs.len() as f64;
+							let var: f64 = valid_outputs.iter()
+								.map(|x| (x - output_mean).powi(2))
+								.sum::<f64>() / valid_outputs.len() as f64;
+							var
+						} else {
+							0.0
+						}
+					} else {
+						0.0
+					};
+
+					// SMMA should reduce variance (be smoother) for non-constant data
+					if input_variance > 1e-10 && output_variance > 1e-10 {
+						prop_assert!(
+							output_variance <= input_variance * 1.1, // Allow 10% tolerance for numerical errors
+							"SMMA should smooth the data: output variance {} > input variance {}",
+							output_variance, input_variance
+						);
+					}
+				}
+
+				// Special case: when period is 1 and offset is 0, output should match input
+				if jaw_period == 1 && jaw_offset == 0 {
+					for i in first..data.len() {
+						prop_assert!((out_jaw[i] - data[i]).abs() <= f64::EPSILON,
+							"jaw with period=1, offset=0 should match input at idx {}", i);
+					}
+				}
+				if teeth_period == 1 && teeth_offset == 0 {
+					for i in first..data.len() {
+						prop_assert!((out_teeth[i] - data[i]).abs() <= f64::EPSILON,
+							"teeth with period=1, offset=0 should match input at idx {}", i);
+					}
+				}
+				if lips_period == 1 && lips_offset == 0 {
+					for i in first..data.len() {
+						prop_assert!((out_lips[i] - data[i]).abs() <= f64::EPSILON,
+							"lips with period=1, offset=0 should match input at idx {}", i);
+					}
+				}
+
+				// If all input values are the same constant, SMMA should converge to that constant
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) && !data.is_empty() {
+					let constant = data[first];
+					// For SMMA convergence, we need many iterations relative to the period
+					// Check convergence only if we have enough data (at least 5x the period)
+					if data.len() >= jaw_warmup + jaw_period * 5 {
+						// Check the last few values for convergence
+						let check_start = data.len().saturating_sub(5);
+						for i in check_start..data.len() {
+							if i >= jaw_warmup && i < out_jaw.len() {
+								// SMMA converges asymptotically, so use a more relaxed tolerance
+								prop_assert!((out_jaw[i] - constant).abs() <= 1e-4,
+									"jaw should converge to constant {} at idx {}, got {}", constant, i, out_jaw[i]);
+							}
+						}
+					}
+					if data.len() >= teeth_warmup + teeth_period * 5 {
+						let check_start = data.len().saturating_sub(5);
+						for i in check_start..data.len() {
+							if i >= teeth_warmup && i < out_teeth.len() {
+								prop_assert!((out_teeth[i] - constant).abs() <= 1e-4,
+									"teeth should converge to constant {} at idx {}, got {}", constant, i, out_teeth[i]);
+							}
+						}
+					}
+					if data.len() >= lips_warmup + lips_period * 5 {
+						let check_start = data.len().saturating_sub(5);
+						for i in check_start..data.len() {
+							if i >= lips_warmup && i < out_lips.len() {
+								prop_assert!((out_lips[i] - constant).abs() <= 1e-4,
+									"lips should converge to constant {} at idx {}, got {}", constant, i, out_lips[i]);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(not(feature = "proptest"))]
+	fn check_alligator_property(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		Ok(())
+	}
+
 	#[cfg(debug_assertions)]
 	fn check_alligator_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1690,6 +1944,7 @@ mod tests {
 		check_alligator_with_slice_data_reinput,
 		check_alligator_nan_handling,
 		check_alligator_zero_jaw_period,
+		check_alligator_property,
 		check_alligator_no_poison
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

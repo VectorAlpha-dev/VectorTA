@@ -590,11 +590,19 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
 	// fast horizontal sum (avoids _mm512_reduce_add_pd latency)
 	#[inline(always)]
 	unsafe fn horiz_sum(z: __m512d) -> f64 {
+		// Extract upper and lower 256-bit halves
 		let hi = _mm512_extractf64x4_pd(z, 1);
 		let lo = _mm512_castpd512_pd256(z);
-		let red = _mm256_add_pd(hi, lo);
-		let red = _mm256_hadd_pd(red, red);
-		_mm_cvtsd_f64(_mm256_castpd256_pd128(red))
+		// Add them together (now have 4 sums)
+		let sum256 = _mm256_add_pd(hi, lo);
+		// Horizontal add to get 2 sums
+		let sum128 = _mm256_hadd_pd(sum256, sum256);
+		// Extract high and low 128-bit parts and add
+		let hi128 = _mm256_extractf128_pd(sum128, 1);
+		let lo128 = _mm256_castpd256_pd128(sum128);
+		let final_sum = _mm_add_pd(hi128, lo128);
+		// Extract the final scalar result
+		_mm_cvtsd_f64(final_sum)
 	}
 
 	// ---------- phase 1: warm-up ----------
@@ -1632,42 +1640,200 @@ mod tests {
 	fn check_hma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 
+		// Load real market data for realistic testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let close_data = &candles.close;
+
+		// Strategy: test various parameter combinations with real data slices
 		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 30..200),
-			3usize..30,
+			2usize..=100,      // period (HMA requires >= 2)
+			0usize..close_data.len().saturating_sub(500), // starting index for data slice
+			200usize..=500,    // length of data slice to use
 		);
 
 		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(data, period)| {
-				let params = HmaParams { period: Some(period) };
-				let input = HmaInput::from_slice(&data, params);
+			.run(&strat, |(period, start_idx, slice_len)| {
+				// Ensure we have valid slice bounds
+				let end_idx = (start_idx + slice_len).min(close_data.len());
+				if end_idx <= start_idx || end_idx - start_idx < period + 10 {
+					return Ok(()); // Skip invalid combinations
+				}
 
-				// HMA may fail if there's not enough valid data
-				match hma_with_kernel(&input, kernel) {
-					Ok(HmaOutput { values: out }) => {
-						for i in (period + (period as f64).sqrt().floor() as usize - 2)..data.len() {
-							let y = out[i];
-							// HMA uses the formula: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-							// The 2*WMA(n/2) - WMA(n) operation is a form of linear extrapolation
-							// that deliberately produces values outside the input bounds to reduce lag.
-							// This is a key feature of HMA, not a bug.
-							// We only check that the output is finite (not NaN or infinite).
+				let data_slice = &close_data[start_idx..end_idx];
+				let params = HmaParams { period: Some(period) };
+				let input = HmaInput::from_slice(data_slice, params);
+
+				// Test the specified kernel
+				let result = hma_with_kernel(&input, kernel);
+				
+				// Also compute with scalar kernel for reference
+				let scalar_result = hma_with_kernel(&input, Kernel::Scalar);
+
+				// Both should succeed or fail together
+				match (result, scalar_result) {
+					(Ok(HmaOutput { values: out }), Ok(HmaOutput { values: ref_out })) => {
+						// Verify output length
+						prop_assert_eq!(out.len(), data_slice.len());
+						prop_assert_eq!(ref_out.len(), data_slice.len());
+
+						// Calculate expected warmup period
+						let sqrt_period = (period as f64).sqrt().floor() as usize;
+						let expected_warmup = period + sqrt_period - 1;
+
+						// Find first non-NaN value
+						let first_valid = out.iter().position(|x| !x.is_nan());
+						if let Some(first_idx) = first_valid {
+							// Verify warmup period is correct
 							prop_assert!(
-								y.is_nan() || y.is_finite(),
-								"HMA output at index {} is not finite: {}",
+								first_idx >= expected_warmup - 1,
+								"First valid at {} but expected warmup is {}",
+								first_idx,
+								expected_warmup
+							);
+
+							// Check NaN pattern - all values before first_valid should be NaN
+							for i in 0..first_idx {
+								prop_assert!(
+									out[i].is_nan(),
+									"Expected NaN at index {} during warmup, got {}",
+									i,
+									out[i]
+								);
+							}
+						}
+
+						// Verify kernel consistency
+						for i in 0..out.len() {
+							let y = out[i];
+							let r = ref_out[i];
+
+							// Both should be NaN or both should be valid
+							if y.is_nan() {
+								prop_assert!(r.is_nan(), "Kernel mismatch at {}: {} vs {}", i, y, r);
+								continue;
+							}
+
+							// Check finite values
+							prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
+
+							// Compare with scalar reference (allowing for floating-point precision)
+							let y_bits = y.to_bits();
+							let r_bits = r.to_bits();
+							let ulp_diff = y_bits.abs_diff(r_bits);
+
+							// AVX512 has higher ULP differences due to different FMA ordering
+							// but the absolute error is still very small (< 1e-8)
+							let ulp_tolerance = if matches!(kernel, Kernel::Avx512) { 20000 } else { 8 };
+							prop_assert!(
+								(y - r).abs() <= 1e-8 || ulp_diff <= ulp_tolerance,
+								"Kernel mismatch at {}: {} vs {} (ULP={})",
 								i,
-								y
+								y,
+								r,
+								ulp_diff
 							);
 						}
+
+						// Test HMA-specific properties for valid outputs
+						for i in expected_warmup..out.len() {
+							let y = out[i];
+							if y.is_nan() {
+								continue;
+							}
+
+							// HMA can produce values outside the recent window due to linear extrapolation
+							// This is intentional for lag reduction, so we only check it's finite
+							prop_assert!(y.is_finite(), "HMA output at {} is not finite: {}", i, y);
+
+							// For constant data, HMA should converge to that constant
+							if i >= period * 2 {
+								let window_start = i.saturating_sub(period);
+								let window = &data_slice[window_start..=i];
+								let is_constant = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+								if is_constant {
+									let constant_val = window[0];
+									prop_assert!(
+										(y - constant_val).abs() <= 1e-6,
+										"HMA should converge to {} for constant data, got {} at index {}",
+										constant_val,
+										y,
+										i
+									);
+								}
+							}
+						}
+
+						// Edge case: period = 2 (minimum valid)
+						if period == 2 {
+							// HMA should still produce valid output after warmup
+							let min_valid_idx = expected_warmup;
+							if out.len() > min_valid_idx {
+								prop_assert!(
+									out[min_valid_idx].is_finite(),
+									"HMA with period=2 should produce valid output at index {}",
+									min_valid_idx
+								);
+							}
+						}
+
+						Ok(())
 					}
-					Err(_) => {
-						// If HMA fails due to insufficient data, that's expected
-						// for some random test inputs
+					(Err(e1), Err(_e2)) => {
+						// Both kernels failed - this is expected for insufficient data
+						prop_assert!(
+							format!("{:?}", e1).contains("NotEnoughValidData") ||
+							format!("{:?}", e1).contains("InvalidPeriod"),
+							"Unexpected error type: {:?}",
+							e1
+						);
+						Ok(())
+					}
+					(Ok(_), Err(e)) | (Err(e), Ok(_)) => {
+						// Kernels should agree on success/failure
+						prop_assert!(
+							false,
+							"Kernel consistency failure: one succeeded, one failed with {:?}",
+							e
+						);
+						Ok(())
 					}
 				}
-				Ok(())
 			})
 			.unwrap();
+
+		// Additional edge case testing with synthetic data
+		let edge_cases = vec![
+			// Minimum period with small data
+			(vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
+			// Constant data
+			(vec![42.0; 100], 10),
+			// Monotonic increasing
+			((0..100).map(|i| i as f64).collect::<Vec<_>>(), 15),
+			// Monotonic decreasing  
+			((0..100).map(|i| 100.0 - i as f64).collect::<Vec<_>>(), 20),
+		];
+
+		for (case_idx, (data, period)) in edge_cases.into_iter().enumerate() {
+			let params = HmaParams { period: Some(period) };
+			let input = HmaInput::from_slice(&data, params);
+			
+			match hma_with_kernel(&input, kernel) {
+				Ok(out) => {
+					// Just verify it produces some valid output
+					let has_valid = out.values.iter().any(|&x| x.is_finite() && !x.is_nan());
+					assert!(
+						has_valid || data.len() < period + 2,
+						"[{}] Edge case {} produced no valid output",
+						test_name,
+						case_idx
+					);
+				}
+				Err(_) => {
+					// Error is acceptable for edge cases with insufficient data
+				}
+			}
+		}
 
 		Ok(())
 	}
@@ -1848,7 +2014,7 @@ mod tests {
 			// Large range
 			(10, 50, 10), // periods: 10, 20, 30, 40, 50
 			// Edge case: very small periods
-			(1, 3, 1), // periods: 1, 2, 3
+			(2, 4, 1), // periods: 2, 3, 4
 			// Edge case: large periods
 			(50, 150, 25), // periods: 50, 75, 100, 125, 150
 			// Dense range

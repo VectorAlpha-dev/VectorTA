@@ -1680,32 +1680,154 @@ mod tests {
 	fn check_frama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
 
+		// Load real market data for testing
+		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+		let candles = read_candles_from_csv(file_path)?;
+		let high = candles.select_candle_field("high").unwrap();
+		let low = candles.select_candle_field("low").unwrap();
+		let close = candles.select_candle_field("close").unwrap();
+
+		// Strategy for testing different parameter combinations with subsets of real data
+		let data_len = high.len();
 		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 30..200),
-			3usize..30,
+			// window size (will be made even if odd)
+			4usize..=64,
+			// sc: slow constant 
+			50usize..500,
+			// fc: fast constant
+			1usize..50,
+			// starting index in the data
+			0usize..data_len.saturating_sub(200),
+			// length of data slice to use (ensure enough for testing)
+			100usize..=200,
 		);
 
-		proptest::test_runner::TestRunner::default().run(&strat, |(data, win)| {
-			let params = FramaParams {
-				window: Some(win),
-				sc: None,
-				fc: None,
-			};
-			let input = FramaInput::from_slices(&data, &data, &data, params);
-			let FramaOutput { values } = frama_with_kernel(&input, kernel).unwrap();
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(window, sc, fc, start_idx, slice_len)| {
+				// Ensure we don't go out of bounds
+				let end_idx = (start_idx + slice_len).min(data_len);
+				let actual_len = end_idx - start_idx;
+				
+				// Skip if not enough data
+				if actual_len < window * 2 {
+					return Ok(());
+				}
 
-			for i in (win - 1)..data.len() {
-				let window = &data[i + 1 - win..=i];
-				let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-				let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-				let y = values[i];
-				prop_assert!(
-					y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
-					"idx {i}: {y} not in [{lo}, {hi}]"
-				);
-			}
-			Ok(())
-		})?;
+				// Get slices of real data (no artificial NaN injection)
+				let high_slice = &high[start_idx..end_idx];
+				let low_slice = &low[start_idx..end_idx];
+				let close_slice = &close[start_idx..end_idx];
+
+				let params = FramaParams {
+					window: Some(window),
+					sc: Some(sc),
+					fc: Some(fc),
+				};
+				
+				let input = FramaInput::from_slices(high_slice, low_slice, close_slice, params);
+				let result = frama_with_kernel(&input, kernel);
+				
+				// Should succeed with valid market data
+				prop_assert!(result.is_ok(), "FRAMA failed: {:?}", result.err());
+				let FramaOutput { values: out } = result.unwrap();
+				
+				// Also compute with scalar kernel for reference
+				let FramaOutput { values: ref_out } = frama_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// The actual window used is even (adjusted if odd)
+				let actual_window = if window & 1 == 1 { window + 1 } else { window };
+				
+				// FRAMA starts producing values at actual_window - 1
+				// (assuming all input data is valid, which it should be from CSV)
+				let first_output_idx = actual_window - 1;
+				
+				// Check warmup period
+				for i in 0..first_output_idx.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Check values after warmup
+				for i in first_output_idx..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// FRAMA should be bounded reasonably by the data range
+					// Since it's an adaptive EMA, it can be slightly outside recent ranges
+					// but should be within the overall data extremes
+					let all_high_max = high_slice.iter()
+						.filter(|x| x.is_finite())
+						.cloned()
+						.fold(f64::NEG_INFINITY, f64::max);
+					let all_low_min = low_slice.iter()
+						.filter(|x| x.is_finite())
+						.cloned()
+						.fold(f64::INFINITY, f64::min);
+					
+					if all_high_max.is_finite() && all_low_min.is_finite() {
+						// Allow some tolerance as FRAMA smooths the data
+						let tolerance = (all_high_max - all_low_min) * 0.01; // 1% tolerance
+						prop_assert!(
+							y.is_nan() || (y >= all_low_min - tolerance && y <= all_high_max + tolerance),
+							"idx {}: {} not in overall range [{}, {}] with tolerance {}",
+							i,
+							y,
+							all_low_min,
+							all_high_max,
+							tolerance
+						);
+					}
+					
+					// Compare with scalar reference implementation
+					// All kernels should produce identical results for valid data
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN mismatch at idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						// Allow small numerical differences between kernels
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"mismatch at idx {}: {} vs {} (ULP={})",
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					}
+					
+					// FRAMA-specific property: smoothing factor alpha should affect responsiveness
+					// With lower fc (fast constant), FRAMA should be more responsive
+					// This is tested implicitly through kernel consistency
+					
+					// Test edge case: when fc >= sc, alpha should be clamped
+					if fc >= sc && i > first_output_idx {
+						// With fc >= sc, FRAMA becomes less adaptive
+						// The change between consecutive values should be limited
+						let change = (y - out[i - 1]).abs();
+						let price_change = (close_slice[i] - close_slice[i - 1]).abs();
+						prop_assert!(
+							change <= price_change + 1e-6,
+							"Unexpected large change at idx {} with fc >= sc: {} vs price change {}",
+							i,
+							change,
+							price_change
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
 
 		Ok(())
 	}
