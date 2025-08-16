@@ -1499,6 +1499,362 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_pivot_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate diverse OHLC data including edge cases
+		let strat = (10usize..=200).prop_flat_map(|len| {
+			// Mix of normal and edge case data generation
+			prop_oneof![
+				// Normal case: realistic price movements
+				prop::collection::vec(
+					(100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+					len,
+				).prop_flat_map(move |base_prices| {
+					let ohlc_strat = prop::collection::vec(
+						(0f64..1f64, 0f64..1f64, 0f64..1f64, 0f64..1f64),
+						len,
+					);
+					
+					(ohlc_strat, 0usize..=4).prop_map(move |(factors, mode)| {
+						let mut high_data = Vec::with_capacity(len);
+						let mut low_data = Vec::with_capacity(len);
+						let mut close_data = Vec::with_capacity(len);
+						let mut open_data = Vec::with_capacity(len);
+						
+						for (i, base) in base_prices.iter().enumerate() {
+							let (high_factor, low_factor, close_factor, open_factor) = factors[i];
+							
+							// Generate realistic OHLC where high >= low
+							let range = base * 0.1; // 10% range
+							let low = base - range * low_factor;
+							let high = base + range * high_factor;
+							let open = low + (high - low) * open_factor;
+							let close = low + (high - low) * close_factor;
+							
+							high_data.push(high);
+							low_data.push(low);
+							open_data.push(open);
+							close_data.push(close);
+						}
+						
+						(high_data, low_data, close_data, open_data, mode)
+					})
+				}),
+				// Edge case: flat market (all prices equal)
+				(100f64..1000f64, 0usize..=4).prop_map(move |(price, mode)| {
+					let data = vec![price; len];
+					(data.clone(), data.clone(), data.clone(), data, mode)
+				}),
+				// Edge case: very small price differences
+				(100f64..1000f64, 0usize..=4).prop_map(move |(base, mode)| {
+					let mut high_data = Vec::with_capacity(len);
+					let mut low_data = Vec::with_capacity(len);
+					let mut close_data = Vec::with_capacity(len);
+					let mut open_data = Vec::with_capacity(len);
+					
+					for _ in 0..len {
+						let epsilon = 1e-10;
+						let low = base;
+						let high = base + epsilon;
+						let open = base + epsilon * 0.3;
+						let close = base + epsilon * 0.7;
+						
+						high_data.push(high);
+						low_data.push(low);
+						open_data.push(open);
+						close_data.push(close);
+					}
+					
+					(high_data, low_data, close_data, open_data, mode)
+				}),
+			]
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, open, mode)| {
+				let params = PivotParams { mode: Some(mode) };
+				let input = PivotInput::from_slices(&high, &low, &close, &open, params);
+
+				let output = pivot_with_kernel(&input, kernel)?;
+				let ref_output = pivot_with_kernel(&input, Kernel::Scalar)?;
+
+				// Verify output lengths
+				prop_assert_eq!(output.pp.len(), high.len());
+				prop_assert_eq!(output.r1.len(), high.len());
+				prop_assert_eq!(output.s1.len(), high.len());
+
+				for i in 0..high.len() {
+					let h = high[i];
+					let l = low[i];
+					let c = close[i];
+					let o = open[i];
+					
+					// Skip if any input is NaN
+					if h.is_nan() || l.is_nan() || c.is_nan() || o.is_nan() {
+						continue;
+					}
+
+					let pp = output.pp[i];
+					let r4 = output.r4[i];
+					let r3 = output.r3[i];
+					let r2 = output.r2[i];
+					let r1 = output.r1[i];
+					let s1 = output.s1[i];
+					let s2 = output.s2[i];
+					let s3 = output.s3[i];
+					let s4 = output.s4[i];
+					
+					let tolerance = 1e-9;
+					let range = h - l;
+
+					// Comprehensive formula verification for each mode
+					match mode {
+						0 => {
+							// Standard Mode
+							let expected_pp = (h + l + c) / 3.0;
+							prop_assert!((pp - expected_pp).abs() < tolerance,
+								"Standard PP at {}: {} vs {}", i, pp, expected_pp);
+							
+							// R1 = 2*PP - L
+							let expected_r1 = 2.0 * pp - l;
+							prop_assert!((r1 - expected_r1).abs() < tolerance,
+								"Standard R1 at {}: {} vs {}", i, r1, expected_r1);
+							
+							// R2 = PP + (H - L)
+							let expected_r2 = pp + range;
+							prop_assert!((r2 - expected_r2).abs() < tolerance,
+								"Standard R2 at {}: {} vs {}", i, r2, expected_r2);
+							
+							// S1 = 2*PP - H
+							let expected_s1 = 2.0 * pp - h;
+							prop_assert!((s1 - expected_s1).abs() < tolerance,
+								"Standard S1 at {}: {} vs {}", i, s1, expected_s1);
+							
+							// S2 = PP - (H - L)
+							let expected_s2 = pp - range;
+							prop_assert!((s2 - expected_s2).abs() < tolerance,
+								"Standard S2 at {}: {} vs {}", i, s2, expected_s2);
+							
+							// R3, R4, S3, S4 should be NaN for Standard mode
+							prop_assert!(r3.is_nan(), "Standard R3 should be NaN at {}", i);
+							prop_assert!(r4.is_nan(), "Standard R4 should be NaN at {}", i);
+							prop_assert!(s3.is_nan(), "Standard S3 should be NaN at {}", i);
+							prop_assert!(s4.is_nan(), "Standard S4 should be NaN at {}", i);
+							
+							// Verify ordering: S2 < S1 < PP < R1 < R2
+							prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
+							prop_assert!(s1 <= pp + tolerance, "S1 > PP at {}", i);
+							prop_assert!(pp <= r1 + tolerance, "PP > R1 at {}", i);
+							prop_assert!(r1 <= r2 + tolerance, "R1 > R2 at {}", i);
+						}
+						1 => {
+							// Fibonacci Mode
+							let expected_pp = (h + l + c) / 3.0;
+							prop_assert!((pp - expected_pp).abs() < tolerance,
+								"Fibonacci PP at {}: {} vs {}", i, pp, expected_pp);
+							
+							// Fibonacci ratios
+							let expected_r1 = pp + 0.382 * range;
+							let expected_r2 = pp + 0.618 * range;
+							let expected_r3 = pp + 1.0 * range;
+							let expected_s1 = pp - 0.382 * range;
+							let expected_s2 = pp - 0.618 * range;
+							let expected_s3 = pp - 1.0 * range;
+							
+							prop_assert!((r1 - expected_r1).abs() < tolerance,
+								"Fibonacci R1 at {}: {} vs {}", i, r1, expected_r1);
+							prop_assert!((r2 - expected_r2).abs() < tolerance,
+								"Fibonacci R2 at {}: {} vs {}", i, r2, expected_r2);
+							prop_assert!((r3 - expected_r3).abs() < tolerance,
+								"Fibonacci R3 at {}: {} vs {}", i, r3, expected_r3);
+							prop_assert!((s1 - expected_s1).abs() < tolerance,
+								"Fibonacci S1 at {}: {} vs {}", i, s1, expected_s1);
+							prop_assert!((s2 - expected_s2).abs() < tolerance,
+								"Fibonacci S2 at {}: {} vs {}", i, s2, expected_s2);
+							prop_assert!((s3 - expected_s3).abs() < tolerance,
+								"Fibonacci S3 at {}: {} vs {}", i, s3, expected_s3);
+							
+							// R4, S4 should be NaN for Fibonacci
+							prop_assert!(r4.is_nan(), "Fibonacci R4 should be NaN at {}", i);
+							prop_assert!(s4.is_nan(), "Fibonacci S4 should be NaN at {}", i);
+							
+							// Verify ordering
+							prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
+							prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
+							prop_assert!(s1 <= pp + tolerance, "S1 > PP at {}", i);
+							prop_assert!(pp <= r1 + tolerance, "PP > R1 at {}", i);
+							prop_assert!(r1 <= r2 + tolerance, "R1 > R2 at {}", i);
+							prop_assert!(r2 <= r3 + tolerance, "R2 > R3 at {}", i);
+						}
+						2 => {
+							// Demark Mode
+							let expected_pp = if c < o {
+								(h + 2.0 * l + c) / 4.0
+							} else if c > o {
+								(2.0 * h + l + c) / 4.0
+							} else {
+								(h + l + 2.0 * c) / 4.0
+							};
+							prop_assert!((pp - expected_pp).abs() < tolerance,
+								"Demark PP at {}: {} vs {}", i, pp, expected_pp);
+							
+							// Demark has special R1/S1 calculations
+							let expected_r1 = if c < o {
+								(h + 2.0 * l + c) / 2.0 - l
+							} else if c > o {
+								(2.0 * h + l + c) / 2.0 - l
+							} else {
+								(h + l + 2.0 * c) / 2.0 - l
+							};
+							let expected_s1 = if c < o {
+								(h + 2.0 * l + c) / 2.0 - h
+							} else if c > o {
+								(2.0 * h + l + c) / 2.0 - h
+							} else {
+								(h + l + 2.0 * c) / 2.0 - h
+							};
+							
+							prop_assert!((r1 - expected_r1).abs() < tolerance,
+								"Demark R1 at {}: {} vs {}", i, r1, expected_r1);
+							prop_assert!((s1 - expected_s1).abs() < tolerance,
+								"Demark S1 at {}: {} vs {}", i, s1, expected_s1);
+							
+							// Other levels should be NaN for Demark
+							prop_assert!(r2.is_nan(), "Demark R2 should be NaN at {}", i);
+							prop_assert!(r3.is_nan(), "Demark R3 should be NaN at {}", i);
+							prop_assert!(r4.is_nan(), "Demark R4 should be NaN at {}", i);
+							prop_assert!(s2.is_nan(), "Demark S2 should be NaN at {}", i);
+							prop_assert!(s3.is_nan(), "Demark S3 should be NaN at {}", i);
+							prop_assert!(s4.is_nan(), "Demark S4 should be NaN at {}", i);
+						}
+						3 => {
+							// Camarilla Mode
+							let expected_pp = (h + l + c) / 3.0;
+							prop_assert!((pp - expected_pp).abs() < tolerance,
+								"Camarilla PP at {}: {} vs {}", i, pp, expected_pp);
+							
+							// Camarilla specific multipliers
+							let expected_r4 = 0.55 * range + c;
+							let expected_r3 = 0.275 * range + c;
+							let expected_r2 = 0.183 * range + c;
+							let expected_r1 = 0.0916 * range + c;
+							let expected_s1 = c - 0.0916 * range;
+							let expected_s2 = c - 0.183 * range;
+							let expected_s3 = c - 0.275 * range;
+							let expected_s4 = c - 0.55 * range;
+							
+							prop_assert!((r4 - expected_r4).abs() < tolerance,
+								"Camarilla R4 at {}: {} vs {}", i, r4, expected_r4);
+							prop_assert!((r3 - expected_r3).abs() < tolerance,
+								"Camarilla R3 at {}: {} vs {}", i, r3, expected_r3);
+							prop_assert!((r2 - expected_r2).abs() < tolerance,
+								"Camarilla R2 at {}: {} vs {}", i, r2, expected_r2);
+							prop_assert!((r1 - expected_r1).abs() < tolerance,
+								"Camarilla R1 at {}: {} vs {}", i, r1, expected_r1);
+							prop_assert!((s1 - expected_s1).abs() < tolerance,
+								"Camarilla S1 at {}: {} vs {}", i, s1, expected_s1);
+							prop_assert!((s2 - expected_s2).abs() < tolerance,
+								"Camarilla S2 at {}: {} vs {}", i, s2, expected_s2);
+							prop_assert!((s3 - expected_s3).abs() < tolerance,
+								"Camarilla S3 at {}: {} vs {}", i, s3, expected_s3);
+							prop_assert!((s4 - expected_s4).abs() < tolerance,
+								"Camarilla S4 at {}: {} vs {}", i, s4, expected_s4);
+							
+							// Verify ordering
+							prop_assert!(s4 <= s3 + tolerance, "S4 > S3 at {}", i);
+							prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
+							prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
+							prop_assert!(r1 <= r2 + tolerance, "R1 > R2 at {}", i);
+							prop_assert!(r2 <= r3 + tolerance, "R2 > R3 at {}", i);
+							prop_assert!(r3 <= r4 + tolerance, "R3 > R4 at {}", i);
+						}
+						4 => {
+							// Woodie Mode
+							let expected_pp = (h + l + 2.0 * o) / 4.0;
+							prop_assert!((pp - expected_pp).abs() < tolerance,
+								"Woodie PP at {}: {} vs {}", i, pp, expected_pp);
+							
+							// Woodie calculations
+							let expected_r1 = 2.0 * pp - l;
+							let expected_r2 = pp + range;
+							let expected_r3 = h + 2.0 * (pp - l);
+							let expected_r4 = expected_r3 + range;
+							let expected_s1 = 2.0 * pp - h;
+							let expected_s2 = pp - range;
+							let expected_s3 = l - 2.0 * (h - pp);
+							let expected_s4 = expected_s3 - range;
+							
+							prop_assert!((r1 - expected_r1).abs() < tolerance,
+								"Woodie R1 at {}: {} vs {}", i, r1, expected_r1);
+							prop_assert!((r2 - expected_r2).abs() < tolerance,
+								"Woodie R2 at {}: {} vs {}", i, r2, expected_r2);
+							prop_assert!((r3 - expected_r3).abs() < tolerance,
+								"Woodie R3 at {}: {} vs {}", i, r3, expected_r3);
+							prop_assert!((r4 - expected_r4).abs() < tolerance,
+								"Woodie R4 at {}: {} vs {}", i, r4, expected_r4);
+							prop_assert!((s1 - expected_s1).abs() < tolerance,
+								"Woodie S1 at {}: {} vs {}", i, s1, expected_s1);
+							prop_assert!((s2 - expected_s2).abs() < tolerance,
+								"Woodie S2 at {}: {} vs {}", i, s2, expected_s2);
+							prop_assert!((s3 - expected_s3).abs() < tolerance,
+								"Woodie S3 at {}: {} vs {}", i, s3, expected_s3);
+							prop_assert!((s4 - expected_s4).abs() < tolerance,
+								"Woodie S4 at {}: {} vs {}", i, s4, expected_s4);
+							
+							// Verify ordering
+							prop_assert!(s4 <= s3 + tolerance, "S4 > S3 at {}", i);
+							prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
+							prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
+							prop_assert!(r1 <= r2 + tolerance, "R1 > R2 at {}", i);
+							prop_assert!(r2 <= r3 + tolerance, "R2 > R3 at {}", i);
+							prop_assert!(r3 <= r4 + tolerance, "R3 > R4 at {}", i);
+						}
+						_ => {}
+					}
+
+					// Verify kernel consistency
+					prop_assert!((pp - ref_output.pp[i]).abs() < tolerance,
+						"PP kernel mismatch at {}", i);
+					prop_assert!((r1 - ref_output.r1[i]).abs() < tolerance || (r1.is_nan() && ref_output.r1[i].is_nan()),
+						"R1 kernel mismatch at {}", i);
+					prop_assert!((s1 - ref_output.s1[i]).abs() < tolerance || (s1.is_nan() && ref_output.s1[i].is_nan()),
+						"S1 kernel mismatch at {}", i);
+
+					// Check for poison values in debug builds
+					#[cfg(debug_assertions)]
+					{
+						let check_poison = |val: f64, name: &str| {
+							if !val.is_nan() {
+								let bits = val.to_bits();
+								prop_assert_ne!(bits, 0x11111111_11111111, "{} poison at {}", name, i);
+								prop_assert_ne!(bits, 0x22222222_22222222, "{} poison at {}", name, i);
+								prop_assert_ne!(bits, 0x33333333_33333333, "{} poison at {}", name, i);
+							}
+							Ok(())
+						};
+						
+						check_poison(pp, "PP")?;
+						check_poison(r4, "R4")?;
+						check_poison(r3, "R3")?;
+						check_poison(r2, "R2")?;
+						check_poison(r1, "R1")?;
+						check_poison(s1, "S1")?;
+						check_poison(s2, "S2")?;
+						check_poison(s3, "S3")?;
+						check_poison(s4, "S4")?;
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	#[cfg(debug_assertions)]
 	fn check_pivot_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1629,6 +1985,10 @@ mod tests {
 		check_pivot_batch_default_row,
 		check_pivot_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_pivot_tests!(check_pivot_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 

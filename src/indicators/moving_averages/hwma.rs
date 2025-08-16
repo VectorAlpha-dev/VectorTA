@@ -1562,16 +1562,227 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
 	fn check_hwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
-		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 20..100),
+
+		// Main strategy: Test general properties with realistic data
+		let main_strat = (
+			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 20..200),
 			0.01f64..0.99,
 			0.01f64..0.99,
 			0.01f64..0.99,
 		);
 
-		proptest::test_runner::TestRunner::default().run(&strat, |(data, na, nb, nc)| {
+		proptest::test_runner::TestRunner::default().run(&main_strat, |(data, na, nb, nc)| {
+			let params = HwmaParams {
+				na: Some(na),
+				nb: Some(nb),
+				nc: Some(nc),
+			};
+			let input = HwmaInput::from_slice(&data, params.clone());
+			let HwmaOutput { values: out } = hwma_with_kernel(&input, kernel).unwrap();
+
+			// Get scalar reference for SIMD consistency check
+			let HwmaOutput { values: ref_out } = hwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+			// Property 1: Output length matches input
+			prop_assert_eq!(out.len(), data.len(), "Output length should match input");
+
+			// Property 2: First value should match first input (HWMA initialization)
+			// Based on implementation: f=data[0], v=0, a=0 => output = data[0]
+			if !data.is_empty() && data[0].is_finite() {
+				let first_diff = (out[0] - data[0]).abs();
+				prop_assert!(
+					first_diff < 1e-12,
+					"First output should match first input: got {}, expected {}, diff {}",
+					out[0], data[0], first_diff
+				);
+			}
+
+			// Property 3: SIMD consistency - all kernels should produce nearly identical results
+			for i in 0..out.len() {
+				let y = out[i];
+				let r = ref_out[i];
+
+				if !y.is_finite() || !r.is_finite() {
+					prop_assert_eq!(y.to_bits(), r.to_bits(), "NaN/Inf mismatch at idx {}", i);
+					continue;
+				}
+
+				// Tighter ULP tolerance (matching ALMA's strictness)
+				let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+				prop_assert!(
+					(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+					"[{}] SIMD mismatch at idx {}: kernel={:.15}, scalar={:.15}, ulp_diff={}",
+					test_name, i, y, r, ulp_diff
+				);
+			}
+
+			// Property 4: Bounds checking with extrapolation allowance
+			// HWMA can overshoot due to momentum terms, especially with high parameters
+			let (data_min, data_max) = data.iter()
+				.filter(|&&x| x.is_finite())
+				.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &x| {
+					(min.min(x), max.max(x))
+				});
+			
+			if data_min.is_finite() && data_max.is_finite() {
+				let range = (data_max - data_min).abs();
+				// Allow more extrapolation with higher parameters (momentum effect)
+				let max_param = na.max(nb).max(nc);
+				let extrapolation_factor = 0.1 + 0.2 * max_param; // 10-30% extrapolation
+				let tolerance = range * extrapolation_factor + 1e-6;
+				
+				for (idx, &y) in out.iter().enumerate() {
+					if y.is_finite() {
+						prop_assert!(
+							y >= data_min - tolerance && y <= data_max + tolerance,
+							"idx {}: {} outside bounds [{}, {}] with tolerance {}",
+							idx, y, data_min - tolerance, data_max + tolerance, tolerance
+						);
+					}
+				}
+			}
+
+			// Property 5: Constant data convergence
+			if data.len() > 20 && data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+				let constant_val = data[0];
+				// HWMA should converge to constant value
+				// Check last 10% of values for convergence
+				let check_start = out.len() * 9 / 10;
+				for (idx, &val) in out[check_start..].iter().enumerate() {
+					if val.is_finite() {
+						let diff = (val - constant_val).abs();
+						prop_assert!(
+							diff < 1e-6,
+							"Constant data convergence failed at idx {}: expected {}, got {}, diff {}",
+							check_start + idx, constant_val, val, diff
+						);
+					}
+				}
+			}
+
+			// Property 6: Special parameter cases
+			// When na=1, nb=0, nc=0, HWMA should closely follow the input
+			if (na - 1.0).abs() < 0.01 && nb < 0.01 && nc < 0.01 {
+				for (idx, (&y, &x)) in out.iter().zip(data.iter()).enumerate() {
+					if y.is_finite() && x.is_finite() {
+						let diff = (y - x).abs();
+						prop_assert!(
+							diff < 0.1, // Allow small numerical error
+							"With na≈1, nb≈0, nc≈0, output should follow input at idx {}: x={}, y={}, diff={}",
+							idx, x, y, diff
+						);
+					}
+				}
+			}
+
+			Ok(())
+		})?;
+
+		// Strategy 2: Parameter sensitivity testing
+		let param_strat = (
+			proptest::collection::vec((-100f64..100f64).prop_filter("finite", |x| x.is_finite()), 50..100),
+			prop::strategy::Union::new(vec![
+				(0.01f64..0.05).boxed(),  // Very small (high smoothing)
+				(0.95f64..0.99).boxed(),  // Very large (low smoothing)
+				(0.45f64..0.55).boxed(),  // Medium
+			]),
+			prop::strategy::Union::new(vec![
+				(0.01f64..0.05).boxed(),
+				(0.95f64..0.99).boxed(),
+				(0.45f64..0.55).boxed(),
+			]),
+			prop::strategy::Union::new(vec![
+				(0.01f64..0.05).boxed(),
+				(0.95f64..0.99).boxed(),
+				(0.45f64..0.55).boxed(),
+			]),
+		);
+
+		proptest::test_runner::TestRunner::default().run(&param_strat, |(data, na, nb, nc)| {
+			let params = HwmaParams {
+				na: Some(na),
+				nb: Some(nb),
+				nc: Some(nc),
+			};
+			let input = HwmaInput::from_slice(&data, params);
+			let result = hwma_with_kernel(&input, kernel);
+			
+			prop_assert!(result.is_ok(), "HWMA should handle all parameter combinations");
+			let HwmaOutput { values } = result.unwrap();
+			
+			// Check output is finite
+			for (idx, &val) in values.iter().enumerate() {
+				if !val.is_nan() {
+					prop_assert!(
+						val.is_finite(),
+						"Output should be finite at idx {}: got {}",
+						idx, val
+					);
+				}
+			}
+
+			// Test smoothness based on parameters
+			// Small parameters = smoother output, large parameters = more responsive
+			let avg_param = (na + nb + nc) / 3.0;
+			
+			// Calculate roughness metric (average absolute difference)
+			let diffs: Vec<f64> = values.windows(2)
+				.filter(|w| w[0].is_finite() && w[1].is_finite())
+				.map(|w| (w[1] - w[0]).abs())
+				.collect();
+			
+			if diffs.len() > 10 {
+				let avg_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
+				let data_diffs: Vec<f64> = data.windows(2)
+					.filter(|w| w[0].is_finite() && w[1].is_finite())
+					.map(|w| (w[1] - w[0]).abs())
+					.collect();
+				
+				if !data_diffs.is_empty() {
+					let data_avg_diff = data_diffs.iter().sum::<f64>() / data_diffs.len() as f64;
+					
+					// With very small parameters, output should be much smoother than input
+					if avg_param < 0.1 {
+						prop_assert!(
+							avg_diff < data_avg_diff * 0.5,
+							"Small parameters should produce smooth output: output_diff={}, data_diff={}",
+							avg_diff, data_avg_diff
+						);
+					}
+					// With very large parameters, output should closely follow input
+					else if avg_param > 0.9 {
+						prop_assert!(
+							avg_diff < data_avg_diff * 1.5,
+							"Large parameters should produce responsive output: output_diff={}, data_diff={}",
+							avg_diff, data_avg_diff
+						);
+					}
+				}
+			}
+
+			Ok(())
+		})?;
+
+		// Strategy 3: Step response testing
+		let step_strat = (
+			10usize..50,
+			-100f64..100f64,
+			-100f64..100f64,
+			0.1f64..0.9,
+			0.1f64..0.9,
+			0.1f64..0.9,
+		);
+
+		proptest::test_runner::TestRunner::default().run(&step_strat, |(size, level1, level2, na, nb, nc)| {
+			// Create step function data
+			let mut data = vec![level1; size];
+			data.extend(vec![level2; size]);
+			
 			let params = HwmaParams {
 				na: Some(na),
 				nb: Some(nb),
@@ -1579,24 +1790,71 @@ mod tests {
 			};
 			let input = HwmaInput::from_slice(&data, params);
 			let HwmaOutput { values } = hwma_with_kernel(&input, kernel).unwrap();
+			
+			// Check that HWMA eventually adapts to the new level
+			let last_quarter = values.len() * 3 / 4;
+			let final_values = &values[last_quarter..];
+			let avg_final = final_values.iter()
+				.filter(|&&v| v.is_finite())
+				.sum::<f64>() / final_values.len() as f64;
+			
+			// Should converge towards level2
+			let convergence_error = (avg_final - level2).abs();
+			let step_size = (level2 - level1).abs();
+			
+			prop_assert!(
+				convergence_error < step_size * 0.1 + 1e-3,
+				"HWMA should converge to new level: expected {}, got {}, error {}",
+				level2, avg_final, convergence_error
+			);
 
-			let mut min = f64::INFINITY;
-			let mut max = f64::NEG_INFINITY;
-			for (idx, &x) in data.iter().enumerate() {
-				if !x.is_nan() {
-					if x < min {
-						min = x;
-					}
-					if x > max {
-						max = x;
-					}
-				}
-				let y = values[idx];
+			Ok(())
+		})?;
+
+		// Strategy 4: Small data edge cases
+		let small_data_strat = (
+			1usize..=5,
+			0.1f64..0.9,
+			0.1f64..0.9,
+			0.1f64..0.9,
+		);
+
+		proptest::test_runner::TestRunner::default().run(&small_data_strat, |(size, na, nb, nc)| {
+			let data: Vec<f64> = (1..=size).map(|i| i as f64 * 10.0).collect();
+			
+			let params = HwmaParams {
+				na: Some(na),
+				nb: Some(nb),
+				nc: Some(nc),
+			};
+			let input = HwmaInput::from_slice(&data, params);
+			
+			let result = hwma_with_kernel(&input, kernel);
+			prop_assert!(result.is_ok(), "HWMA should handle small data sizes");
+			
+			let HwmaOutput { values } = result.unwrap();
+			
+			prop_assert_eq!(values.len(), data.len(), "Output length should match input");
+			
+			// First value should always match input (initialization)
+			if !data.is_empty() {
+				let first_diff = (values[0] - data[0]).abs();
 				prop_assert!(
-					y.is_nan() || (y >= min - 1e-9 && y <= max + 1e-9),
-					"idx {idx}: {y} not in [{min}, {max}]"
+					first_diff < 1e-9,
+					"First value should match for small data: got {}, expected {}",
+					values[0], data[0]
 				);
 			}
+			
+			// All values should be finite
+			for (idx, &val) in values.iter().enumerate() {
+				prop_assert!(
+					val.is_finite(),
+					"All values should be finite for small data at idx {}: got {}",
+					idx, val
+				);
+			}
+
 			Ok(())
 		})?;
 

@@ -302,31 +302,186 @@ pub fn reflex_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64])
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn reflex_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
+#[inline(always)]
+unsafe fn hsum_pd256(v: __m256d) -> f64 {
+	// Horizontal sum: 256->128->64
+	let hi = _mm256_extractf128_pd(v, 1);
+	let lo = _mm256_castpd256_pd128(v);
+	let sum = _mm_add_pd(hi, lo);
+	_mm_cvtsd_f64(_mm_add_pd(sum, _mm_unpackhi_pd(sum, sum)))
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub fn reflex_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	if period <= 32 {
-		unsafe { reflex_avx512_short(data, period, first, out) }
-	} else {
-		unsafe { reflex_avx512_long(data, period, first, out) }
+#[inline(always)]
+unsafe fn hsum_pd512(v: __m512d) -> f64 {
+	// Horizontal sum: 512->256->128->64
+	let hi256 = _mm512_extractf64x4_pd(v, 1);
+	let lo256 = _mm512_castpd512_pd256(v);
+	hsum_pd256(_mm256_add_pd(hi256, lo256))
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn reflex_avx2(data: &[f64], period: usize, _first: usize, out: &mut [f64]) {
+	const STEP: usize = 4;
+	let len = data.len();
+	if len < 3 || period < 2 {
+		return;
+	}
+
+	// 2-pole smoothing filter coefficients
+	let half_p = (period / 2).max(1) as f64;
+	let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
+	let a2 = a * a;
+	let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
+	let c = (1.0 + a2 - b) * 0.5;
+
+	let mut ssf = vec![0.0f64; len];
+	let mut ms = 0.0f64; // rolling ms
+
+	ssf[0] = data[0];
+	if len > 1 {
+		ssf[1] = data[1];
+	}
+
+	let inv_p = 1.0 / (period as f64);
+
+	// Reusable vectors for AVX2
+	let tbase = _mm256_setr_pd(1.0, 2.0, 3.0, 4.0);
+
+	for i in 2..len {
+		let ssf_i = c * (data[i] + data[i - 1]) + b.mul_add(ssf[i - 1], -a2 * ssf[i - 2]);
+		ssf[i] = ssf_i;
+
+		if i >= period {
+			let slope = (ssf[i - period] - ssf_i) * inv_p;
+			let slope_v = _mm256_set1_pd(slope);
+			let ssf_i_v = _mm256_set1_pd(ssf_i);
+
+			let mut acc = _mm256_setzero_pd();
+			let chunks = period / STEP;
+			let rem = period % STEP;
+
+			// t runs from 1..=period
+			let mut t_off = 0.0f64;
+			
+			// Process full 4-wide blocks
+			for _ in 0..chunks {
+				// pred = ssf_i + slope * (tbase + t_off)
+				let toff_v = _mm256_set1_pd(t_off);
+				let t_vec = _mm256_add_pd(tbase, toff_v);
+				let pred_v = _mm256_fmadd_pd(slope_v, t_vec, ssf_i_v);
+
+				// past = ssf[i - t] for t in (t_off+1 .. t_off+4), contiguous backward
+				let past_ptr = ssf.as_ptr().add(i - (t_off as usize) - 4);
+				let past_v = _mm256_loadu_pd(past_ptr);
+
+				acc = _mm256_add_pd(acc, _mm256_sub_pd(pred_v, past_v));
+				t_off += STEP as f64;
+			}
+
+			let mut my_sum = hsum_pd256(acc);
+
+			// Scalar tail
+			if rem != 0 {
+				let start = chunks * STEP + 1;
+				for t in start..=period {
+					let pred = ssf_i + slope * (t as f64);
+					my_sum += pred - ssf[i - t];
+				}
+			}
+
+			my_sum *= inv_p;
+
+			// EW variance proxy
+			ms = 0.04_f64 * my_sum * my_sum + 0.96_f64 * ms;
+			if ms > 0.0 {
+				out[i] = my_sum / ms.sqrt();
+			}
+		}
 	}
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn reflex_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
-}
+#[target_feature(enable = "avx512f,avx512dq,fma")]
+pub unsafe fn reflex_avx512(data: &[f64], period: usize, _first: usize, out: &mut [f64]) {
+	const STEP: usize = 8;
+	let len = data.len();
+	if len < 3 || period < 2 { 
+		return;
+	}
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
-pub unsafe fn reflex_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
+	// IIR coeffs
+	let half_p = (period / 2).max(1) as f64;
+	let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
+	let a2 = a * a;
+	let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
+	let c = (1.0 + a2 - b) * 0.5;
+
+	let mut ssf = vec![0.0f64; len];
+	let mut ms = 0.0f64; // rolling ms; no need to write an array
+
+	ssf[0] = data[0];
+	if len > 1 { 
+		ssf[1] = data[1];
+	}
+
+	let inv_p = 1.0 / (period as f64);
+
+	// Reusable vectors
+	let tbase = _mm512_setr_pd(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
+
+	for i in 2..len {
+		let ssf_i = c * (data[i] + data[i - 1]) + b.mul_add(ssf[i - 1], -a2 * ssf[i - 2]);
+		ssf[i] = ssf_i;
+
+		if i >= period {
+			let slope = (ssf[i - period] - ssf_i) * inv_p; // (ssf[i-p]-ssf[i])/p
+			let slope_v = _mm512_set1_pd(slope);
+			let ssf_i_v = _mm512_set1_pd(ssf_i);
+
+			let mut acc = _mm512_setzero_pd();
+			let chunks = period / STEP;
+			let rem = period % STEP;
+
+			// t runs from 1..=period; we handle as (tbase + t_off)
+			let mut t_off = 0.0f64;
+			
+			// Process full 8-wide blocks
+			for _ in 0..chunks {
+				// pred = ssf_i + slope * (tbase + t_off)
+				let toff_v = _mm512_set1_pd(t_off);
+				let t_vec = _mm512_add_pd(tbase, toff_v);
+				let pred_v = _mm512_fmadd_pd(slope_v, t_vec, ssf_i_v);
+
+				// past = ssf[i - t] for t in (t_off+1 .. t_off+8), contiguous backward
+				let past_ptr = ssf.as_ptr().add(i - (t_off as usize) - 8);
+				let past_v = _mm512_loadu_pd(past_ptr);
+
+				acc = _mm512_add_pd(acc, _mm512_sub_pd(pred_v, past_v));
+				t_off += STEP as f64;
+			}
+
+			let mut my_sum = hsum_pd512(acc);
+
+			// Scalar tail
+			if rem != 0 {
+				let start = chunks * STEP + 1;
+				for t in start..=period {
+					let pred = ssf_i + slope * (t as f64);
+					my_sum += pred - ssf[i - t];
+				}
+			}
+
+			my_sum *= inv_p;
+
+			// EW variance proxy (scalar)
+			ms = 0.04_f64 * my_sum * my_sum + 0.96_f64 * ms;
+			if ms > 0.0 {
+				out[i] = my_sum / ms.sqrt();
+			}
+		}
+	}
 }
 
 // --- Zero-copy prepare/compute pattern ---
@@ -763,29 +918,13 @@ unsafe fn reflex_row_scalar(data: &[f64], first: usize, period: usize, out: &mut
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn reflex_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
+	reflex_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn reflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	if period <= 32 {
-		reflex_row_avx512_short(data, first, period, out);
-	} else {
-		reflex_row_avx512_long(data, first, period, out);
-	}
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn reflex_row_avx512_short(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
-}
-
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn reflex_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-	reflex_scalar(data, period, first, out)
+	reflex_avx512(data, period, first, out)
 }
 
 // --- Zero-copy batch operations ---
@@ -1412,6 +1551,150 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_reflex_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Single comprehensive strategy following ALMA pattern
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = ReflexParams { period: Some(period) };
+				let input = ReflexInput::from_slice(&data, params);
+
+				let ReflexOutput { values: out } = reflex_with_kernel(&input, kernel).unwrap();
+				let ReflexOutput { values: ref_out } = reflex_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length must match input
+				prop_assert_eq!(out.len(), data.len());
+
+				// Property 2: First period values must be 0.0 (unique to reflex)
+				for i in 0..period.min(data.len()) {
+					prop_assert!(
+						out[i] == 0.0,
+						"[{}] idx {}: expected 0.0 during warmup, got {}",
+						test_name, i, out[i]
+					);
+				}
+
+				// Property 3: SIMD consistency
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"[{}] finite/NaN mismatch idx {}: {} vs {}", test_name, i, y, r);
+						continue;
+					}
+
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] mismatch idx {}: {} vs {} (ULP={})",
+						test_name, i, y, r, ulp_diff
+					);
+				}
+
+				// Property 4: After warmup, values should be finite for reasonable inputs
+				for i in period..data.len() {
+					if data[i].abs() < 1e10 {
+						prop_assert!(
+							out[i].is_finite(),
+							"[{}] idx {}: expected finite, got {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 5: Constant data should produce near-zero values
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+					// For constant data, reflex should be very close to 0 after 2*period
+					for i in (period * 2)..data.len() {
+						prop_assert!(
+							out[i].abs() < 0.001,
+							"[{}] idx {}: constant data should yield near-zero, got {}",
+							test_name, i, out[i]
+						);
+					}
+				}
+
+				// Property 6: Bounds checking - 95% of values should be within reasonable range
+				// Reflex is normalized by variance, typically within [-5, 5]
+				if data.len() > period * 2 {
+					let non_warmup = &out[period..];
+					let within_bounds = non_warmup.iter()
+						.filter(|&&x| x.abs() <= 5.0)
+						.count();
+					let total = non_warmup.len();
+					let ratio = within_bounds as f64 / total as f64;
+					
+					prop_assert!(
+						ratio >= 0.95,
+						"[{}] Only {:.1}% of values within [-5, 5] (expected >= 95%)",
+						test_name, ratio * 100.0
+					);
+				}
+
+				// Property 7: Step response convergence
+				// Create step data: first half at one level, second half at another
+				if data.len() >= period * 4 {
+					let step_data: Vec<f64> = (0..data.len())
+						.map(|i| if i < data.len() / 2 { 100.0 } else { 200.0 })
+						.collect();
+					
+					let step_input = ReflexInput::from_slice(&step_data, params);
+					let step_result = reflex_with_kernel(&step_input, kernel).unwrap();
+					
+					// After step, reflex should spike then decay
+					let step_point = data.len() / 2;
+					if step_point > period {
+						// Check for spike near step point
+						let spike_region = &step_result.values[step_point..step_point + period];
+						let max_spike = spike_region.iter().map(|x| x.abs()).fold(0.0, f64::max);
+						
+						// Should see significant response to step
+						prop_assert!(
+							max_spike > 0.1,
+							"[{}] Step response should produce spike > 0.1, got {}",
+							test_name, max_spike
+						);
+						
+						// Should decay after spike (last quarter should be smaller)
+						let last_quarter_start = step_point + period * 3;
+						if last_quarter_start < step_data.len() {
+							let last_quarter = &step_result.values[last_quarter_start..];
+							let avg_late = last_quarter.iter().map(|x| x.abs()).sum::<f64>() 
+								/ last_quarter.len() as f64;
+							
+							prop_assert!(
+								avg_late < max_spike * 0.5,
+								"[{}] Step response should decay: late avg {} vs spike {}",
+								test_name, avg_late, max_spike
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_reflex_tests!(
 		check_reflex_partial_params,
 		check_reflex_accuracy,
@@ -1422,7 +1705,8 @@ mod tests {
 		check_reflex_reinput,
 		check_reflex_nan_handling,
 		check_reflex_streaming,
-		check_reflex_no_poison
+		check_reflex_no_poison,
+		check_reflex_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

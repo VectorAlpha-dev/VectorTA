@@ -1044,6 +1044,176 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_cmo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: period 1-50 (including edge case), data length period-400
+		// Avoid near-zero values to prevent edge cases
+		let strat = (1usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64)
+							.prop_filter("finite and non-zero", |x| {
+								x.is_finite() && x.abs() > 1e-10
+							}),
+						period.max(2)..400,  // Ensure at least 2 data points for period=1
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = CmoParams {
+					period: Some(period),
+				};
+				let input = CmoInput::from_slice(&data, params);
+
+				let CmoOutput { values: out } = cmo_with_kernel(&input, kernel).unwrap();
+				let CmoOutput { values: ref_out } = cmo_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length should match input length
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: Warmup period validation
+				// CMO warmup is first_valid + period
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first_valid + period;
+				
+				for i in 0..warmup.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: First valid output should be at warmup index
+				if warmup < out.len() {
+					prop_assert!(
+						!out[warmup].is_nan(),
+						"Expected valid value at index {} (first after warmup), got NaN",
+						warmup
+					);
+				}
+
+				// Properties for valid outputs (after warmup)
+				for i in warmup..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 4: Output bounds check - CMO is bounded [-100, 100]
+					prop_assert!(
+						y.is_nan() || (y >= -100.0 - 1e-9 && y <= 100.0 + 1e-9),
+						"CMO value {} at index {} outside bounds [-100, 100]",
+						y,
+						i
+					);
+
+					// Property 5: Finite inputs produce finite outputs
+					if data[..=i].iter().all(|x| x.is_finite()) {
+						prop_assert!(
+							y.is_finite(),
+							"Expected finite output at index {}, got {}",
+							i,
+							y
+						);
+					}
+
+					// Property 6: Kernel consistency (reduced ULP tolerance for better precision)
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y_bits,
+							r_bits,
+							"Finite/NaN mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 8,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 7: Constant data should produce CMO of 0 (tighter tolerance)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < data.len() {
+					let cmo_val = out[warmup];
+					prop_assert!(
+						cmo_val.abs() <= 1e-9,
+						"Constant data should produce CMO of 0, got {} at index {}",
+						cmo_val,
+						warmup
+					);
+				}
+
+				// Property 8: Monotonically increasing data should produce positive CMO
+				let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+				if is_increasing && warmup < data.len() {
+					for i in warmup..data.len() {
+						prop_assert!(
+							out[i].is_nan() || out[i] >= -1e-6,
+							"Monotonically increasing data should produce non-negative CMO, got {} at index {}",
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Property 9: Monotonically decreasing data should produce negative CMO
+				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+				if is_decreasing && warmup < data.len() {
+					for i in warmup..data.len() {
+						prop_assert!(
+							out[i].is_nan() || out[i] <= 1e-6,
+							"Monotonically decreasing data should produce non-positive CMO, got {} at index {}",
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Property 10: Extreme movements test - strong gains should approach +100
+				if period > 1 && warmup + 5 < data.len() {
+					// Check if we have strong upward movement
+					let has_strong_gains = (warmup..data.len().min(warmup + 10))
+						.zip(warmup.saturating_sub(1)..data.len().saturating_sub(1).min(warmup + 9))
+						.all(|(i, j)| data[i] > data[j] * 1.1);  // 10% gains each step
+					
+					if has_strong_gains {
+						let last_idx = data.len() - 1;
+						prop_assert!(
+							out[last_idx].is_nan() || out[last_idx] >= 50.0,
+							"Strong gains should produce CMO > 50, got {} at index {}",
+							out[last_idx],
+							last_idx
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_cmo_tests!(
 		check_cmo_partial_params,
 		check_cmo_accuracy,
@@ -1054,6 +1224,9 @@ mod tests {
 		check_cmo_reinput,
 		check_cmo_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_cmo_tests!(check_cmo_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

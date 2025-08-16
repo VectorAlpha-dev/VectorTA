@@ -1153,6 +1153,168 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_cfo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: period 2-50, scalar 50-200, data length period-400
+		// Avoid near-zero values to prevent division issues
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64)
+							.prop_filter("finite and non-zero", |x| {
+								x.is_finite() && x.abs() > 1e-10
+							}),
+						period..400,
+					),
+					Just(period),
+					50.0f64..200.0f64,
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, scalar)| {
+				let params = CfoParams {
+					period: Some(period),
+					scalar: Some(scalar),
+				};
+				let input = CfoInput::from_slice(&data, params);
+
+				let CfoOutput { values: out } = cfo_with_kernel(&input, kernel).unwrap();
+				let CfoOutput { values: ref_out } = cfo_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length consistency
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: Warmup period validation
+				// First (period - 1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: First valid output check
+				// The first non-NaN value should be at index (period - 1)
+				if data.len() >= period {
+					let first_valid_idx = period - 1;
+					prop_assert!(
+						out[first_valid_idx].is_finite(),
+						"Expected finite value at first valid index {}, got {}",
+						first_valid_idx,
+						out[first_valid_idx]
+					);
+				}
+
+				// Properties 4-6: Check values after warmup
+				for i in (period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 4: Finite output guarantee
+					// When input is finite and non-zero (which we guarantee), output should be finite
+					prop_assert!(
+						y.is_finite(),
+						"Expected finite output at index {}, got {}",
+						i,
+						y
+					);
+
+					// Property 5: Constant data behavior
+					// When all values in window are identical, linear regression predicts same value
+					// So CFO should be very close to 0
+					let window_start = i.saturating_sub(period - 1);
+					let window = &data[window_start..=i];
+					if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+						// All values in window are essentially constant
+						let expected = 0.0;
+						prop_assert!(
+							(y - expected).abs() < 1e-6,
+							"For constant data at idx {}, expected CFO ≈ 0, got {}",
+							i,
+							y
+						);
+					}
+
+					// Property 6: Kernel consistency
+					// Different kernels should produce nearly identical results
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch at idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 7: Scale linearity
+				// Test that doubling the scalar doubles the output
+				if data.len() > period {
+					let params_double = CfoParams {
+						period: Some(period),
+						scalar: Some(scalar * 2.0),
+					};
+					let input_double = CfoInput::from_slice(&data, params_double);
+					let CfoOutput { values: out_double } = cfo_with_kernel(&input_double, kernel).unwrap();
+
+					for i in (period - 1)..data.len().min(period + 10) {
+						// Only test scale linearity when both values are finite and not too close to zero
+						if out[i].is_finite() && out_double[i].is_finite() && out[i].abs() > 1e-6 {
+							let ratio = out_double[i] / out[i];
+							prop_assert!(
+								(ratio - 2.0).abs() < 1e-9,
+								"Scale linearity failed at idx {}: ratio = {} (expected 2.0)",
+								i,
+								ratio
+							);
+						}
+					}
+				}
+
+				// Property 8: Edge case - period=2 should work
+				if period == 2 && data.len() >= 2 {
+					prop_assert!(
+						out[0].is_nan(),
+						"Period=2: first value should be NaN"
+					);
+					// Since we filter out near-zero values, the second value should always be finite
+					prop_assert!(
+						out[1].is_finite(),
+						"Period=2: second value should be finite, got {}",
+						out[1]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_cfo_tests!(
 		check_cfo_partial_params,
 		check_cfo_accuracy,
@@ -1163,7 +1325,8 @@ mod tests {
 		check_cfo_reinput,
 		check_cfo_nan_handling,
 		check_cfo_streaming,
-		check_cfo_no_poison
+		check_cfo_no_poison,
+		check_cfo_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

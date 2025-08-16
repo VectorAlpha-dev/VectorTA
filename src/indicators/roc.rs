@@ -1215,6 +1215,219 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_roc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate diverse test data
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			prop_oneof![
+				// Normal random data
+				(
+					prop::collection::vec(
+						(1f64..1e6f64).prop_filter("finite positive", |x| x.is_finite() && *x > 0.0),
+						period..400,
+					),
+					Just(period),
+				),
+				// Data with some constant sequences
+				(
+					prop::collection::vec(
+						prop_oneof![
+							(1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+							Just(100.0), // Constant value
+						],
+						period..400,
+					),
+					Just(period),
+				),
+				// Monotonic increasing data
+				(
+					(100f64..10000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
+						let len = period + (400 - period) / 2; // Average length
+						(0..len).map(|i| start + (i as f64) * step).collect::<Vec<_>>()
+					}),
+					Just(period),
+				),
+				// Monotonic decreasing data
+				(
+					(10000f64..100000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
+						let len = period + (400 - period) / 2; // Average length
+						(0..len).map(|i| start - (i as f64) * step).collect::<Vec<_>>()
+					}),
+					Just(period),
+				),
+			]
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = RocParams { period: Some(period) };
+				let input = RocInput::from_slice(&data, params);
+
+				let RocOutput { values: out } = roc_with_kernel(&input, kernel)?;
+				let RocOutput { values: ref_out } = roc_with_kernel(&input, Kernel::Scalar)?;
+
+				// Check output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Check warmup period - first 'period' values should be NaN
+				for i in 0..period {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Check mathematical correctness after warmup
+				for i in period..data.len() {
+					let current = data[i];
+					let previous = data[i - period];
+					let roc_val = out[i];
+					
+					// Expected ROC calculation
+					let expected_roc = if previous == 0.0 || previous.is_nan() {
+						0.0
+					} else {
+						((current / previous) - 1.0) * 100.0
+					};
+					
+					// Verify calculation correctness
+					if !roc_val.is_nan() {
+						prop_assert!(
+							(roc_val - expected_roc).abs() < 1e-9,
+							"ROC calculation mismatch at {}: got {}, expected {} (current={}, previous={})",
+							i, roc_val, expected_roc, current, previous
+						);
+						
+						// Sign properties
+						if current > previous && previous > 0.0 {
+							prop_assert!(
+								roc_val > -1e-9,
+								"ROC should be positive when current > previous at {}: roc={}, current={}, previous={}",
+								i, roc_val, current, previous
+							);
+						}
+						if current < previous && previous > 0.0 {
+							prop_assert!(
+								roc_val < 1e-9,
+								"ROC should be negative when current < previous at {}: roc={}, current={}, previous={}",
+								i, roc_val, current, previous
+							);
+						}
+						if (current - previous).abs() < 1e-12 && previous > 0.0 {
+							prop_assert!(
+								roc_val.abs() < 1e-9,
+								"ROC should be ~0 when current ≈ previous at {}: roc={}, current={}, previous={}",
+								i, roc_val, current, previous
+							);
+						}
+					}
+				}
+
+				// Check constant data property
+				let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				if is_constant && data.len() > period {
+					for i in period..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i].abs() < 1e-9,
+								"ROC of constant data should be 0 at {}: got {}",
+								i, out[i]
+							);
+						}
+					}
+				}
+
+				// Check monotonic properties
+				let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
+				let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
+				
+				if is_monotonic_increasing && !is_constant {
+					// For strictly increasing data, ROC should be positive
+					for i in period..data.len() {
+						if !out[i].is_nan() && data[i] > data[i - period] {
+							prop_assert!(
+								out[i] > -1e-9,
+								"ROC should be positive for increasing data at {}: got {}",
+								i, out[i]
+							);
+						}
+					}
+				}
+				
+				if is_monotonic_decreasing && !is_constant {
+					// For strictly decreasing data, ROC should be negative
+					for i in period..data.len() {
+						if !out[i].is_nan() && data[i] < data[i - period] {
+							prop_assert!(
+								out[i] < 1e-9,
+								"ROC should be negative for decreasing data at {}: got {}",
+								i, out[i]
+							);
+						}
+					}
+				}
+
+				// Verify kernel consistency
+				prop_assert_eq!(
+					out.len(),
+					ref_out.len(),
+					"Kernel output length mismatch"
+				);
+				
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/Inf mismatch at {}: {} vs {}",
+							i, y, r
+						);
+					} else {
+						let tolerance = 1e-9;
+						prop_assert!(
+							(y - r).abs() <= tolerance,
+							"Kernel mismatch at {}: {} vs {}, diff={}",
+							i, y, r, (y - r).abs()
+						);
+					}
+				}
+
+				// Check for poison values in debug builds
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert_ne!(
+								bits, 0x11111111_11111111,
+								"Found alloc_with_nan_prefix poison at {}", i
+							);
+							prop_assert_ne!(
+								bits, 0x22222222_22222222,
+								"Found init_matrix_prefixes poison at {}", i
+							);
+							prop_assert_ne!(
+								bits, 0x33333333_33333333,
+								"Found make_uninit_matrix poison at {}", i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_roc_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1250,6 +1463,9 @@ mod tests {
 		check_roc_streaming,
 		check_roc_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_roc_tests!(check_roc_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

@@ -1587,6 +1587,328 @@ mod tests {
 		check_msw_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	fn check_msw_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic test data
+		let strat = (2usize..=50)  // Period range for MSW
+			.prop_flat_map(|period| {
+				(period..=400).prop_flat_map(move |data_len| {
+					prop_oneof![
+						// 60% normal trading data
+						6 => prop::collection::vec(
+							(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							data_len
+						).prop_map(move |v| (v, period)),
+						// 15% constant prices
+						3 => prop::collection::vec(
+							Just(100.0f64),
+							data_len
+						).prop_map(move |v| (v, period)),
+						// 15% trending data (monotonic)
+						3 => (0.0f64..100.0f64, 0.01f64..1.0f64).prop_map(move |(start, step)| {
+							let data: Vec<f64> = (0..data_len)
+								.map(|i| start + (i as f64) * step)
+								.collect();
+							(data, period)
+						}),
+						// 10% edge cases (zeros, small values)
+						2 => prop_oneof![
+							prop::collection::vec(Just(0.0f64), data_len),
+							prop::collection::vec((0.0001f64..0.01f64), data_len),
+						].prop_map(move |v| (v, period))
+					]
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = MswParams {
+					period: Some(period),
+				};
+				let input = MswInput::from_slice(&data, params.clone());
+
+				// Get outputs from the specified kernel and scalar reference
+				let output = msw_with_kernel(&input, kernel).unwrap();
+				let ref_output = msw_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(
+					output.sine.len(),
+					data.len(),
+					"Sine output length mismatch"
+				);
+				prop_assert_eq!(
+					output.lead.len(),
+					data.len(),
+					"Lead output length mismatch"
+				);
+
+				// Find first valid index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first_valid + period - 1;
+
+				// Property 2: Warmup period verification
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(
+						output.sine[i].is_nan(),
+						"Sine[{}] should be NaN during warmup (first_valid={}, period={})",
+						i, first_valid, period
+					);
+					prop_assert!(
+						output.lead[i].is_nan(),
+						"Lead[{}] should be NaN during warmup (first_valid={}, period={})",
+						i, first_valid, period
+					);
+				}
+
+				// Property 3: First valid output at correct index
+				if warmup_end < data.len() {
+					prop_assert!(
+						!output.sine[warmup_end].is_nan(),
+						"Sine[{}] should be valid after warmup",
+						warmup_end
+					);
+					prop_assert!(
+						!output.lead[warmup_end].is_nan(),
+						"Lead[{}] should be valid after warmup",
+						warmup_end
+					);
+				}
+
+				// Property 4: Value bounds - sine and lead are bounded [-1, 1]
+				for i in warmup_end..data.len() {
+					let sine_val = output.sine[i];
+					let lead_val = output.lead[i];
+					
+					if !sine_val.is_nan() {
+						prop_assert!(
+							sine_val >= -1.0 - 1e-9 && sine_val <= 1.0 + 1e-9,
+							"Sine[{}] = {} is outside [-1, 1] bounds",
+							i, sine_val
+						);
+					}
+					
+					if !lead_val.is_nan() {
+						prop_assert!(
+							lead_val >= -1.0 - 1e-9 && lead_val <= 1.0 + 1e-9,
+							"Lead[{}] = {} is outside [-1, 1] bounds",
+							i, lead_val
+						);
+					}
+				}
+
+				// Property 5: Constant data produces consistent phase values
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && warmup_end + 5 < data.len() {
+					// For constant data, all outputs should have the same phase
+					// since the weighted sum is constant * sum_of_weights
+					let first_sine = output.sine[warmup_end];
+					let first_lead = output.lead[warmup_end];
+					
+					for i in (warmup_end + 1)..(warmup_end + 5).min(data.len()) {
+						let sine_val = output.sine[i];
+						let lead_val = output.lead[i];
+						
+						if !sine_val.is_nan() && !first_sine.is_nan() {
+							prop_assert!(
+								(sine_val - first_sine).abs() < 1e-9,
+								"Constant data: Sine[{}] = {} differs from first = {}",
+								i, sine_val, first_sine
+							);
+						}
+						if !lead_val.is_nan() && !first_lead.is_nan() {
+							prop_assert!(
+								(lead_val - first_lead).abs() < 1e-9,
+								"Constant data: Lead[{}] = {} differs from first = {}",
+								i, lead_val, first_lead
+							);
+						}
+					}
+				}
+
+				// Property 6: Mathematical phase relationship verification
+				// Lead = sin(phase + π/4) where Sine = sin(phase)
+				// We can verify: lead ≈ sine * cos(π/4) + cos(asin(sine)) * sin(π/4)
+				// Simplified: lead ≈ sine * 0.707 + sqrt(1 - sine²) * 0.707
+				if warmup_end + 10 < data.len() {
+					const COS_PI4: f64 = 0.7071067811865476; // cos(π/4) = sin(π/4)
+					
+					for i in (warmup_end + 5)..(warmup_end + 10).min(data.len()) {
+						let sine_val = output.sine[i];
+						let lead_val = output.lead[i];
+						
+						if !sine_val.is_nan() && !lead_val.is_nan() && sine_val.abs() < 0.999 {
+							// Calculate expected lead from sine using trigonometric identity
+							// sin(θ + π/4) = sin(θ)cos(π/4) + cos(θ)sin(π/4)
+							// cos(θ) = ±sqrt(1 - sin²(θ))
+							let cos_phase = (1.0 - sine_val * sine_val).sqrt();
+							// Try both positive and negative cosine (we don't know the quadrant)
+							let expected_lead_pos = sine_val * COS_PI4 + cos_phase * COS_PI4;
+							let expected_lead_neg = sine_val * COS_PI4 - cos_phase * COS_PI4;
+							
+							let diff_pos = (lead_val - expected_lead_pos).abs();
+							let diff_neg = (lead_val - expected_lead_neg).abs();
+							let min_diff = diff_pos.min(diff_neg);
+							
+							prop_assert!(
+								min_diff < 0.01,
+								"Phase relationship incorrect at [{}]: sine={}, lead={}, expected ≈ {} or {}",
+								i, sine_val, lead_val, expected_lead_pos, expected_lead_neg
+							);
+						}
+					}
+				}
+
+				// Property 7: Zero data produces specific deterministic values
+				if data.iter().all(|&x| x.abs() < 1e-10) && warmup_end < data.len() {
+					// For all-zero data:
+					// rp = sum(cos_table[j] * 0) = 0
+					// ip = sum(sin_table[j] * 0) = 0
+					// Since rp.abs() <= 0.001 and ip == 0 (not < 0):
+					// phase = π * 1.0 = π
+					// Since rp == 0 (not < 0), no additional π added
+					// phase += π/2 → phase = π + π/2 = 3π/2
+					// sine = sin(3π/2) = -1
+					// lead = sin(3π/2 + π/4) = sin(7π/4) = -0.7071...
+					
+					const EXPECTED_SINE: f64 = -1.0;
+					const EXPECTED_LEAD: f64 = -0.7071067811865476; // sin(7π/4)
+					
+					for i in warmup_end..(warmup_end + 3).min(data.len()) {
+						let sine_val = output.sine[i];
+						let lead_val = output.lead[i];
+						
+						prop_assert!(
+							(sine_val - EXPECTED_SINE).abs() < 1e-7,
+							"Zero data: Sine[{}] = {}, expected {}",
+							i, sine_val, EXPECTED_SINE
+						);
+						prop_assert!(
+							(lead_val - EXPECTED_LEAD).abs() < 1e-7,
+							"Zero data: Lead[{}] = {}, expected {}",
+							i, lead_val, EXPECTED_LEAD
+						);
+					}
+				}
+
+				// Property 8: Period=2 special case (minimum valid period)
+				// With period=2, we only look at current and previous value
+				// This tests the edge case of minimum lookback
+				if period == 2 && warmup_end < data.len() {
+					// For period=2:
+					// cos_table = [cos(0), cos(π)] = [1, -1]
+					// sin_table = [sin(0), sin(π)] = [0, 0]
+					// So ip = 0 always, and rp = data[i] * 1 + data[i-1] * (-1) = data[i] - data[i-1]
+					
+					for i in warmup_end..(warmup_end + 3).min(data.len()) {
+						let sine_val = output.sine[i];
+						let lead_val = output.lead[i];
+						
+						// Verify outputs are valid
+						prop_assert!(
+							!sine_val.is_nan(),
+							"Period=2: Sine[{}] should not be NaN",
+							i
+						);
+						prop_assert!(
+							!lead_val.is_nan(),
+							"Period=2: Lead[{}] should not be NaN",
+							i
+						);
+						
+						// Verify bounds
+						prop_assert!(
+							sine_val >= -1.0 - 1e-9 && sine_val <= 1.0 + 1e-9,
+							"Period=2: Sine[{}] = {} out of bounds",
+							i, sine_val
+						);
+						prop_assert!(
+							lead_val >= -1.0 - 1e-9 && lead_val <= 1.0 + 1e-9,
+							"Period=2: Lead[{}] = {} out of bounds",
+							i, lead_val
+						);
+						
+						// For alternating data [a, b, a, b, ...], should produce consistent phase
+						if i >= 3 && i >= warmup_end + 2 
+							&& (data[i] - data[i-2]).abs() < 1e-10 
+							&& (data[i-1] - data[i-3]).abs() < 1e-10 {
+							let prev_sine = output.sine[i-2];
+							prop_assert!(
+								(sine_val - prev_sine).abs() < 1e-6,
+								"Period=2 with alternating data: Sine should repeat every 2 samples"
+							);
+						}
+					}
+				}
+
+				// Property 9: Kernel consistency - all kernels produce identical results
+				for i in 0..data.len() {
+					let sine_val = output.sine[i];
+					let ref_sine = ref_output.sine[i];
+					let lead_val = output.lead[i];
+					let ref_lead = ref_output.lead[i];
+
+					// Check sine consistency
+					if sine_val.is_nan() && ref_sine.is_nan() {
+						continue; // Both NaN is OK
+					}
+					
+					if sine_val.is_finite() && ref_sine.is_finite() {
+						let sine_bits = sine_val.to_bits();
+						let ref_sine_bits = ref_sine.to_bits();
+						let ulp_diff = sine_bits.abs_diff(ref_sine_bits);
+						
+						prop_assert!(
+							(sine_val - ref_sine).abs() <= 1e-9 || ulp_diff <= 5,
+							"Kernel mismatch for sine at [{}]: {} vs {} (ULP={})",
+							i, sine_val, ref_sine, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							sine_val.is_nan(),
+							ref_sine.is_nan(),
+							"Kernel NaN mismatch for sine at [{}]",
+							i
+						);
+					}
+
+					// Check lead consistency
+					if lead_val.is_nan() && ref_lead.is_nan() {
+						continue; // Both NaN is OK
+					}
+					
+					if lead_val.is_finite() && ref_lead.is_finite() {
+						let lead_bits = lead_val.to_bits();
+						let ref_lead_bits = ref_lead.to_bits();
+						let ulp_diff = lead_bits.abs_diff(ref_lead_bits);
+						
+						prop_assert!(
+							(lead_val - ref_lead).abs() <= 1e-9 || ulp_diff <= 5,
+							"Kernel mismatch for lead at [{}]: {} vs {} (ULP={})",
+							i, lead_val, ref_lead, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							lead_val.is_nan(),
+							ref_lead.is_nan(),
+							"Kernel NaN mismatch for lead at [{}]",
+							i
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_msw_tests!(check_msw_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

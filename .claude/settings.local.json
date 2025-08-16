@@ -275,7 +275,10 @@
       "Bash(.venv/Scripts/pip install:*)",
       "Bash(.venvScriptspython testspythontest_willr.py)",
       "Bash(./test_nan_filling.exe)",
-      "Bash(./test_medprice_nan.exe)"
+      "Bash(./test_medprice_nan.exe)",
+      "WebSearch",
+      "WebFetch(domain:lemire.me)",
+      "Bash(RUST_LOG=proptest=debug cargo test --features nightly-avx --lib indicators::moving_averages::fwma::tests::check_fwma_property_scalar_f64 -- --nocapture)"
     ],
     "deny": []
   }

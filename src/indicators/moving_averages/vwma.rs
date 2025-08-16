@@ -779,6 +779,217 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with appropriate ranges for VWMA
+		// Period: 1-50 (reasonable range for VWMA)
+		// Data length: Must be at least period for valid output
+		let strat = (1usize..=50)
+			.prop_flat_map(|period| {
+				(period..400).prop_flat_map(move |len| {
+					(
+						prop::collection::vec(
+							(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						prop::collection::vec(
+							(0.0f64..1e6f64).prop_filter("non-negative finite", |x| x.is_finite() && *x >= 0.0),
+							len,
+						),
+						Just(period),
+					)
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(prices, volumes, period)| {
+				let params = VwmaParams { period: Some(period) };
+				let input = VwmaInput::from_slice(&prices, &volumes, params);
+
+				// Compute with the specified kernel
+				let VwmaOutput { values: out } = vwma_with_kernel(&input, kernel).unwrap();
+				// Compute reference with scalar kernel for comparison
+				let VwmaOutput { values: ref_out } = vwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length must match input
+				prop_assert_eq!(out.len(), prices.len(), "Output length mismatch");
+				prop_assert_eq!(out.len(), volumes.len(), "Output/volume length mismatch");
+
+				// Since we don't inject NaN into input data, first valid index is always 0
+				let first_valid = 0;
+
+				// Calculate warmup period - first non-NaN appears at first_valid + period - 1
+				let warmup_end = first_valid + period - 1;
+
+				// Property 2: Warmup period values must be NaN
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Check if the data is constant (for Property 6)
+				let is_constant_price = prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+				let is_constant_volume = volumes.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
+
+				// Property 3: Values after warmup should be finite and within bounds
+				// Start from warmup_end which is the first non-NaN index
+				for i in warmup_end..prices.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Get the window for this calculation
+					// For index i, the window is from (i - period + 1) to i inclusive
+					let window_start = if i >= period - 1 { i + 1 - period } else { 0 };
+					let window_prices = &prices[window_start..=i];
+					let window_volumes = &volumes[window_start..=i];
+
+					// Calculate bounds - VWMA should be within price range
+					let price_min = window_prices.iter().cloned().fold(f64::INFINITY, f64::min);
+					let price_max = window_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					// Check if all volumes in window are zero (would cause division by zero)
+					let volume_sum: f64 = window_volumes.iter().sum();
+					let has_valid_volume = volume_sum > 0.0 && volume_sum.is_finite();
+
+					// Property 4: Value bounds check (only when we have valid volume)
+					if y.is_finite() && has_valid_volume {
+						// Use a more forgiving tolerance for floating point comparisons
+						let tolerance = 1e-6 * price_max.abs().max(price_min.abs()).max(1.0);
+						prop_assert!(
+							y >= price_min - tolerance && y <= price_max + tolerance,
+							"VWMA at idx {} out of bounds: {} not in [{}, {}]",
+							i, y, price_min, price_max
+						);
+					} else if !has_valid_volume {
+						// When volume sum is 0, the VWMA formula becomes: sum(price * 0) / sum(0) = 0 / 0
+						// This is mathematically undefined. Different implementations may handle this as:
+						// - NaN (mathematically correct for 0/0)
+						// - Infinity (if treated as division by zero)
+						// - 0 or -0 (some implementations may return zero for "no volume" cases)
+						// We allow all these possibilities to accommodate various implementation choices
+						// without modifying the core indicator code.
+						let all_prices_zero = window_prices.iter().all(|&p| p == 0.0);
+						if all_prices_zero {
+							// 0*0/0 case - implementation may return 0, -0, or NaN
+							prop_assert!(
+								!y.is_finite() || y == 0.0 || y == -0.0,
+								"Expected NaN, 0, or -0 when all prices and volumes are 0 at idx {}, got {}",
+								i, y
+							);
+						} else {
+							// Non-zero prices with zero volume: mathematically sum(price*0)/0 = 0/0
+							// Some implementations may still return 0/-0 as a "no volume" indicator
+							prop_assert!(
+								!y.is_finite() || y == 0.0 || y == -0.0,
+								"Expected non-finite value, 0, or -0 when volume sum is 0 at idx {}, got {}",
+								i, y
+							);
+						}
+					}
+
+					// Property 5: SIMD consistency check
+					if y.is_finite() && r.is_finite() {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"SIMD mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					} else {
+						// For non-finite values, require exact bit match
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"Non-finite value mismatch at index {}",
+							i
+						);
+					}
+
+					// Property 6: For constant price data, VWMA should converge to that price
+					if is_constant_price && i >= warmup_end + period {
+						let const_price = prices[first_valid];
+						prop_assert!(
+							(y - const_price).abs() <= 1e-9,
+							"Constant price property failed at idx {}: expected {}, got {}",
+							i, const_price, y
+						);
+					}
+
+					// Property 7: Special case for period=1
+					if period == 1 && y.is_finite() {
+						// With period=1, VWMA = price * volume / volume = price
+						let expected_price = prices[i];
+						if expected_price.is_finite() && volumes[i] > 0.0 {
+							// Use relative tolerance for large values
+							let tolerance = (expected_price.abs() * 1e-10).max(1e-9);
+							prop_assert!(
+								(y - expected_price).abs() <= tolerance,
+								"Period=1 property failed at idx {}: expected {}, got {}",
+								i, expected_price, y
+							);
+						}
+					}
+
+					// Property 8: When volume is constant and non-zero, VWMA equals simple moving average
+					if is_constant_volume && volumes[first_valid] > 0.0 && y.is_finite() && has_valid_volume {
+						// Calculate simple moving average
+						let sma: f64 = window_prices.iter().sum::<f64>() / period as f64;
+						prop_assert!(
+							(y - sma).abs() <= 1e-9,
+							"Constant volume property failed at idx {}: VWMA={}, SMA={}",
+							i, y, sma
+						);
+					}
+				}
+
+				// Property 9: Check that all volumes are non-negative (data generation constraint)
+				for (i, &v) in volumes.iter().enumerate() {
+					if v.is_finite() {
+						prop_assert!(
+							v >= 0.0,
+							"Volume at index {} is negative: {}",
+							i, v
+						);
+					}
+				}
+
+				// Property 10: Volume scaling invariance - VWMA unchanged if all volumes scaled by constant
+				// Test this by comparing VWMA with volumes scaled by 2.0
+				if volumes.iter().all(|&v| v > 0.0 && v.is_finite()) {
+					let scaled_volumes: Vec<f64> = volumes.iter().map(|&v| v * 2.0).collect();
+					let scaled_params = VwmaParams { period: Some(period) };
+					let scaled_input = VwmaInput::from_slice(&prices, &scaled_volumes, scaled_params);
+					if let Ok(VwmaOutput { values: scaled_out }) = vwma_with_kernel(&scaled_input, kernel) {
+						for i in warmup_end..prices.len() {
+							if out[i].is_finite() && scaled_out[i].is_finite() {
+								prop_assert!(
+									(out[i] - scaled_out[i]).abs() <= 1e-9,
+									"Volume scaling invariance failed at idx {}: {} vs {}",
+									i, out[i], scaled_out[i]
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_vwma_tests!(
 		check_vwma_partial_params,
 		check_vwma_accuracy,
@@ -787,6 +998,9 @@ mod tests {
 		check_vwma_slice_data_reinput,
 		check_vwma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vwma_tests!(check_vwma_property);
 	#[cfg(test)]
 	mod batch_tests {
 		use super::*;

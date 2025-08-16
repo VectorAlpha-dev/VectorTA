@@ -821,6 +821,285 @@ mod tests {
             }
         }
     }
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_linearreg_angle_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic data and parameters
+		let strat = (2usize..=50)  // Period from 2-50 (1 is invalid for linear regression)
+			.prop_flat_map(|period| {
+				(
+					// Generate base price and volatility
+					(100f64..10000f64, 0.0001f64..0.1f64, period + 10..400)
+						.prop_flat_map(move |(base_price, volatility, data_len)| {
+							// Generate price movements with controlled volatility
+							let price_changes = prop::collection::vec(
+								(-volatility..volatility).prop_filter("finite", |x| x.is_finite()),
+								data_len,
+							);
+							
+							// Generate scenarios with different data patterns
+							let scenario = prop::strategy::Union::new(vec![
+								// 60% normal price movements
+								(0u8..60u8).boxed(),
+								// 10% constant prices
+								(60u8..70u8).boxed(),
+								// 10% linear uptrend
+								(70u8..80u8).boxed(),
+								// 10% linear downtrend
+								(80u8..90u8).boxed(),
+								// 5% near-horizontal (very small slope)
+								(90u8..95u8).boxed(),
+								// 5% steep trend (large slope)
+								(95u8..100u8).boxed(),
+							]);
+							
+							(Just(base_price), Just(volatility), Just(data_len), price_changes, scenario)
+						})
+						.prop_map(move |(base_price, volatility, data_len, price_changes, scenario)| {
+							let mut data = Vec::with_capacity(data_len);
+							
+							match scenario {
+								0..=59 => {
+									// Normal price movements
+									let mut current_price = base_price;
+									for change in price_changes {
+										current_price *= 1.0 + change;
+										data.push(current_price);
+									}
+								}
+								60..=69 => {
+									// Constant prices
+									data.resize(data_len, base_price);
+								}
+								70..=79 => {
+									// Linear uptrend
+									let slope = base_price * 0.001; // 0.1% per period
+									for i in 0..data_len {
+										data.push(base_price + slope * i as f64);
+									}
+								}
+								80..=89 => {
+									// Linear downtrend
+									let slope = base_price * 0.001;
+									for i in 0..data_len {
+										data.push(base_price - slope * i as f64);
+									}
+								}
+								90..=94 => {
+									// Near-horizontal (very small slope)
+									let slope = base_price * 0.00001; // 0.001% per period
+									for i in 0..data_len {
+										data.push(base_price + slope * i as f64);
+									}
+								}
+								95..=99 => {
+									// Steep trend (large slope)
+									let slope = base_price * 0.1; // 10% per period
+									for i in 0..data_len {
+										data.push(base_price + slope * i as f64);
+									}
+								}
+								_ => unreachable!()
+							}
+							data
+						}),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = Linearreg_angleParams { period: Some(period) };
+				let input = Linearreg_angleInput::from_slice(&data, params);
+				
+				// Get output from the kernel being tested
+				let result = linearreg_angle_with_kernel(&input, kernel)?;
+				let out = &result.values;
+				
+				// Get reference output from scalar kernel
+				let ref_result = linearreg_angle_with_kernel(&input, Kernel::Scalar)?;
+				let ref_out = &ref_result.values;
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+				
+				// Property 2: Warmup period values are NaN
+				// Since we generate clean data without NaN, first = 0
+				let warmup_end = period - 1;
+				for i in 0..warmup_end {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i, out[i]
+					);
+				}
+				
+				// Property 3: Valid values are within [-90, 90] degrees
+				for (i, &val) in out.iter().enumerate().skip(warmup_end) {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= -90.0 && val <= 90.0,
+							"Angle out of bounds at index {}: {} degrees",
+							i, val
+						);
+					}
+				}
+				
+				// Property 4: Constant data produces ~0 degree angle (relaxed tolerance)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// All values are essentially the same
+					for (i, &val) in out.iter().enumerate().skip(warmup_end) {
+						if !val.is_nan() {
+							prop_assert!(
+								val.abs() < 1e-3,  // Relaxed tolerance for floating-point
+								"Expected ~0° for constant data at index {}, got {}°",
+								i, val
+							);
+						}
+					}
+				}
+				
+				// Property 5: Enhanced linear trend validation
+				// Check if data is perfectly linear
+				let is_perfectly_linear = if data.len() >= 3 {
+					let mut deltas = Vec::new();
+					for i in 1..data.len() {
+						deltas.push(data[i] - data[i-1]);
+					}
+					// Check if all deltas are approximately equal
+					deltas.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
+				} else {
+					false
+				};
+				
+				if is_perfectly_linear && data.len() > period {
+					// For perfectly linear data, all angles should be identical
+					let valid_angles: Vec<f64> = out.iter()
+						.skip(warmup_end)
+						.filter(|&&v| !v.is_nan())
+						.copied()
+						.collect();
+					
+					if valid_angles.len() >= 2 {
+						let first_angle = valid_angles[0];
+						for (i, &angle) in valid_angles.iter().enumerate().skip(1) {
+							prop_assert!(
+								(angle - first_angle).abs() < 1e-6,
+								"Linear data should produce consistent angles. Index {} has {} vs first {}",
+								i, angle, first_angle
+							);
+						}
+					}
+				}
+				
+				// Check trend direction for linear data
+				let is_linear_up = data.windows(2).all(|w| w[1] > w[0]);
+				let is_linear_down = data.windows(2).all(|w| w[1] < w[0]);
+				
+				if is_linear_up {
+					for (i, &val) in out.iter().enumerate().skip(warmup_end) {
+						if !val.is_nan() {
+							prop_assert!(
+								val > 0.0,
+								"Expected positive angle for uptrend at index {}, got {}°",
+								i, val
+							);
+						}
+					}
+				}
+				
+				if is_linear_down {
+					for (i, &val) in out.iter().enumerate().skip(warmup_end) {
+						if !val.is_nan() {
+							prop_assert!(
+								val < 0.0,
+								"Expected negative angle for downtrend at index {}, got {}°",
+								i, val
+							);
+						}
+					}
+				}
+				
+				// Property 6: Mathematical correctness for simple cases
+				// For a simple linear sequence, verify the angle is correct
+				if period <= 10 && data.len() >= period * 2 {
+					// Create a simple test case: y = x (45-degree line in data space)
+					let test_data: Vec<f64> = (0..period).map(|i| i as f64).collect();
+					let test_params = Linearreg_angleParams { period: Some(period) };
+					let test_input = Linearreg_angleInput::from_slice(&test_data, test_params);
+					
+					if let Ok(test_result) = linearreg_angle_with_kernel(&test_input, kernel) {
+						if test_result.values.len() >= period {
+							let test_angle = test_result.values[period - 1];
+							if !test_angle.is_nan() {
+								// For y = x with unit spacing, slope = 1, angle = atan(1) = 45°
+								let expected_angle = 45.0;
+								prop_assert!(
+									(test_angle - expected_angle).abs() < 1.0,
+									"Mathematical test failed: expected ~45°, got {}°",
+									test_angle
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 7: Edge cases - extreme angles
+				// Near-horizontal should produce small angles
+				let base_price = data[0];
+				if data.windows(2).all(|w| {
+					let delta = (w[1] - w[0]).abs();
+					delta < base_price * 0.00001 && delta > 0.0
+				}) {
+					for &val in out.iter().skip(warmup_end) {
+						if !val.is_nan() {
+							prop_assert!(
+								val.abs() < 1.0,  // Should be very small angle
+								"Near-horizontal data should produce small angle, got {}°",
+								val
+							);
+						}
+					}
+				}
+				
+				// Property 8: Kernel consistency
+				for i in warmup_end..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Handle NaN/infinity cases
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(), r.to_bits(),
+							"NaN/infinity mismatch at index {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+					
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = y_bits.abs_diff(r_bits);
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+						"Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+	#[cfg(feature = "proptest")]
+	generate_all_lra_tests!(check_linearreg_angle_property);
+	
 	generate_all_lra_tests!(
 		check_lra_partial_params,
 		check_lra_accuracy,

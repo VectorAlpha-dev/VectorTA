@@ -1550,6 +1550,247 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_macd_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic data and parameters
+		let strat = (2usize..=20)  // Fast period from 2-20
+			.prop_flat_map(|fast_period| {
+				// Slow period must be greater than fast period
+				(fast_period + 1..=50).prop_flat_map(move |slow_period| {
+					// Signal period from 2-20
+					(2usize..=20).prop_flat_map(move |signal_period| {
+						// Generate base price and volatility
+						(100f64..10000f64, 0.0001f64..0.1f64).prop_flat_map(move |(base_price, volatility)| {
+							// Data length: needs to be at least slow + signal + some extra for testing
+							let min_len = slow_period + signal_period + 10;
+							(min_len..400).prop_flat_map(move |data_len| {
+								// Generate price changes with different scenarios
+								let price_changes = prop::collection::vec(
+									prop_oneof![
+										// 60% normal market moves
+										6 => (-volatility..volatility),
+										// 10% constant (no change)
+										1 => Just(0.0),
+										// 15% uptrend
+										15 => (0.0..volatility * 2.0),
+										// 15% downtrend
+										15 => (-volatility * 2.0..0.0),
+									],
+									data_len,
+								);
+
+								price_changes.prop_map(move |changes| {
+									// Build the price series
+									let mut data = Vec::with_capacity(data_len);
+									data.push(base_price);
+									
+									for i in 1..data_len {
+										let prev = data[i - 1];
+										let change = changes[i];
+										let new_price = prev * (1.0 + change);
+										// Ensure prices stay positive and reasonable
+										data.push(new_price.max(1.0).min(1e6));
+									}
+									
+									(data, fast_period, slow_period, signal_period)
+								})
+							})
+						})
+					})
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, fast_period, slow_period, signal_period)| {
+				// Create MACD input
+				let params = MacdParams {
+					fast_period: Some(fast_period),
+					slow_period: Some(slow_period),
+					signal_period: Some(signal_period),
+					ma_type: Some("ema".to_string()),
+				};
+				let input = MacdInput::from_slice(&data, params.clone());
+
+				// Compute MACD with the specified kernel
+				let result = macd_with_kernel(&input, kernel)?;
+
+				// Also compute with scalar kernel for comparison
+				let reference = macd_with_kernel(&input, Kernel::Scalar)?;
+
+				let len = data.len();
+				
+				// Property 1: Output lengths match input length
+				prop_assert_eq!(result.macd.len(), len, "MACD output length mismatch");
+				prop_assert_eq!(result.signal.len(), len, "Signal output length mismatch");
+				prop_assert_eq!(result.hist.len(), len, "Histogram output length mismatch");
+
+				// Calculate expected warmup periods (assuming clean data, first = 0)
+				let macd_warmup = slow_period - 1;
+				let signal_warmup = slow_period + signal_period - 2;
+
+				// Property 2: Warmup period values are NaN
+				for i in 0..macd_warmup.min(len) {
+					prop_assert!(result.macd[i].is_nan(), 
+						"MACD[{}] should be NaN during warmup (< {})", i, macd_warmup);
+				}
+				
+				for i in 0..signal_warmup.min(len) {
+					prop_assert!(result.signal[i].is_nan(), 
+						"Signal[{}] should be NaN during warmup (< {})", i, signal_warmup);
+					prop_assert!(result.hist[i].is_nan(), 
+						"Histogram[{}] should be NaN during warmup (< {})", i, signal_warmup);
+				}
+
+				// Property 3: Mathematical correctness - histogram = macd - signal
+				for i in signal_warmup..len {
+					if !result.macd[i].is_nan() && !result.signal[i].is_nan() {
+						let expected_hist = result.macd[i] - result.signal[i];
+						prop_assert!(
+							(result.hist[i] - expected_hist).abs() < 1e-10,
+							"Histogram[{}] = {} != MACD - Signal = {} - {} = {}",
+							i, result.hist[i], result.macd[i], result.signal[i], expected_hist
+						);
+					}
+				}
+
+				// Property 4: Constant data produces MACD near zero
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// For constant data, MACD should converge to 0
+					for i in signal_warmup..len {
+						if !result.macd[i].is_nan() {
+							prop_assert!(
+								result.macd[i].abs() < 1e-3,
+								"MACD[{}] = {} should be near 0 for constant data",
+								i, result.macd[i]
+							);
+						}
+					}
+				}
+
+				// Property 5: MACD bounded by reasonable range
+				// MACD is difference between two MAs, so it should be much smaller than the data values
+				let data_range = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max) 
+					- data.iter().cloned().fold(f64::INFINITY, f64::min);
+				for i in macd_warmup..len {
+					if !result.macd[i].is_nan() {
+						prop_assert!(
+							result.macd[i].abs() <= data_range,
+							"MACD[{}] = {} exceeds data range {}",
+							i, result.macd[i], data_range
+						);
+					}
+				}
+
+				// Property 6: Monotonic data behavior
+				// Check if data is monotonic increasing or decreasing
+				let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+				let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+				
+				if is_monotonic_inc && !data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// For monotonic increasing data, MACD should eventually be positive
+					let stable_start = (signal_warmup + 10).min(len - 1);
+					if stable_start < len {
+						let stable_macd = &result.macd[stable_start..len];
+						let positive_count = stable_macd.iter().filter(|&&v| !v.is_nan() && v > -1e-10).count();
+						let total_valid = stable_macd.iter().filter(|&&v| !v.is_nan()).count();
+						if total_valid > 0 {
+							prop_assert!(
+								positive_count as f64 / total_valid as f64 > 0.9,
+								"MACD should be mostly positive for monotonic increasing data"
+							);
+						}
+					}
+				} else if is_monotonic_dec && !data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// For monotonic decreasing data, MACD should eventually be negative
+					let stable_start = (signal_warmup + 10).min(len - 1);
+					if stable_start < len {
+						let stable_macd = &result.macd[stable_start..len];
+						let negative_count = stable_macd.iter().filter(|&&v| !v.is_nan() && v < 1e-10).count();
+						let total_valid = stable_macd.iter().filter(|&&v| !v.is_nan()).count();
+						if total_valid > 0 {
+							prop_assert!(
+								negative_count as f64 / total_valid as f64 > 0.9,
+								"MACD should be mostly negative for monotonic decreasing data"
+							);
+						}
+					}
+				}
+
+				// Property 7: Edge case - minimum period difference
+				if fast_period == slow_period - 1 {
+					// With minimum difference, MACD should be very small relative to data
+					let data_scale = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max).abs();
+					for i in signal_warmup..len {
+						if !result.macd[i].is_nan() && data_scale > 1e-10 {
+							let relative_macd = result.macd[i].abs() / data_scale;
+							prop_assert!(
+								relative_macd < 0.1,
+								"MACD[{}] relative magnitude {} too large for minimum period difference",
+								i, relative_macd
+							);
+						}
+					}
+				}
+
+				// Property 8: Kernel consistency - different kernels produce similar results
+				for i in 0..len {
+					let macd_y = result.macd[i];
+					let macd_r = reference.macd[i];
+					let signal_y = result.signal[i];
+					let signal_r = reference.signal[i];
+					let hist_y = result.hist[i];
+					let hist_r = reference.hist[i];
+
+					// Check MACD consistency
+					if !macd_y.is_finite() || !macd_r.is_finite() {
+						prop_assert_eq!(macd_y.to_bits(), macd_r.to_bits(), 
+							"MACD NaN/finite mismatch at index {}", i);
+					} else {
+						let ulp_diff = macd_y.to_bits().abs_diff(macd_r.to_bits());
+						prop_assert!(
+							(macd_y - macd_r).abs() <= 1e-9 || ulp_diff <= 5,
+							"MACD mismatch at index {}: {} vs {} (ULP={})",
+							i, macd_y, macd_r, ulp_diff
+						);
+					}
+
+					// Check signal consistency
+					if !signal_y.is_finite() || !signal_r.is_finite() {
+						prop_assert_eq!(signal_y.to_bits(), signal_r.to_bits(),
+							"Signal NaN/finite mismatch at index {}", i);
+					} else {
+						let ulp_diff = signal_y.to_bits().abs_diff(signal_r.to_bits());
+						prop_assert!(
+							(signal_y - signal_r).abs() <= 1e-9 || ulp_diff <= 5,
+							"Signal mismatch at index {}: {} vs {} (ULP={})",
+							i, signal_y, signal_r, ulp_diff
+						);
+					}
+
+					// Check histogram consistency
+					if !hist_y.is_finite() || !hist_r.is_finite() {
+						prop_assert_eq!(hist_y.to_bits(), hist_r.to_bits(),
+							"Histogram NaN/finite mismatch at index {}", i);
+					} else {
+						let ulp_diff = hist_y.to_bits().abs_diff(hist_r.to_bits());
+						prop_assert!(
+							(hist_y - hist_r).abs() <= 1e-9 || ulp_diff <= 5,
+							"Histogram mismatch at index {}: {} vs {} (ULP={})",
+							i, hist_y, hist_r, ulp_diff
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_macd_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1583,6 +1824,9 @@ mod tests {
 		check_macd_nan_handling,
 		check_macd_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_macd_tests!(check_macd_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

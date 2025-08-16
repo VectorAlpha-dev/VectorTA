@@ -1271,6 +1271,231 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_bandpass_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Test strategy: period 2-50, bandwidth 0.1-0.9, data length period..400
+		let strat = (2usize..=50).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period..400,
+				),
+				Just(period),
+				(0.1f64..=0.9f64), // Valid bandwidth range avoiding edge cases
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, bandwidth)| {
+				let params = BandPassParams {
+					period: Some(period),
+					bandwidth: Some(bandwidth),
+				};
+				let input = BandPassInput::from_slice(&data, params);
+
+				// Get outputs from the kernel being tested
+				let result = bandpass_with_kernel(&input, kernel)?;
+				// Get reference outputs from scalar kernel
+				let ref_result = bandpass_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: All outputs should have same length as input
+				prop_assert_eq!(result.bp.len(), data.len());
+				prop_assert_eq!(result.bp_normalized.len(), data.len());
+				prop_assert_eq!(result.signal.len(), data.len());
+				prop_assert_eq!(result.trigger.len(), data.len());
+
+				// Calculate expected warmup based on highpass calculation
+				let hp_period = ((4.0 * period as f64) / bandwidth).round() as usize;
+				let expected_warmup = hp_period.saturating_sub(1).max(2);
+
+				// Property 2: Strict warmup period validation - values should be NaN
+				if data.len() >= expected_warmup {
+					// Check strict NaN during warmup (no flexibility)
+					for i in 0..(expected_warmup.saturating_sub(1)).min(data.len()) {
+						prop_assert!(
+							result.bp[i].is_nan(),
+							"bp[{}] should be NaN during warmup but got {}",
+							i, result.bp[i]
+						);
+					}
+				}
+
+				// Property 3: All non-NaN values should be finite
+				for i in 0..data.len() {
+					if !result.bp[i].is_nan() {
+						prop_assert!(result.bp[i].is_finite(), "bp[{}] not finite: {}", i, result.bp[i]);
+					}
+					if !result.bp_normalized[i].is_nan() {
+						prop_assert!(result.bp_normalized[i].is_finite(), "bp_normalized[{}] not finite: {}", i, result.bp_normalized[i]);
+					}
+					if !result.signal[i].is_nan() {
+						prop_assert!(result.signal[i].is_finite(), "signal[{}] not finite: {}", i, result.signal[i]);
+					}
+					if !result.trigger[i].is_nan() {
+						prop_assert!(result.trigger[i].is_finite(), "trigger[{}] not finite: {}", i, result.trigger[i]);
+					}
+				}
+
+				// Property 4: Signal values must be exactly -1, 0, or 1
+				for i in 0..data.len() {
+					let sig = result.signal[i];
+					if !sig.is_nan() {
+						prop_assert!(
+							sig == -1.0 || sig == 0.0 || sig == 1.0,
+							"signal[{}] = {} not in {{-1, 0, 1}}",
+							i, sig
+						);
+					}
+				}
+
+				// Property 5: bp_normalized should be bounded by [-1, 1]
+				for i in 0..data.len() {
+					let norm = result.bp_normalized[i];
+					if !norm.is_nan() {
+						prop_assert!(
+							norm >= -1.0 - 1e-9 && norm <= 1.0 + 1e-9,
+							"bp_normalized[{}] = {} not in [-1, 1]",
+							i, norm
+						);
+					}
+				}
+
+				// Property 6: Constant data should produce bp approaching 0 (relaxed tolerance)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && data.len() > expected_warmup + 20 {
+					// After sufficient warmup, bp should be near 0 for constant input
+					let check_start = (expected_warmup + 10).min(data.len() - 1);
+					for i in check_start..data.len() {
+						if !result.bp[i].is_nan() {
+							// Use relative tolerance for numerical stability
+							let tolerance = 1e-6 * data[0].abs().max(1.0);
+							prop_assert!(
+								result.bp[i].abs() < tolerance,
+								"bp[{}] = {} not near 0 for constant data (tolerance={})",
+								i, result.bp[i], tolerance
+							);
+						}
+					}
+				}
+
+				// Property 7: Signal generation logic verification
+				// Signal should be: 1 when bp_normalized < trigger, -1 when >, 0 when ==
+				for i in 0..data.len() {
+					let bn = result.bp_normalized[i];
+					let tr = result.trigger[i];
+					let sig = result.signal[i];
+					
+					if !bn.is_nan() && !tr.is_nan() && !sig.is_nan() {
+						if (bn - tr).abs() < 1e-12 {
+							// Equal case
+							prop_assert_eq!(sig, 0.0, "signal[{}] should be 0 when bp_normalized≈trigger", i);
+						} else if bn < tr {
+							prop_assert_eq!(sig, 1.0, "signal[{}] should be 1 when bp_normalized<trigger ({} < {})", i, bn, tr);
+						} else {
+							prop_assert_eq!(sig, -1.0, "signal[{}] should be -1 when bp_normalized>trigger ({} > {})", i, bn, tr);
+						}
+					}
+				}
+
+				// Property 8: Recursive filter stability - no explosion
+				// Check that values don't grow unbounded
+				if data.len() > 50 {
+					let last_quarter_start = (data.len() * 3) / 4;
+					let mut max_abs_bp = 0.0f64;
+					let mut max_abs_input = 0.0f64;
+					
+					for i in last_quarter_start..data.len() {
+						if !result.bp[i].is_nan() {
+							max_abs_bp = max_abs_bp.max(result.bp[i].abs());
+						}
+						max_abs_input = max_abs_input.max(data[i].abs());
+					}
+					
+					// bp should not explode relative to input magnitude
+					if max_abs_input > 0.0 {
+						let amplification = max_abs_bp / max_abs_input;
+						prop_assert!(
+							amplification < 100.0,
+							"Recursive filter may be unstable: amplification={} at period={}, bandwidth={}",
+							amplification, period, bandwidth
+						);
+					}
+				}
+
+				// Property 9: Edge case validation - specific behavior for extreme parameters
+				if period == 2 {
+					// Minimum period should still produce valid output after warmup
+					let non_nan_count = result.bp.iter().filter(|&&x| !x.is_nan()).count();
+					prop_assert!(
+						non_nan_count >= data.len().saturating_sub(expected_warmup),
+						"period=2 should produce mostly valid output after warmup"
+					);
+				}
+
+				// Property 10: Kernel consistency - compare with scalar kernel
+				for i in 0..data.len() {
+					let bp = result.bp[i];
+					let bp_ref = ref_result.bp[i];
+					let bp_norm = result.bp_normalized[i];
+					let bp_norm_ref = ref_result.bp_normalized[i];
+					let sig = result.signal[i];
+					let sig_ref = ref_result.signal[i];
+					let trig = result.trigger[i];
+					let trig_ref = ref_result.trigger[i];
+
+					// Check bp consistency
+					if !bp.is_finite() || !bp_ref.is_finite() {
+						prop_assert_eq!(bp.to_bits(), bp_ref.to_bits(), "bp finite/NaN mismatch at {}", i);
+					} else {
+						let ulp_diff = bp.to_bits().abs_diff(bp_ref.to_bits());
+						prop_assert!(
+							(bp - bp_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"bp mismatch at {}: {} vs {} (ULP={})",
+							i, bp, bp_ref, ulp_diff
+						);
+					}
+
+					// Check bp_normalized consistency
+					if !bp_norm.is_finite() || !bp_norm_ref.is_finite() {
+						prop_assert_eq!(bp_norm.to_bits(), bp_norm_ref.to_bits(), "bp_normalized finite/NaN mismatch at {}", i);
+					} else {
+						let ulp_diff = bp_norm.to_bits().abs_diff(bp_norm_ref.to_bits());
+						prop_assert!(
+							(bp_norm - bp_norm_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"bp_normalized mismatch at {}: {} vs {} (ULP={})",
+							i, bp_norm, bp_norm_ref, ulp_diff
+						);
+					}
+
+					// Check signal consistency (exact match required)
+					if !sig.is_nan() && !sig_ref.is_nan() {
+						prop_assert_eq!(sig, sig_ref, "signal mismatch at {}: {} vs {}", i, sig, sig_ref);
+					} else {
+						prop_assert_eq!(sig.is_nan(), sig_ref.is_nan(), "signal NaN mismatch at {}", i);
+					}
+
+					// Check trigger consistency
+					if !trig.is_finite() || !trig_ref.is_finite() {
+						prop_assert_eq!(trig.to_bits(), trig_ref.to_bits(), "trigger finite/NaN mismatch at {}", i);
+					} else {
+						let ulp_diff = trig.to_bits().abs_diff(trig_ref.to_bits());
+						prop_assert!(
+							(trig - trig_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"trigger mismatch at {}: {} vs {} (ULP={})",
+							i, trig, trig_ref, ulp_diff
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_bandpass_tests!(
 		check_bandpass_partial_params,
 		check_bandpass_accuracy,
@@ -1281,7 +1506,8 @@ mod tests {
 		check_bandpass_reinput,
 		check_bandpass_nan_handling,
 		check_bandpass_no_poison,
-		check_bandpass_streaming
+		check_bandpass_streaming,
+		check_bandpass_property
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

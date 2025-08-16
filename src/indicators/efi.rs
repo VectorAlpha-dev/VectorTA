@@ -1163,6 +1163,155 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_efi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic price and volume data
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate base price, volatility, and data length
+					(100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
+						.prop_flat_map(move |(base_price, volatility, data_len)| {
+							// Generate random changes for price movement and volume variations
+							(
+								Just(base_price),
+								Just(volatility),
+								Just(data_len),
+								prop::collection::vec((-1f64..1f64), data_len),
+								prop::collection::vec((0.1f64..10f64), data_len),
+							)
+						})
+						.prop_map(move |(base_price, volatility, data_len, price_changes, volume_multipliers)| {
+							// Generate synthetic price data with realistic movement
+							let mut price = Vec::with_capacity(data_len);
+							let mut volume = Vec::with_capacity(data_len);
+							let mut current_price = base_price;
+							let base_volume = 1000000.0; // Base volume of 1M
+							
+							for i in 0..data_len {
+								// Random walk for price with volatility
+								let change = price_changes[i] * volatility * current_price;
+								current_price = (current_price + change).max(10.0); // Prevent negative prices
+								price.push(current_price);
+								
+								// Generate volume with some variation
+								let daily_volume = base_volume * volume_multipliers[i];
+								volume.push(daily_volume);
+							}
+							
+							(price, volume)
+						}),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((price, volume), period)| {
+				let params = EfiParams { period: Some(period) };
+				let input = EfiInput::from_slices(&price, &volume, params);
+				
+				let EfiOutput { values: out } = efi_with_kernel(&input, kernel).unwrap();
+				let EfiOutput { values: ref_out } = efi_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), price.len(), "Output length mismatch");
+				
+				// Property 2: First value should be NaN (warmup period)
+				prop_assert!(out[0].is_nan(), "First value should be NaN");
+				
+				// Property 3: When price is constant (no changes), EFI should approach 0
+				// Check if we have any periods of constant price
+				let constant_start = price.windows(3)
+					.position(|w| w.iter().all(|&p| (p - w[0]).abs() < 1e-9));
+				
+				if let Some(start) = constant_start {
+					// Find how long the constant period lasts
+					let mut constant_end = start + 3;
+					while constant_end < price.len() && (price[constant_end] - price[start]).abs() < 1e-9 {
+						constant_end += 1;
+					}
+					
+					// After a few periods of constant price, EFI should be very close to 0
+					// (price_change = 0, so EFI = EMA of 0 = approaches 0)
+					if constant_end - start >= period && constant_end < price.len() {
+						let check_idx = constant_end - 1;
+						if out[check_idx].is_finite() {
+							prop_assert!(
+								out[check_idx].abs() < 1e-6,
+								"EFI should approach 0 for constant price at idx {}: {}",
+								check_idx,
+								out[check_idx]
+							);
+						}
+					}
+				}
+				
+				// Property 4: Kernel consistency - compare with scalar reference
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					
+					// Handle NaN/infinite values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y_bits, r_bits,
+							"NaN/infinite mismatch at idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+					
+					// Use ULP comparison for finite values
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				// Property 5: EMA smoothing behavior
+				// Verify that EFI exhibits proper exponential smoothing
+				// The change between consecutive EFI values should be proportional to alpha
+				let alpha = 2.0 / (period as f64 + 1.0);
+				for i in 2..out.len() {
+					if out[i].is_finite() && out[i-1].is_finite() && 
+					   price[i].is_finite() && price[i-1].is_finite() && 
+					   volume[i].is_finite() {
+						// Calculate the raw force index for this point
+						let raw_fi = (price[i] - price[i-1]) * volume[i];
+						
+						// EFI[i] should be: alpha * raw_fi + (1 - alpha) * EFI[i-1]
+						// So the expected value is:
+						let expected = alpha * raw_fi + (1.0 - alpha) * out[i-1];
+						
+						// Allow for small numerical errors
+						if (out[i] - expected).abs() > 1e-9 {
+							// Only check if we're past the initial warmup fluctuations
+							if i > period + 1 {
+								prop_assert!(
+									(out[i] - expected).abs() < 1e-6,
+									"EMA smoothing violated at idx {}: got {}, expected {} (diff: {})",
+									i, out[i], expected, (out[i] - expected).abs()
+								);
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_efi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1196,6 +1345,9 @@ mod tests {
 		check_efi_streaming,
 		check_efi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_efi_tests!(check_efi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

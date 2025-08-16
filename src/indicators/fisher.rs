@@ -1075,6 +1075,202 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_fisher_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic high/low price data
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate base price, volatility, and data length
+					(100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
+						.prop_flat_map(move |(base_price, volatility, data_len)| {
+							// Generate random changes for price movement and spread flags
+							(
+								Just(base_price),
+								Just(volatility),
+								Just(data_len),
+								prop::collection::vec((-1f64..1f64), data_len),
+								prop::collection::vec(prop::bool::ANY, data_len), // Flags for zero spread
+							)
+						})
+						.prop_map(move |(base_price, volatility, data_len, price_changes, zero_spread_flags)| {
+							// Generate synthetic high/low data with realistic movement
+							let mut high = Vec::with_capacity(data_len);
+							let mut low = Vec::with_capacity(data_len);
+							let mut current_price = base_price;
+							
+							for i in 0..data_len {
+								// Random walk for price with volatility
+								let change = price_changes[i] * volatility * current_price;
+								current_price = (current_price + change).max(10.0); // Prevent negative prices
+								
+								// Sometimes have zero spread (high == low), sometimes have normal spread
+								if zero_spread_flags[i] && i % 5 == 0 { // ~20% chance of zero spread
+									high.push(current_price);
+									low.push(current_price);
+								} else {
+									// Generate high/low with some spread
+									let spread = current_price * 0.01 * (0.1 + price_changes[i].abs()); // 0.1-2% spread
+									high.push(current_price + spread);
+									low.push((current_price - spread).max(10.0));
+								}
+							}
+							
+							(high, low)
+						}),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low), period)| {
+				let params = FisherParams { period: Some(period) };
+				let input = FisherInput::from_slices(&high, &low, params);
+
+				let FisherOutput { fisher: out, signal: sig } = fisher_with_kernel(&input, kernel)?;
+				let FisherOutput { fisher: ref_out, signal: ref_sig } = fisher_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(out.len(), high.len(), "[{}] Fisher output length mismatch", test_name);
+				prop_assert_eq!(sig.len(), high.len(), "[{}] Signal output length mismatch", test_name);
+
+				// Property 2: Warmup period behavior (first + period - 1 positions should be NaN)
+				// Find first valid index
+				let mut first_valid = None;
+				for i in 0..high.len() {
+					if !high[i].is_nan() && !low[i].is_nan() {
+						first_valid = Some(i);
+						break;
+					}
+				}
+				
+				if let Some(first) = first_valid {
+					let warmup_end = first + period - 1;
+					for i in 0..warmup_end.min(out.len()) {
+						prop_assert!(out[i].is_nan(), "[{}] Expected NaN at index {} during warmup", test_name, i);
+						prop_assert!(sig[i].is_nan(), "[{}] Expected NaN at signal index {} during warmup", test_name, i);
+					}
+					
+					// Should have valid values after warmup
+					if warmup_end < out.len() {
+						prop_assert!(!out[warmup_end].is_nan(), "[{}] Expected valid value at index {} after warmup", test_name, warmup_end);
+					}
+				}
+
+				// Property 3: Constant price behavior - Fisher should trend toward zero
+				// Look for periods where high and low are very close (constant price)
+				if let Some(first) = first_valid {
+					let warmup_end = first + period - 1;
+					
+					for window_start in warmup_end..out.len().saturating_sub(period * 2) {
+						let window_end = (window_start + period).min(out.len());
+						
+						// Check if we have a constant price period
+						let mut is_constant = true;
+						let first_hl = (high[window_start] + low[window_start]) / 2.0;
+						
+						for i in window_start..window_end {
+							let current_hl = (high[i] + low[i]) / 2.0;
+							if (current_hl - first_hl).abs() > 0.001 * first_hl { // 0.1% tolerance
+								is_constant = false;
+								break;
+							}
+						}
+						
+						// If prices are constant, Fisher should be trending toward zero
+						if is_constant && window_end > window_start + 3 {
+							let fisher_start = out[window_start].abs();
+							let fisher_end = out[window_end - 1].abs();
+							
+							// Fisher should be decreasing in magnitude (trending to zero)
+							// Allow some tolerance for numerical precision
+							if fisher_start > 0.1 { // Only check if initial value is significant
+								prop_assert!(
+									fisher_end <= fisher_start * 1.1, // Allow 10% tolerance for numerical noise
+									"[{}] Fisher not trending to zero in constant period [{}, {}]: start={}, end={}",
+									test_name, window_start, window_end, fisher_start, fisher_end
+								);
+							}
+						}
+					}
+				}
+
+				// Property 4: Signal equals previous Fisher value
+				for i in 1..out.len() {
+					if !out[i-1].is_nan() && !sig[i].is_nan() {
+						prop_assert!(
+							(sig[i] - out[i-1]).abs() < 1e-9,
+							"[{}] Signal at {} ({}) doesn't match previous Fisher ({})",
+							test_name, i, sig[i], out[i-1]
+						);
+					}
+				}
+
+				// Property 5: Initial state verification - first valid Fisher value calculation
+				if let Some(first) = first_valid {
+					let warmup_end = first + period - 1;
+					if warmup_end < out.len() && !out[warmup_end].is_nan() {
+						// The first Fisher value should start from prev_fish = 0.0
+						// Due to the 0.5 factor and starting from 0, first value should be moderate
+						prop_assert!(
+							out[warmup_end].abs() < 5.0,
+							"[{}] First Fisher value {} seems incorrect (should start from zero state)",
+							test_name, out[warmup_end]
+						);
+					}
+				}
+
+				// Property 6: Kernel consistency - compare with scalar reference
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					let s = sig[i];
+					let rs = ref_sig[i];
+
+					// Check NaN consistency
+					if y.is_nan() || r.is_nan() {
+						prop_assert_eq!(y.is_nan(), r.is_nan(), "[{}] NaN mismatch at index {}", test_name, i);
+						continue;
+					}
+
+					// Check signal NaN consistency
+					if s.is_nan() || rs.is_nan() {
+						prop_assert_eq!(s.is_nan(), rs.is_nan(), "[{}] Signal NaN mismatch at index {}", test_name, i);
+						continue;
+					}
+
+					// ULP comparison for floating-point accuracy
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let s_bits = s.to_bits();
+					let rs_bits = rs.to_bits();
+
+					let ulp_diff_fisher: u64 = y_bits.abs_diff(r_bits);
+					let ulp_diff_signal: u64 = s_bits.abs_diff(rs_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff_fisher <= 4,
+						"[{}] Fisher mismatch idx {}: {} vs {} (ULP={})",
+						test_name, i, y, r, ulp_diff_fisher
+					);
+
+					prop_assert!(
+						(s - rs).abs() <= 1e-9 || ulp_diff_signal <= 4,
+						"[{}] Signal mismatch idx {}: {} vs {} (ULP={})",
+						test_name, i, s, rs, ulp_diff_signal
+					);
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_fisher_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1110,6 +1306,9 @@ mod tests {
 		check_fisher_streaming,
 		check_fisher_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_fisher_tests!(check_fisher_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
