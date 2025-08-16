@@ -277,6 +277,7 @@
       "Bash(./test_nan_filling.exe)",
       "Bash(./test_medprice_nan.exe)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits"
   }
 }

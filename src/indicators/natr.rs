@@ -734,6 +734,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_natr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1092,6 +1094,223 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_natr_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: generate period and length, then create realistic OHLC data
+		let strat = (2usize..=50, 50usize..=400, 0usize..=2)
+			.prop_flat_map(|(period, len, scenario)| {
+				// Generate base close prices with different scenarios
+				let close_strategy = match scenario {
+					0 => {
+						// Normal range prices
+						prop::collection::vec(
+							(1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						).boxed()
+					},
+					1 => {
+						// Very small prices (edge case)
+						prop::collection::vec(
+							(0.01f64..1.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						).boxed()
+					},
+					_ => {
+						// Constant prices
+						(1.0f64..100.0f64).prop_map(move |val| vec![val; len]).boxed()
+					}
+				};
+				
+				(close_strategy, Just(period), Just(len), Just(scenario))
+			})
+			.prop_flat_map(|(close_prices, period, len, scenario)| {
+				// Generate high/low based on close with realistic spreads
+				let mut high_vec = Vec::with_capacity(len);
+				let mut low_vec = Vec::with_capacity(len);
+				
+				// Use a deterministic approach for generating high/low
+				for (i, &close) in close_prices.iter().enumerate() {
+					if scenario == 2 {
+						// Constant prices scenario
+						high_vec.push(close);
+						low_vec.push(close);
+					} else {
+						// Create volatility that varies over time (expanded range: 0.1% to 20%)
+						let volatility_factor = 0.001 + 0.20 * ((i * 7919) % 100) as f64 / 100.0;
+						let spread = close * volatility_factor;
+						
+						// Ensure high >= close >= low
+						let high = close + spread * 0.5;
+						let low = close - spread * 0.5;
+						
+						high_vec.push(high);
+						low_vec.push(low.max(0.001)); // Ensure positive but allow very small values
+					}
+				}
+				
+				(Just(high_vec), Just(low_vec), Just(close_prices), Just(period), Just(scenario))
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, period, scenario)| {
+				let params = NatrParams { period: Some(period) };
+				let input = NatrInput::from_slices(&high, &low, &close, params);
+
+				// Test with specified kernel
+				let result = natr_with_kernel(&input, kernel)?;
+				
+				// Test with scalar kernel as reference
+				let ref_result = natr_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(result.values.len(), high.len());
+				prop_assert_eq!(result.values.len(), low.len());
+				prop_assert_eq!(result.values.len(), close.len());
+
+				// Property 2: Warmup period handling - first (period - 1) values should be NaN
+				for i in 0..(period - 1) {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Expected NaN at index {} during warmup, got {}",
+						i,
+						result.values[i]
+					);
+				}
+
+				// Property 3: NATR values should be non-negative after warmup (TR is always positive)
+				for i in period..result.values.len() {
+					if result.values[i].is_finite() {
+						prop_assert!(
+							result.values[i] >= 0.0,
+							"NATR should be non-negative at index {}: got {}",
+							i,
+							result.values[i]
+						);
+						
+						// NATR values should be reasonable (with expanded volatility, could be higher)
+						prop_assert!(
+							result.values[i] < 10000.0,
+							"NATR seems unreasonably high at index {}: got {}",
+							i,
+							result.values[i]
+						);
+					}
+				}
+
+				// Property 4: Kernel consistency - different SIMD implementations should produce same results
+				for i in 0..result.values.len() {
+					let val = result.values[i];
+					let ref_val = ref_result.values[i];
+					
+					if val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					
+					if val.is_finite() && ref_val.is_finite() {
+						// Allow small tolerance for floating point differences
+						let diff = (val - ref_val).abs();
+						let tolerance = (ref_val.abs() * 1e-10).max(1e-10);
+						prop_assert!(
+							diff <= tolerance,
+							"Kernel mismatch at index {}: {} vs {} (diff: {})",
+							i,
+							val,
+							ref_val,
+							diff
+						);
+					} else {
+						// Both should have same finite/infinite status
+						prop_assert_eq!(
+							val.is_finite(),
+							ref_val.is_finite(),
+							"Finite status mismatch at index {}: {} vs {}",
+							i,
+							val,
+							ref_val
+						);
+					}
+				}
+
+				// Property 5: Test special case - when all prices are constant (scenario 2)
+				// NATR should be exactly 0 after initial warmup
+				if scenario == 2 {
+					// Check that high == low == close for all values (constant prices)
+					let is_constant = high.iter().zip(&low).zip(&close)
+						.all(|((h, l), c)| (*h - *l).abs() < 1e-10 && (*h - *c).abs() < 1e-10);
+					
+					if is_constant && result.values.len() > period + 5 {
+						// After the initial period, NATR should be 0 for constant prices
+						// Start checking a few indices after warmup to allow stabilization
+						for i in (period + 5)..result.values.len() {
+							if result.values[i].is_finite() {
+								prop_assert!(
+									result.values[i].abs() < 1e-10,
+									"NATR should be 0 for constant prices at index {}, got {}",
+									i,
+									result.values[i]
+								);
+							}
+						}
+					}
+				}
+
+				// Property 6: Test edge case with very small prices (scenario 1)
+				if scenario == 1 {
+					// Verify that NATR still works correctly with small prices
+					for i in period..result.values.len() {
+						if result.values[i].is_finite() && close[i] > 0.0 {
+							// NATR should still be reasonable even with small prices
+							prop_assert!(
+								result.values[i] >= 0.0 && result.values[i] < 100000.0,
+								"NATR out of bounds with small prices at index {}: got {}",
+								i,
+								result.values[i]
+							);
+						}
+					}
+				}
+
+				// Property 7: Division by zero handling
+				// Check if any close prices are near zero
+				if close.iter().any(|&c| c.abs() < 1e-10) {
+					// NATR should return 0 when close is 0, not NaN or infinity
+					for (i, &c) in close.iter().enumerate() {
+						if c.abs() < 1e-10 && i >= period - 1 {
+							prop_assert!(
+								result.values[i] == 0.0 || result.values[i].is_nan(),
+								"NATR should be 0 or NaN when close is 0, got {} at index {}",
+								result.values[i],
+								i
+							);
+						}
+					}
+				}
+
+				// Property 8: Check poison values aren't present
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in result.values.iter().enumerate() {
+						if val.is_finite() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value at index {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_natr_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1122,6 +1341,9 @@ mod tests {
             }
         }
     }
+
+	#[cfg(feature = "proptest")]
+	generate_all_natr_tests!(check_natr_property);
 
 	generate_all_natr_tests!(
 		check_natr_partial_params,

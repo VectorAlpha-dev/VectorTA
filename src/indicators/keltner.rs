@@ -1211,6 +1211,8 @@ mod tests {
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use crate::utilities::enums::Kernel;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_keltner_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1602,6 +1604,285 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_keltner_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Simplified unified strategy for all test scenarios
+		let strat = (2usize..=50, 50usize..500, 0.5f64..3.0f64, 0usize..6, any::<u64>())
+			.prop_map(|(period, len, multiplier, scenario, seed)| {
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				let mut close = Vec::with_capacity(len);
+				
+				// Use a simple deterministic RNG based on the seed
+				let mut rng_state = seed;
+				let mut next_random = || -> f64 {
+					rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223); // LCG
+					(rng_state as f64) / (u64::MAX as f64)
+				};
+				
+				match scenario {
+					0 => {
+						// Random OHLC data
+						let mut prev_close = 100.0;
+						for _ in 0..len {
+							let volatility = 0.01 + next_random() * 0.04; // 0.01..0.05
+							let change = -volatility + next_random() * (2.0 * volatility);
+							let new_close = (prev_close * (1.0 + change)).max(0.1f64);
+							let high_val = new_close * (1.0 + next_random() * volatility);
+							let low_val = new_close * (1.0 - next_random() * volatility);
+							
+							high.push(high_val);
+							low.push(low_val.min(high_val));
+							close.push(new_close);
+							prev_close = new_close;
+						}
+					},
+					1 => {
+						// Uptrend
+						let start = 100.0;
+						for i in 0..len {
+							let base = start * (1.0 + 0.01 * i as f64);
+							let spread = base * 0.02;
+							high.push(base + spread);
+							low.push(base - spread);
+							close.push(base);
+						}
+					},
+					2 => {
+						// Downtrend
+						let start = 100.0;
+						for i in 0..len {
+							let base = start * (1.0 - 0.005 * i as f64).max(10.0);
+							let spread = base * 0.02;
+							high.push(base + spread);
+							low.push(base - spread);
+							close.push(base);
+						}
+					},
+					3 => {
+						// Volatile
+						let mut price = 100.0;
+						for i in 0..len {
+							let volatility = 0.1 * (1.0 + (i as f64 * 0.1).sin());
+							let change = if i % 2 == 0 { volatility } else { -volatility * 0.8 };
+							price = (price * (1.0 + change)).max(1.0);
+							
+							let spread = price * volatility;
+							high.push(price + spread);
+							low.push(price - spread * 0.8);
+							close.push(price);
+						}
+					},
+					4 => {
+						// Constant price (same high, low, close)
+						let constant_price = 50.0;
+						high = vec![constant_price; len];
+						low = vec![constant_price; len];
+						close = vec![constant_price; len];
+					},
+					_ => {
+						// Real-world-like
+						let mut price = 1000.0;
+						let mut momentum = 0.0;
+						
+						for i in 0..len {
+							momentum = momentum * 0.9 + (if i % 20 < 10 { 0.001 } else { -0.001 });
+							let noise = ((i as f64 * 0.3).sin() * 0.005);
+							price = (price * (1.0 + momentum + noise)).max(100.0);
+							
+							let daily_range = price * 0.02;
+							let high_val = price + daily_range * 0.6;
+							let low_val = price - daily_range * 0.4;
+							
+							high.push(high_val);
+							low.push(low_val);
+							close.push(price);
+						}
+					}
+				}
+				
+				// Randomly select MA type
+				let ma_type = if next_random() > 0.5 { "ema" } else { "sma" };
+				(high, low, close, period, multiplier, ma_type.to_string())
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, period, multiplier, ma_type)| {
+				// Use close as source for testing
+				let source = close.clone();
+				
+				let params = KeltnerParams {
+					period: Some(period),
+					multiplier: Some(multiplier),
+					ma_type: Some(ma_type.clone()),
+				};
+				let input = KeltnerInput::from_slice(&high, &low, &close, &source, params.clone());
+				
+				let result = keltner_with_kernel(&input, kernel).unwrap();
+				let scalar_result = keltner_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Check output lengths
+				prop_assert_eq!(result.upper_band.len(), close.len());
+				prop_assert_eq!(result.middle_band.len(), close.len());
+				prop_assert_eq!(result.lower_band.len(), close.len());
+				
+				// Check warmup period (first period-1 values should be NaN)
+				let warmup = period - 1;
+				for i in 0..warmup.min(close.len()) {
+					prop_assert!(
+						result.upper_band[i].is_nan(),
+						"Upper band[{}] should be NaN during warmup", i
+					);
+					prop_assert!(
+						result.middle_band[i].is_nan(),
+						"Middle band[{}] should be NaN during warmup", i
+					);
+					prop_assert!(
+						result.lower_band[i].is_nan(),
+						"Lower band[{}] should be NaN during warmup", i
+					);
+				}
+				
+				// Check valid values after warmup
+				for i in warmup..close.len() {
+					let upper = result.upper_band[i];
+					let middle = result.middle_band[i];
+					let lower = result.lower_band[i];
+					
+					let scalar_upper = scalar_result.upper_band[i];
+					let scalar_middle = scalar_result.middle_band[i];
+					let scalar_lower = scalar_result.lower_band[i];
+					
+					// Skip if any value is NaN
+					if upper.is_nan() || middle.is_nan() || lower.is_nan() {
+						continue;
+					}
+					
+					// Property 1: Band relationships must hold
+					prop_assert!(
+						upper >= middle - 1e-10,
+						"Upper band {} must be >= middle band {} at index {}", upper, middle, i
+					);
+					prop_assert!(
+						middle >= lower - 1e-10,
+						"Middle band {} must be >= lower band {} at index {}", middle, lower, i
+					);
+					
+					// Property 2: Spread must be positive
+					let spread = upper - lower;
+					prop_assert!(
+						spread >= -1e-10,
+						"Spread {} must be positive at index {}", spread, i
+					);
+					
+					// Property 2b: Spread consistency between kernels (validates ATR calculation)
+					if i >= warmup + period {
+						// Compare with scalar result to ensure consistency
+						let scalar_spread = scalar_upper - scalar_lower;
+						if scalar_spread > 0.0 && spread > 0.0 {
+							let ratio = spread / scalar_spread;
+							prop_assert!(
+								(ratio - 1.0).abs() < 0.01,
+								"Spread ratio between kernels should be consistent at index {}: ratio={}", i, ratio
+							);
+						}
+					}
+					
+					// Property 3: Middle band should be within reasonable price range
+					let window_start = i.saturating_sub(period - 1);
+					let window_high = high[window_start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+					let window_low = low[window_start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+					
+					// Middle band should be within the general price range (with some tolerance for MA calculations)
+					prop_assert!(
+						middle <= window_high * 1.05 + 1.0,
+						"Middle band {} exceeds window high {} at index {}", middle, window_high, i
+					);
+					prop_assert!(
+						middle >= window_low * 0.95 - 1.0,
+						"Middle band {} below window low {} at index {}", middle, window_low, i
+					);
+					
+					// Property 4: Kernel consistency check
+					let tolerance = 1e-9;
+					prop_assert!(
+						(upper - scalar_upper).abs() <= tolerance,
+						"Upper band kernel mismatch at {}: {} vs {} (diff: {})",
+						i, upper, scalar_upper, (upper - scalar_upper).abs()
+					);
+					prop_assert!(
+						(middle - scalar_middle).abs() <= tolerance,
+						"Middle band kernel mismatch at {}: {} vs {} (diff: {})",
+						i, middle, scalar_middle, (middle - scalar_middle).abs()
+					);
+					prop_assert!(
+						(lower - scalar_lower).abs() <= tolerance,
+						"Lower band kernel mismatch at {}: {} vs {} (diff: {})",
+						i, lower, scalar_lower, (lower - scalar_lower).abs()
+					);
+					
+					// Property 5: Check for poison values
+					#[cfg(debug_assertions)]
+					{
+						let upper_bits = upper.to_bits();
+						let middle_bits = middle.to_bits();
+						let lower_bits = lower.to_bits();
+						
+						prop_assert!(
+							upper_bits != 0x11111111_11111111 && 
+							upper_bits != 0x22222222_22222222 && 
+							upper_bits != 0x33333333_33333333,
+							"Found poison value in upper band at index {}", i
+						);
+						prop_assert!(
+							middle_bits != 0x11111111_11111111 && 
+							middle_bits != 0x22222222_22222222 && 
+							middle_bits != 0x33333333_33333333,
+							"Found poison value in middle band at index {}", i
+						);
+						prop_assert!(
+							lower_bits != 0x11111111_11111111 && 
+							lower_bits != 0x22222222_22222222 && 
+							lower_bits != 0x33333333_33333333,
+							"Found poison value in lower band at index {}", i
+						);
+					}
+					
+					// Property 6: For truly constant prices (high=low=close), bands should converge
+					// Check if all values in the window are identical
+					let all_same = high[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+					               low[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+					               close[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+					
+					// Also check if high == low == close (truly constant price, no spread)
+					let no_spread = high[window_start..=i].iter()
+						.zip(low[window_start..=i].iter())
+						.zip(close[window_start..=i].iter())
+						.all(|((h, l), c)| (h - l).abs() < 1e-10 && (h - c).abs() < 1e-10);
+					
+					if all_same && no_spread && i >= warmup + period * 3 {
+						// For truly constant prices with no spread, ATR should eventually become 0
+						// and bands should converge to be very close (extra time for EMA stabilization)
+						let band_spread = upper - lower;
+						prop_assert!(
+							band_spread < 0.01 || band_spread < middle * 0.001,
+							"Bands should converge for constant prices with no spread, but spread is {} at index {} (middle: {})", 
+							band_spread, i, middle
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_keltner_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1635,6 +1916,9 @@ mod tests {
 		check_keltner_streaming,
 		check_keltner_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_keltner_tests!(check_keltner_property);
 
 	macro_rules! gen_batch_tests {
 		($fn_name:ident) => {

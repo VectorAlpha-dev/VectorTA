@@ -980,6 +980,138 @@ mod tests {
             }
         }
     }
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_wilders_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = WildersParams { period: Some(period) };
+				let input = WildersInput::from_slice(&data, params.clone());
+				
+				let WildersOutput { values: out } = wilders_with_kernel(&input, kernel)?;
+				let WildersOutput { values: ref_out } = wilders_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+				
+				// Property 2: Warmup period handling - first period-1 values should be NaN
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first_valid + period - 1;
+				for i in 0..warmup.min(out.len()) {
+					prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
+				}
+				
+				// Property 3: Finite values after warmup
+				for i in warmup..out.len() {
+					if data[i].is_finite() {
+						prop_assert!(out[i].is_finite(), "Expected finite value at index {} after warmup", i);
+					}
+				}
+				
+				// Property 4: Bounded by min/max of input data
+				// Wilder's MA is a weighted average, so output should be within data bounds
+				if warmup < out.len() {
+					let data_min = data[first_valid..].iter().cloned().fold(f64::INFINITY, f64::min);
+					let data_max = data[first_valid..].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					for i in warmup..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i] >= data_min - 1e-9 && out[i] <= data_max + 1e-9,
+								"Output {} at index {} outside bounds [{}, {}]",
+								out[i], i, data_min, data_max
+							);
+						}
+					}
+				}
+				
+				// Property 5: Period=1 should equal input values
+				if period == 1 && warmup < out.len() {
+					for i in warmup..out.len() {
+						prop_assert!(
+							(out[i] - data[i]).abs() <= 1e-9,
+							"Period=1 output {} should equal input {} at index {}",
+							out[i], data[i], i
+						);
+					}
+				}
+				
+				// Property 6: Constant input produces constant output
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < out.len() {
+					let constant_val = data[first_valid];
+					for i in warmup..out.len() {
+						prop_assert!(
+							(out[i] - constant_val).abs() <= 1e-9,
+							"Constant input should produce constant output {} at index {}",
+							out[i], i
+						);
+					}
+				}
+				
+				// Property 7: Exponential decay property
+				// Wilder's uses formula: new_val = (data[i] - prev_val) * alpha + prev_val
+				// where alpha = 1.0 / period
+				if warmup + 1 < out.len() {
+					let alpha = 1.0 / (period as f64);
+					for i in (warmup + 1)..out.len() {
+						let expected = (data[i] - out[i - 1]) * alpha + out[i - 1];
+						prop_assert!(
+							(out[i] - expected).abs() <= 1e-9,
+							"Exponential decay formula mismatch at index {}: got {}, expected {}",
+							i, out[i], expected
+						);
+					}
+				}
+				
+				// Property 8: First value after warmup equals simple average
+				// Wilder's MA initializes with the simple average of the first period values
+				if warmup < out.len() && warmup >= period - 1 {
+					let sum: f64 = data[first_valid..first_valid + period].iter().sum();
+					let expected_first = sum / (period as f64);
+					prop_assert!(
+						(out[warmup] - expected_first).abs() <= 1e-9,
+						"First output {} should equal simple average {} of first {} values",
+						out[warmup], expected_first, period
+					);
+				}
+				
+				// Property 9: Kernel consistency - all kernels should produce same results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(y.to_bits() == r.to_bits(), "NaN/infinite mismatch at index {}: {} vs {}", i, y, r);
+						continue;
+					}
+					
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at index {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+				
+				Ok(())
+			})
+			.map_err(|e| e.into())
+	}
+
 	generate_all_wilders_tests!(
 		check_wilders_partial_params,
 		check_wilders_accuracy,
@@ -990,7 +1122,8 @@ mod tests {
 		check_wilders_reinput,
 		check_wilders_nan_handling,
 		check_wilders_streaming,
-		check_wilders_no_poison
+		check_wilders_no_poison,
+		check_wilders_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

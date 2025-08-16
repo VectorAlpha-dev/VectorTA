@@ -754,6 +754,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_linreg_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -965,6 +967,184 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_linearreg_intercept_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Helper function to calculate expected linear regression intercept
+		// For data following y = slope*index + intercept
+		fn calculate_expected_linreg_intercept(window_start_idx: usize, period: usize, data_slope: f64, data_intercept: f64) -> f64 {
+			// For perfect linear data y[i] = data_slope*i + data_intercept
+			// When we do regression on window [start, start+period-1] with x-coords [1, period]
+			// The regression line has slope = data_slope
+			// The output is a + b where a is adjusted intercept and b is slope
+			// Mathematical derivation shows: output = y[start] = data_slope*start + data_intercept
+			data_slope * window_start_idx as f64 + data_intercept
+		}
+
+		// Strategy for generating test data
+		let strat = (1usize..=100, 50usize..500, 0usize..5, any::<u64>())
+			.prop_map(|(period, len, scenario, seed)| {
+				// Use deterministic LCG for reproducible random generation
+				let mut rng_state = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+				let mut data = Vec::with_capacity(len);
+				
+				// Generate data based on scenario
+				match scenario {
+					0 => {
+						// Random data
+						for _ in 0..len {
+							rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+							let val = (rng_state as f64 / u64::MAX as f64) * 200.0 - 100.0;
+							data.push(val);
+						}
+					}
+					1 => {
+						// Constant data
+						let constant = 42.0;
+						data.resize(len, constant);
+					}
+					2 => {
+						// Perfect linear trend: y = 2x + 10
+						for i in 0..len {
+							data.push(2.0 * i as f64 + 10.0);
+						}
+					}
+					3 => {
+						// Perfect downward trend: y = -1.5x + 100
+						for i in 0..len {
+							data.push(-1.5 * i as f64 + 100.0);
+						}
+					}
+					_ => {
+						// Noisy linear trend
+						for i in 0..len {
+							rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+							let noise = ((rng_state as f64 / u64::MAX as f64) - 0.5) * 10.0;
+							data.push(0.5 * i as f64 + 50.0 + noise);
+						}
+					}
+				}
+				
+				(data, period, scenario)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, scenario)| {
+				let params = LinearRegInterceptParams { period: Some(period) };
+				let input = LinearRegInterceptInput::from_slice(&data, params);
+				
+				// Test with specified kernel
+				let output = linearreg_intercept_with_kernel(&input, kernel)?;
+				
+				// Test with scalar reference
+				let ref_output = linearreg_intercept_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(output.values.len(), data.len(), 
+					"[{}] Output length mismatch", test_name);
+				
+				// Property 2: Handle period=1 edge case
+				if period == 1 {
+					// For period=1, output should equal input (no regression, just the value itself)
+					for i in 0..data.len() {
+						let expected = data[i];
+						let actual = output.values[i];
+						prop_assert!((actual - expected).abs() < 1e-9,
+							"[{}] Period=1: expected {}, got {} at index {}", 
+							test_name, expected, actual, i);
+					}
+				} else {
+					// Property 3: Warmup period - first (period-1) values should be NaN
+					for i in 0..(period - 1) {
+						prop_assert!(output.values[i].is_nan(), 
+							"[{}] Expected NaN during warmup at index {}", test_name, i);
+					}
+					
+					// Property 4: First valid value should be at index (period-1)
+					if period <= data.len() {
+						prop_assert!(!output.values[period - 1].is_nan(),
+							"[{}] Expected valid value at index {}", test_name, period - 1);
+					}
+				}
+				
+				// Property 5: For constant data, intercept should equal the constant
+				if scenario == 1 && period < data.len() {
+					for i in (period - 1)..data.len() {
+						let intercept = output.values[i];
+						if !intercept.is_nan() {
+							prop_assert!((intercept - 42.0).abs() < 1e-9,
+								"[{}] Constant data: expected 42.0, got {} at index {}", 
+								test_name, intercept, i);
+						}
+					}
+				}
+				
+				// Property 6: For perfect linear trends, verify EXACT expected intercepts
+				if (scenario == 2 || scenario == 3) && period > 1 && period < data.len() {
+					let (data_slope, data_intercept) = match scenario {
+						2 => (2.0, 10.0),     // y = 2x + 10
+						3 => (-1.5, 100.0),   // y = -1.5x + 100
+						_ => unreachable!(),
+					};
+					
+					// Test a subset of positions for exact mathematical correctness
+					for i in (period - 1)..data.len().min(period * 5) {
+						let actual = output.values[i];
+						if !actual.is_nan() {
+							let window_start = i + 1 - period;
+							let expected = calculate_expected_linreg_intercept(window_start, period, data_slope, data_intercept);
+							
+							prop_assert!((actual - expected).abs() < 1e-9,
+								"[{}] Linear trend (scenario {}): expected {:.6}, got {:.6} at index {} (window start {})",
+								test_name, scenario, expected, actual, i, window_start);
+						}
+					}
+				}
+				
+				// Property 7: Kernel consistency
+				for i in 0..output.values.len() {
+					let y = output.values[i];
+					let r = ref_output.values[i];
+					
+					// Check for poison values
+					let bits = y.to_bits();
+					prop_assert!(bits != 0x11111111_11111111 && 
+								 bits != 0x22222222_22222222 && 
+								 bits != 0x33333333_33333333,
+						"[{}] Found poison value at index {}: 0x{:016X}", test_name, i, bits);
+					
+					// Check kernel consistency
+					if y.is_nan() && r.is_nan() {
+						continue; // Both NaN is fine
+					}
+					
+					if y.is_finite() && r.is_finite() {
+						prop_assert!((y - r).abs() <= 1e-9,
+							"[{}] Kernel mismatch at index {}: {} vs {} (diff: {})",
+							test_name, i, y, r, (y - r).abs());
+					} else {
+						prop_assert_eq!(y.is_nan(), r.is_nan(),
+							"[{}] NaN mismatch at index {}: {} vs {}", test_name, i, y, r);
+					}
+				}
+				
+				// Property 8: Values should be reasonable (not infinite)
+				if period > 1 {
+					for i in (period - 1)..output.values.len() {
+						let val = output.values[i];
+						prop_assert!(val.is_finite(),
+							"[{}] Non-finite value {} at index {}", test_name, val, i);
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_linreg_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1000,6 +1180,9 @@ mod tests {
 		check_linreg_nan_handling,
 		check_linreg_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_linreg_tests!(check_linearreg_intercept_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

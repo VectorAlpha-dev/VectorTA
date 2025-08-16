@@ -1121,6 +1121,170 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_pma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate data with at least 7 valid points after the first valid index
+		let strat = prop::collection::vec(
+			(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+			7..400,  // Ensure at least 7 points for PMA to work
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |data| {
+				let input = PmaInput::from_slice(&data, PmaParams {});
+
+				// Test kernel consistency - all kernels should produce identical results
+				let result = pma_with_kernel(&input, kernel)?;
+				let ref_result = pma_with_kernel(&input, Kernel::Scalar)?;
+
+				// Check that both outputs have the correct length
+				prop_assert_eq!(result.predict.len(), data.len());
+				prop_assert_eq!(result.trigger.len(), data.len());
+				prop_assert_eq!(ref_result.predict.len(), data.len());
+				prop_assert_eq!(ref_result.trigger.len(), data.len());
+
+				// PMA has a warmup period of 7 (first_valid_idx + 7)
+				let warmup_period = 7;
+				
+				// Verify NaN pattern in warmup period
+				for i in 0..warmup_period {
+					prop_assert!(result.predict[i].is_nan(), 
+						"Expected NaN in predict warmup at index {}", i);
+					prop_assert!(result.trigger[i].is_nan(), 
+						"Expected NaN in trigger warmup at index {}", i);
+				}
+
+				// Special case: Test with constant data
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) && data.len() >= warmup_period {
+					// For constant data, PMA should output close to that constant value
+					for i in warmup_period..data.len() {
+						if result.predict[i].is_finite() {
+							prop_assert!(
+								(result.predict[i] - data[0]).abs() < 1e-9,
+								"Constant data test failed: predict[{}] = {} should be close to {}",
+								i, result.predict[i], data[0]
+							);
+						}
+					}
+				}
+
+				// Compare results between kernels and verify mathematical properties
+				for i in warmup_period..data.len() {
+					// Compare predict values between kernels
+					if result.predict[i].is_finite() && ref_result.predict[i].is_finite() {
+						let diff_predict = (result.predict[i] - ref_result.predict[i]).abs();
+						prop_assert!(
+							diff_predict < 1e-10,
+							"Predict mismatch at index {}: kernel={}, scalar={}, diff={}",
+							i, result.predict[i], ref_result.predict[i], diff_predict
+						);
+					} else {
+						prop_assert_eq!(
+							result.predict[i].is_nan(), 
+							ref_result.predict[i].is_nan(),
+							"NaN mismatch in predict at index {}", i
+						);
+					}
+
+					// Compare trigger values between kernels
+					if result.trigger[i].is_finite() && ref_result.trigger[i].is_finite() {
+						let diff_trigger = (result.trigger[i] - ref_result.trigger[i]).abs();
+						prop_assert!(
+							diff_trigger < 1e-10,
+							"Trigger mismatch at index {}: kernel={}, scalar={}, diff={}",
+							i, result.trigger[i], ref_result.trigger[i], diff_trigger
+						);
+					} else {
+						prop_assert_eq!(
+							result.trigger[i].is_nan(), 
+							ref_result.trigger[i].is_nan(),
+							"NaN mismatch in trigger at index {}", i
+						);
+					}
+
+					// Verify predict values are within tight bounds of the input window
+					if i >= warmup_period && result.predict[i].is_finite() {
+						let window_start = i.saturating_sub(6);
+						let window_data = &data[window_start..=i];
+						let min_val = window_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+						let max_val = window_data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+						
+						// Since PMA is predictive (2*wma1 - wma2), it can extrapolate slightly
+						// But should still be reasonably bounded
+						let tolerance = (max_val - min_val).abs() * 0.1 + 1e-9;
+						prop_assert!(
+							result.predict[i] >= min_val - tolerance && result.predict[i] <= max_val + tolerance,
+							"Predict value {} at index {} outside bounds [{}, {}] with tolerance {}",
+							result.predict[i], i, min_val - tolerance, max_val + tolerance, tolerance
+						);
+					}
+
+					// Verify WMA1 calculation for specific positions
+					if i == warmup_period && i >= 6 {
+						// Calculate WMA1 manually for the first valid position
+						let wma1_expected = (7.0 * data[i] 
+							+ 6.0 * data[i-1] 
+							+ 5.0 * data[i-2] 
+							+ 4.0 * data[i-3]
+							+ 3.0 * data[i-4] 
+							+ 2.0 * data[i-5] 
+							+ data[i-6]) / 28.0;
+						
+						// At position warmup_period, WMA2 calculation requires 7 WMA1 values
+						// Since we're at the first position, we can't verify the full predict formula
+						// But we can at least check the predict is related to wma1_expected
+						if result.predict[i].is_finite() {
+							// The predict value should be influenced by wma1_expected
+							let window_start = i.saturating_sub(6);
+							let window = &data[window_start..=i];
+							let window_avg = window.iter().sum::<f64>() / window.len() as f64;
+							let min = window.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+							let max = window.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+							prop_assert!(
+								(result.predict[i] - window_avg).abs() < (max - min).abs() + 1e-9,
+								"Predict value {} at index {} seems unrelated to window average {}",
+								result.predict[i], i, window_avg
+							);
+						}
+					}
+
+					// Verify trigger calculation when we have enough predict values
+					if i >= warmup_period + 3 && result.trigger[i].is_finite() && result.predict[i].is_finite() {
+						// Trigger formula: (4*predict[i] + 3*predict[i-1] + 2*predict[i-2] + predict[i-3]) / 10
+						if result.predict[i-1].is_finite() && result.predict[i-2].is_finite() && result.predict[i-3].is_finite() {
+							let expected_trigger = (4.0 * result.predict[i] 
+								+ 3.0 * result.predict[i-1] 
+								+ 2.0 * result.predict[i-2] 
+								+ result.predict[i-3]) / 10.0;
+							let trigger_diff = (result.trigger[i] - expected_trigger).abs();
+							prop_assert!(
+								trigger_diff < 1e-10,
+								"Trigger calculation error at index {}: expected {}, got {}, diff={}",
+								i, expected_trigger, result.trigger[i], trigger_diff
+							);
+						}
+					}
+				}
+
+				// Test edge case: exactly 7 data points
+				if data.len() == 7 {
+					// Should have at least one valid output at position 6
+					prop_assert!(
+						result.predict[6].is_finite(),
+						"With exactly 7 points, predict[6] should be finite but got NaN"
+					);
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_pma_tests!(
 		check_pma_default_candles,
 		check_pma_with_slice,
@@ -1129,6 +1293,10 @@ mod tests {
 		check_pma_expected_values,
 		check_pma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_pma_tests!(check_pma_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 

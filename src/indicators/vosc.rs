@@ -956,6 +956,133 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (1usize..=50, 1usize..=50)
+			.prop_flat_map(|(short, long)| {
+				let max_period = short.max(long);
+				(
+					prop::collection::vec(
+						(0.1f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						max_period..400,
+					),
+					Just((short, long)),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, (short_period, long_period))| {
+				// Skip invalid combinations
+				if short_period > long_period {
+					return Ok(());
+				}
+
+				let params = VoscParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+				};
+				let input = VoscInput::from_slice(&data, params);
+
+				let VoscOutput { values: out } = vosc_with_kernel(&input, kernel).unwrap();
+				let VoscOutput { values: ref_out } = vosc_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Warmup period validation
+				// First (long_period - 1) values should be NaN
+				for i in 0..(long_period - 1) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 2: Kernel consistency
+				// All kernels should produce identical results
+				for i in (long_period - 1)..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+
+				// Property 3: Mathematical formula verification
+				// VOSC = 100 * ((short_avg - long_avg) / long_avg)
+				// Only verify for indices where we have full windows
+				for i in long_period..data.len() {
+					// For sliding window, we look at the most recent 'period' values
+					let short_start = i + 1 - short_period;
+					let long_start = i + 1 - long_period;
+					
+					let short_sum: f64 = data[short_start..=i].iter().sum();
+					let long_sum: f64 = data[long_start..=i].iter().sum();
+					
+					let short_avg = short_sum / short_period as f64;
+					let long_avg = long_sum / long_period as f64;
+					
+					let expected = 100.0 * (short_avg - long_avg) / long_avg;
+					let actual = out[i];
+					
+					prop_assert!(
+						(actual - expected).abs() <= 1e-9,
+						"Formula mismatch at idx {}: expected {}, got {}",
+						i, expected, actual
+					);
+				}
+
+				// Property 4: Zero oscillation for equal periods
+				// When short_period == long_period, VOSC should be 0
+				if short_period == long_period {
+					for i in (long_period - 1)..data.len() {
+						prop_assert!(
+							out[i].abs() <= 1e-9,
+							"Expected 0 when periods equal at idx {}: got {}",
+							i, out[i]
+						);
+					}
+				}
+
+				// Property 5: Constant volume stability
+				// If all volumes are the same, VOSC should be 0
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
+					for i in (long_period - 1)..data.len() {
+						prop_assert!(
+							out[i].abs() <= 1e-9,
+							"Expected 0 for constant volume at idx {}: got {}",
+							i, out[i]
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_vosc_tests!(
 		check_vosc_accuracy,
 		check_vosc_zero_period,
@@ -965,6 +1092,9 @@ mod tests {
 		check_vosc_streaming,
 		check_vosc_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_vosc_tests!(check_vosc_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

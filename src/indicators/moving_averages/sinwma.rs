@@ -812,6 +812,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_sinwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1045,6 +1047,235 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_sinwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: generate period first, then data of appropriate length
+		let strat = (1usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Data must be at least as long as period
+					prop::collection::vec(
+						(-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
+						period..=500,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SinWmaParams { period: Some(period) };
+				let input = SinWmaInput::from_slice(&data, params);
+
+				let SinWmaOutput { values: out } = sinwma_with_kernel(&input, kernel).unwrap();
+				let SinWmaOutput { values: ref_out } = sinwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(out.len(), data.len(), "Output length should match input length");
+
+				// Property 2: NaN values in warmup period
+				// SINWMA has warmup of period - 1 samples
+				let warmup_end = period - 1;
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN at index {} during warmup (period={})",
+						test_name,
+						i,
+						period
+					);
+				}
+
+				// Property 3: Values after warmup are within window bounds
+				for i in warmup_end..data.len() {
+					let y = out[i];
+					
+					// Skip if NaN (shouldn't happen after warmup but be safe)
+					if y.is_nan() {
+						continue;
+					}
+
+					// Get the window that contributed to this output
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					// Allow small tolerance for floating point
+					let tolerance = 1e-9 + (hi - lo).abs() * 1e-12;
+					prop_assert!(
+						y >= lo - tolerance && y <= hi + tolerance,
+						"[{}] idx {}: value {} not in window bounds [{}, {}] (period={})",
+						test_name,
+						i,
+						y,
+						lo,
+						hi,
+						period
+					);
+				}
+
+				// Property 4: Constant input produces constant output
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && !data.is_empty() {
+					for i in warmup_end..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								(out[i] - data[0]).abs() <= 1e-9,
+								"[{}] Constant input should produce constant output: expected {}, got {} at index {}",
+								test_name,
+								data[0],
+								out[i],
+								i
+							);
+						}
+					}
+				}
+
+				// Property 5: Period=1 special case
+				if period == 1 {
+					// With period=1, sine weight is sin(π/2) = 1.0, normalized to 1.0
+					// So output should equal input after warmup (which is 0 for period=1)
+					for i in 0..data.len() {
+						if !out[i].is_nan() && !data[i].is_nan() {
+							prop_assert!(
+								(out[i] - data[i]).abs() <= 1e-12,
+								"[{}] Period=1 should pass through input: expected {}, got {} at index {}",
+								test_name,
+								data[i],
+								out[i],
+								i
+							);
+						}
+					}
+				}
+
+				// Property 6: Kernel consistency
+				// Since AVX2/AVX512 currently forward to scalar, all should match exactly
+				for i in 0..data.len() {
+					if out[i].is_nan() && ref_out[i].is_nan() {
+						continue;
+					}
+					
+					// Check for exact bit-level equality since they use same implementation
+					let y_bits = out[i].to_bits();
+					let r_bits = ref_out[i].to_bits();
+					
+					prop_assert_eq!(
+						y_bits,
+						r_bits,
+						"[{}] Kernel consistency failed at index {}: {:?} gives {}, Scalar gives {}",
+						test_name,
+						i,
+						kernel,
+						out[i],
+						ref_out[i]
+					);
+				}
+
+				// Property 7: Verify sine weights properties
+				// The sine weights should sum to 1.0 after normalization
+				// We can indirectly verify this by checking that the output is a weighted average
+				// For a window of all positive values, output should be positive
+				// For a window of all negative values, output should be negative
+				for i in warmup_end..data.len() {
+					if out[i].is_nan() {
+						continue;
+					}
+					
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					let all_positive = window.iter().all(|&x| x > 0.0);
+					let all_negative = window.iter().all(|&x| x < 0.0);
+					
+					if all_positive {
+						prop_assert!(
+							out[i] > 0.0,
+							"[{}] All positive window should produce positive output, got {} at index {}",
+							test_name,
+							out[i],
+							i
+						);
+					}
+					
+					if all_negative {
+						prop_assert!(
+							out[i] < 0.0,
+							"[{}] All negative window should produce negative output, got {} at index {}",
+							test_name,
+							out[i],
+							i
+						);
+					}
+				}
+
+				// Property 8: Verify center-weighted behavior
+				// SINWMA uses sine weights that form a bell curve peaking in the middle
+				// The weights follow sin((k+1)π/(period+1)) for k=0 to period-1
+				// This means the output should be biased toward middle values of the window
+				if data.len() >= period * 2 {
+					for i in (warmup_end + period)..data.len().min(warmup_end + period * 3) {
+						if out[i].is_nan() {
+							continue;
+						}
+						
+						let window_start = i + 1 - period;
+						let window = &data[window_start..=i];
+						
+						// Only test if window has significant variation
+						let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+						let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						let range = window_max - window_min;
+						
+						if range > 1.0 {
+							// Get values from different parts of the window
+							let middle_idx = period / 2;
+							let middle_value = window[middle_idx];
+							let first_value = window[0];
+							let last_value = window[period - 1];
+							
+							// For a clearly ascending or descending pattern through the window,
+							// the output should be closer to the middle than to the extremes
+							let clearly_ascending = first_value < middle_value && middle_value < last_value 
+								&& (last_value - first_value) > range * 0.8;
+							let clearly_descending = first_value > middle_value && middle_value > last_value
+								&& (first_value - last_value) > range * 0.8;
+							
+							if clearly_ascending || clearly_descending {
+								// Output should be closer to middle than to either extreme
+								let dist_to_middle = (out[i] - middle_value).abs();
+								let dist_to_first = (out[i] - first_value).abs();
+								let dist_to_last = (out[i] - last_value).abs();
+								
+								// The output should be closer to the middle value than to the extremes
+								// Allow some tolerance since weights don't completely ignore edges
+								prop_assert!(
+									dist_to_middle < dist_to_first.min(dist_to_last) * 1.2,
+									"[{}] idx {}: SINWMA output {} should be closer to middle {} than to extremes [{}, {}] (period={})",
+									test_name,
+									i,
+									out[i],
+									middle_value,
+									first_value,
+									last_value,
+									period
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_sinwma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1081,6 +1312,9 @@ mod tests {
 		check_sinwma_streaming,
 		check_sinwma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_sinwma_tests!(check_sinwma_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

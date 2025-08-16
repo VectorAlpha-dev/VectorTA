@@ -1031,6 +1031,301 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_donchian_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Random realistic price data
+		let random_strat = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					// Generate base prices and spreads
+					prop::collection::vec(
+						(50f64..5000f64, 0.1f64..50f64),
+						period..400,
+					),
+					Just(period),
+				)
+			})
+			.prop_map(|(price_pairs, period)| {
+				// Create high/low arrays where high >= low
+				let mut high = Vec::with_capacity(price_pairs.len());
+				let mut low = Vec::with_capacity(price_pairs.len());
+				for (base, spread) in price_pairs {
+					low.push(base);
+					high.push(base + spread);
+				}
+				(high, low, period)
+			});
+
+		// Strategy 2: Constant values
+		let constant_strat = (2usize..=64, 50f64..5000f64, 0f64..50f64)
+			.prop_map(|(period, base_price, spread)| {
+				let len = period + 50;
+				let high = vec![base_price + spread; len];
+				let low = vec![base_price; len];
+				(high, low, period)
+			});
+
+		// Strategy 3: Trending data (monotonic increasing)
+		let trending_strat = (2usize..=64)
+			.prop_map(|period| {
+				let len = period + 100;
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				for i in 0..len {
+					let base = 100.0 + i as f64 * 10.0;
+					low.push(base);
+					high.push(base + 5.0);
+				}
+				(high, low, period)
+			});
+
+		// Strategy 4: Volatile data with large swings
+		let volatile_strat = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(10f64..10000f64, 0.1f64..500f64),
+						period..200,
+					),
+					Just(period),
+				)
+			})
+			.prop_map(|(price_pairs, period)| {
+				let mut high = Vec::with_capacity(price_pairs.len());
+				let mut low = Vec::with_capacity(price_pairs.len());
+				for (i, (base, spread)) in price_pairs.iter().enumerate() {
+					// Add volatility pattern
+					let volatility = if i % 3 == 0 { 2.0 } else { 0.5 };
+					low.push(base - spread * 0.1);
+					high.push(base + spread * volatility);
+				}
+				(high, low, period)
+			});
+
+		// Strategy 5: Edge case - high == low (single price)
+		let single_price_strat = (2usize..=64, 50f64..5000f64)
+			.prop_map(|(period, price)| {
+				let len = period + 50;
+				let high = vec![price; len];
+				let low = vec![price; len];
+				(high, low, period)
+			});
+
+		// Combine all strategies
+		let combined_strat = prop_oneof![
+			random_strat,
+			constant_strat,
+			trending_strat,
+			volatile_strat,
+			single_price_strat,
+		];
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(high, low, period)| {
+				// Validate input data: high should always be >= low
+				for i in 0..high.len() {
+					prop_assert!(
+						high[i] >= low[i],
+						"Invalid input data at index {}: high ({}) < low ({})",
+						i, high[i], low[i]
+					);
+				}
+
+				let params = DonchianParams { period: Some(period) };
+				let input = DonchianInput::from_slices(&high, &low, params.clone());
+
+				// Compute with test kernel and reference (scalar) kernel
+				let output = donchian_with_kernel(&input, kernel).unwrap();
+				let ref_output = donchian_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Verify warmup period
+				for i in 0..(period - 1) {
+					prop_assert!(
+						output.upperband[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {} (period={})",
+						i, output.upperband[i], period
+					);
+					prop_assert!(
+						output.middleband[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {} (period={})",
+						i, output.middleband[i], period
+					);
+					prop_assert!(
+						output.lowerband[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {} (period={})",
+						i, output.lowerband[i], period
+					);
+				}
+
+				// Verify properties for valid outputs
+				for i in (period - 1)..high.len() {
+					let start = i + 1 - period;
+					let window_high = &high[start..=i];
+					let window_low = &low[start..=i];
+					
+					// Find actual max and min in windows
+					let expected_max = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let expected_min = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+					let expected_mid = 0.5 * (expected_max + expected_min);
+
+					let upper = output.upperband[i];
+					let middle = output.middleband[i];
+					let lower = output.lowerband[i];
+
+					// Property 1: Upperband should equal max of high values in window
+					prop_assert!(
+						(upper - expected_max).abs() < 1e-9,
+						"Upperband mismatch at idx {}: got {}, expected {} (period={})",
+						i, upper, expected_max, period
+					);
+
+					// Property 2: Lowerband should equal min of low values in window
+					prop_assert!(
+						(lower - expected_min).abs() < 1e-9,
+						"Lowerband mismatch at idx {}: got {}, expected {} (period={})",
+						i, lower, expected_min, period
+					);
+
+					// Property 3: Middleband should equal (upper + lower) / 2
+					prop_assert!(
+						(middle - expected_mid).abs() < 1e-9,
+						"Middleband mismatch at idx {}: got {}, expected {} (period={})",
+						i, middle, expected_mid, period
+					);
+
+					// Property 4: Ordering invariant
+					prop_assert!(
+						upper >= middle && middle >= lower,
+						"Band ordering violated at idx {}: upper={}, middle={}, lower={} (period={})",
+						i, upper, middle, lower, period
+					);
+
+					// Property 5: Bands should be within the high/low range
+					let data_min = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+					let data_max = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					prop_assert!(
+						upper <= data_max + 1e-9 && lower >= data_min - 1e-9,
+						"Bands outside data range at idx {}: upper={}, lower={}, data_range=[{}, {}]",
+						i, upper, lower, data_min, data_max
+					);
+
+					// Property 6: Special cases
+					if period == 1 {
+						// For period=1, bands should equal current values
+						prop_assert!(
+							(upper - high[i]).abs() < 1e-9,
+							"Period=1: upper should equal current high at idx {}: {} vs {}",
+							i, upper, high[i]
+						);
+						prop_assert!(
+							(lower - low[i]).abs() < 1e-9,
+							"Period=1: lower should equal current low at idx {}: {} vs {}",
+							i, lower, low[i]
+						);
+					}
+
+					// Check if all values in the window have high == low (single price scenario)
+					let window_is_single_price = window_high.iter().zip(window_low.iter())
+						.all(|(h, l)| (h - l).abs() < f64::EPSILON);
+					
+					if window_is_single_price {
+						// When all high == low in window (single price), all bands should converge
+						prop_assert!(
+							(upper - lower).abs() < 1e-9,
+							"Single price window: bands should converge at idx {}: upper={}, lower={}",
+							i, upper, lower
+						);
+						prop_assert!(
+							(middle - upper).abs() < 1e-9,
+							"Single price window: middle should equal upper/lower at idx {}: middle={}, upper={}",
+							i, middle, upper
+						);
+					}
+
+					// Property 7: Check kernel consistency
+					let ref_upper = ref_output.upperband[i];
+					let ref_middle = ref_output.middleband[i];
+					let ref_lower = ref_output.lowerband[i];
+
+					// Check for exact bit equality for NaN/Inf
+					if !upper.is_finite() || !ref_upper.is_finite() {
+						prop_assert!(
+							upper.to_bits() == ref_upper.to_bits(),
+							"Upper finite/NaN mismatch at idx {}: {} vs {}",
+							i, upper, ref_upper
+						);
+					} else {
+						// For finite values, check ULP difference
+						let ulp_diff = upper.to_bits().abs_diff(ref_upper.to_bits());
+						prop_assert!(
+							(upper - ref_upper).abs() <= 1e-9 || ulp_diff <= 4,
+							"Upper kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, upper, ref_upper, ulp_diff
+						);
+					}
+
+					if !middle.is_finite() || !ref_middle.is_finite() {
+						prop_assert!(
+							middle.to_bits() == ref_middle.to_bits(),
+							"Middle finite/NaN mismatch at idx {}: {} vs {}",
+							i, middle, ref_middle
+						);
+					} else {
+						let ulp_diff = middle.to_bits().abs_diff(ref_middle.to_bits());
+						prop_assert!(
+							(middle - ref_middle).abs() <= 1e-9 || ulp_diff <= 4,
+							"Middle kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, middle, ref_middle, ulp_diff
+						);
+					}
+
+					if !lower.is_finite() || !ref_lower.is_finite() {
+						prop_assert!(
+							lower.to_bits() == ref_lower.to_bits(),
+							"Lower finite/NaN mismatch at idx {}: {} vs {}",
+							i, lower, ref_lower
+						);
+					} else {
+						let ulp_diff = lower.to_bits().abs_diff(ref_lower.to_bits());
+						prop_assert!(
+							(lower - ref_lower).abs() <= 1e-9 || ulp_diff <= 4,
+							"Lower kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, lower, ref_lower, ulp_diff
+						);
+					}
+
+					// Property 8: Check for poison values
+					for (band_name, val) in [("upper", upper), ("middle", middle), ("lower", lower)] {
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111,
+							"Found alloc_with_nan_prefix poison in {} at idx {}: {} (0x{:016X})",
+							band_name, i, val, bits
+						);
+						prop_assert!(
+							bits != 0x22222222_22222222,
+							"Found init_matrix_prefixes poison in {} at idx {}: {} (0x{:016X})",
+							band_name, i, val, bits
+						);
+						prop_assert!(
+							bits != 0x33333333_33333333,
+							"Found make_uninit_matrix poison in {} at idx {}: {} (0x{:016X})",
+							band_name, i, val, bits
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_donchian_tests!(
 		check_donchian_partial_params,
 		check_donchian_accuracy,
@@ -1042,6 +1337,9 @@ mod tests {
 		check_donchian_partial_computation,
 		check_donchian_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_donchian_tests!(check_donchian_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

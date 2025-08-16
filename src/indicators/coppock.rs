@@ -1404,6 +1404,297 @@ mod tests {
             }
         }
     }
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_coppock_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Random price data with realistic period ranges
+		let random_data_strat = (2usize..=20, 5usize..=30, 2usize..=15)
+			.prop_flat_map(|(short, long, ma_period)| {
+				let data_len = long.max(short) + ma_period + 50; // Ensure enough data
+				(
+					prop::collection::vec(
+						(10.0f64..10000.0f64).prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
+						data_len..data_len + 100,
+					),
+					Just(short),
+					Just(long),
+					Just(ma_period),
+					prop::sample::select(vec!["wma", "sma", "ema"]),
+				)
+			});
+
+		// Strategy 2: Constant data (should produce ~0 after warmup)
+		let constant_data_strat = (2usize..=15, 5usize..=20, 2usize..=10)
+			.prop_flat_map(|(short, long, ma_period)| {
+				let data_len = long.max(short) + ma_period + 30;
+				(
+					(100.0f64..1000.0f64).prop_map(move |val| vec![val; data_len]),
+					Just(short),
+					Just(long),
+					Just(ma_period),
+					Just("wma"),
+				)
+			});
+
+		// Strategy 3: Trending data (monotonic increasing/decreasing)
+		let trending_data_strat = (2usize..=15, 5usize..=25, 2usize..=12)
+			.prop_flat_map(|(short, long, ma_period)| {
+				let data_len = long.max(short) + ma_period + 40;
+				(
+					prop::bool::ANY.prop_flat_map(move |increasing| {
+						if increasing {
+							Just((0..data_len).map(|i| 100.0 + i as f64 * 2.0).collect::<Vec<_>>())
+						} else {
+							Just((0..data_len).map(|i| 1000.0 - i as f64 * 2.0).collect::<Vec<_>>())
+						}
+					}),
+					Just(short),
+					Just(long),
+					Just(ma_period),
+					Just("sma"),
+				)
+			});
+
+		// Strategy 4: Edge cases with small periods
+		let edge_case_strat = (2usize..=3, 3usize..=5, 2usize..=3)
+			.prop_flat_map(|(short, long, ma_period)| {
+				let data_len = 20;
+				(
+					prop::collection::vec(
+						(50.0f64..150.0f64).prop_filter("positive", |x| *x > 0.0),
+						data_len..data_len + 10,
+					),
+					Just(short),
+					Just(long),
+					Just(ma_period),
+					Just("wma"),
+				)
+			});
+
+		// Strategy 5: Equal periods edge case (degenerate case)
+		let equal_periods_strat = (5usize..=15, 2usize..=10)
+			.prop_flat_map(|(period, ma_period)| {
+				let data_len = period + ma_period + 30;
+				(
+					prop::collection::vec(
+						(50.0f64..500.0f64).prop_filter("positive", |x| *x > 0.0),
+						data_len..data_len + 20,
+					),
+					Just(period),
+					Just(period), // short == long
+					Just(ma_period),
+					Just("wma"),
+				)
+			});
+
+		// Strategy 6: Data with leading NaN values to test warmup handling
+		let nan_prefix_strat = (2usize..=10, 5usize..=15, 2usize..=8, 1usize..=5)
+			.prop_flat_map(|(short, long, ma_period, nan_count)| {
+				let data_len = nan_count + long.max(short) + ma_period + 20;
+				(
+					prop::collection::vec(
+						(100.0f64..1000.0f64),
+						data_len - nan_count..data_len - nan_count + 10,
+					).prop_map(move |mut vals| {
+						// Prepend NaN values
+						let mut result = vec![f64::NAN; nan_count];
+						result.append(&mut vals);
+						result
+					}),
+					Just(short),
+					Just(long),
+					Just(ma_period),
+					Just("sma"),
+				)
+			});
+
+		// Combine all strategies
+		let combined_strat = prop::strategy::Union::new(vec![
+			random_data_strat.boxed(),
+			constant_data_strat.boxed(),
+			trending_data_strat.boxed(),
+			edge_case_strat.boxed(),
+			equal_periods_strat.boxed(),
+			nan_prefix_strat.boxed(),
+		]);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(data, short, long, ma_period, ma_type)| {
+				let params = CoppockParams {
+					short_roc_period: Some(short),
+					long_roc_period: Some(long),
+					ma_period: Some(ma_period),
+					ma_type: Some(ma_type.to_string()),
+				};
+				let input = CoppockInput::from_slice(&data, params.clone());
+
+				// Get output from the kernel being tested
+				let result = coppock_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "Coppock computation failed: {:?}", result.err());
+				let out = result.unwrap().values;
+
+				// Get reference output from scalar kernel
+				let ref_result = coppock_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference computation failed");
+				let ref_out = ref_result.unwrap().values;
+
+				// Calculate warmup period correctly accounting for first valid data
+				let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
+				let largest_roc = short.max(long);
+				let warmup = first + largest_roc + (ma_period - 1);
+
+				// Property 1: Kernel consistency - outputs should match
+				for i in warmup..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Both should be NaN or both should be finite
+					if y.is_nan() != r.is_nan() {
+						prop_assert!(false, "NaN mismatch at index {}: kernel={:?}, ref={:?}", i, y, r);
+					}
+
+					if y.is_finite() && r.is_finite() {
+						// Check ULP difference for floating point precision
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 10,
+							"Value mismatch at index {}: kernel={}, ref={}, diff={}, ULP={}",
+							i, y, r, (y - r).abs(), ulp_diff
+						);
+					}
+				}
+
+				// Property 2: Constant data should produce ~0 output (ROC of constant = 0)
+				let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
+				if is_constant && data.len() > warmup + 5 {
+					for i in (warmup + 5)..data.len() {
+						let val = out[i];
+						if val.is_finite() {
+							prop_assert!(
+								val.abs() <= 1e-6,
+								"Constant data should produce ~0, got {} at index {}",
+								val, i
+							);
+						}
+					}
+				}
+
+				// Property 3: Monotonic data properties
+				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
+				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
+				
+				if (is_increasing || is_decreasing) && data.len() > warmup + 10 {
+					// For strictly monotonic data, check the sign consistency
+					let expected_positive = is_increasing;
+					
+					// Check a few values after warmup for sign consistency
+					for i in (warmup + 10)..(warmup + 15).min(data.len()) {
+						let val = out[i];
+						if val.is_finite() && val.abs() > 1e-10 {
+							if expected_positive {
+								prop_assert!(
+									val >= -1e-6, // Allow tiny negative due to MA smoothing
+									"Expected positive Coppock for increasing data, got {} at index {}",
+									val, i
+								);
+							} else {
+								prop_assert!(
+									val <= 1e-6, // Allow tiny positive due to MA smoothing  
+									"Expected negative Coppock for decreasing data, got {} at index {}",
+									val, i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 4: All values after warmup should be finite (no infinity or undefined)
+				for i in warmup..data.len() {
+					let val = out[i];
+					prop_assert!(
+						val.is_finite() || val.is_nan(),
+						"Found non-finite value {} at index {}",
+						val, i
+					);
+				}
+
+				// Property 5: Output magnitude should be reasonable
+				// ROC values are percentages, but with extreme price movements and MA smoothing,
+				// values can be large. We'll use a generous but still catching bound.
+				for i in warmup..data.len() {
+					let val = out[i];
+					if val.is_finite() {
+						// Allow up to 100,000% to handle extreme cases with MA amplification
+						// This still catches infinity and calculation errors
+						prop_assert!(
+							val.abs() <= 100_000.0,
+							"Unreasonably large Coppock value {} at index {} (exceeds 100,000%)",
+							val, i
+						);
+					}
+				}
+
+				// Property 6: Verify that Coppock calculation doesn't produce NaN unexpectedly
+				// After warmup, all values should be either finite or NaN (not infinity)
+				for i in warmup..data.len() {
+					let val = out[i];
+					prop_assert!(
+						val.is_finite() || val.is_nan(),
+						"Found infinity at index {}: {}",
+						i, val
+					);
+					
+					// If the input data is all finite at the required lookback positions,
+					// the output should be finite too
+					if i >= largest_roc {
+						let current = data[i];
+						let prev_short = data[i - short];
+						let prev_long = data[i - long];
+						
+						if current.is_finite() && prev_short.is_finite() && prev_long.is_finite() 
+							&& prev_short != 0.0 && prev_long != 0.0 {
+							// With valid input data, output should be finite after full warmup
+							if i >= warmup {
+								prop_assert!(
+									val.is_finite(),
+									"Expected finite value but got {} at index {} with valid inputs",
+									val, i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 7: Equal periods should produce valid output (degenerate case)
+				if short == long && data.len() > warmup + 5 {
+					// When short == long, Coppock = MA(2 * ROC_period)
+					// Just verify output is finite and reasonable
+					for i in (warmup + 1)..data.len().min(warmup + 6) {
+						let val = out[i];
+						if val.is_finite() {
+							// The value should still be within reasonable bounds (same as Property 5)
+							prop_assert!(
+								val.abs() <= 100_000.0,
+								"Equal periods produced unreasonable value {} at index {}",
+								val, i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_coppock_tests!(
 		check_coppock_partial_params,
 		check_coppock_accuracy,
@@ -1416,6 +1707,9 @@ mod tests {
 		check_coppock_streaming,
 		check_coppock_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_coppock_tests!(check_coppock_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

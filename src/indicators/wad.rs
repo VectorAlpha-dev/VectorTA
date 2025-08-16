@@ -731,6 +731,189 @@ mod tests {
 	}
 
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_wad_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: Generate realistic OHLC data with proper constraints
+		let strat = (1usize..=200).prop_flat_map(|len| {
+			prop::collection::vec(
+				(1.0f64..1000.0f64).prop_flat_map(|base_price| {
+					// Generate proper OHLC where low <= close <= high
+					let range = base_price * 0.1; // 10% daily range
+					let low = base_price - range;
+					let high = base_price + range;
+					
+					// Generate close within [low, high]
+					(low..=high).prop_map(move |close| {
+						// Ensure low <= close <= high
+						let actual_low = low.min(close);
+						let actual_high = high.max(close);
+						(actual_high, actual_low, close)
+					})
+				}),
+				len,
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |ohlc_data| {
+				let (highs, lows, closes): (Vec<f64>, Vec<f64>, Vec<f64>) = 
+					ohlc_data.into_iter()
+						.map(|(h, l, c)| (h, l, c))
+						.unzip3();
+				
+				// Create input
+				let input = WadInput::from_slices(&highs, &lows, &closes);
+				
+				// Calculate WAD with specified kernel and scalar reference
+				let WadOutput { values: out } = wad_with_kernel(&input, kernel).unwrap();
+				let WadOutput { values: ref_out } = wad_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: First value should always be 0.0
+				prop_assert_eq!(out[0], 0.0, "First WAD value must be 0.0");
+				prop_assert_eq!(ref_out[0], 0.0, "First reference WAD value must be 0.0");
+				
+				// Property 2: WAD is cumulative - verify accumulation logic
+				let mut expected_sum = 0.0;
+				let mut prev_close = closes[0];
+				
+				for i in 1..closes.len() {
+					let trh = if prev_close > highs[i] { prev_close } else { highs[i] };
+					let trl = if prev_close < lows[i] { prev_close } else { lows[i] };
+					
+					let ad = if closes[i] > prev_close {
+						closes[i] - trl
+					} else if closes[i] < prev_close {
+						closes[i] - trh
+					} else {
+						0.0
+					};
+					
+					expected_sum += ad;
+					
+					// Check that the calculated value matches expected
+					prop_assert!(
+						(out[i] - expected_sum).abs() <= 1e-9,
+						"WAD mismatch at idx {}: got {}, expected {}",
+						i, out[i], expected_sum
+					);
+					
+					prev_close = closes[i];
+				}
+				
+				// Property 3: Different kernels should produce identical results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Check for exact bit-level equality for special values
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"NaN/Inf mismatch at idx {}: {} vs {}", i, y, r);
+						continue;
+					}
+					
+					// For finite values, allow small numerical tolerance
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"Kernel mismatch at idx {}: {} vs {} (diff: {}, ulp: {})",
+						i, y, r, (y - r).abs(), ulp_diff
+					);
+				}
+				
+				// Property 4: When consecutive closes are equal, AD should be 0
+				for i in 1..closes.len() {
+					if (closes[i] - closes[i-1]).abs() < f64::EPSILON {
+						let ad_change = if i == 1 {
+							out[i] - 0.0
+						} else {
+							out[i] - out[i-1]
+						};
+						prop_assert!(
+							ad_change.abs() < 1e-9,
+							"WAD should not change when close[{}] == close[{}], but changed by {}",
+							i, i-1, ad_change
+						);
+					}
+				}
+				
+				// Edge case 1: Single element should return [0.0]
+				if closes.len() == 1 {
+					prop_assert_eq!(out.len(), 1);
+					prop_assert_eq!(out[0], 0.0);
+				}
+				
+				// Edge case 2: All constant prices should accumulate to 0
+				if closes.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+					// All WAD values should remain 0 after the first
+					for i in 0..out.len() {
+						prop_assert!(
+							out[i].abs() < 1e-9,
+							"WAD should be 0 for constant prices, but got {} at index {}",
+							out[i], i
+						);
+					}
+				}
+				
+				// Edge case 3: Strictly increasing closes should have positive accumulation
+				let strictly_increasing = closes.windows(2).all(|w| w[1] > w[0]);
+				if strictly_increasing && closes.len() > 1 {
+					// Each WAD value should be >= previous (monotonic increase)
+					for i in 1..out.len() {
+						prop_assert!(
+							out[i] >= out[i-1] - 1e-9,
+							"WAD should increase monotonically for strictly increasing prices, but {} < {} at index {}",
+							out[i], out[i-1], i
+						);
+					}
+				}
+				
+				// Edge case 4: Strictly decreasing closes should have negative accumulation
+				let strictly_decreasing = closes.windows(2).all(|w| w[1] < w[0]);
+				if strictly_decreasing && closes.len() > 1 {
+					// Each WAD value should be <= previous (monotonic decrease)
+					for i in 1..out.len() {
+						prop_assert!(
+							out[i] <= out[i-1] + 1e-9,
+							"WAD should decrease monotonically for strictly decreasing prices, but {} > {} at index {}",
+							out[i], out[i-1], i
+						);
+					}
+				}
+				
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
+	// Helper for unzipping tuples
+	trait Unzip3<A, B, C> {
+		fn unzip3(self) -> (Vec<A>, Vec<B>, Vec<C>);
+	}
+	
+	impl<A, B, C, I> Unzip3<A, B, C> for I
+	where
+		I: Iterator<Item = (A, B, C)>,
+	{
+		fn unzip3(self) -> (Vec<A>, Vec<B>, Vec<C>) {
+			let (mut a_vec, mut b_vec, mut c_vec) = (Vec::new(), Vec::new(), Vec::new());
+			for (a, b, c) in self {
+				a_vec.push(a);
+				b_vec.push(b);
+				c_vec.push(c);
+			}
+			(a_vec, b_vec, c_vec)
+		}
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_wad_tests!(check_wad_property);
 }
 
 // Helper functions for WASM zero-copy optimization

@@ -1339,4 +1339,153 @@ mod tests {
 	}
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rocp_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random period values and corresponding data vectors
+		// Use non-negative values to simulate real financial data (prices >= 0)
+		let strat = (1usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(0.01f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = RocpParams {
+					period: Some(period),
+				};
+				let input = RocpInput::from_slice(&data, params);
+
+				// Calculate ROCP with the specified kernel
+				let RocpOutput { values: out } = rocp_with_kernel(&input, kernel).unwrap();
+				
+				// Calculate reference with scalar kernel for consistency check
+				let RocpOutput { values: ref_out } = rocp_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				
+				// Verify outputs starting from warmup period
+				for i in (first_valid + period)..data.len() {
+					let prev_value = data[i - period];
+					let curr_value = data[i];
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Mathematical correctness: ROCP = (current - previous) / previous
+					if prev_value != 0.0 && prev_value.is_finite() && curr_value.is_finite() {
+						let expected = (curr_value - prev_value) / prev_value;
+						
+						// Check mathematical correctness (with tolerance for floating-point)
+						prop_assert!(
+							y.is_nan() || (y - expected).abs() <= 1e-10,
+							"idx {}: ROCP mismatch. Got {}, expected {}, curr={}, prev={}",
+							i, y, expected, curr_value, prev_value
+						);
+					} else if prev_value == 0.0 {
+						// Division by zero should produce infinity or NaN
+						prop_assert!(
+							!y.is_finite(),
+							"idx {}: Expected non-finite value when dividing by zero, got {}",
+							i, y
+						);
+					}
+
+					// Special case: constant data (using relative difference for better scale handling)
+					let is_constant = data[first_valid..=i].windows(2).all(|w| {
+						let max_val = w[0].max(w[1]);
+						if max_val > 0.0 {
+							(w[0] - w[1]).abs() / max_val < 1e-10
+						} else {
+							w[0] == w[1]
+						}
+					});
+					
+					if is_constant && data[first_valid].is_finite() && data[first_valid] != 0.0 {
+						// If all values are the same, ROCP should be 0
+						prop_assert!(
+							y.abs() <= 1e-10,
+							"Constant data should produce ROCP=0, got {} at idx {}",
+							y, i
+						);
+					}
+					
+					// Special case: monotonic sequences
+					// For strictly increasing data, ROCP should be positive
+					let is_increasing = i >= first_valid + period && 
+						(first_valid..=i).all(|j| j == first_valid || data[j] > data[j-1]);
+					
+					if is_increasing && y.is_finite() {
+						prop_assert!(
+							y > -1e-10,  // Allow small negative due to floating point
+							"Strictly increasing data should produce positive ROCP, got {} at idx {}",
+							y, i
+						);
+					}
+					
+					// For strictly decreasing data, ROCP should be negative
+					let is_decreasing = i >= first_valid + period && 
+						(first_valid..=i).all(|j| j == first_valid || data[j] < data[j-1]);
+					
+					if is_decreasing && y.is_finite() {
+						prop_assert!(
+							y < 1e-10,  // Allow small positive due to floating point
+							"Strictly decreasing data should produce negative ROCP, got {} at idx {}",
+							y, i
+						);
+					}
+
+					// Kernel consistency check
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						// NaN/Inf should match exactly
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					// ULP comparison for floating-point accuracy
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-10 || ulp_diff <= 4,
+						"Kernel mismatch idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+
+				}
+
+				// Verify warmup period contains NaN
+				for i in 0..(first_valid + period).min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at idx {}, got {}",
+						i, out[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_rocp_tests!(check_rocp_property);
 }

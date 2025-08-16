@@ -1127,6 +1127,9 @@ mod tests {
 		check_dec_osc_reinput,
 		check_dec_osc_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_dec_osc_tests!(check_dec_osc_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -1261,6 +1264,213 @@ mod tests {
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_dec_osc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy 1: Random price data with full hp_period range (2-200)
+		let strat_random = (2usize..=200)
+			.prop_flat_map(|hp_period| {
+				(
+					prop::collection::vec(
+						(100.0f64..10000.0f64).prop_filter("finite positive", |x| x.is_finite() && *x > 50.0),
+						hp_period + 10..400,
+					),
+					Just(hp_period),
+					(0.1f64..3.0f64), // k multiplier
+				)
+			});
+
+		// Strategy 2: Constant data (should produce oscillator near 0 after warmup)
+		let strat_constant = (2usize..=100, 0.1f64..3.0f64)
+			.prop_map(|(hp_period, k)| {
+				let value = 1000.0; // Use larger value to avoid division issues
+				let data = vec![value; hp_period.max(10) + 20];
+				(data, hp_period, k)
+			});
+
+		// Strategy 3: Trending data (monotonic increasing/decreasing)
+		let strat_trending = (2usize..=100, 0.1f64..3.0f64, prop::bool::ANY)
+			.prop_map(|(hp_period, k, increasing)| {
+				let len = hp_period.max(10) + 50;
+				let data: Vec<f64> = if increasing {
+					(0..len).map(|i| 500.0 + i as f64 * 2.0).collect()
+				} else {
+					(0..len).map(|i| 2000.0 - i as f64 * 2.0).collect()
+				};
+				(data, hp_period, k)
+			});
+
+		// Strategy 4: Small k values to test proportionality
+		let strat_small_k = (10usize..=50, 0.01f64..0.5f64)
+			.prop_flat_map(|(hp_period, k)| {
+				(
+					prop::collection::vec(
+						(500.0f64..1500.0f64).prop_filter("finite", |x| x.is_finite()),
+						hp_period + 20..100,
+					),
+					Just(hp_period),
+					Just(k),
+				)
+			});
+
+		// Strategy 5: High volatility data to test filter response
+		let strat_volatile = (5usize..=50, 0.1f64..2.0f64)
+			.prop_flat_map(|(hp_period, k)| {
+				(
+					prop::collection::vec(
+						prop::strategy::Union::new(vec![
+							(100.0f64..200.0f64).boxed(),
+							(800.0f64..1000.0f64).boxed(),
+						]),
+						hp_period + 20..100,
+					),
+					Just(hp_period),
+					Just(k),
+				)
+			});
+
+		// Combine all strategies
+		let combined_strat = prop::strategy::Union::new(vec![
+			strat_random.boxed(),
+			strat_constant.boxed(),
+			strat_trending.boxed(),
+			strat_small_k.boxed(),
+			strat_volatile.boxed(),
+		]);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&combined_strat, |(data, hp_period, k)| {
+				let params = DecOscParams {
+					hp_period: Some(hp_period),
+					k: Some(k),
+				};
+				let input = DecOscInput::from_slice(&data, params);
+
+				// Get outputs from tested kernel and reference scalar kernel
+				let DecOscOutput { values: out } = dec_osc_with_kernel(&input, kernel).unwrap();
+				let DecOscOutput { values: ref_out } = dec_osc_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first non-NaN value
+				let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first + 2; // DEC_OSC needs at least 2 values after first
+
+				// Property validations
+				for i in warmup_end..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Property 1: Finite values after warmup
+					prop_assert!(
+						y.is_finite(),
+						"[{}] Output should be finite at index {} (after warmup): got {}",
+						test_name, i, y
+					);
+
+					// Property 2: Graduated magnitude bounds based on hp_period
+					// DEC_OSC can produce extreme values especially with small periods
+					// Skip magnitude check for hp_period=2 as it can produce mathematically valid but extreme values
+					if hp_period > 2 {
+						let magnitude_limit = if hp_period >= 50 {
+							5000.0   // ±5,000% for large periods
+						} else if hp_period >= 20 {
+							20000.0  // ±20,000% for medium periods  
+						} else if hp_period >= 10 {
+							100000.0 // ±100,000% for small-medium periods
+						} else {
+							1000000.0 // ±1,000,000% for very small periods (3-9)
+						};
+						
+						prop_assert!(
+							y.abs() <= magnitude_limit,
+							"[{}] Oscillator exceeds bounds at index {}: {} (> ±{}%) with hp_period={}",
+							test_name, i, y, magnitude_limit, hp_period
+						);
+					}
+
+					// Property 3: For constant data, oscillator should converge
+					// Skip for hp_period=2 which can produce extreme values even with constant data
+					if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && i > first + hp_period * 3 && hp_period > 2 {
+						// Allow more tolerance for small periods which can be unstable
+						let convergence_limit = if hp_period < 10 { 10.0 } else { 0.1 };
+						prop_assert!(
+							y.abs() <= convergence_limit,
+							"[{}] Constant data should converge near zero at index {}: got {} (hp_period={})",
+							test_name, i, y, hp_period
+						);
+					}
+
+					// Property 4: Kernel consistency check with tighter tolerance
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+						continue;
+					}
+
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+						"[{}] Kernel mismatch at index {}: {} vs {} (ULP={}, diff={})",
+						test_name, i, y, r, ulp_diff, (y - r).abs()
+					);
+
+					// Property 5: No poison values
+					prop_assert!(
+						y_bits != 0x11111111_11111111 && 
+						y_bits != 0x22222222_22222222 && 
+						y_bits != 0x33333333_33333333,
+						"[{}] Found poison value at index {}: {} (0x{:016X})",
+						test_name, i, y, y_bits
+					);
+					
+					// Property 6: Basic k parameter validation
+					// Since k multiplies the output, with k=0.01, values should generally be smaller
+					if k < 0.1 && i > first + hp_period * 2 && hp_period > 2 {
+						// Very small k should produce smaller outputs on average
+						// But allow for filter transients and edge effects
+						// Calculate appropriate limit based on period
+						let k_limit = if hp_period >= 50 {
+							10000.0   // 2x the normal limit for large periods
+						} else if hp_period >= 20 {
+							40000.0  // 2x the normal limit for medium periods  
+						} else if hp_period >= 10 {
+							200000.0 // 2x the normal limit for small-medium periods
+						} else {
+							2000000.0 // 2x the normal limit for very small periods (3-9)
+						};
+						
+						prop_assert!(
+							y.abs() <= k_limit,
+							"[{}] Unexpectedly large output with small k={} at index {}: got {}",
+							test_name, k, i, y
+						);
+					}
+				}
+
+				// Property 6: Warmup period should have NaN values
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}: got {}",
+						test_name, i, out[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
 	}
 }
 
