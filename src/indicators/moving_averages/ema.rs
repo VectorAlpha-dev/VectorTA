@@ -902,30 +902,157 @@ mod tests {
 	}
 
 	fn check_ema_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
 
-		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 30..200),
-			3usize..30,
-		);
+		// Enhanced property testing strategy
+		let strat = (1usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Generate data with length >= period + warmup buffer
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						period + 10..400,
+					),
+					Just(period),
+				)
+			});
 
 		proptest::test_runner::TestRunner::default()
 			.run(&strat, |(data, period)| {
 				let params = EmaParams { period: Some(period) };
 				let input = EmaInput::from_slice(&data, params);
+				
+				// Get output from the kernel being tested
 				let EmaOutput { values: out } = ema_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel for comparison
+				let EmaOutput { values: ref_out } = ema_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// EMA specific alpha/beta for validation
+				let alpha = 2.0 / (period as f64 + 1.0);
+				let beta = 1.0 - alpha;
 
-				for i in (period - 1)..data.len() {
-					let window = &data[..=i];
-					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				// Find first non-NaN value position
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				
+				for i in 0..data.len() {
 					let y = out[i];
-
+					let r = ref_out[i];
+					
+					// Test 1: Warmup period should be NaN
+					if i < first_valid {
+						prop_assert!(
+							y.is_nan(),
+							"[{}] Expected NaN during warmup at idx {}, got {}",
+							test_name, i, y
+						);
+						continue;
+					}
+					
+					// Test 2: Values should be within min/max bounds of all seen data
+					if i >= first_valid {
+						let window = &data[first_valid..=i];
+						let lo = window.iter().cloned().filter(|x| x.is_finite()).fold(f64::INFINITY, f64::min);
+						let hi = window.iter().cloned().filter(|x| x.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+						
+						if !y.is_nan() && lo.is_finite() && hi.is_finite() {
+							prop_assert!(
+								y >= lo - 1e-9 && y <= hi + 1e-9,
+								"[{}] idx {}: {} not in [{}, {}]",
+								test_name, i, y, lo, hi
+							);
+						}
+					}
+					
+					// Test 3: Special case - period=1 should equal input
+					if period == 1 && i >= first_valid && data[i].is_finite() {
+						// For period=1, alpha=2/2=1, so EMA = current value
+						prop_assert!(
+							(y - data[i]).abs() <= 1e-10,
+							"[{}] Period=1 mismatch at idx {}: {} vs {}",
+							test_name, i, y, data[i]
+						);
+					}
+					
+					// Test 4: Constant data should converge to that constant
+					if i >= first_valid + period {
+						let window_start = i.saturating_sub(period);
+						let window = &data[window_start..=i];
+						if window.iter().all(|&x| (x - data[window_start]).abs() < 1e-10) {
+							let expected = data[window_start];
+							prop_assert!(
+								(y - expected).abs() <= 1e-6,
+								"[{}] Constant data convergence failed at idx {}: {} vs {}",
+								test_name, i, y, expected
+							);
+						}
+					}
+					
+					// Test 5: Kernel consistency - compare with scalar reference
+					if !y.is_finite() || !r.is_finite() {
+						// Both should be NaN or infinite in the same way
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] NaN/infinite mismatch at idx {}: {} vs {}",
+							test_name, i, y, r
+						);
+					} else {
+						// For finite values, check they are close
+						let abs_diff = (y - r).abs();
+						let rel_diff = if r.abs() > 1e-10 { abs_diff / r.abs() } else { abs_diff };
+						
+						prop_assert!(
+							abs_diff <= 1e-9 || rel_diff <= 1e-9,
+							"[{}] Kernel mismatch at idx {}: {} vs {} (abs_diff={}, rel_diff={})",
+							test_name, i, y, r, abs_diff, rel_diff
+						);
+					}
+					
+					// Test 6: EMA recursive property (for i > first_valid)
+					if i > first_valid && y.is_finite() && out[i-1].is_finite() && data[i].is_finite() {
+						let expected_ema = alpha * data[i] + beta * out[i-1];
+						let diff = (y - expected_ema).abs();
+						
+						// Allow small numerical error accumulation
+						prop_assert!(
+							diff <= 1e-9 * ((i - first_valid) as f64).max(1.0),
+							"[{}] EMA recursive property failed at idx {}: {} vs {} (diff={})",
+							test_name, i, y, expected_ema, diff
+						);
+					}
+					
+					// Test 7: EMA value range after warmup
+					// After sufficient warmup, EMA should be within historical bounds
+					if i >= first_valid + period * 2 {
+						// Look at all historical data from first_valid to current
+						let historical = &data[first_valid..=i];
+						let hist_min = historical.iter()
+							.filter(|x| x.is_finite())
+							.fold(f64::INFINITY, |a, &b| a.min(b));
+						let hist_max = historical.iter()
+							.filter(|x| x.is_finite())
+							.fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+						
+						if hist_min.is_finite() && hist_max.is_finite() && y.is_finite() {
+							prop_assert!(
+								y >= hist_min - 1e-6 && y <= hist_max + 1e-6,
+								"[{}] EMA outside historical bounds at idx {}: {} not in [{}, {}]",
+								test_name, i, y, hist_min, hist_max
+							);
+						}
+					}
+				}
+				
+				// Test 8: Verify first valid output matches first valid input
+				if first_valid < data.len() && out[first_valid].is_finite() {
 					prop_assert!(
-						y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
-						"idx {i}: {y} not in [{lo}, {hi}]",
+						(out[first_valid] - data[first_valid]).abs() <= 1e-10,
+						"[{}] First valid output should equal first valid input: {} vs {}",
+						test_name, out[first_valid], data[first_valid]
 					);
 				}
+				
 				Ok(())
 			})
 			.unwrap();

@@ -987,6 +987,200 @@ mod tests {
 		Ok(())
 	}
 
+	fn check_adxr_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test scenarios with various market conditions
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				// Generate data size between period+10 and 400
+				let min_size = (period * 3).max(period + 10);
+				let max_size = 400;
+				(
+					// Base price
+					10.0f64..1000.0f64,
+					// Volatility percentage (0% to 10%)
+					0.0f64..0.1f64,
+					// Trend strength (-0.01 to 0.01 per bar)
+					-0.01f64..0.01f64,
+					// Data size
+					min_size..max_size,
+					// Period
+					Just(period),
+					// Market type: 0=ranging, 1=trending, 2=zero volatility
+					0u8..3,
+				)
+			})
+			.prop_map(|(base_price, volatility_pct, trend, size, period, market_type)| {
+				let mut high_data = Vec::with_capacity(size);
+				let mut low_data = Vec::with_capacity(size);
+				let mut close_data = Vec::with_capacity(size);
+				
+				for i in 0..size {
+					let price = match market_type {
+						0 => {
+							// Ranging market with variable volatility
+							let cycle = (i as f64 * 0.1).sin();
+							base_price * (1.0 + cycle * volatility_pct)
+						}
+						1 => {
+							// Trending market
+							base_price * (1.0 + trend * i as f64)
+						}
+						2 => {
+							// Zero/minimal volatility - constant price
+							base_price
+						}
+						_ => base_price,
+					};
+					
+					// Generate high/low based on market type
+					let (high, low, close) = if market_type == 2 {
+						// Zero volatility case - high = low = close
+						(price, price, price)
+					} else {
+						// Variable volatility
+						let daily_volatility = price * volatility_pct * (0.5 + 0.5 * (i as f64 * 0.05).cos());
+						let close = price;
+						let high = close + daily_volatility.abs();
+						let low = close - daily_volatility.abs();
+						(high, low, close)
+					};
+					
+					high_data.push(high);
+					low_data.push(low);
+					close_data.push(close);
+				}
+				
+				(high_data, low_data, close_data, period, market_type)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high_data, low_data, close_data, period, market_type)| {
+				let params = AdxrParams {
+					period: Some(period),
+				};
+				let input = AdxrInput::from_slices(&high_data, &low_data, &close_data, params);
+
+				// Test with the specified kernel
+				let result = adxr_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "ADXR computation failed: {:?}", result);
+				let AdxrOutput { values: out } = result.unwrap();
+
+				// Test with scalar kernel as reference
+				let ref_result = adxr_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference ADXR computation failed");
+				let AdxrOutput { values: ref_out } = ref_result.unwrap();
+
+				// Find first non-NaN index in data
+				let first = close_data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				
+				// ADXR warmup period is first + 2 * period
+				let warmup_period = first + 2 * period;
+
+				// Test properties
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if i < warmup_period {
+						// During warmup, values should be NaN
+						prop_assert!(
+							y.is_nan(),
+							"Expected NaN during warmup at index {}, got {}",
+							i,
+							y
+						);
+					} else {
+						// After warmup, values should be valid
+						
+						// ADXR values should be in [0, 100] range (since it's based on ADX)
+						if !y.is_nan() {
+							prop_assert!(
+								y >= -1e-9 && y <= 100.0 + 1e-9,
+								"ADXR value {} at index {} is outside [0, 100] range",
+								y,
+								i
+							);
+						}
+
+						// Different kernels should produce very similar results
+						if !y.is_nan() && !r.is_nan() {
+							let diff = (y - r).abs();
+							prop_assert!(
+								diff < 1e-6,
+								"Kernel {:?} and Scalar differ by {} at index {}: {} vs {}",
+								kernel,
+								diff,
+								i,
+								y,
+								r
+							);
+						}
+					}
+				}
+
+				// Market-specific validations
+				if market_type == 2 && out.len() > warmup_period + period {
+					// Zero volatility: ADXR should converge toward 0
+					let last_values = &out[out.len().saturating_sub(10)..];
+					let non_nan_values: Vec<f64> = last_values.iter()
+						.filter(|v| !v.is_nan())
+						.copied()
+						.collect();
+					
+					if !non_nan_values.is_empty() {
+						let avg_last = non_nan_values.iter().sum::<f64>() / non_nan_values.len() as f64;
+						prop_assert!(
+							avg_last < 25.0,
+							"ADXR should be low with zero volatility, got average {}",
+							avg_last
+						);
+					}
+				}
+
+				// Special case: period = 2 (minimum valid)
+				if period == 2 {
+					// Just verify it doesn't crash and produces valid output
+					prop_assert!(out.len() == close_data.len());
+				}
+
+				// Constant data test
+				let is_constant = close_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+								  high_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+								  low_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if is_constant && out.len() > warmup_period {
+					// With constant prices, ADXR should stabilize
+					let stable_values = &out[warmup_period..];
+					let non_nan: Vec<f64> = stable_values.iter()
+						.filter(|v| !v.is_nan())
+						.copied()
+						.collect();
+					
+					if non_nan.len() > 10 {
+						// Check that values are stabilizing (low standard deviation)
+						let mean = non_nan.iter().sum::<f64>() / non_nan.len() as f64;
+						let variance = non_nan.iter()
+							.map(|v| (v - mean).powi(2))
+							.sum::<f64>() / non_nan.len() as f64;
+						let std_dev = variance.sqrt();
+						
+						prop_assert!(
+							std_dev < 5.0,
+							"ADXR should stabilize with constant data, std_dev = {}",
+							std_dev
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_adxr_tests!(
 		check_adxr_partial_params,
 		check_adxr_accuracy,
@@ -995,7 +1189,8 @@ mod tests {
 		check_adxr_very_small_dataset,
 		check_adxr_reinput,
 		check_adxr_nan_handling,
-		check_adxr_no_poison
+		check_adxr_no_poison,
+		check_adxr_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

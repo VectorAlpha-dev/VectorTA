@@ -1032,6 +1032,330 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_tsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with varying parameters
+		let strat = (2usize..=50)
+			.prop_flat_map(|long_period| {
+				(
+					// Generate data with enough length for the periods
+					prop::collection::vec(
+						(1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+						(long_period + 30)..400,
+					),
+					Just(long_period),
+					// Short period should be less than or equal to long period
+					2usize..=long_period.min(25),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, long_period, short_period)| {
+				let params = TsiParams {
+					long_period: Some(long_period),
+					short_period: Some(short_period),
+				};
+				let input = TsiInput::from_slice(&data, params.clone());
+
+				let TsiOutput { values: out } = tsi_with_kernel(&input, kernel).unwrap();
+				let TsiOutput { values: ref_out } = tsi_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: TSI values must be in [-100, 100] range
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= -100.0 - 1e-9 && val <= 100.0 + 1e-9,
+							"Property 1: TSI value out of range at idx {}: {} ∉ [-100, 100]",
+							i, val
+						);
+					}
+				}
+
+				// Property 2: Warmup period handling
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				
+				// The first value should always be NaN (momentum needs previous value)
+				prop_assert!(
+					out[0].is_nan(),
+					"Property 2: First value should always be NaN, got {}",
+					out[0]
+				);
+				
+				// Check if the data has any variation (not all constant)
+				let has_variation = data.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-10);
+				
+				if has_variation {
+					// TSI produces values earlier than theoretical warmup due to EMA behavior
+					// Just verify we eventually get consistent non-NaN values
+					let first_non_nan = out.iter().position(|x| !x.is_nan());
+					
+					if let Some(idx) = first_non_nan {
+						// Verify first non-NaN appears after some minimal warmup
+						prop_assert!(
+							idx >= 1,  // At least after first (momentum needs previous)
+							"Property 2: First non-NaN too early at idx {}",
+							idx
+						);
+						
+						// Check that after sufficient data, values are consistently non-NaN
+						let sufficient_data = (first_valid + long_period + short_period).min(out.len());
+						if sufficient_data < out.len() {
+							let last_quarter_start = out.len() - (out.len() / 4).max(1);
+							for i in last_quarter_start..out.len() {
+								prop_assert!(
+									!out[i].is_nan(),
+									"Property 2: Expected valid value in last quarter at idx {}, got NaN",
+									i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 3: Kernel consistency
+				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
+					if val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					if !val.is_finite() || !ref_val.is_finite() {
+						prop_assert!(
+							val.to_bits() == ref_val.to_bits(),
+							"Property 3: Kernel finite/NaN mismatch at idx {}: {} vs {}",
+							i, val, ref_val
+						);
+						continue;
+					}
+					prop_assert!(
+						(val - ref_val).abs() <= 1e-9,
+						"Property 3: Kernel mismatch at idx {}: {} vs {} (diff: {})",
+						i, val, ref_val, (val - ref_val).abs()
+					);
+				}
+
+				// Property 4: Zero momentum special case (constant prices)
+				// When prices are constant, momentum is 0, and TSI = 100 * (0/0) = NaN
+				let constant_data = vec![100.0; 50];
+				let const_params = TsiParams {
+					long_period: Some(10),
+					short_period: Some(5),
+				};
+				let const_input = TsiInput::from_slice(&constant_data, const_params);
+				if let Ok(TsiOutput { values: const_out }) = tsi_with_kernel(&const_input, kernel) {
+					// All values should be NaN for constant prices (after first which is always NaN)
+					for (i, &val) in const_out.iter().enumerate() {
+						prop_assert!(
+							val.is_nan(),
+							"Property 4: TSI should be NaN for constant prices at idx {}, got {}",
+							i, val
+						);
+					}
+				}
+
+				// Property 5: Trend behavior for all period combinations
+				// Strong uptrend
+				let uptrend: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 20.0).collect();
+				let uptrend_input = TsiInput::from_slice(&uptrend, params.clone());
+				
+				// Strong downtrend
+				let downtrend: Vec<f64> = (0..100).map(|i| 2100.0 - i as f64 * 20.0).collect();
+				let downtrend_input = TsiInput::from_slice(&downtrend, params.clone());
+				
+				if let (Ok(TsiOutput { values: up_out }), Ok(TsiOutput { values: down_out })) = 
+					(tsi_with_kernel(&uptrend_input, kernel), tsi_with_kernel(&downtrend_input, kernel)) {
+					
+					let test_warmup = 1 + long_period + short_period - 1;
+					if test_warmup + 10 < up_out.len() {
+						// Check last 10 values after warmup
+						let up_vals: Vec<f64> = up_out[up_out.len()-10..]
+							.iter()
+							.filter(|&&x| !x.is_nan())
+							.copied()
+							.collect();
+						let down_vals: Vec<f64> = down_out[down_out.len()-10..]
+							.iter()
+							.filter(|&&x| !x.is_nan())
+							.copied()
+							.collect();
+						
+						if !up_vals.is_empty() && !down_vals.is_empty() {
+							let up_avg = up_vals.iter().sum::<f64>() / up_vals.len() as f64;
+							let down_avg = down_vals.iter().sum::<f64>() / down_vals.len() as f64;
+							
+							// Use tolerance based on period size (larger periods smooth more)
+							let tolerance = if long_period > 20 { 10.0 } else { 0.0 };
+							
+							prop_assert!(
+								up_avg > tolerance,
+								"Property 5: Uptrend TSI should be positive, got avg: {} (long={}, short={})",
+								up_avg, long_period, short_period
+							);
+							prop_assert!(
+								down_avg < -tolerance,
+								"Property 5: Downtrend TSI should be negative, got avg: {} (long={}, short={})",
+								down_avg, long_period, short_period
+							);
+						}
+					}
+				}
+
+				// Property 6: Extreme values with realistic strong trends
+				// Very strong linear uptrend
+				let extreme_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 50.0).collect();
+				let extreme_params = TsiParams {
+					long_period: Some(5),
+					short_period: Some(3),
+				};
+				let extreme_input = TsiInput::from_slice(&extreme_up, extreme_params.clone());
+				if let Ok(TsiOutput { values: extreme_out }) = tsi_with_kernel(&extreme_input, kernel) {
+					// Check last few values - should be very positive (>80 for strong trend)
+					let last_valid = extreme_out.iter().rposition(|x| !x.is_nan());
+					if let Some(idx) = last_valid {
+						if idx >= 20 {
+							let last_vals = &extreme_out[idx-5..=idx];
+							for &v in last_vals {
+								if !v.is_nan() {
+									prop_assert!(
+										v > 80.0,
+										"Property 6: Very strong uptrend should have TSI > 80, got: {}",
+										v
+									);
+								}
+							}
+						}
+					}
+				}
+				
+				// Very strong linear downtrend
+				let extreme_down: Vec<f64> = (0..100).map(|i| 5100.0 - i as f64 * 50.0).collect();
+				let extreme_down_input = TsiInput::from_slice(&extreme_down, extreme_params);
+				if let Ok(TsiOutput { values: extreme_down_out }) = tsi_with_kernel(&extreme_down_input, kernel) {
+					let last_valid = extreme_down_out.iter().rposition(|x| !x.is_nan());
+					if let Some(idx) = last_valid {
+						if idx >= 20 {
+							let last_vals = &extreme_down_out[idx-5..=idx];
+							for &v in last_vals {
+								if !v.is_nan() {
+									prop_assert!(
+										v < -80.0,
+										"Property 6: Very strong downtrend should have TSI < -80, got: {}",
+										v
+									);
+								}
+							}
+						}
+					}
+				}
+
+				// Property 7: Enhanced formula verification
+				// Test basic TSI behavior with predictable data
+				if data.len() >= 20 {
+					// Check that increasing prices generally lead to positive TSI
+					let increasing_count = data.windows(2).filter(|w| w[1] > w[0]).count();
+					let decreasing_count = data.windows(2).filter(|w| w[1] < w[0]).count();
+					
+					// Find the last few valid TSI values
+					let valid_tsi: Vec<f64> = out.iter()
+						.rev()
+						.take(10)
+						.filter(|&&x| !x.is_nan())
+						.copied()
+						.collect();
+					
+					if !valid_tsi.is_empty() {
+						let avg_tsi = valid_tsi.iter().sum::<f64>() / valid_tsi.len() as f64;
+						
+						// If prices are mostly increasing, TSI should tend positive
+						if increasing_count > decreasing_count * 2 {
+							prop_assert!(
+								avg_tsi > -20.0,
+								"Property 7: Mostly increasing prices should have TSI > -20, got: {}",
+								avg_tsi
+							);
+						}
+						// If prices are mostly decreasing, TSI should tend negative
+						else if decreasing_count > increasing_count * 2 {
+							prop_assert!(
+								avg_tsi < 20.0,
+								"Property 7: Mostly decreasing prices should have TSI < 20, got: {}",
+								avg_tsi
+							);
+						}
+					}
+				}
+
+				// Property 8: No poison values in debug mode
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Property 8: Found poison value at idx {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+				}
+
+				// Property 9: Momentum response
+				// TSI should respond to changes in momentum direction
+				if data.len() >= 50 && has_variation {
+					// Find a period where we have valid TSI values
+					let start_idx = (1 + long_period + short_period).max(20);
+					if start_idx + 20 < out.len() {
+						// Check if TSI changes direction when price momentum changes
+						let mut momentum_changes = 0;
+						let mut tsi_follows = 0;
+						
+						for i in start_idx..out.len()-10 {
+							if !out[i].is_nan() && !out[i+5].is_nan() && !out[i+10].is_nan() {
+								// Check price momentum change
+								let price_change1 = data[i+5] - data[i];
+								let price_change2 = data[i+10] - data[i+5];
+								
+								// Check TSI change
+								let tsi_change1 = out[i+5] - out[i];
+								let tsi_change2 = out[i+10] - out[i+5];
+								
+								// If price momentum reverses, TSI should eventually follow
+								if price_change1 * price_change2 < 0.0 {
+									momentum_changes += 1;
+									// Allow some lag, but TSI should respond
+									if tsi_change1 * tsi_change2 < 0.0 || 
+									   (price_change2 > 0.0 && tsi_change2 > tsi_change1) ||
+									   (price_change2 < 0.0 && tsi_change2 < tsi_change1) {
+										tsi_follows += 1;
+									}
+								}
+							}
+						}
+						
+						// TSI should follow momentum changes at least 50% of the time
+						if momentum_changes > 0 {
+							let follow_rate = tsi_follows as f64 / momentum_changes as f64;
+							prop_assert!(
+								follow_rate >= 0.3,  // Allow for smoothing lag
+								"Property 9: TSI should respond to momentum changes, follow rate: {:.2}",
+								follow_rate
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_tsi_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1066,6 +1390,9 @@ mod tests {
 		check_tsi_nan_handling,
 		check_tsi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_tsi_tests!(check_tsi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

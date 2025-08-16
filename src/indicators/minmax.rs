@@ -1749,6 +1749,9 @@ mod tests {
 		check_minmax_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_minmax_tests!(check_minmax_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1840,6 +1843,274 @@ mod tests {
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_minmax_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic high/low price data with various orders
+		let strat = (1usize..=50)
+			.prop_flat_map(|order| {
+				(
+					// Generate data length from order to 400
+					(order..400)
+						.prop_flat_map(move |len| {
+							// Generate low prices first
+							prop::collection::vec(
+								(0.1f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+								len,
+							)
+							.prop_flat_map(move |low| {
+								// Generate high prices with realistic spreads
+								let high_strategies: Vec<_> = low
+									.iter()
+									.map(|&l| {
+										// Generate spread factor between 0% and 20%
+										(0.0f64..=0.2).prop_map(move |spread| l * (1.0 + spread))
+									})
+									.collect();
+								prop::collection::vec(prop::strategy::Union::new(high_strategies), low.len())
+									.prop_map(move |high| (high, low.clone()))
+							})
+						}),
+					Just(order),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |((high, low), order)| {
+				let params = MinmaxParams { order: Some(order) };
+				let input = MinmaxInput::from_slices(&high, &low, params);
+
+				// Get outputs from different kernels
+				let output = minmax_with_kernel(&input, kernel)?;
+				let ref_output = minmax_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(output.is_min.len(), high.len());
+				prop_assert_eq!(output.is_max.len(), high.len());
+				prop_assert_eq!(output.last_min.len(), high.len());
+				prop_assert_eq!(output.last_max.len(), high.len());
+
+				// Property 2: Warmup period handling
+				// First 'order' values should be NaN for is_min/is_max
+				for i in 0..order.min(high.len()) {
+					prop_assert!(
+						output.is_min[i].is_nan(),
+						"is_min[{}] should be NaN during warmup", i
+					);
+					prop_assert!(
+						output.is_max[i].is_nan(),
+						"is_max[{}] should be NaN during warmup", i
+					);
+				}
+
+				// Property 3: Local extrema validity
+				// When a minimum is detected, it should be a valid local minimum
+				for i in order..high.len().saturating_sub(order) {
+					if !output.is_min[i].is_nan() {
+						// This is a detected minimum - verify it's actually a local min
+						prop_assert_eq!(output.is_min[i], low[i], 
+							"is_min[{}] should equal low[{}]", i, i);
+						
+						// Check it's less than or equal to all neighbors (implementation uses >=)
+						for o in 1..=order {
+							if i >= o && i + o < low.len() {
+								prop_assert!(
+									low[i] <= low[i - o] && low[i] <= low[i + o],
+									"Detected min at {} not <= neighbors at {} and {}", 
+									i, i - o, i + o
+								);
+							}
+						}
+					}
+					
+					if !output.is_max[i].is_nan() {
+						// This is a detected maximum - verify it's actually a local max
+						prop_assert_eq!(output.is_max[i], high[i],
+							"is_max[{}] should equal high[{}]", i, i);
+						
+						// Check it's greater than or equal to all neighbors (implementation uses <=)
+						for o in 1..=order {
+							if i >= o && i + o < high.len() {
+								prop_assert!(
+									high[i] >= high[i - o] && high[i] >= high[i + o],
+									"Detected max at {} not >= neighbors at {} and {}",
+									i, i - o, i + o
+								);
+							}
+						}
+					}
+				}
+
+				// Property 4: Forward-filling behavior
+				// last_min and last_max should forward-fill from is_min/is_max
+				let first_valid_idx = high
+					.iter()
+					.zip(low.iter())
+					.position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
+					.unwrap_or(0);
+				
+				for i in first_valid_idx..high.len() {
+					// Check forward-filling logic
+					if i > first_valid_idx {
+						// If no new extrema detected, should maintain previous value
+						if output.is_min[i].is_nan() && !output.last_min[i - 1].is_nan() {
+							prop_assert_eq!(
+								output.last_min[i], output.last_min[i - 1],
+								"last_min[{}] should equal last_min[{}]", i, i - 1
+							);
+						}
+						if output.is_max[i].is_nan() && !output.last_max[i - 1].is_nan() {
+							prop_assert_eq!(
+								output.last_max[i], output.last_max[i - 1],
+								"last_max[{}] should equal last_max[{}]", i, i - 1
+							);
+						}
+						
+						// If new extrema detected, should update to new value
+						if !output.is_min[i].is_nan() {
+							prop_assert_eq!(
+								output.last_min[i], output.is_min[i],
+								"last_min[{}] should update to new minimum", i
+							);
+						}
+						if !output.is_max[i].is_nan() {
+							prop_assert_eq!(
+								output.last_max[i], output.is_max[i],
+								"last_max[{}] should update to new maximum", i
+							);
+						}
+					}
+				}
+
+				// Property 5: Kernel consistency
+				// Different kernels should produce identical results within ULP tolerance
+				for i in 0..high.len() {
+					// Check is_min consistency
+					if output.is_min[i].is_finite() && ref_output.is_min[i].is_finite() {
+						let ulp_diff = output.is_min[i].to_bits().abs_diff(ref_output.is_min[i].to_bits());
+						prop_assert!(
+							ulp_diff <= 5,
+							"is_min[{}] kernel mismatch: {} vs {} (ULP={})",
+							i, output.is_min[i], ref_output.is_min[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(output.is_min[i].to_bits(), ref_output.is_min[i].to_bits(),
+							"is_min[{}] NaN mismatch", i);
+					}
+					
+					// Check is_max consistency
+					if output.is_max[i].is_finite() && ref_output.is_max[i].is_finite() {
+						let ulp_diff = output.is_max[i].to_bits().abs_diff(ref_output.is_max[i].to_bits());
+						prop_assert!(
+							ulp_diff <= 5,
+							"is_max[{}] kernel mismatch: {} vs {} (ULP={})",
+							i, output.is_max[i], ref_output.is_max[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(output.is_max[i].to_bits(), ref_output.is_max[i].to_bits(),
+							"is_max[{}] NaN mismatch", i);
+					}
+					
+					// Check last_min consistency
+					if output.last_min[i].is_finite() && ref_output.last_min[i].is_finite() {
+						let ulp_diff = output.last_min[i].to_bits().abs_diff(ref_output.last_min[i].to_bits());
+						prop_assert!(
+							ulp_diff <= 5,
+							"last_min[{}] kernel mismatch: {} vs {} (ULP={})",
+							i, output.last_min[i], ref_output.last_min[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(output.last_min[i].to_bits(), ref_output.last_min[i].to_bits(),
+							"last_min[{}] NaN mismatch", i);
+					}
+					
+					// Check last_max consistency
+					if output.last_max[i].is_finite() && ref_output.last_max[i].is_finite() {
+						let ulp_diff = output.last_max[i].to_bits().abs_diff(ref_output.last_max[i].to_bits());
+						prop_assert!(
+							ulp_diff <= 5,
+							"last_max[{}] kernel mismatch: {} vs {} (ULP={})",
+							i, output.last_max[i], ref_output.last_max[i], ulp_diff
+						);
+					} else {
+						prop_assert_eq!(output.last_max[i].to_bits(), ref_output.last_max[i].to_bits(),
+							"last_max[{}] NaN mismatch", i);
+					}
+				}
+
+				// Property 6: Boundary values
+				// All detected extrema should be within data range
+				let min_low = low.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+				let max_high = high.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+				
+				for i in 0..high.len() {
+					if !output.is_min[i].is_nan() {
+						prop_assert!(
+							output.is_min[i] >= min_low && output.is_min[i] <= max_high,
+							"is_min[{}]={} outside data range [{}, {}]",
+							i, output.is_min[i], min_low, max_high
+						);
+					}
+					if !output.is_max[i].is_nan() {
+						prop_assert!(
+							output.is_max[i] >= min_low && output.is_max[i] <= max_high,
+							"is_max[{}]={} outside data range [{}, {}]",
+							i, output.is_max[i], min_low, max_high
+						);
+					}
+					if !output.last_min[i].is_nan() {
+						prop_assert!(
+							output.last_min[i] >= min_low && output.last_min[i] <= max_high,
+							"last_min[{}]={} outside data range [{}, {}]",
+							i, output.last_min[i], min_low, max_high
+						);
+					}
+					if !output.last_max[i].is_nan() {
+						prop_assert!(
+							output.last_max[i] >= min_low && output.last_max[i] <= max_high,
+							"last_max[{}]={} outside data range [{}, {}]",
+							i, output.last_max[i], min_low, max_high
+						);
+					}
+				}
+
+				// Property 7: Order = 1 special case
+				// With order=1, extrema detection looks at immediate neighbors only
+				if order == 1 && high.len() >= 3 {
+					for i in 1..high.len() - 1 {
+						// Check if this is a valid local minimum (strict inequality)
+						if low[i] < low[i - 1] && low[i] < low[i + 1] {
+							prop_assert!(!output.is_min[i].is_nan(),
+								"Expected minimum at {} not detected", i);
+						}
+						// Check if this is a valid local maximum (strict inequality)
+						if high[i] > high[i - 1] && high[i] > high[i + 1] {
+							prop_assert!(!output.is_max[i].is_nan(),
+								"Expected maximum at {} not detected", i);
+						}
+					}
+				}
+
+				// Property 8: High >= Low constraint
+				// Verify our generated data maintains the constraint
+				for i in 0..high.len() {
+					prop_assert!(
+						high[i] >= low[i],
+						"Invalid data: high[{}]={} < low[{}]={}",
+						i, high[i], i, low[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
 	}
 
 	macro_rules! gen_batch_tests {

@@ -1240,6 +1240,166 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vpwma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: period from 2..=100 (VPWMA requires period >= 2), then generate data and power
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period.max(2)..400,
+				),
+				Just(period),
+				0.1f64..10.0f64, // power parameter range
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, power)| {
+				let params = VpwmaParams {
+					period: Some(period),
+					power: Some(power),
+				};
+				let input = VpwmaInput::from_slice(&data, params);
+
+				let VpwmaOutput { values: out } = vpwma_with_kernel(&input, kernel).unwrap();
+				let VpwmaOutput { values: ref_out } = vpwma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len());
+
+				// Property 2: Warmup period check - first (period-1) values should be NaN
+				let expected_warmup = period - 1;
+				for i in 0..expected_warmup.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Weight properties verification
+				// VPWMA weights: (period - k)^power for k in 0..(period-1)
+				let mut weights = Vec::with_capacity(period - 1);
+				let mut weight_sum = 0.0;
+				for k in 0..(period - 1) {
+					let w = (period as f64 - k as f64).powf(power);
+					weights.push(w);
+					weight_sum += w;
+				}
+				// Verify weights sum to approximately 1.0 after normalization
+				prop_assert!(
+					(weight_sum - 0.0).abs() > 1e-10,
+					"Weight sum should be non-zero, got {}",
+					weight_sum
+				);
+
+				// Property 4: Values after warmup are within window bounds
+				for i in expected_warmup..data.len() {
+					if out[i].is_nan() {
+						continue;
+					}
+					
+					// VPWMA uses period-1 weights, looking back from current position
+					let window_start = i.saturating_sub(period - 1);
+					let window = &data[window_start..=i];
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					prop_assert!(
+						out[i] >= lo - 1e-9 && out[i] <= hi + 1e-9,
+						"idx {}: {} ∉ [{}, {}]",
+						i,
+						out[i],
+						lo,
+						hi
+					);
+				}
+
+				// Property 5: Minimum period edge case (period=2)
+				// Already tested in Property 6 below
+
+				// Property 6: Period=2 special case
+				if period == 2 && data.len() >= 2 {
+					// With period=2, VPWMA uses 1 weight: (2-0)^power = 2^power
+					// After normalization, weight is 1.0, so it should equal the previous value
+					for i in 1..data.len() {
+						if !out[i].is_nan() && !data[i].is_nan() {
+							// VPWMA with period=2 looks at data[i] only (single weight)
+							prop_assert!(
+								(out[i] - data[i]).abs() <= 1e-9,
+								"Period=2 mismatch at idx {}: {} vs {}",
+								i,
+								out[i],
+								data[i]
+							);
+						}
+					}
+				}
+
+				// Property 7: Constant data should converge to that constant
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.len() > 0 {
+					let constant_val = data[0];
+					for i in expected_warmup..data.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								(out[i] - constant_val).abs() <= 1e-9,
+								"Constant data should give constant output at idx {}: {} vs {}",
+								i,
+								out[i],
+								constant_val
+							);
+						}
+					}
+				}
+
+				// Property 8: Cross-kernel validation
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// If either is non-finite, they should match exactly
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					// For finite values, check ULP difference
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					// Allow slightly higher ULP tolerance for AVX512 due to different rounding
+					let max_ulp = if matches!(kernel, Kernel::Avx512) { 20 } else { 10 };
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= max_ulp,
+						"mismatch idx {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_vpwma_tests!(
 		check_vpwma_partial_params,
 		check_vpwma_accuracy,
@@ -1249,7 +1409,8 @@ mod tests {
 		check_vpwma_reinput,
 		check_vpwma_nan_handling,
 		check_vpwma_streaming,
-		check_vpwma_no_poison
+		check_vpwma_no_poison,
+		check_vpwma_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

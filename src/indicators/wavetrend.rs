@@ -1908,6 +1908,255 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_wavetrend_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: Generate reasonable parameter combinations and data
+		let strat = (2usize..=30, 2usize..=30, 1usize..=10, 0.001f64..1.0f64)
+			.prop_flat_map(|(channel_len, average_len, ma_len, factor)| {
+				// Ensure data length is always larger than the warmup period
+				// warmup = first + channel_len - 1 + average_len - 1 + ma_len - 1
+				// Since first is 0 for non-NaN data, warmup = channel_len + average_len + ma_len - 3
+				// Add extra buffer to ensure we have valid data after warmup
+				let min_len = channel_len + average_len + ma_len + 20;
+				(min_len..400).prop_flat_map(move |data_len| {
+					(
+						prop::collection::vec(
+							(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+							data_len,
+						),
+						Just(channel_len),
+						Just(average_len),
+						Just(ma_len),
+						Just(factor),
+					)
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, channel_len, average_len, ma_len, factor)| {
+				let params = WavetrendParams {
+					channel_length: Some(channel_len),
+					average_length: Some(average_len),
+					ma_length: Some(ma_len),
+					factor: Some(factor),
+				};
+				let input = WavetrendInput::from_slice(&data, params);
+
+				// Run with the specified kernel and scalar reference
+				let output = wavetrend_with_kernel(&input, kernel).unwrap();
+				let ref_output = wavetrend_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index (after warmup)
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let expected_warmup = first_valid + channel_len - 1 + average_len - 1 + ma_len - 1;
+
+				// Property 1: WT_DIFF = WT2 - WT1 for all valid indices
+				// Make sure we don't exceed the data length
+				for i in expected_warmup.min(data.len())..data.len() {
+					if output.wt1[i].is_finite() && output.wt2[i].is_finite() {
+						let expected_diff = output.wt2[i] - output.wt1[i];
+						let actual_diff = output.wt_diff[i];
+						prop_assert!(
+							(actual_diff - expected_diff).abs() <= 1e-9,
+							"WT_DIFF mismatch at idx {}: expected {}, got {}",
+							i, expected_diff, actual_diff
+						);
+					}
+				}
+
+				// Property 2: WT2 should be smoother than WT1 (it's an SMA of WT1)
+				// Check variance when we have enough valid data points
+				let valid_start = expected_warmup.min(data.len());
+				let valid_wt1: Vec<f64> = output.wt1[valid_start..]
+					.iter()
+					.filter(|&&x| x.is_finite())
+					.copied()
+					.collect();
+				let valid_wt2: Vec<f64> = output.wt2[valid_start..]
+					.iter()
+					.filter(|&&x| x.is_finite())
+					.copied()
+					.collect();
+
+				// Only check smoothness if we have sufficient data and ma_len > 1
+				if valid_wt1.len() > 10 && valid_wt2.len() > 10 && ma_len > 1 {
+					// WT2 should generally change less drastically than WT1
+					let mut wt1_changes = 0.0;
+					let mut wt2_changes = 0.0;
+					for i in 1..valid_wt1.len().min(valid_wt2.len()) {
+						wt1_changes += (valid_wt1[i] - valid_wt1[i-1]).abs();
+						wt2_changes += (valid_wt2[i] - valid_wt2[i-1]).abs();
+					}
+					// WT2 should have less total change (smoother)
+					if wt1_changes > 1e-6 {
+						// Only check if there's actual movement
+						prop_assert!(
+							wt2_changes <= wt1_changes * 1.1, // Allow 10% tolerance
+							"WT2 should be smoother: wt1_changes={}, wt2_changes={}",
+							wt1_changes, wt2_changes
+						);
+					}
+				}
+
+				// Property 3: Constant price should lead to stable oscillator
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && data.len() > valid_start + 10 {
+					// After sufficient warmup, oscillator should stabilize near zero
+					let last_10_wt1: Vec<f64> = output.wt1[output.wt1.len()-10..]
+						.iter()
+						.filter(|&&x| x.is_finite())
+						.copied()
+						.collect();
+					if last_10_wt1.len() >= 5 {
+						let avg_wt1: f64 = last_10_wt1.iter().sum::<f64>() / last_10_wt1.len() as f64;
+						prop_assert!(
+							avg_wt1.abs() <= 1.0, // Oscillator should be near zero for constant prices
+							"Constant price should give near-zero oscillator: avg_wt1={}",
+							avg_wt1
+						);
+					}
+				}
+
+				// Property 3b: Factor scaling relationship
+				// CI = (price - ESA) / (factor * DE), so doubling factor should roughly halve CI/WT1 values
+				if factor < 0.5 && valid_start < data.len() { // Only test when we can double without exceeding 1.0
+					let params_double = WavetrendParams {
+						channel_length: Some(channel_len),
+						average_length: Some(average_len),
+						ma_length: Some(ma_len),
+						factor: Some(factor * 2.0),
+					};
+					let input_double = WavetrendInput::from_slice(&data, params_double);
+					let output_double = wavetrend_with_kernel(&input_double, kernel).unwrap();
+					
+					// Check relationship for a few valid points after warmup
+					let check_end = data.len().min(valid_start + 20);
+					let mut checked_count = 0;
+					for i in valid_start..check_end {
+						if output.wt1[i].is_finite() && output_double.wt1[i].is_finite() 
+						   && output.wt1[i].abs() > 0.1 { // Only check non-near-zero values
+							let ratio = output_double.wt1[i] / output.wt1[i];
+							// The relationship should be roughly inverse (doubling factor ~halves WT1)
+							// Allow generous tolerance as the relationship is affected by EMA smoothing
+							prop_assert!(
+								(ratio - 0.5).abs() <= 0.35, // Allow 35% tolerance due to EMA effects
+								"Factor doubling should roughly halve WT1 at idx {}: original={}, doubled={}, ratio={}",
+								i, output.wt1[i], output_double.wt1[i], ratio
+							);
+							checked_count += 1;
+							if checked_count >= 5 { // Check at most 5 points
+								break;
+							}
+						}
+					}
+				}
+
+				// Property 4: Special case - when ma_len = 1, WT2 should equal WT1
+				if ma_len == 1 {
+					for i in valid_start..data.len() {
+						if output.wt1[i].is_finite() && output.wt2[i].is_finite() {
+							prop_assert!(
+								(output.wt1[i] - output.wt2[i]).abs() <= 1e-9,
+								"When ma_len=1, WT2 should equal WT1 at idx {}: wt1={}, wt2={}",
+								i, output.wt1[i], output.wt2[i]
+							);
+						}
+					}
+				}
+
+				// Property 5: Kernel consistency - compare with scalar reference
+				for i in 0..data.len() {
+					let wt1 = output.wt1[i];
+					let wt1_ref = ref_output.wt1[i];
+					let wt2 = output.wt2[i];
+					let wt2_ref = ref_output.wt2[i];
+					let diff = output.wt_diff[i];
+					let diff_ref = ref_output.wt_diff[i];
+
+					// Check NaN consistency
+					if wt1.is_nan() || wt1_ref.is_nan() {
+						prop_assert!(
+							wt1.is_nan() && wt1_ref.is_nan(),
+							"NaN mismatch for WT1 at idx {}: kernel={:?}, ref={:?}",
+							i, wt1, wt1_ref
+						);
+					} else {
+						// Check ULP difference for finite values
+						let wt1_bits = wt1.to_bits();
+						let wt1_ref_bits = wt1_ref.to_bits();
+						let ulp_diff = wt1_bits.abs_diff(wt1_ref_bits);
+						prop_assert!(
+							(wt1 - wt1_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"WT1 mismatch at idx {}: kernel={}, ref={} (ULP={})",
+							i, wt1, wt1_ref, ulp_diff
+						);
+					}
+
+					// Same checks for WT2 and WT_DIFF
+					if wt2.is_nan() || wt2_ref.is_nan() {
+						prop_assert!(
+							wt2.is_nan() && wt2_ref.is_nan(),
+							"NaN mismatch for WT2 at idx {}: kernel={:?}, ref={:?}",
+							i, wt2, wt2_ref
+						);
+					} else {
+						let wt2_bits = wt2.to_bits();
+						let wt2_ref_bits = wt2_ref.to_bits();
+						let ulp_diff = wt2_bits.abs_diff(wt2_ref_bits);
+						prop_assert!(
+							(wt2 - wt2_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"WT2 mismatch at idx {}: kernel={}, ref={} (ULP={})",
+							i, wt2, wt2_ref, ulp_diff
+						);
+					}
+
+					if diff.is_nan() || diff_ref.is_nan() {
+						prop_assert!(
+							diff.is_nan() && diff_ref.is_nan(),
+							"NaN mismatch for WT_DIFF at idx {}: kernel={:?}, ref={:?}",
+							i, diff, diff_ref
+						);
+					} else {
+						let diff_bits = diff.to_bits();
+						let diff_ref_bits = diff_ref.to_bits();
+						let ulp_diff = diff_bits.abs_diff(diff_ref_bits);
+						prop_assert!(
+							(diff - diff_ref).abs() <= 1e-9 || ulp_diff <= 4,
+							"WT_DIFF mismatch at idx {}: kernel={}, ref={} (ULP={})",
+							i, diff, diff_ref, ulp_diff
+						);
+					}
+				}
+
+				// Property 6: Warmup period validation
+				// Values before warmup should be NaN
+				for i in 0..expected_warmup.min(data.len()) {
+					prop_assert!(
+						output.wt1[i].is_nan(),
+						"WT1 should be NaN during warmup at idx {}: got {}",
+						i, output.wt1[i]
+					);
+					prop_assert!(
+						output.wt2[i].is_nan(),
+						"WT2 should be NaN during warmup at idx {}: got {}",
+						i, output.wt2[i]
+					);
+					prop_assert!(
+						output.wt_diff[i].is_nan(),
+						"WT_DIFF should be NaN during warmup at idx {}: got {}",
+						i, output.wt_diff[i]
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_wavetrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1943,6 +2192,9 @@ mod tests {
 		check_wavetrend_streaming,
 		check_wavetrend_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_wavetrend_tests!(check_wavetrend_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

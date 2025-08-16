@@ -987,6 +987,224 @@ mod tests {
             }
         }
     }
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_mean_ad_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic price data with various periods
+		let strat = (2usize..=64)
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(10.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+						period..400,
+					),
+					Just(period),
+					// Add a flag for whether to generate constant data
+					prop::bool::weighted(0.1),
+				)
+			})
+			.prop_map(|(mut data, period, make_constant)| {
+				if make_constant && data.len() > 0 {
+					// Make all values the same for testing constant data property
+					let constant_val = data[0];
+					data.iter_mut().for_each(|v| *v = constant_val);
+				}
+				(data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = MeanAdParams {
+					period: Some(period),
+				};
+				let input = MeanAdInput::from_slice(&data, params);
+
+				let MeanAdOutput { values: out } = mean_ad_with_kernel(&input, kernel)?;
+				let MeanAdOutput { values: ref_out } = mean_ad_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length should match input length
+				prop_assert_eq!(
+					out.len(),
+					data.len(),
+					"[{}] Output length mismatch",
+					test_name
+				);
+
+				// Calculate the expected warmup period
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first_valid + 2 * period - 2;
+
+				// Property 2: Values during warmup should be NaN
+				for i in 0..warmup_period.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name,
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: After warmup, all values should be non-negative (MAD is always >= 0)
+				for i in warmup_period..out.len() {
+					if !out[i].is_nan() {
+						prop_assert!(
+							out[i] >= -1e-10, // Allow tiny negative due to floating-point errors
+							"[{}] MAD should be non-negative at index {}: got {}",
+							test_name,
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Property 4: Kernel consistency - compare with scalar reference
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Both should be NaN or both should be finite
+					if y.is_nan() || r.is_nan() {
+						prop_assert!(
+							y.is_nan() && r.is_nan(),
+							"[{}] NaN mismatch at index {}: kernel={}, scalar={}",
+							test_name,
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+					
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = y_bits.abs_diff(r_bits);
+					
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+						"[{}] Kernel mismatch at index {}: kernel={}, scalar={}, diff={}, ULP={}",
+						test_name,
+						i,
+						y,
+						r,
+						(y - r).abs(),
+						ulp_diff
+					);
+				}
+
+				// Property 5: For constant data, MAD should be very close to 0
+				let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				if is_constant && out.len() > warmup_period {
+					for i in warmup_period..out.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i].abs() <= 1e-9,
+								"[{}] MAD should be ~0 for constant data at index {}: got {}",
+								test_name,
+								i,
+								out[i]
+							);
+						}
+					}
+				}
+
+				// Property 6: For perfectly linear monotonic data, MAD should be very stable
+				// Check if data is linearly increasing/decreasing
+				let is_linear_monotonic = if data.len() >= 3 {
+					let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
+					let first_diff = diffs[0];
+					diffs.iter().all(|&d| (d - first_diff).abs() < 1e-9)
+				} else {
+					false
+				};
+				
+				if is_linear_monotonic && out.len() > warmup_period + period {
+					// For perfectly linear data, consecutive MAD values should be nearly identical
+					for i in (warmup_period + 1)..out.len() {
+						if !out[i].is_nan() && !out[i-1].is_nan() && out[i-1] > 1e-10 {
+							let change_ratio = (out[i] - out[i-1]).abs() / out[i-1];
+							
+							// For linear data, MAD should change by less than 10%
+							prop_assert!(
+								change_ratio <= 0.1,
+								"[{}] MAD changes too much for linear data at index {}: {} -> {} ({:.2}% change)",
+								test_name,
+								i,
+								out[i-1],
+								out[i],
+								change_ratio * 100.0
+							);
+						}
+					}
+				}
+
+				// Property 7: MAD should be bounded by half the window range (tighter bound)
+				for i in warmup_period..out.len() {
+					if out[i].is_nan() || i < period {
+						continue;
+					}
+					
+					// Get the actual window for this MAD value
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					
+					// Calculate window range
+					let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let window_range = window_max - window_min;
+					
+					// MAD cannot exceed half the window range (maximum possible deviation from mean)
+					// For a window [a, b], mean is (a+b)/2, max deviation is |b - (a+b)/2| = (b-a)/2
+					prop_assert!(
+						out[i] <= window_range / 2.0 + 1e-9,
+						"[{}] MAD exceeds half window range at index {}: MAD={}, window_range/2={}",
+						test_name,
+						i,
+						out[i],
+						window_range / 2.0
+					);
+				}
+
+				// Property 8: Edge case - period equals data length
+				if period == data.len() && out.len() > warmup_period {
+					// With period = data.len(), only one MAD value should be non-NaN
+					let non_nan_count = out.iter().filter(|&&v| !v.is_nan()).count();
+					prop_assert!(
+						non_nan_count <= 1,
+						"[{}] With period={}, expected at most 1 non-NaN value, got {}",
+						test_name,
+						period,
+						non_nan_count
+					);
+				}
+
+				// Property 9: For period=2, MAD should equal half the absolute difference
+				if period == 2 && out.len() > warmup_period {
+					for i in warmup_period..out.len() {
+						if !out[i].is_nan() && i >= 1 {
+							let expected = (data[i] - data[i-1]).abs() / 2.0;
+							prop_assert!(
+								(out[i] - expected).abs() <= 1e-9,
+								"[{}] For period=2 at index {}, MAD should be {}, got {}",
+								test_name,
+								i,
+								expected,
+								out[i]
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_mean_ad_tests!(
 		check_mean_ad_partial_params,
 		check_mean_ad_accuracy,
@@ -999,6 +1217,9 @@ mod tests {
 		check_mean_ad_streaming,
 		check_mean_ad_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_mean_ad_tests!(check_mean_ad_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

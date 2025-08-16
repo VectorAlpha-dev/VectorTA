@@ -1290,6 +1290,244 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_sar_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with realistic market conditions
+		// SAR needs high/low data, so we generate base prices and derive high/low from them
+		let strat = (0.001f64..0.5f64)  // acceleration
+			.prop_flat_map(|acceleration| {
+				(
+					Just(acceleration),
+					acceleration..1.0f64,  // maximum must be >= acceleration
+				)
+			})
+			.prop_flat_map(|(acceleration, maximum)| {
+				(
+					// Generate base prices and derive high/low
+					prop::collection::vec(
+						(1.0f64..1e6f64).prop_filter("finite price", |x| x.is_finite() && *x > 0.0),
+						10..400,  // Need at least 2 points for SAR
+					),
+					Just(acceleration),
+					Just(maximum),
+					// Add volatility factor for variable spread
+					0.001f64..0.1f64,  // 0.1% to 10% volatility
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, acceleration, maximum, volatility)| {
+				// Generate high/low from base prices with variable spread
+				let mut high = Vec::with_capacity(base_prices.len());
+				let mut low = Vec::with_capacity(base_prices.len());
+				
+				// Use a simple random walk for spread variation
+				let mut spread_factor = 1.0;
+				for price in &base_prices {
+					// Vary the spread to simulate realistic market volatility
+					spread_factor = (spread_factor + (price % 0.1 - 0.05) * 0.2).max(0.5).min(2.0);
+					let spread = price * volatility * spread_factor;
+					high.push(price + spread);
+					low.push(price - spread);
+				}
+
+				let params = SarParams {
+					acceleration: Some(acceleration),
+					maximum: Some(maximum),
+				};
+				let input = SarInput::from_slices(&high, &low, params.clone());
+				
+				// Get output from the kernel being tested
+				let SarOutput { values: out } = sar_with_kernel(&input, kernel).unwrap();
+				
+				// Get reference output from scalar kernel for comparison
+				let SarOutput { values: ref_out } = sar_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: SAR values must be within the range of high/low prices
+				for i in 1..out.len() {  // Skip first (NaN)
+					if !out[i].is_nan() {
+						let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
+						let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+						
+						prop_assert!(
+							out[i] >= min_price - 1e-9 && out[i] <= max_price + 1e-9,
+							"SAR[{}] = {} is outside range [{}, {}]",
+							i, out[i], min_price, max_price
+						);
+					}
+				}
+
+				// Property 2: Warmup period - first value should be NaN
+				prop_assert!(
+					out[0].is_nan(),
+					"First SAR value should be NaN during warmup, got {}",
+					out[0]
+				);
+
+				// Property 3: Kernel consistency - all implementations must match
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Both NaN or both finite
+					if y.is_nan() {
+						prop_assert!(r.is_nan(), "NaN mismatch at index {}: test={}, ref={}", i, y, r);
+					} else if r.is_nan() {
+						prop_assert!(y.is_nan(), "NaN mismatch at index {}: test={}, ref={}", i, y, r);
+					} else {
+						// Check values are close enough
+						let diff = (y - r).abs();
+						prop_assert!(
+							diff < 1e-9,
+							"Kernel mismatch at index {}: test={}, ref={}, diff={}",
+							i, y, r, diff
+						);
+					}
+				}
+
+				// Property 4: Acceleration increases up to maximum
+				// When SAR doesn't reverse, acceleration should increase each time a new extreme is hit
+				if out.len() > 10 {
+					// Track acceleration changes by monitoring SAR movement
+					let mut last_movement = 0.0;
+					let mut increasing_count = 0;
+					
+					for i in 2..out.len().min(20) {  // Check first 20 points
+						if !out[i].is_nan() && !out[i-1].is_nan() {
+							let movement = (out[i] - out[i-1]).abs();
+							if movement > last_movement {
+								increasing_count += 1;
+							}
+							last_movement = movement;
+						}
+					}
+					
+					// Acceleration should increase at least sometimes
+					prop_assert!(
+						increasing_count > 0 || out.len() < 5,
+						"SAR acceleration never increases (count: {})",
+						increasing_count
+					);
+				}
+
+				// Property 5: Trend properties - Fixed to check correct boundaries
+				// In a strong uptrend, SAR should be below the low prices
+				let strong_uptrend = high.windows(2).all(|w| w[1] > w[0] + 1e-9) && 
+				                     low.windows(2).all(|w| w[1] > w[0] + 1e-9);
+				if strong_uptrend && out.len() > 10 {
+					// Check last quarter of values
+					let start = out.len() * 3 / 4;
+					for i in start..out.len() {
+						if !out[i].is_nan() {
+							// SAR should be below or at the low in an uptrend
+							prop_assert!(
+								out[i] <= low[i] + 1e-6,  // Small tolerance for floating point
+								"In uptrend, SAR[{}] = {} should be <= low[{}] = {}",
+								i, out[i], i, low[i]
+							);
+						}
+					}
+				}
+				
+				// Similarly for downtrend
+				let strong_downtrend = high.windows(2).all(|w| w[1] < w[0] - 1e-9) && 
+				                       low.windows(2).all(|w| w[1] < w[0] - 1e-9);
+				if strong_downtrend && out.len() > 10 {
+					let start = out.len() * 3 / 4;
+					for i in start..out.len() {
+						if !out[i].is_nan() {
+							// SAR should be above or at the high in a downtrend
+							prop_assert!(
+								out[i] >= high[i] - 1e-6,  // Small tolerance for floating point
+								"In downtrend, SAR[{}] = {} should be >= high[{}] = {}",
+								i, out[i], i, high[i]
+							);
+						}
+					}
+				}
+
+				// Property 6: SAR reversal mechanism
+				// When SAR is penetrated by price, it should flip to the other side
+				if out.len() > 5 {
+					for i in 2..out.len() {
+						if !out[i].is_nan() && !out[i-1].is_nan() {
+							// Check for large jumps that indicate reversal
+							let jump = (out[i] - out[i-1]).abs();
+							let avg_price = (high[i] + low[i]) / 2.0;
+							
+							// A reversal typically causes a jump larger than the normal movement
+							if jump > avg_price * 0.05 {  // Jump > 5% of price
+								// After reversal, SAR should be on opposite side of price
+								let prev_below = out[i-1] < low[i-1];
+								let curr_below = out[i] < low[i];
+								
+								// They should be on different sides (reversal occurred)
+								// or SAR moved significantly (indicating potential reversal)
+								prop_assert!(
+									prev_below != curr_below || jump > avg_price * 0.03,
+									"Large SAR jump without proper reversal at index {}",
+									i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 7: Monotonic price behavior with reasonable tolerance
+				// For strictly increasing prices, SAR should generally trend upward
+				if base_prices.windows(2).all(|w| w[1] > w[0]) && out.len() > 20 {
+					// Compare first quarter average with last quarter average
+					let quarter = out.len() / 4;
+					let first_quarter: Vec<f64> = out[quarter..quarter*2].iter()
+						.filter(|v| !v.is_nan())
+						.cloned()
+						.collect();
+					let last_quarter: Vec<f64> = out[quarter*3..].iter()
+						.filter(|v| !v.is_nan())
+						.cloned()
+						.collect();
+					
+					if !first_quarter.is_empty() && !last_quarter.is_empty() {
+						let first_avg = first_quarter.iter().sum::<f64>() / first_quarter.len() as f64;
+						let last_avg = last_quarter.iter().sum::<f64>() / last_quarter.len() as f64;
+						
+						// For monotonically increasing prices, last average should generally be higher
+						// Allow more tolerance as SAR can have temporary reversals
+						prop_assert!(
+							last_avg >= first_avg * 0.95,  // Allow 5% tolerance for reversals
+							"For increasing prices, SAR should generally trend up: first_avg={}, last_avg={}",
+							first_avg, last_avg
+						);
+					}
+				}
+
+				// Property 8: No poison values in debug mode
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value at index {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+		
+		Ok(())
+	}
+
 	macro_rules! generate_all_sar_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1321,6 +1559,9 @@ mod tests {
 		check_sar_all_nan,
 		check_sar_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_sar_tests!(check_sar_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

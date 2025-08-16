@@ -1138,6 +1138,404 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_lrsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic high/low price pairs
+		let strat = (4usize..=400, 0.01f64..0.99f64, prop::bool::weighted(0.1))
+			.prop_flat_map(|(len, alpha, use_constant_price)| {
+				if use_constant_price && len < 50 {
+					// Generate truly constant prices for testing Property 5
+					let constant_price = (10.0f64..200.0f64);
+					constant_price.prop_map(move |price| {
+						let high = vec![price; len];
+						let low = vec![price; len];
+						(high, low, alpha)
+					}).boxed()
+				} else {
+					// Generate normal price data with spreads
+					(
+						// Generate base prices
+						proptest::collection::vec(
+							(10.0f64..200.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						// Generate spread percentages for high/low
+						proptest::collection::vec(
+							(0.0f64..0.05f64), // 0-5% spread
+							len,
+						),
+						Just(alpha),
+					).prop_map(|(base_prices, spreads, alpha)| {
+						// Create high/low pairs from base prices and spreads
+						let mut high = Vec::with_capacity(base_prices.len());
+						let mut low = Vec::with_capacity(base_prices.len());
+						
+						for (base, spread) in base_prices.iter().zip(spreads.iter()) {
+							let half_spread = base * spread / 2.0;
+							high.push(base + half_spread);
+							low.push(base - half_spread);
+						}
+						
+						(high, low, alpha)
+					}).boxed()
+				}
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, alpha)| {
+				let params = LrsiParams { alpha: Some(alpha) };
+				let input = LrsiInput::from_slices(&high, &low, params.clone());
+				
+				// Test with specified kernel
+				let result = lrsi_with_kernel(&input, kernel)?;
+				let out = result.values;
+				
+				// Test with scalar reference
+				let ref_result = lrsi_with_kernel(&input, Kernel::Scalar)?;
+				let ref_out = ref_result.values;
+				
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
+				
+				// Find first valid price index
+				let mut first_valid_idx = None;
+				for i in 0..high.len() {
+					let price = (high[i] + low[i]) / 2.0;
+					if !price.is_nan() {
+						first_valid_idx = Some(i);
+						break;
+					}
+				}
+				
+				if let Some(first_idx) = first_valid_idx {
+					let warmup_end = first_idx + 3;
+					
+					// Property 2: Warmup period handling
+					// The implementation sets out[first] = 0.0 and starts calculating from first+1
+					// So only indices before first_idx should be NaN
+					for i in 0..first_idx {
+						prop_assert!(
+							out[i].is_nan(),
+							"Expected NaN before first valid at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+					
+					// The first valid index should have value 0.0
+					if first_idx < out.len() {
+						prop_assert!(
+							out[first_idx].abs() < f64::EPSILON,
+							"Expected 0.0 at first valid index {}, got {}",
+							first_idx,
+							out[first_idx]
+						);
+					}
+					
+					// Property 3: LRSI values bounded [0, 1]
+					// LRSI produces values starting from first_idx (with first value being 0.0)
+					for i in (first_idx + 1)..out.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i] >= 0.0 && out[i] <= 1.0,
+								"LRSI value {} at index {} outside [0, 1] range",
+								out[i],
+								i
+							);
+						}
+					}
+					
+					// Property 4: Kernel consistency (comparing with scalar)
+					for i in 0..out.len() {
+						let y = out[i];
+						let r = ref_out[i];
+						
+						if !y.is_finite() || !r.is_finite() {
+							prop_assert_eq!(
+								y.to_bits(),
+								r.to_bits(),
+								"NaN/infinite mismatch at index {}: {} vs {}",
+								i,
+								y,
+								r
+							);
+						} else {
+							let y_bits = y.to_bits();
+							let r_bits = r.to_bits();
+							let ulp_diff = y_bits.abs_diff(r_bits);
+							
+							prop_assert!(
+								(y - r).abs() <= 1e-9 || ulp_diff <= 5,
+								"Kernel mismatch at index {}: {} vs {} (ULP={}, alpha={})",
+								i,
+								y,
+								r,
+								ulp_diff,
+								alpha
+							);
+						}
+					}
+					
+					// Property 5: Constant price behavior
+					// If high == low for all values, LRSI should stabilize
+					let is_constant = high.iter().zip(low.iter())
+						.all(|(h, l)| (h - l).abs() < f64::EPSILON && h.is_finite());
+					
+					if is_constant && out.len() > first_idx + 10 {
+						// After sufficient iterations, LRSI should stabilize near 0 or a constant
+						let last_values = &out[out.len() - 5..];
+						let valid_last = last_values.iter()
+							.filter(|v| v.is_finite())
+							.collect::<Vec<_>>();
+						
+						if valid_last.len() >= 2 {
+							let variance = valid_last.windows(2)
+								.map(|w| (w[1] - w[0]).abs())
+								.fold(0.0, f64::max);
+							
+							// LRSI can oscillate even with constant prices due to filter dynamics
+							// Allow reasonable variance for an oscillator
+							prop_assert!(
+								variance < 0.1,
+								"LRSI not stable for constant prices, variance: {}",
+								variance
+							);
+						}
+					}
+					
+					// Property 6: Alpha boundary behavior
+					// Very low alpha (< 0.05) = less responsive, very high alpha (> 0.95) = more responsive
+					if out.len() > first_idx + 25 {
+						// Calculate input data volatility for dynamic threshold
+						let prices: Vec<f64> = high.iter().zip(low.iter())
+							.map(|(h, l)| (h + l) / 2.0)
+							.filter(|p| p.is_finite())
+							.collect();
+						
+						if prices.len() >= 10 {
+							let price_changes: Vec<f64> = prices.windows(2)
+								.map(|w| ((w[1] - w[0]) / w[0]).abs())
+								.collect();
+							let input_volatility = if !price_changes.is_empty() {
+								price_changes.iter().sum::<f64>() / price_changes.len() as f64
+							} else {
+								0.01  // Default volatility
+							};
+							
+							let start = (first_idx + 5).min(out.len().saturating_sub(5));
+							let end = out.len().saturating_sub(5);
+							if start < end {
+								let mid_section = &out[start..end];
+								let valid_mid: Vec<f64> = mid_section.iter()
+									.filter(|v| v.is_finite())
+									.copied()
+									.collect();
+								
+								if valid_mid.len() >= 10 {
+									let avg_change = valid_mid.windows(2)
+										.map(|w| (w[1] - w[0]).abs())
+										.sum::<f64>() / (valid_mid.len() - 1) as f64;
+									
+									if alpha < 0.05 {
+										// Low alpha should smooth the output relative to input volatility
+										// The smoother the alpha, the more it should dampen volatility
+										let expected_max_change = input_volatility * (alpha * 20.0).max(0.1);
+										prop_assert!(
+											avg_change <= expected_max_change,
+											"Low alpha ({}) should produce smooth output relative to input volatility. \
+											Avg change: {}, Expected max: {}, Input volatility: {}",
+											alpha,
+											avg_change,
+											expected_max_change,
+											input_volatility
+										);
+									} else if alpha > 0.95 {
+										// High alpha should be more responsive
+										// But LRSI is still bounded [0,1] so it won't match input volatility exactly
+										// Use a more reasonable expectation
+										let expected_min_change = (input_volatility * 0.2).min(0.1);
+										// Only test if there's meaningful volatility
+										if input_volatility > 0.01 {
+											prop_assert!(
+												avg_change >= expected_min_change || avg_change < 0.001,
+												"High alpha ({}) should be responsive to input changes. \
+												Avg change: {}, Expected min: {}, Input volatility: {}",
+												alpha,
+												avg_change,
+												expected_min_change,
+												input_volatility
+											);
+										}
+									}
+								}
+							}
+						}
+					}
+					
+					// Property 7: Monotonic trend response (with tighter tolerance)
+					// Check if prices are monotonically increasing or decreasing with actual change
+					let is_monotonic_up = high.windows(2)
+						.all(|w| w[1] >= w[0]) && 
+						high.windows(2).any(|w| w[1] > w[0] + f64::EPSILON);  // Must have actual increase
+					let is_monotonic_down = high.windows(2)
+						.all(|w| w[1] <= w[0]) &&
+						high.windows(2).any(|w| w[1] < w[0] - f64::EPSILON);  // Must have actual decrease
+					
+					if (is_monotonic_up || is_monotonic_down) && out.len() > first_idx + 20 {
+						let valid_out: Vec<(usize, f64)> = out.iter()
+							.enumerate()
+							.skip(first_idx + 1)
+							.filter(|(_, v)| v.is_finite())
+							.map(|(i, v)| (i, *v))
+							.collect();
+						
+						if valid_out.len() >= 20 {
+							// Check general trend direction over chunks
+							let chunk_size = valid_out.len() / 3;
+							if chunk_size >= 5 {
+								let first_chunk_avg = valid_out[..chunk_size].iter()
+									.map(|(_, v)| v)
+									.sum::<f64>() / chunk_size as f64;
+								let last_chunk_avg = valid_out[valid_out.len() - chunk_size..].iter()
+									.map(|(_, v)| v)
+									.sum::<f64>() / chunk_size as f64;
+								
+								// Calculate how strong the trend is
+								let price_range = high.iter().zip(low.iter())
+									.map(|(h, l)| (h + l) / 2.0)
+									.filter(|p| p.is_finite())
+									.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), p| {
+										(min.min(p), max.max(p))
+									});
+								let trend_strength = if price_range.1 > price_range.0 {
+									(price_range.1 - price_range.0) / price_range.0
+								} else {
+									0.01
+								};
+								
+								// Tighter tolerance: 0.05 base, adjusted by trend strength and alpha
+								let tolerance = (0.05 * (1.0 - alpha * 0.5)).min(0.05);
+								
+								if is_monotonic_up {
+									// For uptrend, LRSI should increase
+									prop_assert!(
+										last_chunk_avg >= first_chunk_avg - tolerance,
+										"LRSI should respond to uptrend, but first_avg={}, last_avg={}, \
+										tolerance={}, alpha={}, trend_strength={}",
+										first_chunk_avg,
+										last_chunk_avg,
+										tolerance,
+										alpha,
+										trend_strength
+									);
+								} else if is_monotonic_down {
+									// For downtrend, LRSI should decrease
+									prop_assert!(
+										last_chunk_avg <= first_chunk_avg + tolerance,
+										"LRSI should respond to downtrend, but first_avg={}, last_avg={}, \
+										tolerance={}, alpha={}, trend_strength={}",
+										first_chunk_avg,
+										last_chunk_avg,
+										tolerance,
+										alpha,
+										trend_strength
+									);
+								}
+							}
+						}
+					}
+					
+					// Property 8: Extreme alpha values
+					// Test behavior at alpha boundaries
+					if alpha < 0.02 || alpha > 0.98 {
+						if out.len() > first_idx + 50 {
+							let valid_values: Vec<f64> = out.iter()
+								.skip(first_idx + 10)
+								.filter(|v| v.is_finite())
+								.copied()
+								.collect();
+							
+							if valid_values.len() >= 20 {
+								if alpha < 0.02 {
+									// Very low alpha: LRSI should be smooth after initial settling
+									// Skip first few values which might have larger steps due to initialization
+									let settled_values = if valid_values.len() > 10 {
+										&valid_values[5..]  // Skip first 5 values
+									} else {
+										&valid_values[..]
+									};
+									
+									if settled_values.len() >= 5 {
+										let max_step = settled_values.windows(2)
+											.map(|w| (w[1] - w[0]).abs())
+											.fold(0.0f64, f64::max);
+										
+										// LRSI with low alpha can still have steps due to filter dynamics
+										// but should be generally smooth
+										prop_assert!(
+											max_step < 0.7,  // Allow for Laguerre filter dynamics
+											"Extreme low alpha ({}) should produce smooth output after settling, \
+											but max step is {}",
+											alpha,
+											max_step
+										);
+									}
+									
+									// Should converge to a relatively stable value
+									// Check the last values for stability
+									if valid_values.len() >= 20 {
+										let last_10 = &valid_values[valid_values.len() - 10..];
+										// Check max difference in last 10 values
+										let min_val = last_10.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+										let max_val = last_10.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+										let range = max_val - min_val;
+										
+										// With extreme low alpha, the range should be small
+										prop_assert!(
+											range < 0.5,
+											"Extreme low alpha ({}) should converge to stable value, \
+											but range in last 10 values is {}",
+											alpha,
+											range
+										);
+									}
+								} else {
+									// Very high alpha: LRSI should be highly responsive
+									// Should have meaningful variation if input has variation
+									let range = valid_values.iter()
+										.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &v| {
+											(min.min(v), max.max(v))
+										});
+									
+									// Only test if input has meaningful variation
+									let input_has_variation = high.windows(2)
+										.any(|w| (w[1] - w[0]).abs() > w[0] * 0.001);
+									
+									if input_has_variation {
+										prop_assert!(
+											range.1 - range.0 > 0.05,
+											"Extreme high alpha ({}) should produce varied output \
+											for varied input, but range is only {}",
+											alpha,
+											range.1 - range.0
+										);
+									}
+								}
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_lrsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1171,7 +1569,8 @@ mod tests {
 		check_lrsi_all_nan,
 		check_lrsi_very_small_dataset,
 		check_lrsi_streaming,
-		check_lrsi_no_poison
+		check_lrsi_no_poison,
+		check_lrsi_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

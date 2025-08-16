@@ -718,6 +718,242 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	fn check_bop_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic OHLC data
+		let strat = (50usize..400)
+			.prop_flat_map(|size| {
+				(
+					// Base price
+					10.0f64..1000.0f64,
+					// Volatility (0% to 10% of base price)
+					0.0f64..0.1f64,
+					// Trend strength (-2% to +2% per candle)  
+					-0.02f64..0.02f64,
+					// Generate random movements for each candle (only need 3 values)
+					prop::collection::vec(
+						(0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0),
+						size
+					),
+					// Market type: 0=ranging, 1=uptrend, 2=downtrend, 3=flat, 4=volatile
+					0u8..5,
+					Just(size),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_price, volatility, trend, random_factors, market_type, size)| {
+				// Generate realistic OHLC data based on market type
+				let mut open = Vec::with_capacity(size);
+				let mut high = Vec::with_capacity(size);
+				let mut low = Vec::with_capacity(size);
+				let mut close = Vec::with_capacity(size);
+
+				let mut current_price = base_price;
+				
+				for i in 0..size {
+					let range = base_price * volatility;
+					let (r1, r2, r3) = random_factors[i];
+					
+					// Determine price movement based on market type
+					let (o, h, l, c) = match market_type {
+						0 => {
+							// Ranging market - oscillate around base price
+							let wave = (i as f64 * 0.2).sin();
+							let o = current_price + wave * range;
+							let movement = range * (r1 - 0.5);
+							let c = o + movement;
+							let h = o.max(c) + range * r2 * 0.5;
+							let l = o.min(c) - range * r3 * 0.5;
+							(o, h, l, c)
+						}
+						1 => {
+							// Uptrend
+							let o = current_price;
+							current_price *= 1.0 + trend.abs();
+							let c = current_price + range * r1;
+							let h = c + range * r2;
+							let l = o - range * r3 * 0.3;
+							(o, h.max(c), l.min(o), c)
+						}
+						2 => {
+							// Downtrend
+							let o = current_price;
+							current_price *= 1.0 - trend.abs();
+							let c = current_price - range * r1;
+							let h = o + range * r2 * 0.3;
+							let l = c - range * r3;
+							(o, h.max(o), l.min(c), c)
+						}
+						3 => {
+							// Flat market - minimal movement, sometimes High==Low
+							if r1 < 0.3 {
+								// 30% chance of High==Low (flat candle)
+								let price = current_price;
+								(price, price, price, price)
+							} else {
+								// 70% chance of tiny movement
+								let tiny_move = range * 0.01 * (r2 - 0.5);
+								let o = current_price;
+								let c = current_price + tiny_move;
+								let h = o.max(c) + tiny_move.abs() * 0.1;
+								let l = o.min(c) - tiny_move.abs() * 0.1;
+								(o, h, l, c)
+							}
+						}
+						_ => {
+							// Volatile market
+							let o = current_price;
+							let big_move = range * 2.0 * (r1 - 0.5);
+							let c = current_price + big_move;
+							let h = o.max(c) + range * r2 * 2.0;
+							let l = o.min(c) - range * r3 * 2.0;
+							current_price = c;
+							(o, h, l.max(0.1), c)  // Ensure positive prices
+						}
+					};
+
+					// Ensure OHLC constraints are satisfied
+					let h_final = h.max(o.max(c));
+					let l_final = l.min(o.min(c));
+					
+					open.push(o);
+					high.push(h_final);
+					low.push(l_final);
+					close.push(c);
+				}
+
+				// Create BOP input
+				let params = BopParams::default();
+				let input = BopInput::from_slices(&open, &high, &low, &close, params);
+
+				// Calculate BOP with test kernel and reference (scalar) kernel
+				let output = bop_with_kernel(&input, kernel).unwrap();
+				let ref_output = bop_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Validate properties
+				for i in 0..size {
+					let y = output.values[i];
+					let r = ref_output.values[i];
+
+					// Property 1: BOP must be in range [-1, 1]
+					if y.is_finite() {
+						prop_assert!(
+							y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
+							"[{}] BOP out of range at idx {}: {} (should be in [-1, 1])",
+							test_name, i, y
+						);
+					}
+
+					// Property 2: When High == Low, BOP should be 0
+					let denom = high[i] - low[i];
+					if denom <= 0.0 || denom.abs() < f64::EPSILON {
+						prop_assert!(
+							y.abs() < 1e-9,
+							"[{}] BOP should be 0 when High==Low at idx {}: got {}",
+							test_name, i, y
+						);
+					}
+
+					// Property 3: When Close == Open, BOP should be 0 (if High != Low)
+					if (close[i] - open[i]).abs() < f64::EPSILON && denom > f64::EPSILON {
+						prop_assert!(
+							y.abs() < 1e-9,
+							"[{}] BOP should be 0 when Close==Open at idx {}: got {}",
+							test_name, i, y
+						);
+					}
+
+					// Property 4: Verify formula (Close - Open) / (High - Low)
+					if denom > f64::EPSILON {
+						let expected = (close[i] - open[i]) / denom;
+						prop_assert!(
+							(y - expected).abs() < 1e-9,
+							"[{}] BOP formula mismatch at idx {}: got {}, expected {}",
+							test_name, i, y, expected
+						);
+					}
+
+					// Property 5: Kernel consistency
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] Finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, y, r
+						);
+					} else {
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, y, r, ulp_diff
+						);
+					}
+
+					// Property 6: Special case - flat window (all prices same)
+					if (open[i] - high[i]).abs() < f64::EPSILON &&
+					   (open[i] - low[i]).abs() < f64::EPSILON &&
+					   (open[i] - close[i]).abs() < f64::EPSILON {
+						prop_assert!(
+							y.abs() < 1e-9,
+							"[{}] BOP should be 0 for flat candle at idx {}: got {}",
+							test_name, i, y
+						);
+					}
+
+					// Property 7: Sign consistency
+					// If Close > Open and High > Low, BOP should be positive
+					// If Close < Open and High > Low, BOP should be negative
+					if denom > f64::EPSILON {
+						let numerator = close[i] - open[i];
+						if numerator > f64::EPSILON {
+							prop_assert!(
+								y >= -1e-9,
+								"[{}] BOP should be non-negative when Close > Open at idx {}: got {}",
+								test_name, i, y
+							);
+						} else if numerator < -f64::EPSILON {
+							prop_assert!(
+								y <= 1e-9,
+								"[{}] BOP should be non-positive when Close < Open at idx {}: got {}",
+								test_name, i, y
+							);
+						}
+					}
+
+					// Property 8: Boundary testing - BOP approaching ±1
+					// When Close is at High and Open is at Low, BOP should approach 1
+					// When Close is at Low and Open is at High, BOP should approach -1
+					if denom > f64::EPSILON {
+						// Test upper boundary: Close ≈ High, Open ≈ Low
+						if (close[i] - high[i]).abs() < 1e-9 && (open[i] - low[i]).abs() < 1e-9 {
+							prop_assert!(
+								y >= 1.0 - 1e-6,
+								"[{}] BOP should approach 1 when Close≈High and Open≈Low at idx {}: got {}",
+								test_name, i, y
+							);
+						}
+						// Test lower boundary: Close ≈ Low, Open ≈ High
+						if (close[i] - low[i]).abs() < 1e-9 && (open[i] - high[i]).abs() < 1e-9 {
+							prop_assert!(
+								y <= -1.0 + 1e-6,
+								"[{}] BOP should approach -1 when Close≈Low and Open≈High at idx {}: got {}",
+								test_name, i, y
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_bop_tests!(
 		check_bop_partial_params,
 		check_bop_accuracy,
@@ -730,6 +966,9 @@ mod tests {
 		check_bop_streaming,
 		check_bop_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_bop_tests!(check_bop_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 

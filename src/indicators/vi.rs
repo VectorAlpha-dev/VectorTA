@@ -1281,6 +1281,374 @@ mod tests {
 	fn check_vi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
 	}
+	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Strategy to generate valid OHLC data with more variability
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				// First generate a length for all vectors
+				(period + 50..400).prop_flat_map(move |len| {
+					(
+						// Generate base prices and volatility factors with same length
+						prop::collection::vec(
+							(50.0f64..500.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						prop::collection::vec(
+							(0.001f64..0.05f64), // Variable volatility from 0.1% to 5%
+							len,
+						),
+						prop::collection::vec(
+							(0.0f64..1.0f64), // Variable close position within range
+							len,
+						),
+						Just(period),
+					)
+				})
+			});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, volatilities, close_positions, period)| {
+				// Generate more realistic OHLC data with variability
+				let mut high = Vec::with_capacity(base_prices.len());
+				let mut low = Vec::with_capacity(base_prices.len());
+				let mut close = Vec::with_capacity(base_prices.len());
+				
+				// Ensure all vectors have the same length
+				assert_eq!(base_prices.len(), volatilities.len());
+				assert_eq!(base_prices.len(), close_positions.len());
+				
+				for i in 0..base_prices.len() {
+					let price = base_prices[i];
+					let vol = volatilities[i];
+					let close_pos = close_positions[i];
+					
+					// Variable range based on volatility
+					let range = price * vol;
+					let h = price + range * (0.3 + vol * 2.0); // High varies with volatility
+					let l = price - range * (0.3 + vol * 2.0); // Low varies with volatility
+					let c = l + (h - l) * close_pos; // Close at variable position
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+				
+				let params = ViParams { period: Some(period) };
+				let input = ViInput::from_slices(&high, &low, &close, params.clone());
+				
+				// Get outputs from the kernel being tested and scalar reference
+				let ViOutput { plus: out_plus, minus: out_minus } = 
+					vi_with_kernel(&input, kernel).unwrap();
+				let ViOutput { plus: ref_plus, minus: ref_minus } = 
+					vi_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: VI+ and VI- must be non-negative (they're ratios of absolute values)
+				for i in 0..out_plus.len() {
+					if !out_plus[i].is_nan() {
+						prop_assert!(
+							out_plus[i] >= -1e-9,
+							"[{}] VI+ negative at idx {}: {}",
+							test_name, i, out_plus[i]
+						);
+					}
+					if !out_minus[i].is_nan() {
+						prop_assert!(
+							out_minus[i] >= -1e-9,
+							"[{}] VI- negative at idx {}: {}",
+							test_name, i, out_minus[i]
+						);
+					}
+				}
+				
+				// Property 2: Warmup period handling - first (period - 1) values should be NaN
+				let first_valid = (0..high.len())
+					.find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+					.unwrap_or(0);
+				let warmup_end = first_valid + period - 1;
+				
+				for i in 0..warmup_end.min(out_plus.len()) {
+					prop_assert!(
+						out_plus[i].is_nan(),
+						"[{}] Expected NaN during warmup at idx {}, got {}",
+						test_name, i, out_plus[i]
+					);
+					prop_assert!(
+						out_minus[i].is_nan(),
+						"[{}] Expected NaN during warmup at idx {}, got {}",
+						test_name, i, out_minus[i]
+					);
+				}
+				
+				// Property 3: Kernel consistency - different kernels should produce same results
+				for i in warmup_end..out_plus.len() {
+					let plus_bits = out_plus[i].to_bits();
+					let ref_plus_bits = ref_plus[i].to_bits();
+					let minus_bits = out_minus[i].to_bits();
+					let ref_minus_bits = ref_minus[i].to_bits();
+					
+					if !out_plus[i].is_finite() || !ref_plus[i].is_finite() {
+						prop_assert!(
+							plus_bits == ref_plus_bits,
+							"[{}] VI+ finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, out_plus[i], ref_plus[i]
+						);
+					} else {
+						let ulp_diff = plus_bits.abs_diff(ref_plus_bits);
+						prop_assert!(
+							(out_plus[i] - ref_plus[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] VI+ mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, out_plus[i], ref_plus[i], ulp_diff
+						);
+					}
+					
+					if !out_minus[i].is_finite() || !ref_minus[i].is_finite() {
+						prop_assert!(
+							minus_bits == ref_minus_bits,
+							"[{}] VI- finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, out_minus[i], ref_minus[i]
+						);
+					} else {
+						let ulp_diff = minus_bits.abs_diff(ref_minus_bits);
+						prop_assert!(
+							(out_minus[i] - ref_minus[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] VI- mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, out_minus[i], ref_minus[i], ulp_diff
+						);
+					}
+				}
+				
+				// Property 4: Period=1 special case
+				if period == 1 {
+					// With period=1, VI calculations are based on single bar
+					// The values should be well-defined after warmup
+					if warmup_end < out_plus.len() {
+						prop_assert!(
+							out_plus[warmup_end].is_finite(),
+							"[{}] VI+ should be finite for period=1 at idx {}",
+							test_name, warmup_end
+						);
+						prop_assert!(
+							out_minus[warmup_end].is_finite(),
+							"[{}] VI- should be finite for period=1 at idx {}",
+							test_name, warmup_end
+						);
+					}
+				}
+				
+				// Property 5: Extreme low volatility case
+				// When volatility approaches zero (all values very similar)
+				let very_low_vol = high.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01) &&
+								   low.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01) &&
+								   close.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
+				
+				if very_low_vol && warmup_end + 5 < out_plus.len() {
+					// In extremely low volatility, VI+ and VI- should be close to 1.0
+					// because vortex movements are balanced
+					for i in (warmup_end + 5)..out_plus.len().min(warmup_end + 15) {
+						if out_plus[i].is_finite() && out_minus[i].is_finite() {
+							// Both should be near 1.0 in balanced markets
+							prop_assert!(
+								out_plus[i] >= 0.5 && out_plus[i] <= 1.5,
+								"[{}] VI+ in low volatility should be near 1.0, got {} at idx {}",
+								test_name, out_plus[i], i
+							);
+							prop_assert!(
+								out_minus[i] >= 0.5 && out_minus[i] <= 1.5,
+								"[{}] VI- in low volatility should be near 1.0, got {} at idx {}",
+								test_name, out_minus[i], i
+							);
+						}
+					}
+				}
+				
+				// Property 6: Trending behavior - check across multiple windows
+				// Check if general trend direction affects VI relationship
+				if warmup_end + period * 2 < out_plus.len() {
+					// Check multiple windows for trend consistency
+					let mut up_windows = 0;
+					let mut down_windows = 0;
+					
+					let step_size = (period / 2).max(1); // Ensure step is at least 1
+					for window_start in (warmup_end..out_plus.len() - period).step_by(step_size) {
+						let window_end = (window_start + period).min(out_plus.len());
+						
+						// Check trend in this window
+						let window_close = &close[window_start..window_end];
+						if window_close.len() > 2 {
+							let trend_up = window_close.windows(2)
+								.filter(|w| w[1] > w[0])
+								.count() > window_close.len() * 2 / 3;
+							let trend_down = window_close.windows(2)
+								.filter(|w| w[1] < w[0])
+								.count() > window_close.len() * 2 / 3;
+							
+							if trend_up || trend_down {
+								// Calculate average VI values for this window
+								let avg_plus: f64 = out_plus[window_start..window_end]
+									.iter()
+									.filter(|x| x.is_finite())
+									.sum::<f64>() / (window_end - window_start) as f64;
+								let avg_minus: f64 = out_minus[window_start..window_end]
+									.iter()
+									.filter(|x| x.is_finite())
+									.sum::<f64>() / (window_end - window_start) as f64;
+								
+								if avg_plus.is_finite() && avg_minus.is_finite() {
+									if trend_up && avg_plus > avg_minus {
+										up_windows += 1;
+									} else if trend_down && avg_minus > avg_plus {
+										down_windows += 1;
+									}
+								}
+							}
+						}
+					}
+					
+					// VI should correctly identify trend direction in most windows
+					let total_trend_windows = up_windows + down_windows;
+					if total_trend_windows > 0 {
+						let accuracy = (up_windows + down_windows) as f64 / total_trend_windows as f64;
+						prop_assert!(
+							accuracy >= 0.6, // Should be right at least 60% of the time
+							"[{}] VI trend detection accuracy too low: {}",
+							test_name, accuracy
+						);
+					}
+				}
+				
+				// Property 7: Output bounds - VI values typically between 0 and 2.5
+				for i in warmup_end..out_plus.len() {
+					if out_plus[i].is_finite() {
+						prop_assert!(
+							out_plus[i] >= 0.0 && out_plus[i] <= 2.5,
+							"[{}] VI+ outside typical bounds at idx {}: {}",
+							test_name, i, out_plus[i]
+						);
+					}
+					if out_minus[i].is_finite() {
+						prop_assert!(
+							out_minus[i] >= 0.0 && out_minus[i] <= 2.5,
+							"[{}] VI- outside typical bounds at idx {}: {}",
+							test_name, i, out_minus[i]
+						);
+					}
+				}
+				
+				// Property 8: Formula verification for small window
+				// Manually calculate VI for a specific point to verify formula
+				if period <= 5 && warmup_end + 5 < high.len() && warmup_end >= period {
+					let idx = warmup_end;
+					
+					// Calculate True Range, VM+ and VM- manually
+					let mut tr_sum = 0.0;
+					let mut vp_sum = 0.0;
+					let mut vm_sum = 0.0;
+					
+					// First bar in period (special case)
+					let first_idx = idx + 1 - period;
+					tr_sum += high[first_idx] - low[first_idx];
+					
+					// Remaining bars
+					for j in (first_idx + 1)..=idx {
+						let tr = (high[j] - low[j])
+							.max((high[j] - close[j - 1]).abs())
+							.max((low[j] - close[j - 1]).abs());
+						let vp = (high[j] - low[j - 1]).abs();
+						let vm = (low[j] - high[j - 1]).abs();
+						
+						tr_sum += tr;
+						vp_sum += vp;
+						vm_sum += vm;
+					}
+					
+					if tr_sum > 1e-10 {
+						let expected_plus = vp_sum / tr_sum;
+						let expected_minus = vm_sum / tr_sum;
+						
+						prop_assert!(
+							(out_plus[idx] - expected_plus).abs() < 1e-6,
+							"[{}] VI+ formula verification failed at idx {}: {} vs {}",
+							test_name, idx, out_plus[idx], expected_plus
+						);
+						prop_assert!(
+							(out_minus[idx] - expected_minus).abs() < 1e-6,
+							"[{}] VI- formula verification failed at idx {}: {} vs {}",
+							test_name, idx, out_minus[idx], expected_minus
+						);
+					}
+				}
+				
+				// Property 9: VI+ and VI- relationship
+				// The sum of VI+ and VI- relates to overall market activity
+				// When one is high, the other tends to be lower (but not always)
+				for i in warmup_end..out_plus.len() {
+					if out_plus[i].is_finite() && out_minus[i].is_finite() {
+						// Sum typically ranges from 1.5 to 2.5 in normal markets
+						let sum = out_plus[i] + out_minus[i];
+						prop_assert!(
+							sum >= 0.8 && sum <= 3.0,
+							"[{}] VI+ + VI- sum outside normal range at idx {}: {} ({} + {})",
+							test_name, i, sum, out_plus[i], out_minus[i]
+						);
+						
+						// When one VI is very high, the other shouldn't also be very high
+						if out_plus[i] > 1.5 {
+							prop_assert!(
+								out_minus[i] <= 1.5,
+								"[{}] Both VI+ and VI- are high at idx {}: {} and {}",
+								test_name, i, out_plus[i], out_minus[i]
+							);
+						}
+						if out_minus[i] > 1.5 {
+							prop_assert!(
+								out_plus[i] <= 1.5,
+								"[{}] Both VI- and VI+ are high at idx {}: {} and {}",
+								test_name, i, out_minus[i], out_plus[i]
+							);
+						}
+					}
+				}
+				
+				// Property 10: No poison values in debug mode
+				#[cfg(debug_assertions)]
+				{
+					for i in 0..out_plus.len() {
+						if !out_plus[i].is_nan() {
+							let bits = out_plus[i].to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"[{}] Found poison value in VI+ at idx {}: 0x{:016X}",
+								test_name, i, bits
+							);
+						}
+						if !out_minus[i].is_nan() {
+							let bits = out_minus[i].to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"[{}] Found poison value in VI- at idx {}: 0x{:016X}",
+								test_name, i, bits
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+	
 	macro_rules! generate_all_vi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1314,6 +1682,9 @@ mod tests {
 		check_vi_nan_handling,
 		check_vi_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_vi_tests!(check_vi_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

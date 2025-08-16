@@ -1114,6 +1114,160 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_swma_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: Generate periods from 1 to 100, then generate data with appropriate length
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period.max(2)..400, // Ensure at least period elements
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = SwmaParams { period: Some(period) };
+				let input = SwmaInput::from_slice(&data, params);
+
+				let SwmaOutput { values: out } = swma_with_kernel(&input, kernel).unwrap();
+				let SwmaOutput { values: ref_out } = swma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: Warmup period check (first period-1 values should be NaN)
+				if period > 1 {
+					for i in 0..(period - 1) {
+						prop_assert!(
+							out[i].is_nan(),
+							"Expected NaN during warmup at index {}, got {}",
+							i,
+							out[i]
+						);
+					}
+				}
+
+				// Build weights for validation
+				let weights = build_symmetric_triangle_avec(period);
+				
+				// Property 3: Weight properties
+				// 3a: Weights sum to 1.0
+				let weight_sum: f64 = weights.iter().sum();
+				prop_assert!(
+					(weight_sum - 1.0).abs() < 1e-10,
+					"Weights don't sum to 1.0, got {}",
+					weight_sum
+				);
+
+				// 3b: Weights are symmetric
+				for i in 0..period / 2 {
+					let left = weights[i];
+					let right = weights[period - 1 - i];
+					prop_assert!(
+						(left - right).abs() < 1e-10,
+						"Weights not symmetric at positions {} and {}: {} vs {}",
+						i,
+						period - 1 - i,
+						left,
+						right
+					);
+				}
+
+				// Property 4: Bounds checking and specific value tests
+				for i in (period - 1)..data.len() {
+					let window = &data[i + 1 - period..=i];
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Output should be within window bounds
+					prop_assert!(
+						y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
+						"idx {}: {} ∉ [{}, {}]",
+						i,
+						y,
+						lo,
+						hi
+					);
+
+					// Property 5: Period=1 returns exact input values
+					if period == 1 {
+						prop_assert!(
+							(y - data[i]).abs() <= f64::EPSILON,
+							"Period=1 should return input value at idx {}: {} vs {}",
+							i,
+							y,
+							data[i]
+						);
+					}
+
+					// Property 6: Period=2 returns simple average
+					if period == 2 && i >= 1 {
+						let expected = (data[i - 1] + data[i]) / 2.0;
+						prop_assert!(
+							(y - expected).abs() < 1e-9,
+							"Period=2 should return average at idx {}: {} vs {}",
+							i,
+							y,
+							expected
+						);
+					}
+
+					// Property 7: Constant data produces constant output
+					if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+						prop_assert!(
+							(y - data[0]).abs() < 1e-9,
+							"Constant data should produce constant output at idx {}: {} vs {}",
+							i,
+							y,
+							data[0]
+						);
+					}
+
+					// Property 8: Cross-kernel validation
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					// Use slightly higher ULP tolerance for AVX512 due to potential FMA differences
+					let max_ulp = if matches!(kernel, Kernel::Avx512) { 20 } else { 10 };
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= max_ulp,
+						"mismatch idx {}: {} vs {} (ULP={})",
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_swma_tests!(
 		check_swma_partial_params,
 		check_swma_accuracy,
@@ -1126,6 +1280,9 @@ mod tests {
 		check_swma_streaming,
 		check_swma_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_swma_tests!(check_swma_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

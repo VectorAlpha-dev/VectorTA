@@ -1408,6 +1408,197 @@ mod tests {
 		Ok(())
 	}
 
+	fn check_kama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy: Generate period from 2 to 100, then data with length >= period+1
+		let strat = (2usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					(period + 1)..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = KamaParams { period: Some(period) };
+				let input = KamaInput::from_slice(&data, params);
+
+				// Compute KAMA with specified kernel and scalar reference
+				let result = kama_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "KAMA computation failed: {:?}", result.err());
+				let out = result.unwrap().values;
+
+				let ref_result = kama_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference KAMA failed");
+				let ref_out = ref_result.unwrap().values;
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Find first valid data point
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first_valid + period;
+
+				// Property 2: NaN values only in warmup period
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN at index {} (warmup period), got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: All values after warmup are finite
+				for i in warmup_end..out.len() {
+					prop_assert!(
+						out[i].is_finite(),
+						"Expected finite value at index {} (after warmup), got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 4: KAMA values bounded by min/max of the trailing window
+				for i in warmup_end..out.len() {
+					// Get the relevant window for this KAMA value
+					let window_start = i.saturating_sub(period);
+					let window = &data[window_start..=i];
+					let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let max_val = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					prop_assert!(
+						out[i] >= min_val - 1e-6 && out[i] <= max_val + 1e-6,
+						"KAMA at index {} = {} is outside window bounds [{}, {}]",
+						i,
+						out[i],
+						min_val,
+						max_val
+					);
+				}
+
+				// Property 5: For constant data, KAMA should converge to that value
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
+					let const_val = data[first_valid];
+					// After sufficient iterations, KAMA should be very close to the constant
+					if out.len() > warmup_end + period * 2 {
+						let last_val = out[out.len() - 1];
+						prop_assert!(
+							(last_val - const_val).abs() < 1e-6,
+							"For constant data {}, KAMA should converge but got {}",
+							const_val,
+							last_val
+						);
+					}
+				}
+
+				// Property 6: Kernel consistency (compare with scalar reference)
+				for i in warmup_end..out.len() {
+					let diff = (out[i] - ref_out[i]).abs();
+					let ulps = {
+						if out[i] == ref_out[i] {
+							0
+						} else {
+							let a_bits = out[i].to_bits() as i64;
+							let b_bits = ref_out[i].to_bits() as i64;
+							(a_bits.wrapping_sub(b_bits)).unsigned_abs()
+						}
+					};
+					
+					// Allow up to 10 ULPs difference for floating-point precision
+					prop_assert!(
+						ulps <= 10 || diff < 1e-10,
+						"Kernel mismatch at index {}: {} vs {} (diff={}, ulps={})",
+						i,
+						out[i],
+						ref_out[i],
+						diff,
+						ulps
+					);
+				}
+
+				// Property 7: Smoothness - KAMA changes bounded by maximum smoothing constant
+				// KAMA formula: kama += (price - kama) * sc
+				// Maximum sc = (2/3)^2 ≈ 0.445
+				for i in (warmup_end + 1)..out.len() {
+					let change = (out[i] - out[i - 1]).abs();
+					let price = data[i];
+					let prev_kama = out[i - 1];
+					// Maximum possible change is when efficiency ratio = 1 (perfect trend)
+					let max_possible_change = (price - prev_kama).abs() * 0.445;
+					prop_assert!(
+						change <= max_possible_change + 1e-6,
+						"KAMA change {} exceeds maximum possible {} at index {}",
+						change,
+						max_possible_change,
+						i
+					);
+				}
+
+				// Property 8: Monotonicity for monotonic data
+				// If data is strictly increasing/decreasing after warmup, KAMA should follow
+				let post_warmup_data = &data[warmup_end..];
+				if post_warmup_data.len() > period {
+					let is_increasing = post_warmup_data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+					let is_decreasing = post_warmup_data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+					
+					if is_increasing {
+						for i in (warmup_end + period)..out.len() {
+							prop_assert!(
+								out[i] >= out[i - 1] - 1e-6,
+								"KAMA should be non-decreasing for increasing data at index {}",
+								i
+							);
+						}
+					}
+					if is_decreasing {
+						for i in (warmup_end + period)..out.len() {
+							prop_assert!(
+								out[i] <= out[i - 1] + 1e-6,
+								"KAMA should be non-increasing for decreasing data at index {}",
+								i
+							);
+						}
+					}
+				}
+
+				// Property 9: Zero volatility case
+				// When a window has identical values (sum_roc1 = 0), KAMA should not change
+				// This tests the edge case where efficiency ratio = 0
+				for i in (warmup_end + period)..out.len() {
+					// Check if the last 'period' values are all the same
+					let window_start = i - period + 1;
+					let window = &data[window_start..=i];
+					let all_same = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+					
+					if all_same && i > warmup_end + period {
+						// When all values in window are the same, sum_roc1 = 0, so ER = 0
+						// This means smoothing constant is at minimum: (0 * const_diff + const_max)^2
+						// KAMA should barely change (only by minimum smoothing)
+						let change = (out[i] - out[i - 1]).abs();
+						let min_sc = (2.0 / 31.0_f64).powi(2); // ≈ 0.00416
+						let max_change = (data[i] - out[i - 1]).abs() * min_sc;
+						prop_assert!(
+							change <= max_change + 1e-9,
+							"With zero volatility at index {}, KAMA change {} exceeds minimum expected {}",
+							i,
+							change,
+							max_change
+						);
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_kama_tests!(
 		check_kama_partial_params,
 		check_kama_accuracy,
@@ -1418,7 +1609,8 @@ mod tests {
 		check_kama_reinput,
 		check_kama_nan_handling,
 		check_kama_streaming,
-		check_kama_no_poison
+		check_kama_no_poison,
+		check_kama_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

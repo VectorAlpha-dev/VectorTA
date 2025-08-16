@@ -991,6 +991,243 @@ mod tests {
         }
     }
 
+	#[cfg(feature = "proptest")]
+	fn check_kurtosis_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data with realistic price movements
+		// Note: Kurtosis period starts from 2 since we need at least 2 values
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				let min_len = period * 2; // Ensure enough data for testing
+				let max_len = 400.min(period * 20); // Cap at reasonable size
+				(
+					min_len..=max_len,
+					Just(period),
+				)
+			})
+			.prop_flat_map(|(len, period)| {
+				(
+					// Generate realistic price data with trend and noise
+					proptest::collection::vec(
+						// Base price with trend component
+						(50.0f64..150.0f64).prop_flat_map(move |base| {
+							let trend = (-0.01f64..0.01f64);
+							trend.prop_flat_map(move |t| {
+								let noise = (-2.0f64..2.0f64);
+								noise.prop_map(move |n| {
+									base * (1.0 + t) + n
+								})
+							})
+						}),
+						len,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = KurtosisParams { period: Some(period) };
+				let input = KurtosisInput::from_slice(&data, params.clone());
+
+				let result = kurtosis_with_kernel(&input, kernel)?;
+				let scalar_result = kurtosis_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length must match input length
+				prop_assert_eq!(
+					result.values.len(),
+					data.len(),
+					"Output length mismatch"
+				);
+
+				// Property 2: Warmup period handling - first (period - 1) values should be NaN
+				let warmup_end = period - 1;
+				for i in 0..warmup_end.min(data.len()) {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Expected NaN during warmup at index {}", i
+					);
+				}
+
+				// Property 3: After warmup, values should be finite (unless window contains NaN)
+				for i in warmup_end..data.len() {
+					let window_start = i + 1 - period;
+					let window = &data[window_start..=i];
+					let has_nan = window.iter().any(|x| x.is_nan());
+					
+					if has_nan {
+						prop_assert!(
+							result.values[i].is_nan(),
+							"Expected NaN when window contains NaN at index {}", i
+						);
+					} else {
+						prop_assert!(
+							result.values[i].is_finite() || result.values[i].is_nan(),
+							"Expected finite or NaN value at index {}, got {}", i, result.values[i]
+						);
+					}
+				}
+
+				// Property 4: Kernel consistency - different kernels should produce similar results
+				for i in warmup_end..data.len() {
+					let val = result.values[i];
+					let scalar_val = scalar_result.values[i];
+
+					if val.is_nan() && scalar_val.is_nan() {
+						continue;
+					}
+
+					if val.is_finite() && scalar_val.is_finite() {
+						// Use ULP comparison for floating point precision
+						let val_bits = val.to_bits();
+						let scalar_bits = scalar_val.to_bits();
+						let ulp_diff = val_bits.abs_diff(scalar_bits);
+
+						prop_assert!(
+							(val - scalar_val).abs() <= 1e-9 || ulp_diff <= 5,
+							"Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+							i, val, scalar_val, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							val.is_nan(), scalar_val.is_nan(),
+							"NaN mismatch at index {}", i
+						);
+					}
+				}
+
+				// Property 5: Constant values in window should give NaN (zero variance)
+				let constant_data = vec![42.0; data.len()];
+				let constant_input = KurtosisInput::from_slice(&constant_data, params.clone());
+				let constant_result = kurtosis_with_kernel(&constant_input, kernel)?;
+				
+				for i in warmup_end..constant_data.len() {
+					prop_assert!(
+						constant_result.values[i].is_nan(),
+						"Expected NaN for constant values at index {}, got {}",
+						i, constant_result.values[i]
+					);
+				}
+
+				// Property 6: Normal distribution approximation
+				// For large enough windows with normally distributed data, 
+				// excess kurtosis should be close to 0
+				if period >= 30 && data.len() >= 100 {
+					// Calculate mean kurtosis over stable region
+					let stable_start = data.len() / 4;
+					let stable_end = data.len() * 3 / 4;
+					let stable_kurtosis: Vec<f64> = result.values[stable_start..stable_end]
+						.iter()
+						.filter(|x| x.is_finite())
+						.copied()
+						.collect();
+					
+					if stable_kurtosis.len() > 10 {
+						let mean_kurtosis = stable_kurtosis.iter().sum::<f64>() / stable_kurtosis.len() as f64;
+						// For pseudo-random data approximating normal distribution,
+						// mean excess kurtosis should be close to 0
+						prop_assert!(
+							mean_kurtosis >= -0.5 && mean_kurtosis <= 0.5,
+							"Mean kurtosis {} outside expected range [-0.5, 0.5] for pseudo-normal data", mean_kurtosis
+						);
+					}
+				}
+
+				// Property 7: Mathematical bounds verification
+				// Excess kurtosis has a theoretical minimum of -2.0
+				// (achieved by a two-point distribution with equal probabilities)
+				for i in warmup_end..data.len() {
+					if result.values[i].is_finite() {
+						// Theoretical minimum for excess kurtosis is exactly -2.0
+						// Allow small numerical error margin
+						prop_assert!(
+							result.values[i] >= -2.0 - 1e-10,
+							"Kurtosis {} at index {} violates theoretical minimum of -2.0",
+							result.values[i], i
+						);
+					}
+				}
+
+				// Property 8: Outlier sensitivity
+				// Adding a significant outlier should increase kurtosis (leptokurtic)
+				if data.len() > period * 2 && period >= 3 {
+					let mut outlier_data = data.clone();
+					let mid = data.len() / 2;
+					if mid >= period {
+						// Calculate mean and std deviation of window
+						let window_start = mid - period + 1;
+						let window = &data[window_start..=mid];
+						let mean = window.iter().sum::<f64>() / period as f64;
+						let variance = window.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / period as f64;
+						let std_dev = variance.sqrt();
+						
+						// Add significant outlier (10 standard deviations away)
+						// This ensures it's a true outlier regardless of the distribution
+						outlier_data[mid] = mean + std_dev * 10.0;
+						
+						let outlier_input = KurtosisInput::from_slice(&outlier_data, params.clone());
+						let outlier_result = kurtosis_with_kernel(&outlier_input, kernel)?;
+						
+						// The window containing the outlier should have higher kurtosis
+						if result.values[mid].is_finite() && outlier_result.values[mid].is_finite() && std_dev > 0.01 {
+							// Outliers make distributions more leptokurtic (higher kurtosis)
+							prop_assert!(
+								outlier_result.values[mid] > result.values[mid],
+								"Outlier should increase kurtosis: original {}, with outlier {}",
+								result.values[mid], outlier_result.values[mid]
+							);
+							
+							// The increase should be substantial for such a large outlier
+							let kurtosis_increase = outlier_result.values[mid] - result.values[mid];
+							prop_assert!(
+								kurtosis_increase > 0.5,
+								"Outlier should substantially increase kurtosis: increase of {} is too small",
+								kurtosis_increase
+							);
+						}
+					}
+				}
+
+				// Property 9: Uniform distribution (platykurtic)
+				// Data with low variance within each window should produce negative excess kurtosis
+				if period >= 4 {
+					// Generate data with very small variance (nearly uniform within windows)
+					let uniform_data: Vec<f64> = (0..data.len())
+						.map(|i| {
+							let base = (i / period) as f64 * 10.0;
+							// Add tiny variation to avoid exact zeros
+							base + ((i % period) as f64) * 0.001
+						})
+						.collect();
+					
+					let uniform_input = KurtosisInput::from_slice(&uniform_data, params.clone());
+					let uniform_result = kurtosis_with_kernel(&uniform_input, kernel)?;
+					
+					// Check a few windows after warmup
+					let check_start = warmup_end + period;
+					let check_end = (check_start + 5).min(uniform_data.len());
+					
+					for i in check_start..check_end {
+						if uniform_result.values[i].is_finite() {
+							// Uniform distributions have excess kurtosis of -1.2
+							// Nearly uniform should be negative (platykurtic)
+							prop_assert!(
+								uniform_result.values[i] < 0.0,
+								"Nearly uniform distribution should have negative excess kurtosis at index {}, got {}",
+								i, uniform_result.values[i]
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_kurtosis_tests!(
 		check_kurtosis_partial_params,
 		check_kurtosis_accuracy,
@@ -1003,6 +1240,9 @@ mod tests {
 		check_kurtosis_streaming,
 		check_kurtosis_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_kurtosis_tests!(check_kurtosis_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

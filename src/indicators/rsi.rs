@@ -1034,6 +1034,233 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with realistic market conditions
+		let strat = (2usize..=100)
+			.prop_flat_map(|period| {
+				(
+					// Price data between -1e6 and 1e6 (filtered for finite values)
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite price", |x| x.is_finite() && x.abs() > 1e-10),
+						period + 10..400,
+					),
+					Just(period),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = RsiParams { period: Some(period) };
+				let input = RsiInput::from_slice(&data, params);
+
+				// Get results from the kernel being tested
+				let RsiOutput { values: out } = rsi_with_kernel(&input, kernel)?;
+				
+				// Get reference results from scalar kernel for comparison
+				let RsiOutput { values: ref_out } = rsi_with_kernel(&input, Kernel::Scalar)?;
+
+				// Find first non-NaN index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_end = first_valid + period;
+
+				// Property 1: RSI values must be in range [0, 100]
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= 0.0 && val <= 100.0,
+							"[{}] RSI value {} at index {} is out of range [0, 100]",
+							test_name, val, i
+						);
+					}
+				}
+
+				// Property 2: Warmup period handling
+				for i in 0..warmup_end.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+				
+				// First non-NaN should be at warmup_end
+				if warmup_end < out.len() {
+					prop_assert!(
+						!out[warmup_end].is_nan(),
+						"[{}] Expected non-NaN at index {} (warmup_end), got NaN",
+						test_name, warmup_end
+					);
+				}
+
+				// Property 3: Kernel consistency
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if y.is_nan() && r.is_nan() {
+						continue;
+					}
+					
+					prop_assert!(
+						(y - r).abs() < 1e-9,
+						"[{}] Kernel mismatch at index {}: {} vs {} (diff: {})",
+						test_name, i, y, r, (y - r).abs()
+					);
+				}
+
+				// Property 4: Constant prices should yield RSI = 50
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup_end < out.len() {
+					for i in warmup_end..out.len() {
+						prop_assert!(
+							(out[i] - 50.0).abs() < 1e-9,
+							"[{}] Constant prices should yield RSI=50, got {} at index {}",
+							test_name, out[i], i
+						);
+					}
+				}
+
+				// Property 5: Monotonic increasing prices should trend toward 100
+				// Use period-adaptive thresholds for more realistic testing
+				let strictly_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
+				if strictly_increasing && out.len() > warmup_end + 10 {
+					let last_rsi = out[out.len() - 1];
+					let high_threshold = if period <= 5 {
+						60.0
+					} else if period <= 20 {
+						65.0
+					} else {
+						70.0
+					};
+					prop_assert!(
+						last_rsi > high_threshold,
+						"[{}] Strictly increasing prices should yield RSI > {} (period={}), got {}",
+						test_name, high_threshold, period, last_rsi
+					);
+				}
+
+				// Property 6: Monotonic decreasing prices should trend toward 0
+				// Use period-adaptive thresholds for more realistic testing
+				let strictly_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
+				if strictly_decreasing && out.len() > warmup_end + 10 {
+					let last_rsi = out[out.len() - 1];
+					let low_threshold = if period <= 5 {
+						40.0
+					} else if period <= 20 {
+						35.0
+					} else {
+						30.0
+					};
+					prop_assert!(
+						last_rsi < low_threshold,
+						"[{}] Strictly decreasing prices should yield RSI < {} (period={}), got {}",
+						test_name, low_threshold, period, last_rsi
+					);
+				}
+
+				// Property 7: No poison values (in debug mode)
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in out.iter().enumerate() {
+						if val.is_nan() {
+							continue;
+						}
+						
+						let bits = val.to_bits();
+						prop_assert!(
+							bits != 0x11111111_11111111 && 
+							bits != 0x22222222_22222222 && 
+							bits != 0x33333333_33333333,
+							"[{}] Found poison value {} (0x{:016X}) at index {}",
+							test_name, val, bits, i
+						);
+					}
+				}
+
+				// Property 8: Oscillating prices should keep RSI in middle range
+				// Check if prices alternate between increases and decreases
+				let mut oscillating = true;
+				let mut prev_delta = 0.0;
+				for window in data.windows(2) {
+					let delta = window[1] - window[0];
+					if prev_delta != 0.0 && delta != 0.0 {
+						// Check if signs are different (oscillating)
+						if (delta > 0.0 && prev_delta > 0.0) || (delta < 0.0 && prev_delta < 0.0) {
+							oscillating = false;
+							break;
+						}
+					}
+					prev_delta = delta;
+				}
+				
+				// If we have oscillating prices with sufficient data after warmup
+				if oscillating && out.len() > warmup_end + 10 && prev_delta != 0.0 {
+					// RSI should stay in middle range (roughly 40-60)
+					let last_quarter_start = out.len() - (out.len() - warmup_end) / 4;
+					for i in last_quarter_start..out.len() {
+						if !out[i].is_nan() {
+							prop_assert!(
+								out[i] >= 35.0 && out[i] <= 65.0,
+								"[{}] Oscillating prices should keep RSI in [35, 65] range, got {} at index {}",
+								test_name, out[i], i
+							);
+						}
+					}
+				}
+
+				// Property 9: Mathematical consistency check for a few values
+				if warmup_end + 5 < out.len() {
+					// Manually calculate RSI for one point to verify
+					let idx = warmup_end + 3;
+					let mut avg_gain = 0.0;
+					let mut avg_loss = 0.0;
+					
+					// Initial average calculation
+					for j in (first_valid + 1)..=(first_valid + period) {
+						let delta = data[j] - data[j - 1];
+						if delta > 0.0 {
+							avg_gain += delta;
+						} else {
+							avg_loss += -delta;
+						}
+					}
+					avg_gain /= period as f64;
+					avg_loss /= period as f64;
+					
+					// Update averages using EMA
+					let inv_period = 1.0 / period as f64;
+					let beta = 1.0 - inv_period;
+					for j in (first_valid + period + 1)..=idx {
+						let delta = data[j] - data[j - 1];
+						let gain = if delta > 0.0 { delta } else { 0.0 };
+						let loss = if delta < 0.0 { -delta } else { 0.0 };
+						avg_gain = inv_period * gain + beta * avg_gain;
+						avg_loss = inv_period * loss + beta * avg_loss;
+					}
+					
+					let expected_rsi = if avg_gain + avg_loss == 0.0 {
+						50.0
+					} else {
+						100.0 * avg_gain / (avg_gain + avg_loss)
+					};
+					
+					prop_assert!(
+						(out[idx] - expected_rsi).abs() < 1e-9,
+						"[{}] RSI calculation mismatch at index {}: got {}, expected {}",
+						test_name, idx, out[idx], expected_rsi
+					);
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_rsi_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1070,6 +1297,9 @@ mod tests {
 		check_rsi_streaming,
 		check_rsi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_rsi_tests!(check_rsi_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

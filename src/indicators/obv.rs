@@ -691,6 +691,206 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_obv_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate random price and volume data
+		// Note: We generate finite, non-NaN data to test realistic conditions
+		// Volume includes zero to test edge case where no volume is traded
+		let strat = prop::collection::vec(
+			(
+				(-1e6f64..1e6f64).prop_filter("finite close", |x| x.is_finite()),
+				(0f64..1e6f64).prop_filter("finite positive volume", |x| x.is_finite() && *x >= 0.0),
+			),
+			10..400,
+		);
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |price_volume_pairs| {
+				let (close, volume): (Vec<f64>, Vec<f64>) = price_volume_pairs.into_iter().unzip();
+				
+				let input = ObvInput::from_slices(&close, &volume, ObvParams::default());
+				let ObvOutput { values: out } = obv_with_kernel(&input, kernel)?;
+				let ObvOutput { values: ref_out } = obv_with_kernel(&input, Kernel::Scalar)?;
+
+				// Find first valid index - should be 0 since we generate only finite values
+				let first_valid = close.iter()
+					.zip(volume.iter())
+					.position(|(c, v)| !c.is_nan() && !v.is_nan());
+
+				// Since we generate only finite values, first_valid should always be Some(0)
+				prop_assert_eq!(
+					first_valid, Some(0),
+					"Expected first valid index to be 0 for finite input data"
+				);
+
+				if let Some(first_idx) = first_valid {
+					// Validate NaN prefix: all values before first_idx should be NaN
+					for i in 0..first_idx {
+						prop_assert!(
+							out[i].is_nan(),
+							"Expected NaN at index {} (before first_valid), got {}",
+							i, out[i]
+						);
+					}
+
+					// Validate output completeness: all values from first_idx onwards should be valid
+					for i in first_idx..out.len() {
+						prop_assert!(
+							!out[i].is_nan(),
+							"Expected valid value at index {} (after first_valid), got NaN",
+							i
+						);
+					}
+
+					// Property 1: First valid OBV value should be 0
+					prop_assert_eq!(
+						out[first_idx], 0.0,
+						"First valid OBV at index {} should be 0, got {}",
+						first_idx, out[first_idx]
+					);
+
+					// Property 2: Verify cumulative behavior for subsequent values
+					// Now with explicit check for out[i-1] validity
+					for i in (first_idx + 1)..close.len() {
+						// Both current and previous values should be valid after first_idx
+						if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
+							let obv_diff = out[i] - out[i - 1];
+							let price_diff = close[i] - close[i - 1];
+
+							if price_diff > 0.0 {
+								// Price increased, OBV should increase by volume
+								prop_assert!(
+									(obv_diff - volume[i]).abs() < 1e-9,
+									"At index {}: OBV diff {} should equal volume {} (price increased)",
+									i, obv_diff, volume[i]
+								);
+							} else if price_diff < 0.0 {
+								// Price decreased, OBV should decrease by volume
+								prop_assert!(
+									(obv_diff + volume[i]).abs() < 1e-9,
+									"At index {}: OBV diff {} should equal -volume {} (price decreased)",
+									i, obv_diff, -volume[i]
+								);
+							} else {
+								// Price unchanged, OBV should remain the same
+								prop_assert!(
+									obv_diff.abs() < 1e-9,
+									"At index {}: OBV should not change when price is unchanged, diff = {}",
+									i, obv_diff
+								);
+							}
+						}
+					}
+
+					// Property 3: All kernels should produce identical results
+					for i in 0..out.len() {
+						if out[i].is_nan() && ref_out[i].is_nan() {
+							continue; // Both NaN is fine
+						}
+						prop_assert!(
+							(out[i] - ref_out[i]).abs() < 1e-9,
+							"Kernel mismatch at index {}: {} (kernel) vs {} (scalar)",
+							i, out[i], ref_out[i]
+						);
+					}
+
+					// Property 4: Check for poison values
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value at index {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+
+					// Property 5: Test with constant price - OBV should remain at 0
+					if close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
+						for i in first_idx..out.len() {
+							if !out[i].is_nan() {
+								prop_assert!(
+									out[i].abs() < 1e-9,
+									"OBV should remain at 0 for constant price, got {} at index {}",
+									out[i], i
+								);
+							}
+						}
+					}
+
+					// Property 6: Monotonic increasing price - OBV should be cumulative sum of volumes
+					if close.windows(2).all(|w| w[1] > w[0]) {
+						let mut expected_obv = 0.0;
+						for i in first_idx..out.len() {
+							if i > first_idx {
+								expected_obv += volume[i];
+							}
+							if !out[i].is_nan() {
+								prop_assert!(
+									(out[i] - expected_obv).abs() < 1e-9,
+									"For monotonic increasing price at index {}: expected OBV {}, got {}",
+									i, expected_obv, out[i]
+								);
+							}
+						}
+					}
+
+					// Property 7: Monotonic decreasing price - OBV should be negative cumulative sum
+					if close.windows(2).all(|w| w[1] < w[0]) {
+						let mut expected_obv = 0.0;
+						for i in first_idx..out.len() {
+							if i > first_idx {
+								expected_obv -= volume[i];
+							}
+							if !out[i].is_nan() {
+								prop_assert!(
+									(out[i] - expected_obv).abs() < 1e-9,
+									"For monotonic decreasing price at index {}: expected OBV {}, got {}",
+									i, expected_obv, out[i]
+								);
+							}
+						}
+					}
+
+					// Property 8: Explicit test for zero volume cases
+					// When volume is 0, OBV should not change regardless of price movement
+					for i in (first_idx + 1)..close.len() {
+						if volume[i] == 0.0 && i > 0 && !out[i].is_nan() && !out[i - 1].is_nan() {
+							prop_assert!(
+								(out[i] - out[i - 1]).abs() < 1e-9,
+								"OBV should not change when volume is 0 at index {}, but changed from {} to {}",
+								i, out[i - 1], out[i]
+							);
+						}
+					}
+
+					// Property 9: OBV bounds check - ensure OBV doesn't exceed reasonable bounds
+					// Given max volume of 1e6 and max length of 400, max absolute OBV should be < 4e8
+					let max_possible_obv = 1e6 * (out.len() as f64);
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							prop_assert!(
+								val.abs() <= max_possible_obv,
+								"OBV at index {} exceeds reasonable bounds: {} > {}",
+								i, val.abs(), max_possible_obv
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	generate_all_obv_tests!(
 		check_obv_empty_data,
 		check_obv_data_length_mismatch,
@@ -698,6 +898,9 @@ mod tests {
 		check_obv_csv_accuracy,
 		check_obv_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_obv_tests!(check_obv_property);
 }
 
 /// Helper function for WASM bindings - writes directly to output slice with zero allocations

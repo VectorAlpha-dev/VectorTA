@@ -915,6 +915,153 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_zlema_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// ZLEMA only has period parameter, no offset/sigma like ALMA
+		// Strategy: period from 1..=100, then generate matching data
+		let strat = (1usize..=100).prop_flat_map(|period| {
+			(
+				prop::collection::vec(
+					(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+					period.max(2)..400,
+				),
+				Just(period),
+			)
+		});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = ZlemaParams { period: Some(period) };
+				let input = ZlemaInput::from_slice(&data, params);
+
+				let ZlemaOutput { values: out } = zlema_with_kernel(&input, kernel).unwrap();
+				let ZlemaOutput { values: ref_out } = zlema_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length should match input
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+
+				// Property 2: Warmup period check
+				// ZLEMA starts calculating from the first non-NaN value, but uses a warmup period
+				// The actual warmup is first + period, where first is the first non-NaN index
+				let first_non_nan = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first_non_nan + period;
+				
+				// Essential: Values before first_non_nan input must be NaN
+				for i in 0..first_non_nan.min(data.len()) {
+					prop_assert!(out[i].is_nan(), "Expected NaN at index {} before first non-NaN input", i);
+				}
+				
+				// Essential: After warmup period, must have valid calculated values
+				for i in warmup..data.len() {
+					prop_assert!(!out[i].is_nan(), "Expected valid value after warmup at index {}", i);
+				}
+				
+				// Implementation detail: During warmup (first_non_nan..warmup), 
+				// the implementation may choose to output NaN or calculated values.
+				// The current implementation produces values, but this is not a requirement.
+
+				// Property 3: De-lagging behavior verification
+				// ZLEMA uses: lag = (period - 1) / 2
+				// de-lagged value = 2.0 * data[i] - data[i - lag]
+				let lag = (period - 1) / 2;
+				let alpha = 2.0 / (period as f64 + 1.0);
+
+				// Property 4: Values should be within reasonable bounds
+				// After warmup, check that values are bounded
+				for i in warmup..data.len() {
+					// For ZLEMA, we need to consider a wider window because of de-lagging
+					// The de-lagging looks back by 'lag' positions
+					let window_start = i.saturating_sub(period + lag);
+					let window_end = i.min(data.len() - 1);
+					let window = &data[window_start..=window_end];
+					
+					// Get min/max of the extended window for bounds checking
+					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let y = out[i];
+
+					// ZLEMA can overshoot due to de-lagging formula: 2*current - lagged
+					// This can theoretically push values to 2*hi - lo or 2*lo - hi
+					let extended_lo = 2.0 * lo - hi;
+					let extended_hi = 2.0 * hi - lo;
+					
+					prop_assert!(
+						y.is_nan() || (y >= extended_lo - 1e-9 && y <= extended_hi + 1e-9),
+						"idx {}: {} ∉ [{}, {}] (extended bounds for de-lagging)",
+						i, y, extended_lo, extended_hi
+					);
+				}
+
+				// Property 5: Period=1 edge case
+				// With period=1, lag=0, so de-lagged value = 2*data[i] - data[i] = data[i]
+				// And alpha = 2/2 = 1, so EMA = data[i]
+				if period == 1 && data.len() > 0 {
+					for i in 1..data.len() {
+						let expected = data[i];
+						let actual = out[i];
+						prop_assert!(
+							(actual - expected).abs() <= 1e-9,
+							"Period=1 mismatch at {}: expected {}, got {}",
+							i, expected, actual
+						);
+					}
+				}
+
+				// Property 6: Constant data should converge to that constant
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.len() > warmup {
+					// After sufficient iterations, ZLEMA should converge to the constant value
+					let constant_val = data[first_non_nan];
+					for i in (warmup + period * 2)..data.len() {
+						prop_assert!(
+							(out[i] - constant_val).abs() <= 1e-6,
+							"Constant data convergence failed at {}: expected {}, got {}",
+							i, constant_val, out[i]
+						);
+					}
+				}
+
+				// Property 7: Cross-kernel validation
+				// Compare against scalar reference implementation
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					// Handle NaN/infinity cases
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"NaN/Inf mismatch at idx {}: {} vs {}",
+							i, y, r
+						);
+						continue;
+					}
+
+					// Check ULP difference for finite values
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+					// ZLEMA is relatively simple, so use tighter ULP tolerance
+					let max_ulp = if matches!(kernel, Kernel::Avx512) { 10 } else { 5 };
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= max_ulp,
+						"Cross-kernel mismatch at idx {}: {} vs {} (ULP={})",
+						i, y, r, ulp_diff
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_zlema_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -950,6 +1097,9 @@ mod tests {
 		check_zlema_streaming,
 		check_zlema_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_zlema_tests!(check_zlema_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

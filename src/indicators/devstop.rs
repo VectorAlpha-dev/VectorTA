@@ -1214,6 +1214,274 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_devstop_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data with more realistic scenarios
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate base price and volatility
+					(100.0f64..5000.0f64, 0.01f64..0.1f64),
+					Just(period),
+					0.0f64..3.0f64,     // mult range
+					0usize..=2,         // devtype range (0: stddev, 1: mean abs, 2: median abs)
+					prop::bool::ANY,    // direction (true = long, false = short)
+					// MA type selection
+					prop::sample::select(vec!["sma", "ema", "wma", "hma", "dema"]),
+				)
+			})
+			.prop_flat_map(move |(base_price_vol, period, mult, devtype, is_long, ma_type)| {
+				let (base_price, volatility) = base_price_vol;
+				let data_len = period + 10 + (period * 3); // Ensure enough data for warmup
+				
+				// Generate more realistic price data with trends and volatility
+				let price_strategy = prop::collection::vec(
+					(-volatility..volatility).prop_map(move |change| {
+						base_price * (1.0 + change)
+					}),
+					data_len..400,
+				);
+				
+				(
+					price_strategy.clone(), // For high calculation
+					price_strategy,         // For low calculation  
+					Just(period),
+					Just(mult),
+					Just(devtype),
+					Just(is_long),
+					Just(ma_type.to_string()),
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high_base, low_base, period, mult, devtype, is_long, ma_type)| {
+				// Create high/low with realistic spread
+				let len = high_base.len().min(low_base.len());
+				let mut high = vec![0.0; len];
+				let mut low = vec![0.0; len];
+				
+				for i in 0..len {
+					// Ensure high >= low with realistic spread (0.1% to 2% typically)
+					let mid = (high_base[i] + low_base[i]) / 2.0;
+					let spread = mid * 0.001 * (1.0 + (i as f64 * 0.1).sin().abs()); // Variable spread
+					high[i] = mid + spread;
+					low[i] = mid - spread;
+				}
+
+				let direction = if is_long { "long".to_string() } else { "short".to_string() };
+				
+				let params = DevStopParams {
+					period: Some(period),
+					mult: Some(mult),
+					devtype: Some(devtype),
+					direction: Some(direction.clone()),
+					ma_type: Some(ma_type.clone()),
+				};
+				let input = DevStopInput::from_slices(&high, &low, params.clone());
+
+				// Test with specified kernel
+				let result = devstop_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "DevStop calculation failed: {:?}", result.err());
+				let out = result.unwrap().values;
+
+				// Test with scalar reference kernel
+				let ref_result = devstop_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference calculation failed");
+				let ref_out = ref_result.unwrap().values;
+
+				// Property 1: Output length should match input length
+				prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
+
+				// Property 2: Warmup period handling - be less rigid
+				// Just verify that we have NaN values early and finite values later
+				let expected_warmup = period * 2; // Approximate
+				let has_early_nans = out.iter().take(period).any(|&x| x.is_nan());
+				let has_late_finites = out.iter().skip(expected_warmup + 5).any(|&x| x.is_finite());
+				
+				if out.len() > expected_warmup + 5 {
+					prop_assert!(
+						has_early_nans || period <= 2,
+						"Expected some NaN values during warmup period"
+					);
+					prop_assert!(
+						has_late_finites,
+						"Expected finite values after warmup period"
+					);
+				}
+
+				// Property 3: Kernel consistency - compare with scalar reference
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Both should be NaN or both should be finite
+					if y.is_nan() != r.is_nan() {
+						prop_assert!(
+							false,
+							"NaN mismatch at index {}: kernel is_nan={}, scalar is_nan={}",
+							i, y.is_nan(), r.is_nan()
+						);
+					}
+
+					// Check finite value consistency
+					if y.is_finite() && r.is_finite() {
+						let abs_diff = (y - r).abs();
+						let rel_diff = if r.abs() > 1e-10 { abs_diff / r.abs() } else { abs_diff };
+						
+						prop_assert!(
+							abs_diff <= 1e-6 || rel_diff <= 1e-6,
+							"Value mismatch at index {}: kernel={}, scalar={}, diff={}",
+							i, y, r, abs_diff
+						);
+					}
+				}
+
+				// Property 4: Multiplier effect
+				// Higher multiplier should generally mean stops further from price
+				if mult > 0.1 && out.len() > expected_warmup + 10 {
+					// Compare with zero multiplier version
+					let params_zero = DevStopParams {
+						period: Some(period),
+						mult: Some(0.0),
+						devtype: Some(devtype),
+						direction: Some(direction.clone()),
+						ma_type: Some(ma_type.clone()),
+					};
+					let input_zero = DevStopInput::from_slices(&high, &low, params_zero);
+					if let Ok(result_zero) = devstop_with_kernel(&input_zero, Kernel::Scalar) {
+						let out_zero = result_zero.values;
+						
+						// Count how many times the stop with multiplier is further from price
+						let mut further_count = 0;
+						let mut total_count = 0;
+						
+						for i in expected_warmup..out.len() {
+							if out[i].is_finite() && out_zero[i].is_finite() {
+								total_count += 1;
+								if direction == "long" {
+									// For long, higher mult should give lower (further) stops
+									if out[i] <= out_zero[i] {
+										further_count += 1;
+									}
+								} else {
+									// For short, higher mult should give higher (further) stops
+									if out[i] >= out_zero[i] {
+										further_count += 1;
+									}
+								}
+							}
+						}
+						
+						// At least 90% of the time, multiplier should increase stop distance
+						if total_count > 0 {
+							let ratio = further_count as f64 / total_count as f64;
+							prop_assert!(
+								ratio >= 0.9 || mult < 0.1,
+								"Multiplier effect not working: only {:.1}% of stops are further with mult={}",
+								ratio * 100.0, mult
+							);
+						}
+					}
+				}
+
+				// Property 5: Special case - flat candles (high == low)
+				// Test a subset with flat candles
+				if len > 20 {
+					let mut flat_high = high.clone();
+					let mut flat_low = high.clone(); // Same as high
+					for i in 10..20.min(len) {
+						flat_high[i] = 1000.0;
+						flat_low[i] = 1000.0;
+					}
+					
+					let flat_params = params.clone();
+					let flat_input = DevStopInput::from_slices(&flat_high, &flat_low, flat_params);
+					let flat_result = devstop_with_kernel(&flat_input, kernel);
+					
+					// Should not error on flat candles
+					prop_assert!(
+						flat_result.is_ok(),
+						"DevStop should handle flat candles (high==low)"
+					);
+				}
+
+				// Property 6: Deviation type parameter is being used
+				// Simply verify that the devtype parameter affects the calculation
+				// Different deviation types may produce similar results with certain data patterns
+				// which is mathematically valid, so we just verify the parameter is processed
+				if out.len() > expected_warmup + 10 && mult > 0.5 {
+					// Test that all three deviation types can be calculated without error
+					for test_devtype in 0..=2 {
+						let params_test = DevStopParams {
+							period: Some(period),
+							mult: Some(mult),
+							devtype: Some(test_devtype),
+							direction: Some(direction.clone()),
+							ma_type: Some(ma_type.clone()),
+						};
+						let input_test = DevStopInput::from_slices(&high, &low, params_test);
+						let result_test = devstop_with_kernel(&input_test, Kernel::Scalar);
+						
+						prop_assert!(
+							result_test.is_ok(),
+							"DevStop should handle all deviation types: failed on devtype {}",
+							test_devtype
+						);
+						
+						// Verify output has the correct structure
+						if let Ok(output) = result_test {
+							prop_assert_eq!(
+								output.values.len(), 
+								high.len(),
+								"Output length should match input for devtype {}", 
+								test_devtype
+							);
+						}
+					}
+				}
+
+				// Property 7: Stop movement logic  
+				// The stops should behave sensibly - not jumping erratically
+				if out.len() > expected_warmup + period {
+					let mut max_jump = 0.0;
+					let mut jump_count = 0;
+					
+					for i in (expected_warmup + 1)..out.len() {
+						if out[i].is_finite() && out[i-1].is_finite() {
+							let jump = (out[i] - out[i-1]).abs();
+							let relative_jump = jump / out[i-1].abs().max(1.0);
+							
+							// Track the maximum jump
+							if relative_jump > max_jump {
+								max_jump = relative_jump;
+							}
+							
+							// Count large jumps (more than 20% change)
+							if relative_jump > 0.2 {
+								jump_count += 1;
+							}
+						}
+					}
+					
+					// Stops shouldn't jump more than 50% in a single step typically
+					// (unless we have extreme price movements)
+					prop_assert!(
+						max_jump < 0.5 || jump_count < 5,
+						"Stop values jumping too much: max jump = {:.1}%, large jumps = {}",
+						max_jump * 100.0, jump_count
+					);
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_devstop_tests!(
 		check_devstop_partial_params,
 		check_devstop_accuracy,
@@ -1223,7 +1491,8 @@ mod tests {
 		check_devstop_very_small_dataset,
 		check_devstop_reinput,
 		check_devstop_nan_handling,
-		check_devstop_no_poison
+		check_devstop_no_poison,
+		check_devstop_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

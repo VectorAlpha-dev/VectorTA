@@ -879,12 +879,12 @@ mod tests {
 		skip_if_unsupported!(kernel, test_name);
 
 		// Property test strategy: generate period and matching data length
-		let strat = (1usize..=64) // period
+		let strat = (1usize..=100) // period (include 1 for edge case testing)
 			.prop_flat_map(|period| {
 				(
 					prop::collection::vec(
 						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-						period..400, // len >= period
+						period.max(2)..400, // ensure we have at least 2 data points
 					),
 					Just(period),
 				)
@@ -894,73 +894,159 @@ mod tests {
 			let params = SmmaParams { period: Some(period) };
 			let input = SmmaInput::from_slice(&data, params);
 
-			match smma_with_kernel(&input, kernel) {
-				Ok(output) => {
-					// Property 1: Output length equals input length
-					prop_assert_eq!(output.values.len(), data.len());
+			// Get output for the kernel being tested
+			let output = smma_with_kernel(&input, kernel)?;
+			
+			// Get scalar reference for cross-kernel validation
+			let reference = smma_with_kernel(&input, Kernel::Scalar)?;
 
-					// Property 2: First period-1 values are NaN
-					for i in 0..period - 1 {
-						prop_assert!(
-							output.values[i].is_nan(),
-							"Expected NaN at index {} but got {}",
-							i,
-							output.values[i]
-						);
-					}
+			// Property 1: Output length equals input length
+			prop_assert_eq!(output.values.len(), data.len());
+			prop_assert_eq!(reference.values.len(), data.len());
 
-					// Property 3: Values after warmup are finite (not NaN or inf)
-					for i in period - 1..output.values.len() {
-						prop_assert!(
-							output.values[i].is_finite(),
-							"Expected finite value at index {} but got {}",
-							i,
-							output.values[i]
-						);
-					}
-
-					// Property 4: SMMA is bounded by min/max of input window
-					if let Some(first_valid) = data.iter().position(|&x| !x.is_nan()) {
-						for i in (first_valid + period - 1)..output.values.len() {
-							let window_start = i.saturating_sub(period - 1);
-							let window = &data[window_start..=i];
-							if let (Some(&min), Some(&max)) = (
-								window
-									.iter()
-									.filter(|x| x.is_finite())
-									.min_by(|a, b| a.partial_cmp(b).unwrap()),
-								window
-									.iter()
-									.filter(|x| x.is_finite())
-									.max_by(|a, b| a.partial_cmp(b).unwrap()),
-							) {
-								prop_assert!(
-									output.values[i] >= min && output.values[i] <= max,
-									"SMMA value {} at index {} outside bounds [{}, {}]",
-									output.values[i],
-									i,
-									min,
-									max
-								);
-							}
-						}
-					}
-				}
-				Err(e) => {
-					// If it errors, it should be for a valid reason
+			// Property 2: First period-1 values are NaN (warmup period)
+			// Skip for period=1 since there's no warmup
+			if period > 1 {
+				for i in 0..period - 1 {
 					prop_assert!(
-						matches!(
-							e,
-							SmmaError::EmptyInputData
-								| SmmaError::AllValuesNaN
-								| SmmaError::InvalidPeriod { .. }
-								| SmmaError::NotEnoughValidData { .. }
-						),
-						"Unexpected error type: {:?}",
-						e
+						output.values[i].is_nan(),
+						"Expected NaN at index {} but got {}",
+						i,
+						output.values[i]
 					);
 				}
 			}
+
+			// Property 3: First valid SMMA value should be simple average of first period values
+			// For period=1, first valid is at index 0; otherwise at period-1
+			let first_smma_idx = if period == 1 { 0 } else { period - 1 };
+			let first_sum: f64 = data[0..period].iter().sum();
+			let expected_first = first_sum / period as f64;
+			let actual_first = output.values[first_smma_idx];
+			prop_assert!(
+				(actual_first - expected_first).abs() < 1e-9,
+				"First SMMA value mismatch: expected {}, got {} (diff: {})",
+				expected_first,
+				actual_first,
+				(actual_first - expected_first).abs()
+			);
+
+			// Property 4: Verify recursive formula for subsequent values
+			// SMMA[i] = (SMMA[i-1] * (period - 1) + data[i]) / period
+			if data.len() > period {
+				for i in period..data.len().min(period + 10) {
+					let prev_smma = output.values[i - 1];
+					let expected = (prev_smma * (period as f64 - 1.0) + data[i]) / period as f64;
+					let actual = output.values[i];
+					
+					// Allow small tolerance for floating-point arithmetic
+					prop_assert!(
+						(actual - expected).abs() < 1e-9,
+						"Recursive formula mismatch at index {}: expected {}, got {} (diff: {})",
+						i,
+						expected,
+						actual,
+						(actual - expected).abs()
+					);
+				}
+			}
+
+			// Property 5: Cross-kernel validation - compare against scalar reference
+			for i in 0..output.values.len() {
+				let test_val = output.values[i];
+				let ref_val = reference.values[i];
+				
+				// Both should be NaN or both should be finite
+				if test_val.is_nan() && ref_val.is_nan() {
+					continue;
+				}
+				
+				prop_assert!(
+					test_val.is_finite() == ref_val.is_finite(),
+					"Finite/NaN mismatch at index {}: test={}, ref={}",
+					i,
+					test_val,
+					ref_val
+				);
+				
+				if test_val.is_finite() && ref_val.is_finite() {
+					// Check ULP difference for floating-point precision
+					let test_bits = test_val.to_bits();
+					let ref_bits = ref_val.to_bits();
+					let ulp_diff = test_bits.abs_diff(ref_bits);
+					
+					// SMMA uses simple arithmetic, should have very tight tolerance
+					// Allow up to 10 ULPs for accumulated floating-point errors
+					let max_ulps = if matches!(kernel, Kernel::Avx512 | Kernel::Avx512Batch) {
+						20 // AVX512 might have slightly more variance
+					} else {
+						10
+					};
+					
+					prop_assert!(
+						ulp_diff <= max_ulps || (test_val - ref_val).abs() < 1e-9,
+						"Cross-kernel mismatch at index {}: test={}, ref={}, ULP diff={}, abs diff={}",
+						i,
+						test_val,
+						ref_val,
+						ulp_diff,
+						(test_val - ref_val).abs()
+					);
+				}
+			}
+
+			// Property 6: SMMA should be bounded by min/max of all data seen so far
+			// (not just the window, since SMMA has infinite memory)
+			let start_idx = if period == 1 { 0 } else { period - 1 };
+			for i in start_idx..output.values.len() {
+				let val = output.values[i];
+				if val.is_finite() {
+					let data_up_to_i = &data[0..=i];
+					let min = data_up_to_i.iter().copied().fold(f64::INFINITY, f64::min);
+					let max = data_up_to_i.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+					
+					prop_assert!(
+						val >= min - 1e-9 && val <= max + 1e-9,
+						"SMMA value {} at index {} outside historical bounds [{}, {}]",
+						val,
+						i,
+						min,
+						max
+					);
+				}
+			}
+
+			// Property 7: For constant data, SMMA should converge to that constant
+			if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
+				// All data points are essentially the same
+				let constant_val = data[0];
+				let check_start = if period == 1 { 0 } else { period - 1 };
+				for i in check_start..output.values.len() {
+					let val = output.values[i];
+					prop_assert!(
+						(val - constant_val).abs() < 1e-9,
+						"SMMA should converge to {} for constant data, but got {} at index {}",
+						constant_val,
+						val,
+						i
+					);
+				}
+			}
+
+			// Property 8: Period = 1 edge case - output should equal input after warmup
+			if period == 1 {
+				prop_assert_eq!(output.values[0], data[0], "Period=1: first value should equal input");
+				for i in 1..data.len() {
+					prop_assert!(
+						(output.values[i] - data[i]).abs() < 1e-9,
+						"Period=1: output should equal input at index {}: {} != {}",
+						i,
+						output.values[i],
+						data[i]
+					);
+				}
+			}
+
 			Ok(())
 		})?;
 

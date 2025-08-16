@@ -1707,6 +1707,9 @@ mod tests {
 		check_stochf_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_stochf_tests!(check_stochf_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1846,6 +1849,266 @@ mod tests {
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_stochf_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy to generate valid OHLC data where high >= close >= low
+		let strat = (2usize..=50)  // fastk_period range
+			.prop_flat_map(|fastk_period| {
+				(
+					// Generate base prices and close positions
+					prop::collection::vec(
+						(1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+						fastk_period + 50..400,  // Ensure enough data
+					),
+					// Generate random close position within [low, high] for each price
+					prop::collection::vec(
+						0.0f64..=1.0f64,  // Position within [low, high] range
+						fastk_period + 50..400,
+					),
+					Just(fastk_period),
+					1usize..=10,  // fastd_period range
+					0.001f64..0.1f64,  // volatility factor for generating high/low spread
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, close_positions, fastk_period, fastd_period, volatility)| {
+				// Generate realistic OHLC data from base prices
+				let len = base_prices.len().min(close_positions.len());
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				let mut close = Vec::with_capacity(len);
+				
+				for i in 0..len {
+					let base = base_prices[i];
+					let spread = base * volatility;
+					let h = base + spread * 0.5;
+					let l = base - spread * 0.5;
+					// Close is randomly positioned between low and high
+					let c = l + (h - l) * close_positions[i];  // Random position within range
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+
+				let params = StochfParams {
+					fastk_period: Some(fastk_period),
+					fastd_period: Some(fastd_period),
+					fastd_matype: Some(0),
+				};
+				let input = StochfInput::from_slices(&high, &low, &close, params.clone());
+				
+				let output = stochf_with_kernel(&input, kernel).unwrap();
+				let ref_output = stochf_with_kernel(&input, Kernel::Scalar).unwrap();
+				
+				// Property 1: K values must be in [0, 100] range
+				for (i, &k_val) in output.k.iter().enumerate() {
+					if !k_val.is_nan() {
+						prop_assert!(
+							k_val >= -1e-9 && k_val <= 100.0 + 1e-9,
+							"K value out of range at idx {}: {} (should be in [0, 100])",
+							i, k_val
+						);
+					}
+				}
+				
+				// Property 2: D values must be in [0, 100] range
+				for (i, &d_val) in output.d.iter().enumerate() {
+					if !d_val.is_nan() {
+						prop_assert!(
+							d_val >= -1e-9 && d_val <= 100.0 + 1e-9,
+							"D value out of range at idx {}: {} (should be in [0, 100])",
+							i, d_val
+						);
+					}
+				}
+				
+				// Property 3: Warmup period handling
+				let k_warmup = fastk_period - 1;
+				let d_warmup = fastk_period - 1 + fastd_period - 1;
+				
+				for i in 0..k_warmup.min(len) {
+					prop_assert!(
+						output.k[i].is_nan(),
+						"K value should be NaN during warmup at idx {}: {}",
+						i, output.k[i]
+					);
+				}
+				
+				for i in 0..d_warmup.min(len) {
+					prop_assert!(
+						output.d[i].is_nan(),
+						"D value should be NaN during warmup at idx {}: {}",
+						i, output.d[i]
+					);
+				}
+				
+				// Property 4: Kernel consistency - all kernels should produce same results
+				for i in 0..len {
+					let k_val = output.k[i];
+					let k_ref = ref_output.k[i];
+					let d_val = output.d[i];
+					let d_ref = ref_output.d[i];
+					
+					if !k_val.is_nan() && !k_ref.is_nan() {
+						prop_assert!(
+							(k_val - k_ref).abs() <= 1e-9,
+							"K kernel mismatch at idx {}: {} vs {} (diff: {})",
+							i, k_val, k_ref, (k_val - k_ref).abs()
+						);
+					}
+					
+					if !d_val.is_nan() && !d_ref.is_nan() {
+						prop_assert!(
+							(d_val - d_ref).abs() <= 1e-9,
+							"D kernel mismatch at idx {}: {} vs {} (diff: {})",
+							i, d_val, d_ref, (d_val - d_ref).abs()
+						);
+					}
+				}
+				
+				// Property 5: K value formula verification
+				// K = 100 * (close - lowest_low) / (highest_high - lowest_low)
+				for i in k_warmup..len {
+					let start = i + 1 - fastk_period;
+					let window_high = &high[start..=i];
+					let window_low = &low[start..=i];
+					
+					let hh = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					let ll = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+					
+					let expected_k = if hh == ll {
+						if close[i] == hh { 100.0 } else { 0.0 }
+					} else {
+						100.0 * (close[i] - ll) / (hh - ll)
+					};
+					
+					let actual_k = output.k[i];
+					prop_assert!(
+						(actual_k - expected_k).abs() <= 1e-9,
+						"K formula mismatch at idx {}: actual {} vs expected {} (diff: {})",
+						i, actual_k, expected_k, (actual_k - expected_k).abs()
+					);
+				}
+				
+				// Property 6: D is simple moving average of K
+				for i in d_warmup..len {
+					let start = i + 1 - fastd_period;
+					let k_window = &output.k[start..=i];
+					let expected_d = k_window.iter().sum::<f64>() / (fastd_period as f64);
+					let actual_d = output.d[i];
+					
+					prop_assert!(
+						(actual_d - expected_d).abs() <= 1e-9,
+						"D SMA mismatch at idx {}: actual {} vs expected {} (diff: {})",
+						i, actual_d, expected_d, (actual_d - expected_d).abs()
+					);
+				}
+				
+				// Property 7: Special case - when high == low == close (constant price)
+				// Test with a small constant price window
+				// Ensure we have enough data for both fastk and fastd periods
+				let const_len = (fastk_period + fastd_period) * 2;
+				if len > const_len {
+					let const_price = 100.0;
+					let const_high = vec![const_price; const_len];
+					let const_low = vec![const_price; const_len];
+					let const_close = vec![const_price; const_len];
+					
+					let const_input = StochfInput::from_slices(&const_high, &const_low, &const_close, params.clone());
+					let const_output = stochf_with_kernel(&const_input, kernel).unwrap();
+					
+					// When all prices are equal, K should be 100 (since close == high)
+					for i in k_warmup..const_high.len() {
+						prop_assert!(
+							(const_output.k[i] - 100.0).abs() <= 1e-9,
+							"Constant price K should be 100 at idx {}: {}",
+							i, const_output.k[i]
+						);
+					}
+				}
+				
+				// Property 8: Extreme cases - close at boundaries
+				// Test when close is consistently at low (K should be near 0) or high (K should be near 100)
+				let extreme_len = (fastk_period + fastd_period) * 2;
+				if len > extreme_len {
+					// Test 1: Close at low boundary with constant prices
+					let low_close_high = vec![100.0; extreme_len];  // Constant high
+					let low_close_low = vec![90.0; extreme_len];    // Constant low
+					let low_close_close = vec![90.0; extreme_len];  // Close equals low
+					
+					let low_input = StochfInput::from_slices(&low_close_high, &low_close_low, &low_close_close, params.clone());
+					let low_output = stochf_with_kernel(&low_input, kernel).unwrap();
+					
+					// When close == low consistently, K should be 0
+					for i in k_warmup..low_close_high.len() {
+						prop_assert!(
+							low_output.k[i].abs() <= 1e-9,
+							"When close == low, K should be 0 at idx {}: {}",
+							i, low_output.k[i]
+						);
+					}
+					
+					// Test 2: Close at high boundary with constant prices
+					let high_close_high = vec![100.0; extreme_len];   // Constant high
+					let high_close_low = vec![90.0; extreme_len];     // Constant low
+					let high_close_close = vec![100.0; extreme_len];  // Close equals high
+					
+					let high_input = StochfInput::from_slices(&high_close_high, &high_close_low, &high_close_close, params.clone());
+					let high_output = stochf_with_kernel(&high_input, kernel).unwrap();
+					
+					// When close == high consistently, K should be 100
+					for i in k_warmup..high_close_high.len() {
+						prop_assert!(
+							(high_output.k[i] - 100.0).abs() <= 1e-9,
+							"When close == high, K should be 100 at idx {}: {}",
+							i, high_output.k[i]
+						);
+					}
+				}
+				
+				// Property 9: No poison values in debug mode
+				#[cfg(debug_assertions)]
+				{
+					for (i, &val) in output.k.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value in K at idx {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+					
+					for (i, &val) in output.d.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && 
+								bits != 0x22222222_22222222 && 
+								bits != 0x33333333_33333333,
+								"Found poison value in D at idx {}: {} (0x{:016X})",
+								i, val, bits
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
 	}
 
 	macro_rules! gen_batch_tests {

@@ -1084,6 +1084,9 @@ mod tests {
 		check_er_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_er_tests!(check_er_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 
@@ -1213,4 +1216,219 @@ mod tests {
 
 	gen_batch_tests!(check_batch_default_row);
 	gen_batch_tests!(check_batch_no_poison);
+
+	#[cfg(feature = "proptest")]
+	fn check_er_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data with realistic price movements
+		// Note: Period starts from 2 since period=1 doesn't make mathematical sense for ER
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				let min_len = period * 2; // Ensure sufficient data for meaningful testing
+				(
+					// Base price level and volatility
+					(100.0f64..5000.0f64, 0.01f64..0.1f64),
+					// Trend strength (-2% to +2% per step)
+					-0.02f64..0.02f64,
+					// Generate period and data length
+					Just(period),
+					min_len..400,
+				)
+			})
+			.prop_flat_map(|((base_price, volatility), trend, period, len)| {
+				// Generate realistic price data with trend and noise
+				let price_changes = prop::collection::vec(
+					(-1.0f64..1.0f64),
+					len
+				);
+				
+				(Just(base_price), Just(volatility), Just(trend), Just(period), price_changes)
+			})
+			.prop_map(|(base_price, volatility, trend, period, changes)| {
+				// Create realistic price series with trend and volatility
+				let mut data = Vec::with_capacity(changes.len());
+				let mut price = base_price;
+				
+				for (i, &noise) in changes.iter().enumerate() {
+					// Add trend component
+					price *= 1.0 + trend;
+					// Add noise scaled by volatility
+					price *= 1.0 + (noise * volatility);
+					// Ensure price stays positive
+					price = price.max(1.0);
+					data.push(price);
+				}
+				
+				(data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period)| {
+				let params = ErParams { period: Some(period) };
+				let input = ErInput::from_slice(&data, params);
+
+				let ErOutput { values: out } = er_with_kernel(&input, kernel).unwrap();
+				let ErOutput { values: ref_out } = er_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length equals input length
+				prop_assert_eq!(out.len(), data.len());
+
+				// Property 2: Warmup period handling - first (period - 1) values should be NaN
+				let warmup = period - 1;
+				for i in 0..warmup {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+
+				// Property 3: Mathematical bounds - ER must be in [0.0, 1.0]
+				for i in warmup..data.len() {
+					let val = out[i];
+					if !val.is_nan() {
+						prop_assert!(
+							val >= -1e-10 && val <= 1.0 + 1e-10,
+							"ER value {} at index {} outside valid range [0, 1]",
+							val,
+							i
+						);
+					}
+				}
+
+				// Property 4: Kernel consistency - all kernels should produce identical results
+				for i in 0..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						let diff = (y - r).abs();
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							diff <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (diff={}, ULP={})",
+							i,
+							y,
+							r,
+							diff,
+							ulp_diff
+						);
+					}
+				}
+
+				// Property 5: Perfect efficiency for straight line moves
+				// Note: Using 0.90 threshold for practical tolerance with floating-point arithmetic
+				if data.len() >= period + 10 {
+					// Find a monotonic section if exists
+					for window_start in warmup..(data.len() - period) {
+						let window_end = (window_start + period).min(data.len() - 1);
+						let window = &data[window_start..=window_end];
+						
+						// Check if this window is monotonic but not constant
+						let is_monotonic_up = window.windows(2).all(|w| w[1] >= w[0] - 1e-10);
+						let is_monotonic_down = window.windows(2).all(|w| w[1] <= w[0] + 1e-10);
+						let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
+						
+						// Skip constant windows as they're handled by Property 6
+						if !is_constant && (is_monotonic_up || is_monotonic_down) {
+							// For a perfect trend, ER should be close to 1.0
+							let er_val = out[window_end];
+							if !er_val.is_nan() && (window[window.len()-1] - window[0]).abs() > 1e-6 {
+								prop_assert!(
+									er_val >= 0.90,
+									"Expected high ER (>0.90) for monotonic move at {}, got {}",
+									window_end,
+									er_val
+								);
+							}
+						}
+					}
+				}
+
+				// Property 6: Constant prices should yield 0.0
+				// When all prices in window are identical, delta=0 and sum=0, ER remains unset (NaN from warmup)
+				// But after warmup, the indicator leaves the value as 0.0 since sum is not > 0
+				for i in warmup..data.len().saturating_sub(period) {
+					let window_end = i + period - 1;
+					if window_end < data.len() {
+						let window = &data[i..=window_end];
+						let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
+						
+						if is_constant {
+							let er_val = out[window_end];
+							// For constant prices, ER calculation has delta=0 and sum=0
+							// The guard `if sum > 0.0` prevents division, leaving the value unchanged
+							// Since we use alloc_with_nan_prefix, values after warmup stay as allocated (0.0)
+							prop_assert!(
+								er_val.is_nan() || er_val.abs() < 1e-10,
+								"Constant prices should yield NaN or 0, got {} at index {}",
+								er_val,
+								window_end
+							);
+						}
+					}
+				}
+
+				// Property 7: Non-negative values
+				for i in warmup..data.len() {
+					let val = out[i];
+					if !val.is_nan() {
+						prop_assert!(
+							val >= -1e-10,
+							"ER should be non-negative, got {} at index {}",
+							val,
+							i
+						);
+					}
+				}
+
+				// Property 8: Choppy market detection
+				// Create a synthetic choppy pattern and verify low ER
+				if period >= 4 && data.len() >= period * 3 {
+					// Look for sections with high volatility relative to net movement
+					for i in warmup..(data.len() - period) {
+						let window_start = i;
+						let window_end = i + period - 1;
+						if window_end < data.len() {
+							let net_change = (data[window_end] - data[window_start]).abs();
+							let mut total_movement = 0.0;
+							for j in window_start..window_end {
+								total_movement += (data[j + 1] - data[j]).abs();
+							}
+							
+							// If total movement is much larger than net change, market is choppy
+							if total_movement > 0.0 && net_change / total_movement < 0.3 {
+								let er_val = out[window_end];
+								if !er_val.is_nan() {
+									// Choppy markets should have low ER
+									prop_assert!(
+										er_val <= 0.35,
+										"Expected low ER (<0.35) for choppy market at {}, got {}",
+										window_end,
+										er_val
+									);
+								}
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
 }

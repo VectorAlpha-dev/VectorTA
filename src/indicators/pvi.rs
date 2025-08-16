@@ -981,6 +981,239 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_pvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with realistic market conditions
+		let strat = (
+			// Close prices between -1e6 and 1e6 (filtered for finite values)
+			prop::collection::vec(
+				(-1e6f64..1e6f64).prop_filter("finite close", |x| x.is_finite() && x.abs() > 1e-10),
+				10..400,
+			),
+			// Volume data between 0 and 1e6 (filtered for finite, non-negative values)
+			prop::collection::vec(
+				(0f64..1e6f64).prop_filter("finite volume", |x| x.is_finite()),
+				10..400,
+			),
+			// Initial value between 100 and 10000
+			100f64..10000f64,
+		).prop_filter("same length", |(close, volume, _)| close.len() == volume.len());
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(close_data, volume_data, initial_value)| {
+				let params = PviParams {
+					initial_value: Some(initial_value),
+				};
+				let input = PviInput::from_slices(&close_data, &volume_data, params);
+				
+				// Get outputs from different kernels - handle potential errors gracefully
+				let output = match pvi_with_kernel(&input, kernel) {
+					Ok(o) => o,
+					Err(_) => return Ok(()), // Skip this test case if PVI fails (e.g., not enough valid data)
+				};
+				let out = &output.values;
+				
+				let scalar_output = match pvi_with_kernel(&input, Kernel::Scalar) {
+					Ok(o) => o,
+					Err(_) => return Ok(()), // Skip this test case if PVI fails
+				};
+				let ref_out = &scalar_output.values;
+
+				// Find first valid index
+				let first_valid_idx = close_data
+					.iter()
+					.zip(volume_data.iter())
+					.position(|(&c, &v)| !c.is_nan() && !v.is_nan());
+				
+				if let Some(first_idx) = first_valid_idx {
+					// Property 1: First valid value should equal initial_value
+					if !out[first_idx].is_nan() {
+						prop_assert!(
+							(out[first_idx] - initial_value).abs() < 1e-9,
+							"First valid PVI value {} should equal initial_value {} at index {}",
+							out[first_idx], initial_value, first_idx
+						);
+					}
+
+					// Property 2: PVI should remain constant when volume doesn't increase
+					for i in (first_idx + 1)..close_data.len() {
+						if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
+							if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
+								if volume_data[i] <= volume_data[i - 1] {
+									prop_assert!(
+										(out[i] - out[i - 1]).abs() < 1e-9,
+										"PVI should remain constant when volume doesn't increase: {} != {} at index {}",
+										out[i], out[i - 1], i
+									);
+								}
+							}
+						}
+					}
+
+					// Property 3: PVI should only change when volume increases
+					for i in (first_idx + 1)..close_data.len() {
+						if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
+							if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
+								let volume_increased = volume_data[i] > volume_data[i - 1];
+								let pvi_changed = (out[i] - out[i - 1]).abs() > 1e-9;
+								
+								if pvi_changed {
+									prop_assert!(
+										volume_increased,
+										"PVI changed without volume increase at index {}: vol[{}]={} <= vol[{}]={}",
+										i, i, volume_data[i], i - 1, volume_data[i - 1]
+									);
+								}
+							}
+						}
+					}
+
+					// Property 4: Verify change calculation accuracy
+					for i in (first_idx + 1)..close_data.len() {
+						if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() 
+							&& !close_data[i].is_nan() && !close_data[i - 1].is_nan()
+							&& !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
+							
+							if volume_data[i] > volume_data[i - 1] && close_data[i - 1].abs() > 1e-10 {
+								let expected_change = ((close_data[i] - close_data[i - 1]) / close_data[i - 1]) * out[i - 1];
+								let expected_pvi = out[i - 1] + expected_change;
+								prop_assert!(
+									(out[i] - expected_pvi).abs() < 1e-9,
+									"PVI calculation error at index {}: expected {} but got {}",
+									i, expected_pvi, out[i]
+								);
+							}
+						}
+					}
+
+					// Property 5: Kernel consistency - all kernels should produce identical results
+					for i in 0..out.len() {
+						if out[i].is_nan() && ref_out[i].is_nan() {
+							continue;
+						}
+						prop_assert!(
+							(out[i] - ref_out[i]).abs() < 1e-9,
+							"Kernel mismatch at index {}: {} ({:?}) vs {} (Scalar)",
+							i, out[i], kernel, ref_out[i]
+						);
+					}
+
+					// Property 6: No poison values
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							let bits = val.to_bits();
+							prop_assert!(
+								bits != 0x11111111_11111111 && bits != 0x22222222_22222222 && bits != 0x33333333_33333333,
+								"Found poison value {} (0x{:016X}) at index {}",
+								val, bits, i
+							);
+						}
+					}
+
+					// Property 7: Constant volume should keep PVI at initial value
+					if volume_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+						for &val in out.iter().skip(first_idx) {
+							if !val.is_nan() {
+								prop_assert!(
+									(val - initial_value).abs() < 1e-9,
+									"PVI should remain at initial_value {} with constant volume, but got {}",
+									initial_value, val
+								);
+							}
+						}
+					}
+
+					// Property 8: With monotonic increasing volume AND price changes, PVI should change
+					let is_monotonic_increasing = volume_data.windows(2)
+						.all(|w| !w[0].is_nan() && !w[1].is_nan() && w[1] > w[0]);
+					
+					if is_monotonic_increasing && close_data.len() > first_idx + 2 {
+						let mut last_valid_pvi = out[first_idx];
+						for i in (first_idx + 1)..out.len() {
+							if !out[i].is_nan() && !close_data[i].is_nan() && !close_data[i - 1].is_nan() {
+								// PVI changes when BOTH volume increases AND price changes
+								if (close_data[i] - close_data[i - 1]).abs() > 1e-10 {
+									prop_assert!(
+										(out[i] - last_valid_pvi).abs() > 1e-10,
+										"PVI should change with monotonic increasing volume and price change at index {}",
+										i
+									);
+								}
+								last_valid_pvi = out[i];
+							}
+						}
+					}
+					
+					// Property 9: Test behavior when close[i-1] is not near zero (avoid division by zero)
+					// The implementation doesn't explicitly handle division by zero, so we test normal cases
+					for i in (first_idx + 1)..close_data.len() {
+						if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() 
+							&& volume_data[i] > volume_data[i - 1]
+							&& !close_data[i].is_nan() && !close_data[i - 1].is_nan()
+							&& close_data[i - 1].abs() > 1e-10 {  // Only test when close[i-1] is NOT near zero
+							// Verify the percentage change calculation is mathematically correct
+							if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
+								let expected_change = ((close_data[i] - close_data[i - 1]) / close_data[i - 1]) * out[i - 1];
+								let expected_pvi = out[i - 1] + expected_change;
+								// This duplicates Property 4 but ensures we avoid division by zero edge cases
+								prop_assert!(
+									(out[i] - expected_pvi).abs() < 1e-9 || out[i].is_infinite(),
+									"PVI calculation should be correct or handle extreme values at index {}",
+									i
+								);
+							}
+						}
+					}
+					
+					// Property 10: PVI values should remain finite and reasonable
+					for (i, &val) in out.iter().enumerate() {
+						if !val.is_nan() {
+							// PVI should remain finite (not infinite)
+							prop_assert!(
+								val.is_finite(),
+								"PVI should be finite, but got {} at index {}",
+								val, i
+							);
+							
+							// With positive initial value and reasonable price changes, 
+							// PVI shouldn't become negative (though mathematically possible with extreme drops)
+							// Only check this for reasonable values to avoid edge cases
+							if initial_value > 0.0 && val.is_finite() && val.abs() < initial_value * 100.0 {
+								prop_assert!(
+									val >= 0.0 || close_data[..i].iter().any(|&c| c < 0.0),
+									"PVI unexpectedly negative ({}) with positive initial value {} at index {}",
+									val, initial_value, i
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_pvi_tests!(
+		check_pvi_partial_params,
+		check_pvi_accuracy,
+		check_pvi_default_candles,
+		check_pvi_empty_data,
+		check_pvi_mismatched_length,
+		check_pvi_all_values_nan,
+		check_pvi_not_enough_valid_data,
+		check_pvi_streaming,
+		check_pvi_no_poison,
+		check_pvi_property
+	);
+
+	#[cfg(not(feature = "proptest"))]
 	generate_all_pvi_tests!(
 		check_pvi_partial_params,
 		check_pvi_accuracy,

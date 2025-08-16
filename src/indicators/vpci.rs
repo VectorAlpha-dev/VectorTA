@@ -1015,6 +1015,268 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn calculate_variance(data: &[f64]) -> f64 {
+		let finite_values: Vec<f64> = data.iter()
+			.filter(|v| v.is_finite())
+			.copied()
+			.collect();
+		
+		if finite_values.len() < 2 {
+			return 0.0;
+		}
+		
+		let mean = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
+		let variance = finite_values.iter()
+			.map(|x| (x - mean).powi(2))
+			.sum::<f64>() / finite_values.len() as f64;
+		
+		variance
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_vpci_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		let strat = (2usize..=20)
+			.prop_flat_map(|short_range| {
+				((short_range + 1)..=50).prop_flat_map(move |long_range| {
+					let min_len = long_range + 10; // Ensure we have enough data after warmup
+					(min_len..400).prop_flat_map(move |data_len| {
+						(
+							// Close prices: realistic price range
+							prop::collection::vec(
+								(100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+								data_len,
+							),
+							// Volume: realistic volume range  
+							prop::collection::vec(
+								(1000f64..1000000f64).prop_filter("finite", |x| x.is_finite()),
+								data_len,
+							),
+							Just(short_range),
+							Just(long_range),
+						)
+					})
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(close, volume, short_range, long_range)| {
+				let params = VpciParams {
+					short_range: Some(short_range),
+					long_range: Some(long_range),
+				};
+				let input = VpciInput::from_slices(&close, &volume, params);
+
+				let VpciOutput { vpci: out, vpcis: out_smooth } = 
+					vpci_with_kernel(&input, kernel).unwrap();
+				let VpciOutput { vpci: ref_out, vpcis: ref_out_smooth } = 
+					vpci_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first valid index (non-NaN in both close and volume)
+				let first_valid = close.iter()
+					.zip(volume.iter())
+					.position(|(c, v)| !c.is_nan() && !v.is_nan())
+					.unwrap_or(0);
+				
+				// Expected warmup period
+				let expected_warmup = first_valid + long_range - 1;
+
+				// Check warmup period - values before warmup should be NaN
+				for i in 0..expected_warmup.min(out.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+					prop_assert!(
+						out_smooth[i].is_nan(),
+						"Expected NaN in VPCIS during warmup at index {}, got {}",
+						i,
+						out_smooth[i]
+					);
+				}
+
+				// Check values after warmup period
+				for i in expected_warmup..close.len() {
+					let y = out[i];
+					let ys = out_smooth[i];
+					let r = ref_out[i];
+					let rs = ref_out_smooth[i];
+
+					// Values should be finite after warmup (unless input had NaN)
+					if !close[i].is_nan() && !volume[i].is_nan() {
+						prop_assert!(
+							y.is_finite() || r.is_nan(),
+							"VPCI should be finite at idx {} after warmup, got {}",
+							i,
+							y
+						);
+					}
+
+					// Check kernel consistency for VPCI
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"finite/NaN mismatch in VPCI at idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						let y_bits = y.to_bits();
+						let r_bits = r.to_bits();
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"VPCI mismatch at idx {}: {} vs {} (ULP={})",
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					}
+
+					// Check kernel consistency for VPCIS
+					if !ys.is_finite() || !rs.is_finite() {
+						prop_assert!(
+							ys.to_bits() == rs.to_bits(),
+							"finite/NaN mismatch in VPCIS at idx {}: {} vs {}",
+							i,
+							ys,
+							rs
+						);
+					} else {
+						let ys_bits = ys.to_bits();
+						let rs_bits = rs.to_bits();
+						let ulp_diff: u64 = ys_bits.abs_diff(rs_bits);
+
+						prop_assert!(
+							(ys - rs).abs() <= 1e-9 || ulp_diff <= 4,
+							"VPCIS mismatch at idx {}: {} vs {} (ULP={})",
+							i,
+							ys,
+							rs,
+							ulp_diff
+						);
+					}
+				}
+
+				// Additional mathematical properties specific to VPCI
+				
+				// Property 1: When prices are constant, VPC component should be near zero
+				// VPC = VWMA_long - SMA_long, both should be equal for constant prices
+				let prices_constant = close.windows(2)
+					.all(|w| (w[0] - w[1]).abs() < 1e-9);
+				
+				if prices_constant && expected_warmup < close.len() {
+					for i in expected_warmup..close.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i].abs() <= 1e-6,
+								"VPCI should be ~0 when prices are constant, got {} at index {}",
+								out[i],
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 2: When volumes are constant, test volume ratio behavior
+				let volumes_constant = volume.windows(2)
+					.all(|w| (w[0] - w[1]).abs() < 1e-9);
+				
+				if volumes_constant && expected_warmup < close.len() {
+					// VM = SMA_volume_short / SMA_volume_long = 1.0 when volumes are constant
+					// This simplifies the VPCI calculation
+					for i in expected_warmup..close.len() {
+						if out[i].is_finite() && ref_out[i].is_finite() {
+							// Just verify consistency since the math still involves price components
+							prop_assert!(
+								(out[i] - ref_out[i]).abs() <= 1e-9,
+								"VPCI kernels should match exactly with constant volume"
+							);
+						}
+					}
+				}
+				
+				// Property 3: VPCIS relationship to VPCI - both should be finite in same locations
+				// VPCIS is a volume-weighted average of VPCI, so when VPCI is finite, VPCIS should be too
+				if expected_warmup + short_range < close.len() {
+					for i in (expected_warmup + short_range)..close.len() {
+						if out[i].is_finite() && volume[i].is_finite() && volume[i] > 0.0 {
+							// If VPCI is finite and volume is valid, VPCIS should also be finite
+							// (unless there's a division by zero in the calculation)
+							if !out_smooth[i].is_finite() {
+								// Check if it's due to division by zero (SMA of volume being 0)
+								let vol_window = &volume[i.saturating_sub(short_range - 1)..=i];
+								let vol_sum: f64 = vol_window.iter().sum();
+								prop_assert!(
+									vol_sum.abs() < 1e-10,
+									"VPCIS should be finite when VPCI is finite and volume > 0 at index {}",
+									i
+								);
+							}
+						}
+					}
+				}
+				
+				// Property 4: Special edge case when short_range == long_range
+				if short_range == long_range && expected_warmup < close.len() {
+					// When periods are equal, certain components interact in specific ways
+					// VPC uses same period for VWMA and SMA, but different calculations
+					for i in expected_warmup..close.len().min(expected_warmup + 10) {
+						if out[i].is_finite() {
+							// The output should still be valid and finite
+							prop_assert!(
+								!out[i].is_nan(),
+								"VPCI should be valid even when short_range == long_range"
+							);
+						}
+					}
+				}
+				
+				// Property 5: Extreme parameter ratios should still produce valid results
+				let extreme_ratio = long_range as f64 / short_range as f64 > 10.0;
+				if extreme_ratio && expected_warmup < close.len() {
+					for i in expected_warmup..close.len().min(expected_warmup + 5) {
+						prop_assert!(
+							out[i].is_nan() || out[i].is_finite(),
+							"VPCI should handle extreme parameter ratios gracefully at index {}",
+							i
+						);
+					}
+				}
+				
+				// Property 6: Verify valid count consistency between kernels
+				let valid_count = out.iter()
+					.skip(expected_warmup)
+					.filter(|v| v.is_finite())
+					.count();
+				
+				let ref_valid_count = ref_out.iter()
+					.skip(expected_warmup)
+					.filter(|v| v.is_finite())
+					.count();
+				
+				prop_assert_eq!(
+					valid_count,
+					ref_valid_count,
+					"Valid value count mismatch between kernels"
+				);
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_vpci_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1035,6 +1297,9 @@ mod tests {
 		check_vpci_slice_input,
 		check_vpci_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_vpci_tests!(check_vpci_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

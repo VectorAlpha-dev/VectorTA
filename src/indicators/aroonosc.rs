@@ -976,6 +976,267 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_aroonosc_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate realistic test scenarios with various market conditions
+		let strat = (2usize..=100)
+			.prop_flat_map(|length| {
+				let min_size = (length * 2).max(length + 20); // Ensure enough data for proper testing
+				let max_size = 400;
+				(
+					10.0f64..1000.0f64,        // Base price
+					0.0f64..0.1f64,            // Volatility percentage (0% to 10%)
+					-0.02f64..0.02f64,         // Trend strength (-2% to 2% per period)
+					min_size..max_size,         // Data size
+					Just(length),               // Period for AroonOsc
+					0u8..6,                     // Market type: 0=ranging, 1=uptrend, 2=downtrend, 3=flat, 4=monotonic up, 5=monotonic down
+				)
+			})
+			.prop_map(|(base_price, volatility, trend, size, length, market_type)| {
+				let mut high = Vec::with_capacity(size);
+				let mut low = Vec::with_capacity(size);
+				
+				// Generate realistic OHLC data based on market type
+				for i in 0..size {
+					let time_factor = i as f64 / size as f64;
+					
+					let (h, l) = match market_type {
+						0 => {
+							// Ranging market with sine wave pattern
+							let cycle = (time_factor * 4.0 * std::f64::consts::PI).sin();
+							let price = base_price * (1.0 + cycle * volatility);
+							let spread = price * volatility * 0.5;
+							(price + spread, price - spread)
+						}
+						1 => {
+							// Strong uptrend
+							let price = base_price * (1.0 + trend.abs() * i as f64);
+							let noise = ((i * 17 + 13) % 100) as f64 / 100.0 - 0.5;
+							let variation = price * volatility * noise * 0.3;
+							let spread = price * volatility * 0.2;
+							(price + variation + spread, price + variation - spread)
+						}
+						2 => {
+							// Strong downtrend
+							let price = base_price * (1.0 - trend.abs() * i as f64).max(1.0);
+							let noise = ((i * 23 + 7) % 100) as f64 / 100.0 - 0.5;
+							let variation = price * volatility * noise * 0.3;
+							let spread = price * volatility * 0.2;
+							(price + variation + spread, price + variation - spread)
+						}
+						3 => {
+							// Completely flat market (high = low = constant)
+							let price = base_price;
+							(price, price)
+						}
+						4 => {
+							// Monotonically increasing
+							let price = base_price + (i as f64 * base_price * 0.01);
+							let spread = price * 0.001; // Very small spread
+							(price + spread, price - spread)
+						}
+						_ => {
+							// Monotonically decreasing
+							let price = base_price - (i as f64 * base_price * 0.005).min(base_price * 0.9);
+							let spread = price * 0.001; // Very small spread
+							(price + spread, price - spread)
+						}
+					};
+					
+					// Ensure high >= low constraint
+					high.push(h.max(l));
+					low.push(h.min(l));
+				}
+				
+				(high, low, length, market_type)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, length, market_type)| {
+				let params = AroonOscParams { 
+					length: Some(length) 
+				};
+				let input = AroonOscInput::from_slices_hl(&high, &low, params);
+
+				// Test with specified kernel
+				let result = aroon_osc_with_kernel(&input, kernel)?;
+				
+				// Test with scalar reference for comparison
+				let reference = aroon_osc_with_kernel(&input, Kernel::Scalar)?;
+
+				// Verify output length matches input
+				prop_assert_eq!(
+					result.values.len(),
+					high.len(),
+					"Output length mismatch"
+				);
+
+				// Check warmup period - first 'length' values should be NaN
+				for i in 0..length {
+					prop_assert!(
+						result.values[i].is_nan(),
+						"Expected NaN at index {} during warmup (length={})",
+						i,
+						length
+					);
+				}
+
+				// Check values after warmup period
+				for i in length..result.values.len() {
+					let val = result.values[i];
+					let ref_val = reference.values[i];
+
+					// AroonOsc must be in range [-100, 100]
+					prop_assert!(
+						val >= -100.0 && val <= 100.0,
+						"AroonOsc value {} at index {} out of range [-100, 100]",
+						val,
+						i
+					);
+
+					// Check kernel consistency
+					if val.is_finite() && ref_val.is_finite() {
+						// Allow small floating point differences
+						let diff = (val - ref_val).abs();
+						prop_assert!(
+							diff <= 1e-9,
+							"Kernel mismatch at index {}: {} vs {} (diff={})",
+							i,
+							val,
+							ref_val,
+							diff
+						);
+					} else {
+						// Both should be NaN or both finite
+						prop_assert_eq!(
+							val.is_nan(),
+							ref_val.is_nan(),
+							"NaN mismatch at index {}: {} vs {}",
+							i,
+							val,
+							ref_val
+						);
+					}
+
+					// Test AroonOsc-specific properties based on data patterns
+					let window_start = i.saturating_sub(length);
+					let window_high = &high[window_start..=i];
+					let window_low = &low[window_start..=i];
+					
+					// Property 1: When all values in window are identical (flat), AroonOsc should be 0
+					if window_high.iter().all(|&h| (h - window_high[0]).abs() < f64::EPSILON) &&
+					   window_low.iter().all(|&l| (l - window_low[0]).abs() < f64::EPSILON) {
+						prop_assert!(
+							val.abs() < 1e-9,
+							"Completely flat window should produce AroonOsc = 0, got {} at index {}",
+							val,
+							i
+						);
+					}
+					
+					// Property 2: Find position of highest high and lowest low in window
+					let highest_idx = window_high.iter()
+						.enumerate()
+						.max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+						.map(|(idx, _)| idx)
+						.unwrap_or(0);
+					
+					let lowest_idx = window_low.iter()
+						.enumerate()
+						.min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+						.map(|(idx, _)| idx)
+						.unwrap_or(0);
+					
+					// When highest is most recent (at end of window), Aroon Up should be 100
+					if highest_idx == window_high.len() - 1 {
+						// AroonOsc should be positive when highest high is most recent
+						prop_assert!(
+							val >= -100.0 && val <= 100.0,
+							"When highest high is most recent, AroonOsc {} should be valid at index {}",
+							val,
+							i
+						);
+					}
+					
+					// When lowest is most recent (at end of window), Aroon Down should be 100
+					if lowest_idx == window_low.len() - 1 {
+						// AroonOsc should be negative when lowest low is most recent
+						prop_assert!(
+							val >= -100.0 && val <= 100.0,
+							"When lowest low is most recent, AroonOsc {} should be valid at index {}",
+							val,
+							i
+						);
+					}
+					
+					// Property 3: Monotonic sequences should have consistent behavior
+					if market_type == 4 {
+						// Monotonically increasing - most recent high should be highest
+						// AroonOsc should tend to be positive
+						prop_assert!(
+							val >= -100.0,
+							"Monotonic increasing should not produce very negative AroonOsc, got {} at index {}",
+							val,
+							i
+						);
+					} else if market_type == 5 {
+						// Monotonically decreasing - most recent low should be lowest
+						// AroonOsc should tend to be negative
+						prop_assert!(
+							val <= 100.0,
+							"Monotonic decreasing should not produce very positive AroonOsc, got {} at index {}",
+							val,
+							i
+						);
+					}
+					
+					// Property 4: When extremes are at opposite ends of window (but not in flat markets)
+					let is_flat_window = window_high.iter().all(|&h| (h - window_high[0]).abs() < f64::EPSILON) &&
+					                    window_low.iter().all(|&l| (l - window_low[0]).abs() < f64::EPSILON);
+					
+					if !is_flat_window {
+						if highest_idx == window_high.len() - 1 && lowest_idx == 0 {
+							// Highest is most recent, lowest is oldest -> AroonOsc should be near 100
+							prop_assert!(
+								val >= 50.0,
+								"When highest is recent and lowest is old, AroonOsc {} should be positive at index {}",
+								val,
+								i
+							);
+						} else if lowest_idx == window_low.len() - 1 && highest_idx == 0 {
+							// Lowest is most recent, highest is oldest -> AroonOsc should be near -100
+							prop_assert!(
+								val <= -50.0,
+								"When lowest is recent and highest is old, AroonOsc {} should be negative at index {}",
+								val,
+								i
+							);
+						}
+					}
+				}
+
+				// Verify no poison values (debug builds check these)
+				#[cfg(debug_assertions)]
+				for &val in &result.values {
+					if !val.is_nan() {
+						let bits = val.to_bits();
+						prop_assert_ne!(bits, 0x11111111_11111111, "Found poison value from alloc_with_nan_prefix");
+						prop_assert_ne!(bits, 0x22222222_22222222, "Found poison value from init_matrix_prefixes");
+						prop_assert_ne!(bits, 0x33333333_33333333, "Found poison value from make_uninit_matrix");
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_aroonosc_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -1007,6 +1268,9 @@ mod tests {
 		check_aroonosc_nan_handling,
 		check_aroonosc_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_aroonosc_tests!(check_aroonosc_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

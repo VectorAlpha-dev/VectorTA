@@ -814,23 +814,160 @@ mod tests {
 		Ok(())
 	}
 
+	// Helper function for comparing floating-point values with ULP tolerance
+	fn ulps_diff(a: f64, b: f64) -> u64 {
+		if a.is_nan() && b.is_nan() {
+			return 0;
+		}
+		if a.is_nan() || b.is_nan() {
+			return u64::MAX;
+		}
+		if a == b {
+			return 0;
+		}
+		if a.is_infinite() || b.is_infinite() {
+			return if a == b { 0 } else { u64::MAX };
+		}
+		let a_bits = a.to_bits() as i64;
+		let b_bits = b.to_bits() as i64;
+		(a_bits.wrapping_sub(b_bits)).unsigned_abs()
+	}
+
 	fn check_highpass_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
-		let strat = (
-			(-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
-			30usize..200,
-			3usize..30,
-		);
+
+		// Enhanced property testing strategy
+		let strat = (3usize..=100)
+			.prop_filter("avoid invalid alpha", |&p| {
+				// Avoid periods that cause cos_val ≈ 0 (InvalidAlpha error)
+				let cos_val = (2.0 * std::f64::consts::PI / (p as f64)).cos();
+				cos_val.abs() >= 1e-14
+			})
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						(period + 20)..500,
+					),
+					Just(period),
+				)
+			});
+
 		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(val, len, period)| {
-				let cos_val = (2.0 * std::f64::consts::PI / (period as f64)).cos();
-				prop_assume!(cos_val.abs() >= 1e-15);
-				let data = vec![val; len];
+			.run(&strat, |(data, period)| {
+				// Create input and compute highpass
 				let params = HighPassParams { period: Some(period) };
 				let input = HighPassInput::from_slice(&data, params);
-				let HighPassOutput { values: out } = highpass_with_kernel(&input, kernel).unwrap();
-				let last = *out.last().unwrap();
-				prop_assert!(last.abs() <= val.abs() * 0.01);
+				let HighPassOutput { values: result } = highpass_with_kernel(&input, kernel).unwrap();
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(result.len(), data.len(), 
+					"[{}] Output length {} should match input length {}", 
+					test_name, result.len(), data.len());
+
+				// Property 2: No NaN values in output (highpass computes from start)
+				for (i, &val) in result.iter().enumerate() {
+					prop_assert!(!val.is_nan(), 
+						"[{}] Unexpected NaN at index {}", 
+						test_name, i);
+				}
+
+				// Property 3: All output values are finite
+				for (i, &val) in result.iter().enumerate() {
+					prop_assert!(val.is_finite(), 
+						"[{}] Expected finite value at index {}, got {}", 
+						test_name, i, val);
+				}
+
+				// Property 4: DC removal - constant data should converge to near zero
+				// (Highpass filters remove DC components)
+				// Use non-zero constant to avoid numerical edge cases
+				let constant_val = 42.0;
+				let constant_data = vec![constant_val; data.len()];
+				let constant_input = HighPassInput::from_slice(&constant_data, params);
+				let HighPassOutput { values: constant_result } = highpass_with_kernel(&constant_input, kernel).unwrap();
+
+				// After sufficient samples for stabilization, output should be near zero for constant input
+				let check_start = (period * 3).min(constant_result.len());
+				if check_start < constant_result.len() {
+					for i in check_start..constant_result.len() {
+						let abs_val = constant_result[i].abs();
+						// More lenient tolerance for edge cases
+						prop_assert!(abs_val < 1e-3, 
+							"[{}] Highpass should remove DC component at index {}, got {} (should be near 0)", 
+							test_name, i, constant_result[i]);
+					}
+				}
+
+				// Property 5: Kernel consistency - all kernels should produce similar results
+				if cfg!(all(feature = "nightly-avx", target_arch = "x86_64")) {
+					let scalar_result = highpass_with_kernel(&input, Kernel::Scalar).unwrap().values;
+					for i in 0..result.len() {
+						let diff = (result[i] - scalar_result[i]).abs();
+						let ulps = ulps_diff(result[i], scalar_result[i]);
+						prop_assert!(ulps <= 10 || diff < 1e-9, 
+							"[{}] Kernel mismatch at index {}: {} vs {} (diff={}, ulps={})", 
+							test_name, i, result[i], scalar_result[i], diff, ulps);
+					}
+				}
+
+				// Property 6: IIR formula verification (spot check)
+				// out[i] = (1 - α/2) * (data[i] - data[i-1]) + (1 - α) * out[i-1]
+				if result.len() >= 10 {
+					let k = 1.0;
+					let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
+					let sin_val = two_pi_k_div.sin();
+					let cos_val = two_pi_k_div.cos();
+					let alpha = 1.0 + (sin_val - 1.0) / cos_val;
+					let one_minus_half_alpha = 1.0 - alpha / 2.0;
+					let one_minus_alpha = 1.0 - alpha;
+
+					// Check a few points after initial value
+					for i in 5..10.min(result.len()) {
+						let expected = one_minus_half_alpha * data[i] 
+									 - one_minus_half_alpha * data[i - 1] 
+									 + one_minus_alpha * result[i - 1];
+						let diff = (result[i] - expected).abs();
+						prop_assert!(diff < 1e-8, 
+							"[{}] IIR formula mismatch at index {}: expected {}, got {} (diff={})", 
+							test_name, i, expected, result[i], diff);
+					}
+				}
+
+				// Property 7: Stability - bounded input produces bounded output
+				let data_max = data.iter().fold(f64::NEG_INFINITY, |a, &b| if b.is_finite() { a.max(b.abs()) } else { a });
+				if data_max.is_finite() && data_max > 0.0 {
+					for (i, &val) in result.iter().enumerate() {
+						// Highpass filter output magnitude should not exceed a reasonable multiple of input
+						prop_assert!(val.abs() <= data_max * 10.0, 
+							"[{}] Output {} at index {} exceeds reasonable bounds for input max {}", 
+							test_name, val, i, data_max);
+					}
+				}
+
+				// Property 8: Basic signal processing - output changes with input changes
+				// Verify the filter responds to input variations (not stuck at zero or constant)
+				if data.len() >= 10 {
+					// Check that output varies when input varies
+					let input_variance = {
+						let mean = data.iter().sum::<f64>() / data.len() as f64;
+						data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64
+					};
+					
+					if input_variance > 1e-10 {  // Only check if input has meaningful variance
+						let output_variance = {
+							let mean = result.iter().sum::<f64>() / result.len() as f64;
+							result.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / result.len() as f64
+						};
+						
+						// Output should have some variance if input does
+						prop_assert!(output_variance > 0.0, 
+							"[{}] Output variance {} should be non-zero when input variance is {}", 
+							test_name, output_variance, input_variance);
+					}
+				}
+
 				Ok(())
 			})
 			.unwrap();

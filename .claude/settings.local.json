@@ -275,7 +275,11 @@
       "Bash(.venv/Scripts/pip install:*)",
       "Bash(.venvScriptspython testspythontest_willr.py)",
       "Bash(./test_nan_filling.exe)",
-      "Bash(./test_medprice_nan.exe)"
+      "Bash(./test_medprice_nan.exe)",
+      "Bash(./test_nma_values.exe)",
+      "Bash(./bench_nma_performance.exe)",
+      "Bash(./test_nma_batch_perf.exe)",
+      "Bash(./test_batch_perf.exe)"
     ],
     "deny": []
   }

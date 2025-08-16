@@ -1334,6 +1334,220 @@ mod tests {
 		check_cc_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	fn check_correlation_cycle_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic price data
+		let strat = (5usize..=50)  // period range
+			.prop_flat_map(|period| {
+				(
+					prop::collection::vec(
+						(10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+						period + 10..400,  // Ensure we have enough data for warmup + testing
+					),
+					Just(period),
+					1.0f64..20.0f64,  // threshold range
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, period, threshold)| {
+				let params = CorrelationCycleParams {
+					period: Some(period),
+					threshold: Some(threshold),
+				};
+				let input = CorrelationCycleInput::from_slice(&data, params);
+
+				// Test with the specified kernel
+				let output = correlation_cycle_with_kernel(&input, kernel).unwrap();
+				
+				// Test with scalar reference for comparison
+				let ref_output = correlation_cycle_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Calculate warmup period (first non-NaN should be at index period)
+				let warmup_period = period;
+
+				// Property 1: Check warmup period - values before period should be NaN
+				for i in 0..warmup_period {
+					prop_assert!(
+						output.real[i].is_nan(),
+						"[{}] real[{}] should be NaN during warmup but is {}",
+						test_name, i, output.real[i]
+					);
+					prop_assert!(
+						output.imag[i].is_nan(),
+						"[{}] imag[{}] should be NaN during warmup but is {}",
+						test_name, i, output.imag[i]
+					);
+					prop_assert!(
+						output.angle[i].is_nan(),
+						"[{}] angle[{}] should be NaN during warmup but is {}",
+						test_name, i, output.angle[i]
+					);
+				}
+
+				// State warmup is period + 1
+				for i in 0..=period {
+					prop_assert!(
+						output.state[i].is_nan(),
+						"[{}] state[{}] should be NaN during warmup but is {}",
+						test_name, i, output.state[i]
+					);
+				}
+
+				// Property 2: Check bounds for real and imag (correlation coefficients should be in [-1, 1])
+				for i in warmup_period..data.len() {
+					if !output.real[i].is_nan() {
+						prop_assert!(
+							output.real[i] >= -1.0 - 1e-9 && output.real[i] <= 1.0 + 1e-9,
+							"[{}] real[{}] = {} is outside [-1, 1] bounds",
+							test_name, i, output.real[i]
+						);
+					}
+					if !output.imag[i].is_nan() {
+						prop_assert!(
+							output.imag[i] >= -1.0 - 1e-9 && output.imag[i] <= 1.0 + 1e-9,
+							"[{}] imag[{}] = {} is outside [-1, 1] bounds",
+							test_name, i, output.imag[i]
+						);
+					}
+				}
+
+				// Property 3: Check angle bounds (should be in degrees between -180 and 180)
+				for i in warmup_period..data.len() {
+					if !output.angle[i].is_nan() {
+						prop_assert!(
+							output.angle[i] >= -180.0 - 1e-9 && output.angle[i] <= 180.0 + 1e-9,
+							"[{}] angle[{}] = {} is outside [-180, 180] bounds",
+							test_name, i, output.angle[i]
+						);
+					}
+				}
+
+				// Property 4: Check state values (should be exactly -1, 0, or 1)
+				for i in (period + 1)..data.len() {
+					if !output.state[i].is_nan() {
+						let state_val = output.state[i];
+						prop_assert!(
+							(state_val + 1.0).abs() < 1e-9 || state_val.abs() < 1e-9 || (state_val - 1.0).abs() < 1e-9,
+							"[{}] state[{}] = {} is not -1, 0, or 1",
+							test_name, i, state_val
+						);
+					}
+				}
+
+				// Property 5: Check kernel consistency
+				for i in 0..data.len() {
+					// Compare real values
+					let real_bits = output.real[i].to_bits();
+					let ref_real_bits = ref_output.real[i].to_bits();
+					
+					if !output.real[i].is_finite() || !ref_output.real[i].is_finite() {
+						prop_assert!(
+							real_bits == ref_real_bits,
+							"[{}] real finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, output.real[i], ref_output.real[i]
+						);
+					} else {
+						let ulp_diff = real_bits.abs_diff(ref_real_bits);
+						prop_assert!(
+							(output.real[i] - ref_output.real[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] real mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, output.real[i], ref_output.real[i], ulp_diff
+						);
+					}
+
+					// Compare imag values
+					let imag_bits = output.imag[i].to_bits();
+					let ref_imag_bits = ref_output.imag[i].to_bits();
+					
+					if !output.imag[i].is_finite() || !ref_output.imag[i].is_finite() {
+						prop_assert!(
+							imag_bits == ref_imag_bits,
+							"[{}] imag finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, output.imag[i], ref_output.imag[i]
+						);
+					} else {
+						let ulp_diff = imag_bits.abs_diff(ref_imag_bits);
+						prop_assert!(
+							(output.imag[i] - ref_output.imag[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] imag mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, output.imag[i], ref_output.imag[i], ulp_diff
+						);
+					}
+
+					// Compare angle values
+					let angle_bits = output.angle[i].to_bits();
+					let ref_angle_bits = ref_output.angle[i].to_bits();
+					
+					if !output.angle[i].is_finite() || !ref_output.angle[i].is_finite() {
+						prop_assert!(
+							angle_bits == ref_angle_bits,
+							"[{}] angle finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, output.angle[i], ref_output.angle[i]
+						);
+					} else {
+						let ulp_diff = angle_bits.abs_diff(ref_angle_bits);
+						prop_assert!(
+							(output.angle[i] - ref_output.angle[i]).abs() <= 1e-9 || ulp_diff <= 4,
+							"[{}] angle mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, output.angle[i], ref_output.angle[i], ulp_diff
+						);
+					}
+
+					// Compare state values
+					let state_bits = output.state[i].to_bits();
+					let ref_state_bits = ref_output.state[i].to_bits();
+					
+					if !output.state[i].is_finite() || !ref_output.state[i].is_finite() {
+						prop_assert!(
+							state_bits == ref_state_bits,
+							"[{}] state finite/NaN mismatch at idx {}: {} vs {}",
+							test_name, i, output.state[i], ref_output.state[i]
+						);
+					} else {
+						prop_assert!(
+							(output.state[i] - ref_output.state[i]).abs() <= 1e-9,
+							"[{}] state mismatch at idx {}: {} vs {}",
+							test_name, i, output.state[i], ref_output.state[i]
+						);
+					}
+				}
+
+				// Property 6: Test specific mathematical properties of correlation cycle
+				// When all data is constant, correlation should be near 0 or NaN
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					for i in warmup_period..data.len() {
+						// For constant data, correlation is undefined (0/0) so could be NaN or 0
+						if !output.real[i].is_nan() {
+							prop_assert!(
+								output.real[i].abs() < 1e-6,
+								"[{}] real[{}] = {} should be near 0 for constant data",
+								test_name, i, output.real[i]
+							);
+						}
+						if !output.imag[i].is_nan() {
+							prop_assert!(
+								output.imag[i].abs() < 1e-6,
+								"[{}] imag[{}] = {} should be near 0 for constant data",
+								test_name, i, output.imag[i]
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
+	#[cfg(feature = "proptest")]
+	generate_all_cc_tests!(check_correlation_cycle_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

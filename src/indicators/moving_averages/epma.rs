@@ -1051,40 +1051,320 @@ mod tests {
 		use proptest::prelude::*;
 		skip_if_unsupported!(kernel, test_name);
 
-		let strat = (
-			proptest::collection::vec((-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()), 30..200),
-			3usize..30,
-		);
+		// Enhanced property testing strategy - expanded range for better coverage
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				(
+					// Generate data with length >= period + offset + warmup buffer
+					// Need at least period + max_offset + 1, plus some buffer for testing
+					prop::collection::vec(
+						(-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+						(period * 2 + 10)..500,  // Ensure enough data even for max offset
+					),
+					Just(period),
+					0usize..period, // offset must be < period
+				)
+			});
 
 		proptest::test_runner::TestRunner::default()
-			.run(&strat, |(data, period)| {
+			.run(&strat, |(data, period, offset)| {
 				let params = EpmaParams {
 					period: Some(period),
-					offset: Some(0),
+					offset: Some(offset),
 				};
 				let input = EpmaInput::from_slice(&data, params);
-				let EpmaOutput { values: out } = epma_with_kernel(&input, kernel).unwrap();
 
-				let start = period + 1;
-				for i in start..data.len() {
-					let y = out[i];
-					// EPMA can produce values outside the input window bounds due to its
-					// polynomial weighting scheme which can include negative weights.
-					// This is expected behavior for a leading indicator.
-					// We only check that the output is finite (not NaN or infinite).
+				// Test with the specified kernel
+				let EpmaOutput { values: out } = epma_with_kernel(&input, kernel).unwrap();
+				
+				// Also compute reference with scalar kernel for consistency check
+				let EpmaOutput { values: ref_out } = epma_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Find first non-NaN index
+				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup = first_valid + period + offset + 1;
+
+				// Property 1: Warmup period validation
+				for i in 0..warmup.min(out.len()) {
 					prop_assert!(
-						y.is_nan() || y.is_finite(),
-						"EPMA output at index {} is not finite: {}",
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name,
 						i,
-						y
+						out[i]
 					);
 				}
+
+				// Property 2: First valid output at correct index
+				// Note: EPMA may still produce NaN if weight_sum is 0 or if all data in window is NaN
+				if warmup < out.len() && data[warmup].is_finite() {
+					// Check if weight_sum would be non-zero
+					let p1 = period - 1;
+					let mut weight_sum = 0.0;
+					for i in 0..p1 {
+						let w = (period as i32 - i as i32 - offset as i32) as f64;
+						weight_sum += w;
+					}
+					
+					// Only check for valid output if weight_sum is non-zero
+					if weight_sum.abs() > 1e-10 {
+						prop_assert!(
+							!out[warmup].is_nan(),
+							"[{}] Expected valid value at warmup index {}, got NaN",
+							test_name,
+							warmup
+						);
+					}
+				}
+
+				// Property 3: Values after warmup should be finite (but can be outside input bounds)
+				// STRICT CHECK: when weight_sum is zero, ALL kernels should produce consistent NaN/Inf
+				let p1 = period - 1;
+				let mut weight_sum = 0.0;
+				for i in 0..p1 {
+					let w = (period as i32 - i as i32 - offset as i32) as f64;
+					weight_sum += w;
+				}
+				
+				if weight_sum.abs() > 1e-10 {
+					// Normal case: weight_sum is non-zero, outputs should be finite
+					for i in warmup..data.len() {
+						let y = out[i];
+						prop_assert!(
+							y.is_finite(),
+							"[{}] EPMA output at index {} is not finite: {} (period={}, offset={}, weight_sum={})",
+							test_name,
+							i,
+							y,
+							period,
+							offset,
+							weight_sum
+						);
+					}
+				} else {
+					// Edge case: weight_sum is zero, should produce consistent behavior across all kernels
+					// Either both NaN or both Inf (division by zero)
+					for i in warmup..data.len() {
+						let both_nan = out[i].is_nan() && ref_out[i].is_nan();
+						let both_inf = out[i].is_infinite() && ref_out[i].is_infinite();
+						prop_assert!(
+							both_nan || both_inf,
+							"[{}] With weight_sum=0, expected consistent NaN or Inf at index {} but got: kernel={}, scalar={} (period={}, offset={})",
+							test_name,
+							i,
+							out[i],
+							ref_out[i],
+							period,
+							offset
+						);
+					}
+				}
+
+				// Property 4: Special case - period=2, offset=0 
+				// EPMA uses period-1 values, so for period=2 it uses 1 value
+				// Weight = (2 - 0 - 0) = 2, but since p1=1, it just copies the value
+				if period == 2 && offset == 0 && warmup < data.len() {
+					// For period=2, p1=1, so it uses only 1 value with weight (2-0-0)=2
+					for i in warmup..data.len() {
+						if data[i].is_finite() {
+							// EPMA with period=2 just uses the current value
+							prop_assert!(
+								(out[i] - data[i]).abs() < 1e-9,
+								"[{}] Period=2,offset=0 mismatch at {}: got {}, expected {}",
+								test_name,
+								i,
+								out[i],
+								data[i]
+							);
+						}
+					}
+				}
+
+				// Property 5: Constant non-zero data should produce that constant
+				// (after warmup, regardless of weights)
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.iter().any(|x| x.is_finite() && x.abs() > 1e-10) {
+					let constant = *data.iter().find(|x| x.is_finite()).unwrap();
+					// Check if weight_sum would be non-zero
+					let p1 = period - 1;
+					let mut weight_sum = 0.0;
+					for i in 0..p1 {
+						let w = (period as i32 - i as i32 - offset as i32) as f64;
+						weight_sum += w;
+					}
+					
+					if weight_sum.abs() > 1e-10 {
+						for i in warmup..data.len() {
+							prop_assert!(
+								(out[i] - constant).abs() < 1e-9,
+								"[{}] Constant data mismatch at {}: got {}, expected {}",
+								test_name,
+								i,
+								out[i],
+								constant
+							);
+						}
+					}
+				}
+
+				// Property 6: Kernel consistency - all kernels should produce identical results
+				for i in warmup..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert!(
+							y.to_bits() == r.to_bits(),
+							"[{}] finite/NaN mismatch at idx {}: {} vs {}",
+							test_name,
+							i,
+							y,
+							r
+						);
+						continue;
+					}
+
+					let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
+					// Allow up to 6 ULPs for minor floating-point differences between SIMD implementations
+					// But catch major differences (>100 ULPs indicates a real bug)
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 6,
+						"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
+						test_name,
+						i,
+						y,
+						r,
+						ulp_diff
+					);
+				}
+
+				// Property 7: EPMA polynomial weight verification
+				// Verify the weighted sum formula for a few random positions
+				if warmup + 5 < data.len() {
+					// Build weights for verification
+					let p1 = period - 1;
+					let mut weights = Vec::with_capacity(p1);
+					let mut weight_sum = 0.0;
+					for i in 0..p1 {
+						let w = (period as i32 - i as i32 - offset as i32) as f64;
+						weights.push(w);
+						weight_sum += w;
+					}
+
+					// Only verify formula if weight_sum is non-zero
+					if weight_sum.abs() > 1e-10 {
+						// Test a few positions
+						for idx in [warmup, warmup + 1, data.len() - 1].iter().copied() {
+							if idx >= warmup && idx < data.len() {
+								let start = idx + 1 - p1;
+								let mut expected_sum = 0.0;
+								for i in 0..p1 {
+									expected_sum += data[start + i] * weights[p1 - 1 - i];
+								}
+								let expected = expected_sum / weight_sum;
+								
+								// Both should be finite for comparison
+								if out[idx].is_finite() && expected.is_finite() {
+									prop_assert!(
+										(out[idx] - expected).abs() < 1e-9,
+										"[{}] EPMA formula mismatch at {}: got {}, expected {}",
+										test_name,
+										idx,
+										out[idx],
+										expected
+									);
+								} else {
+									// Both should have the same NaN/Inf status
+									prop_assert!(
+										out[idx].is_nan() == expected.is_nan() && 
+										out[idx].is_infinite() == expected.is_infinite(),
+										"[{}] EPMA formula NaN/Inf mismatch at {}: got {}, expected {}",
+										test_name,
+										idx,
+										out[idx],
+										expected
+									);
+								}
+							}
+						}
+					}
+				}
+
+				// Property 8: Edge case - offset = period - 1
+				// This gives weights like [1, 0, -1, -2, ...] which can produce extreme values
+				// When weight_sum is zero, NaN/Inf is expected
+				if offset == period - 1 && warmup < data.len() && weight_sum.abs() > 1e-10 {
+					// Just verify outputs are finite, as they can be quite extreme
+					for i in warmup..data.len() {
+						prop_assert!(
+							out[i].is_finite(),
+							"[{}] Edge case offset={} produced non-finite at {}",
+							test_name,
+							offset,
+							i
+						);
+					}
+				}
+
 				Ok(())
 			})
 			.unwrap();
 
 		Ok(())
 	}
+	fn check_epma_invalid_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Test specific parameter combinations that produce weight_sum = 0
+		// These should either error or produce consistent NaN
+		let zero_weight_cases = vec![
+			(4, 3),  // weights: [1, 0, -1] -> sum = 0
+			(5, 3),  // weights: [2, 1, 0, -1] -> sum = 2
+			(6, 4),  // weights: [2, 1, 0, -1, -2] -> sum = 0
+			(8, 6),  // weights: [2, 1, 0, -1, -2, -3, -4] -> sum = -7
+		];
+		
+		for (period, offset) in zero_weight_cases {
+			// Calculate actual weight sum
+			let p1 = period - 1;
+			let mut weight_sum = 0.0;
+			for i in 0..p1 {
+				let w = (period as i32 - i as i32 - offset as i32) as f64;
+				weight_sum += w;
+			}
+			
+			// Test with some simple data
+			let data = vec![1.0; period * 2];
+			let params = EpmaParams {
+				period: Some(period),
+				offset: Some(offset),
+			};
+			let input = EpmaInput::from_slice(&data, params);
+			
+			// If weight_sum is zero, this should produce NaN consistently
+			if weight_sum.abs() < 1e-10 {
+				let out = epma_with_kernel(&input, kernel)?;
+				let scalar_out = epma_with_kernel(&input, Kernel::Scalar)?;
+				
+				let warmup = period + offset + 1;
+				for i in warmup..data.len() {
+					let both_nan = out.values[i].is_nan() && scalar_out.values[i].is_nan();
+					let both_inf = out.values[i].is_infinite() && scalar_out.values[i].is_infinite();
+					assert!(
+						both_nan || both_inf,
+						"[{}] Period={}, Offset={} (weight_sum=0) should produce consistent NaN or Inf, got kernel={}, scalar={}",
+						test_name,
+						period,
+						offset,
+						out.values[i],
+						scalar_out.values[i]
+					);
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
 	fn check_epma_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test_name);
 		let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1310,6 +1590,7 @@ mod tests {
 		check_epma_very_small_dataset,
 		check_epma_empty_input,
 		check_epma_invalid_offset,
+		check_epma_invalid_params,
 		check_epma_reinput,
 		check_epma_nan_handling,
 		check_epma_streaming,

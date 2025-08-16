@@ -1858,6 +1858,300 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 	
+	#[cfg(feature = "proptest")]
+	fn check_dti_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data with realistic high/low prices
+		let strat = (2usize..=50)
+			.prop_flat_map(|max_period| {
+				let min_len = max_period * 3; // Ensure sufficient data for warmup
+				(
+					// Base price level and volatility
+					(100.0f64..5000.0f64, 0.01f64..0.1f64),
+					// Generate parameters r, s, u
+					(1usize..=max_period, 1usize..=max_period, 1usize..=max_period),
+					// Data length
+					min_len..400,
+				)
+			})
+			.prop_flat_map(|((base_price, volatility), (r, s, u), len)| {
+				// Generate realistic high/low price data using proptest strategies
+				let price_changes = prop::collection::vec(
+					(-1.0f64..1.0f64),
+					len
+				);
+				
+				(Just((base_price, volatility)), Just((r, s, u)), price_changes)
+			})
+			.prop_map(|((base_price, volatility), (r, s, u), changes)| {
+				let len = changes.len();
+				let mut high = Vec::with_capacity(len);
+				let mut low = Vec::with_capacity(len);
+				let mut current_price = base_price;
+				
+				for change_factor in changes {
+					// Random walk with trend
+					let change = change_factor * volatility * current_price;
+					current_price = (current_price + change).max(10.0); // Ensure positive
+					
+					// Generate high/low around current price
+					let daily_range = current_price * volatility * (0.5 + change_factor.abs());
+					let mid_adjustment = change_factor * daily_range * 0.25;
+					
+					let daily_high = current_price + daily_range / 2.0 + mid_adjustment;
+					let daily_low = current_price - daily_range / 2.0 + mid_adjustment;
+					
+					high.push(daily_high);
+					low.push(daily_low.max(1.0)); // Ensure low is positive and less than high
+				}
+				
+				(high, low, r, s, u)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, r, s, u)| {
+				let params = DtiParams {
+					r: Some(r),
+					s: Some(s),
+					u: Some(u),
+				};
+				let input = DtiInput::from_slices(&high, &low, params);
+
+				// Test with specified kernel
+				let result = dti_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "DTI computation failed: {:?}", result);
+				let DtiOutput { values: out } = result.unwrap();
+				
+				// Test with scalar reference
+				let DtiOutput { values: ref_out } = dti_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length matches input
+				prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
+				
+				// Property 2: Early values should be NaN (warmup period)
+				// DTI needs at least 2 values to compute differences
+				prop_assert!(out[0].is_nan(), "First value should be NaN");
+				// Note: out[1] can be non-NaN and non-zero if there's a price difference
+				
+				// Property 3: Values mathematically bounded between -100 and 100
+				// DTI formula: 100.0 * e0_u / e1_u, so bounded to ±100
+				let finite_values: Vec<f64> = out.iter().copied().filter(|v| v.is_finite()).collect();
+				if !finite_values.is_empty() {
+					let max_val = finite_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+					let min_val = finite_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+					
+					// DTI is mathematically bounded to ±100 with small epsilon for floating-point
+					prop_assert!(
+						max_val <= 100.0001 && min_val >= -100.0001,
+						"DTI values exceed mathematical bounds: [{:.6}, {:.6}]",
+						min_val,
+						max_val
+					);
+				}
+				
+				// Property 4: Kernel consistency - different kernels should produce nearly identical results
+				for i in 0..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"NaN/finite mismatch at idx {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						let diff = (y - r).abs();
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							diff <= 1e-9 || ulp_diff <= 10,
+							"Kernel mismatch at idx {}: {} vs {} (diff={}, ulp={})",
+							i,
+							y,
+							r,
+							diff,
+							ulp_diff
+						);
+					}
+				}
+				
+				// Property 5: Monotonic response to strong trends
+				// DTI should be positive in uptrends, negative in downtrends
+				let is_strong_uptrend = high.windows(5).all(|w| {
+					w.windows(2).all(|pair| pair[1] > pair[0] * 1.001)
+				}) && low.windows(5).all(|w| {
+					w.windows(2).all(|pair| pair[1] > pair[0] * 1.001)
+				});
+				
+				let is_strong_downtrend = high.windows(5).all(|w| {
+					w.windows(2).all(|pair| pair[1] < pair[0] * 0.999)
+				}) && low.windows(5).all(|w| {
+					w.windows(2).all(|pair| pair[1] < pair[0] * 0.999)
+				});
+				
+				if (is_strong_uptrend || is_strong_downtrend) && out.len() > r + s + u + 10 {
+					let later_values: Vec<f64> = out[out.len() - 10..]
+						.iter()
+						.copied()
+						.filter(|v| v.is_finite())
+						.collect();
+					if later_values.len() >= 5 {
+						let avg = later_values.iter().sum::<f64>() / later_values.len() as f64;
+						if is_strong_uptrend {
+							prop_assert!(
+								avg > 0.0,
+								"DTI should be positive in strong uptrend: avg={:.2}",
+								avg
+							);
+						}
+						if is_strong_downtrend {
+							prop_assert!(
+								avg < 0.0,
+								"DTI should be negative in strong downtrend: avg={:.2}",
+								avg
+							);
+						}
+					}
+				}
+				
+				// Property 6: No poison values (debug only)
+				#[cfg(debug_assertions)]
+				for (i, &val) in out.iter().enumerate() {
+					if val.is_nan() {
+						continue;
+					}
+					let bits = val.to_bits();
+					prop_assert!(
+						bits != 0x11111111_11111111 && 
+						bits != 0x22222222_22222222 && 
+						bits != 0x33333333_33333333,
+						"Found poison value at index {}: {} (0x{:016X})",
+						i,
+						val,
+						bits
+					);
+				}
+				
+				// Property 7: Parameter validation
+				// When r=s=u=1, DTI should respond very quickly to price changes
+				if r == 1 && s == 1 && u == 1 && out.len() > 10 {
+					let responsive_values: Vec<f64> = out[2..10]
+						.iter()
+						.copied()
+						.filter(|v| v.is_finite() && v.abs() > 0.0)
+						.collect();
+					prop_assert!(
+						!responsive_values.is_empty(),
+						"DTI with period=1 should produce non-zero values quickly"
+					);
+				}
+				
+				// Property 8: Zero volatility case
+				// When high == low for all values, DTI should be 0 after warmup
+				let is_zero_volatility = high.iter().zip(low.iter()).all(|(h, l)| (h - l).abs() < 1e-10);
+				if is_zero_volatility && out.len() > 2 {
+					for i in 2..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								out[i].abs() < 1e-10,
+								"DTI should be 0 with zero volatility at index {}: {}",
+								i,
+								out[i]
+							);
+						}
+					}
+				}
+				
+				// Property 9: Constant spread case
+				// When high - low is constant and prices are stable, DTI should converge to 0
+				if high.len() >= 10 {
+					let spreads: Vec<f64> = high.iter().zip(low.iter()).map(|(h, l)| h - l).collect();
+					let first_spread = spreads[0];
+					let is_constant_spread = spreads.iter().all(|&s| (s - first_spread).abs() < first_spread * 0.01);
+					
+					// Check if prices are relatively stable (small changes)
+					let high_changes: Vec<f64> = high.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+					let low_changes: Vec<f64> = low.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+					let avg_high_change = high_changes.iter().sum::<f64>() / high_changes.len() as f64;
+					let avg_low_change = low_changes.iter().sum::<f64>() / low_changes.len() as f64;
+					let is_stable = avg_high_change < high[0] * 0.001 && avg_low_change < low[0] * 0.001;
+					
+					if is_constant_spread && is_stable && out.len() > r + s + u + 5 {
+						let last_values: Vec<f64> = out[out.len() - 5..]
+							.iter()
+							.copied()
+							.filter(|v| v.is_finite())
+							.collect();
+						if last_values.len() >= 3 {
+							let avg_abs = last_values.iter().map(|v| v.abs()).sum::<f64>() / last_values.len() as f64;
+							prop_assert!(
+								avg_abs < 10.0,
+								"DTI should converge near 0 with constant spread and stable prices: avg_abs={:.2}",
+								avg_abs
+							);
+						}
+					}
+				}
+				
+				// Property 10: Sign correspondence
+				// Consistent price rises should yield positive DTI, consistent falls should yield negative
+				if high.len() >= 10 {
+					let high_rising = high.windows(5).all(|w| {
+						w.windows(2).all(|pair| pair[1] >= pair[0])
+					});
+					let low_rising = low.windows(5).all(|w| {
+						w.windows(2).all(|pair| pair[1] >= pair[0])
+					});
+					let high_falling = high.windows(5).all(|w| {
+						w.windows(2).all(|pair| pair[1] <= pair[0])
+					});
+					let low_falling = low.windows(5).all(|w| {
+						w.windows(2).all(|pair| pair[1] <= pair[0])
+					});
+					
+					if (high_rising && low_rising) && out.len() > 10 {
+						let mid_to_end: Vec<f64> = out[out.len() / 2..]
+							.iter()
+							.copied()
+							.filter(|v| v.is_finite())
+							.collect();
+						if mid_to_end.len() >= 3 {
+							let positive_count = mid_to_end.iter().filter(|&&v| v > 0.0).count();
+							prop_assert!(
+								positive_count >= mid_to_end.len() / 2,
+								"DTI should be mostly positive when prices consistently rise"
+							);
+						}
+					}
+					
+					if (high_falling && low_falling) && out.len() > 10 {
+						let mid_to_end: Vec<f64> = out[out.len() / 2..]
+							.iter()
+							.copied()
+							.filter(|v| v.is_finite())
+							.collect();
+						if mid_to_end.len() >= 3 {
+							let negative_count = mid_to_end.iter().filter(|&&v| v < 0.0).count();
+							prop_assert!(
+								negative_count >= mid_to_end.len() / 2,
+								"DTI should be mostly negative when prices consistently fall"
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+	
 	macro_rules! generate_all_dti_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1897,7 +2191,8 @@ mod tests {
 		check_dti_all_nan,
 		check_dti_empty_data,
 		check_dti_streaming,
-		check_dti_no_poison
+		check_dti_no_poison,
+		check_dti_property
 	);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

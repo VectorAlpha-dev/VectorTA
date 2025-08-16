@@ -1141,6 +1141,246 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	fn check_ift_rsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data with realistic price movements
+		// Note: RSI period starts from 2 since RSI needs at least 2 values
+		let strat = (2usize..=50, 2usize..=50)
+			.prop_flat_map(|(rsi_period, wma_period)| {
+				let min_len = (rsi_period + wma_period) * 2; // Ensure sufficient data for meaningful testing
+				(
+					// Base price level and volatility
+					(100.0f64..5000.0f64, 0.01f64..0.1f64),
+					// Trend strength (-2% to +2% per step)
+					-0.02f64..0.02f64,
+					// Generate periods and data length
+					Just(rsi_period),
+					Just(wma_period),
+					min_len..400,
+				)
+			})
+			.prop_map(|((base_price, volatility), trend, rsi_period, wma_period, len)| {
+				// Generate realistic price data with trend and noise
+				let mut prices = Vec::with_capacity(len);
+				let mut current_price = base_price;
+				
+				for i in 0..len {
+					// Apply trend
+					current_price *= 1.0 + trend;
+					// Add noise
+					let noise = 1.0 + (i as f64 * 0.1).sin() * volatility;
+					prices.push(current_price * noise);
+				}
+				
+				(prices, rsi_period, wma_period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, rsi_period, wma_period)| {
+				let params = IftRsiParams {
+					rsi_period: Some(rsi_period),
+					wma_period: Some(wma_period),
+				};
+				let input = IftRsiInput::from_slice(&data, params);
+				
+				// Test with the specified kernel
+				let IftRsiOutput { values: out } = ift_rsi_with_kernel(&input, kernel)?;
+				
+				// Also compute with scalar kernel for reference
+				let IftRsiOutput { values: ref_out } = ift_rsi_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Property 1: Output length matches input length
+				prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
+				
+				// Property 2: Warmup period handling
+				let warmup_period = rsi_period + wma_period - 1;
+				for i in 0..warmup_period.min(data.len()) {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN during warmup at index {}, got {}",
+						i,
+						out[i]
+					);
+				}
+				
+				// Properties for values after warmup
+				for i in warmup_period..data.len() {
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Property 3: Mathematical bounds - IFT RSI bounded to [-1, 1]
+					// The Inverse Fisher Transform formula: (2w)^2 - 1 / (2w)^2 + 1
+					// This is mathematically bounded to [-1, 1]
+					if y.is_finite() {
+						prop_assert!(
+							y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
+							"IFT RSI value {} at index {} outside [-1, 1] bounds",
+							y,
+							i
+						);
+					}
+					
+					// Property 4: Kernel consistency
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(),
+							r.to_bits(),
+							"NaN/Inf mismatch at index {}: {} vs {}",
+							i,
+							y,
+							r
+						);
+					} else {
+						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at index {}: {} vs {} (ULP={})",
+							i,
+							y,
+							r,
+							ulp_diff
+						);
+					}
+					
+					// Property 5: Response to trending markets
+					// NOTE: This property currently exposes a bug in the IFT RSI implementation
+					// The formula (2w)^2 loses sign information, making both up and down trends positive
+					// Check if we have enough data for trend analysis
+					if i >= warmup_period + 10 {
+						let lookback = 10;
+						let recent_prices = &data[i - lookback..=i];
+						let price_change = (recent_prices[lookback] - recent_prices[0]) / recent_prices[0];
+						
+						// For strong uptrends (>5%), IFT RSI should be distinctly positive
+						if price_change > 0.05 && y.is_finite() {
+							// Tightened from > -0.5 to > 0.2 to catch directionality issues
+							prop_assert!(
+								y > 0.2,
+								"Strong uptrend should produce positive IFT RSI > 0.2, got {} at index {}",
+								y,
+								i
+							);
+						}
+						
+						// For strong downtrends (<-5%), IFT RSI should be distinctly negative
+						// WARNING: Due to implementation bug using (2w)^2, this will likely fail
+						if price_change < -0.05 && y.is_finite() {
+							// Tightened from < 0.5 to < -0.2 to properly test directionality
+							prop_assert!(
+								y < -0.2,
+								"Strong downtrend should produce negative IFT RSI < -0.2, got {} at index {}",
+								y,
+								i
+							);
+						}
+					}
+					
+					// Property 6: No NaN values after warmup (unless input has NaN)
+					if !data[..=i].iter().any(|x| x.is_nan()) {
+						prop_assert!(
+							!y.is_nan(),
+							"Unexpected NaN at index {} after warmup",
+							i
+						);
+					}
+				}
+				
+				// Property 7: Response to constant prices
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_period {
+					// Mathematical derivation for constant prices:
+					// 1. RSI = 50 (no gains or losses)
+					// 2. Transformed: 0.1 * (50 - 50) = 0
+					// 3. WMA of zeros = 0
+					// 4. IFT formula: ((2*0)^2 - 1) / ((2*0)^2 + 1) = -1/1 = -1
+					for i in warmup_period..out.len() {
+						if out[i].is_finite() {
+							prop_assert!(
+								(out[i] - (-1.0)).abs() < 1e-6,
+								"Constant prices should yield IFT RSI = -1, got {} at index {}",
+								out[i],
+								i
+							);
+						}
+					}
+				}
+				
+				// Property 8: Response to extreme volatility
+				let volatility = if data.len() > 2 {
+					let returns: Vec<f64> = data.windows(2)
+						.map(|w| (w[1] - w[0]) / w[0])
+						.collect();
+					let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+					let variance = returns.iter()
+						.map(|r| (r - mean_return).powi(2))
+						.sum::<f64>() / returns.len() as f64;
+					variance.sqrt()
+				} else {
+					0.0
+				};
+				
+				// For extreme volatility (>10% per period), values should still be bounded
+				if volatility > 0.1 {
+					for &val in out.iter() {
+						if val.is_finite() {
+							prop_assert!(
+								val >= -1.0 && val <= 1.0,
+								"Even with extreme volatility, IFT RSI must be bounded: {}",
+								val
+							);
+						}
+					}
+				}
+				
+				// Property 9: Sign preservation check (currently exposes implementation bug)
+				// The IFT RSI should preserve directional information from RSI
+				// However, due to (2w)^2 in the formula, sign information is lost
+				// This property will likely FAIL, confirming the mathematical issue
+				if data.len() > warmup_period + 20 {
+					// Sample a few points to check sign preservation
+					for check_idx in (warmup_period + 10..data.len()).step_by(20) {
+						if check_idx + 5 >= data.len() { break; }
+						
+						// Calculate approximate RSI direction
+						let recent_window = &data[check_idx - 5..=check_idx];
+						let gains: f64 = recent_window.windows(2)
+							.map(|w| (w[1] - w[0]).max(0.0))
+							.sum();
+						let losses: f64 = recent_window.windows(2)
+							.map(|w| (w[0] - w[1]).max(0.0))
+							.sum();
+						
+						if gains > losses * 1.5 && out[check_idx].is_finite() {
+							// Strong bullish momentum should yield positive IFT RSI
+							prop_assert!(
+								out[check_idx] > -0.1,
+								"Bullish momentum (gains > losses*1.5) should yield IFT RSI > -0.1, got {} at index {}",
+								out[check_idx],
+								check_idx
+							);
+						}
+						
+						if losses > gains * 1.5 && out[check_idx].is_finite() {
+							// Strong bearish momentum should yield negative IFT RSI
+							// This will likely FAIL due to the (2w)^2 bug
+							prop_assert!(
+								out[check_idx] < 0.1,
+								"Bearish momentum (losses > gains*1.5) should yield IFT RSI < 0.1, got {} at index {}",
+								out[check_idx],
+								check_idx
+							);
+						}
+					}
+				}
+				
+				Ok(())
+			})?;
+			
+		Ok(())
+	}
+
 	macro_rules! generate_all_ift_rsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1174,7 +1414,8 @@ mod tests {
 		check_ift_rsi_very_small_dataset,
 		check_ift_rsi_reinput,
 		check_ift_rsi_nan_handling,
-		check_ift_rsi_no_poison
+		check_ift_rsi_no_poison,
+		check_ift_rsi_property
 	);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
