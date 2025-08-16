@@ -1479,6 +1479,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_kaufmanstop_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1765,6 +1767,9 @@ mod tests {
 		check_kaufmanstop_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_kaufmanstop_tests!(check_kaufmanstop_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1914,5 +1919,393 @@ mod tests {
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(()) // No-op in release builds
+	}
+
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_kaufmanstop_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Kaufmanstop Property Test Design:
+		//
+		// This test validates the Kaufmanstop indicator which calculates adaptive price stops
+		// based on the moving average of the high-low range, multiplied by a factor.
+		//
+		// Key design decisions:
+		// 1. MA Type Selection: Only simple MA types (sma, ema, wma) are tested to avoid
+		//    complex warmup requirements of DEMA/TEMA which need 2x or 3x the period.
+		//
+		// 2. Warmup Handling: The kaufmanstop delegates warmup to the underlying MA function.
+		//    Each MA type has different warmup characteristics:
+		//    - SMA: Requires full period for first output
+		//    - EMA: Can produce output immediately but needs warmup for stability
+		//    - WMA: Requires full period for weighted calculation
+		//
+		// 3. Data Generation: Synthetic OHLC data includes:
+		//    - Normal volatility periods (0.1% to 5%)
+		//    - Occasional very small range periods to test edge cases
+		//    - Proper OHLC constraints (high >= low)
+		//    - Realistic price trends and random walk
+		//
+		// 4. Properties Tested:
+		//    - Warmup validation
+		//    - Kernel consistency (SIMD vs scalar)
+		//    - Stop level bounds (long below low, short above high)
+		//    - Mathematical formula verification
+		//    - Edge cases (period=1, small ranges, small/large multipliers)
+
+		// Strategy to generate realistic OHLC data with proper constraints
+		let strat = (2usize..=50)  // Period range
+			.prop_flat_map(|period| {
+				(
+					100.0f64..5000.0f64,  // Base price range
+					(period + 20)..400,    // Data length
+					0.001f64..0.05f64,     // Volatility factor (0.1% to 5%)
+					-0.01f64..0.01f64,     // Trend factor
+					Just(period),
+					0.1f64..5.0f64,        // Multiplier range
+					prop::sample::select(vec!["long", "short"]),  // Direction
+					prop::sample::select(vec!["sma", "ema", "wma"]),  // MA types
+				)
+			})
+			.prop_map(|(base_price, data_len, volatility, trend, period, mult, direction, ma_type)| {
+				// Generate synthetic OHLC data with realistic constraints
+				let mut high = Vec::with_capacity(data_len);
+				let mut low = Vec::with_capacity(data_len);
+				let mut price = base_price;
+				
+				for i in 0..data_len {
+					// Add trend and random walk
+					price *= 1.0 + trend + (i as f64 * 0.0001);
+					let noise = ((i * 17 + 11) % 100) as f64 / 100.0 - 0.5;
+					price *= 1.0 + noise * volatility;
+					
+					// Create high/low with proper constraints
+					// Occasionally create very small or zero range periods (flat price)
+					let range = if i > data_len - 20 && i % 3 == 0 {
+						// Last 20 points, every 3rd point has very small range
+						price * 0.00001  // Very small range for testing
+					} else {
+						price * volatility * 2.0  // Normal range
+					};
+					
+					high.push(price + range / 2.0);
+					low.push(price - range / 2.0);
+				}
+				
+				(high, low, period, mult, direction, ma_type)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, period, mult, direction, ma_type)| {
+				let params = KaufmanstopParams {
+					period: Some(period),
+					mult: Some(mult),
+					direction: Some(direction.to_string()),
+					ma_type: Some(ma_type.to_string()),
+				};
+				let input = KaufmanstopInput::from_slices(&high, &low, params.clone());
+
+				// Get results from the kernel being tested
+				let result = kaufmanstop_with_kernel(&input, kernel);
+				prop_assert!(result.is_ok(), "Kaufmanstop computation failed: {:?}", result);
+				let KaufmanstopOutput { values: out } = result.unwrap();
+
+				// Get reference results from scalar kernel
+				let ref_result = kaufmanstop_with_kernel(&input, Kernel::Scalar);
+				prop_assert!(ref_result.is_ok(), "Reference computation failed: {:?}", ref_result);
+				let KaufmanstopOutput { values: ref_out } = ref_result.unwrap();
+
+				// Both outputs should have the same length as input
+				prop_assert_eq!(out.len(), high.len());
+				prop_assert_eq!(ref_out.len(), high.len());
+
+				// Find first valid index
+				let first_valid_idx = high.iter()
+					.zip(low.iter())
+					.position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+					.unwrap_or(0);
+
+				// Property 1: Warmup period validation
+				// The MA function itself handles warmup, and kaufmanstop writes the MA output
+				// starting from first_valid_idx. The actual warmup depends on the MA type.
+				// For simple MAs like SMA, EMA, WMA with period N:
+				// - SMA needs N points to produce first output
+				// - EMA can produce output from first point but may need warmup for stability
+				// - WMA needs N points
+				// So we expect NaN values before first_valid_idx at minimum
+				for i in 0..first_valid_idx {
+					prop_assert!(
+						out[i].is_nan(),
+						"Expected NaN before first valid index at {}, got {}",
+						i, out[i]
+					);
+				}
+				
+				// Also check that we eventually get non-NaN values after sufficient data
+				let expected_first_valid = first_valid_idx + period - 1;
+				if expected_first_valid < out.len() - 10 {
+					let has_valid = out[expected_first_valid..expected_first_valid + 10]
+						.iter()
+						.any(|&v| !v.is_nan());
+					prop_assert!(
+						has_valid,
+						"Expected at least one valid value after warmup period"
+					);
+				}
+
+				// Property 2: Kernel consistency
+				// Different kernel implementations should produce nearly identical results
+				for i in first_valid_idx..out.len() {
+					let y = out[i];
+					let r = ref_out[i];
+
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(y.to_bits(), r.to_bits(), 
+							"NaN/infinite mismatch at index {}: {} vs {}", i, y, r);
+						continue;
+					}
+
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					let ulp_diff = y_bits.abs_diff(r_bits);
+
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 8,
+						"Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
+						i, y, r, ulp_diff
+					);
+				}
+
+				// Property 3: Stop level bounds
+				// For valid indices, check that stops respect direction
+				for i in first_valid_idx..out.len() {
+					if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
+						continue;
+					}
+
+					let stop = out[i];
+					
+					if direction == "long" {
+						// Long stops should be below the low (with some tolerance for calculation)
+						prop_assert!(
+							stop <= low[i] + 1e-6,
+							"Long stop {} should be below low {} at index {}",
+							stop, low[i], i
+						);
+					} else {
+						// Short stops should be above the high (with some tolerance)
+						prop_assert!(
+							stop >= high[i] - 1e-6,
+							"Short stop {} should be above high {} at index {}",
+							stop, high[i], i
+						);
+					}
+				}
+
+				// Property 4: Mathematical definition verification
+				// The Kaufmanstop formula is: stop = price +/- (MA(high-low) * mult)
+				// We can't easily recalculate the exact MA here due to different MA types,
+				// but we can verify the stop distance is reasonable given the multiplier.
+				let check_start = first_valid_idx + period;
+				if out.len() > check_start + 10 {
+					// Calculate range manually for verification
+					let mut range_values = Vec::new();
+					for i in first_valid_idx..high.len() {
+						if high[i].is_nan() || low[i].is_nan() {
+							range_values.push(f64::NAN);
+						} else {
+							range_values.push(high[i] - low[i]);
+						}
+					}
+
+					// Verify stop distances are within reasonable bounds
+					// The MA of ranges should be roughly similar to recent ranges,
+					// so the stop distance should be approximately mult * typical_range
+					for i in (check_start + 5)..(check_start + 10).min(out.len()) {
+						if out[i].is_nan() {
+							continue;
+						}
+
+						// Calculate typical range in the recent window
+						let window_start = i.saturating_sub(period);
+						let recent_ranges: Vec<f64> = (window_start..i)
+							.filter_map(|j| {
+								if !high[j].is_nan() && !low[j].is_nan() {
+									Some(high[j] - low[j])
+								} else {
+									None
+								}
+							})
+							.collect();
+						
+						if recent_ranges.is_empty() {
+							continue;
+						}
+						
+						let avg_recent_range = recent_ranges.iter().sum::<f64>() / recent_ranges.len() as f64;
+						let max_distance = avg_recent_range * mult * 2.0; // Allow 2x for MA smoothing effects
+						
+						if direction == "long" {
+							let distance = low[i] - out[i];
+							prop_assert!(
+								distance >= 0.0 && distance <= max_distance,
+								"Long stop distance {} out of bounds at index {} (max: {})",
+								distance, i, max_distance
+							);
+						} else {
+							let distance = out[i] - high[i];
+							prop_assert!(
+								distance >= 0.0 && distance <= max_distance,
+								"Short stop distance {} out of bounds at index {} (max: {})",
+								distance, i, max_distance
+							);
+						}
+					}
+				}
+
+				// Property 5: Edge cases
+				// Test period = 1 case
+				if period == 1 && out.len() > first_valid_idx {
+					// With period=1, the MA of range is just the current range
+					for i in first_valid_idx..out.len().min(first_valid_idx + 10) {
+						if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
+							continue;
+						}
+						
+						let expected_range = high[i] - low[i];
+						if direction == "long" {
+							let expected = low[i] - expected_range * mult;
+							prop_assert!(
+								(out[i] - expected).abs() <= 1e-6,
+								"Period=1 long stop mismatch at {}: {} vs {}",
+								i, out[i], expected
+							);
+						} else {
+							let expected = high[i] + expected_range * mult;
+							prop_assert!(
+								(out[i] - expected).abs() <= 1e-6,
+								"Period=1 short stop mismatch at {}: {} vs {}",
+								i, out[i], expected
+							);
+						}
+					}
+				}
+
+				// Property 6: Very small range scenario
+				// When the price range is very small (near-flat price), stops should be very close to price
+				let const_start = out.len().saturating_sub(20);
+				let small_range_indices: Vec<usize> = (const_start..out.len())
+					.filter(|&i| {
+						let range = high[i] - low[i];
+						let avg_price = (high[i] + low[i]) / 2.0;
+						range < avg_price * 0.0001  // Very small range relative to price
+					})
+					.collect();
+				
+				if !small_range_indices.is_empty() && const_start >= first_valid_idx + period {
+					for &i in &small_range_indices {
+						if out[i].is_nan() {
+							continue;
+						}
+						
+						// With very small range at current point, but MA includes previous normal ranges,
+						// the stop distance will be based on the average which includes larger ranges
+						// Calculate the average range in the lookback window
+						let window_start = i.saturating_sub(period - 1);
+						let window_ranges: Vec<f64> = (window_start..=i)
+							.map(|j| high[j] - low[j])
+							.collect();
+						let avg_window_range = window_ranges.iter().sum::<f64>() / window_ranges.len() as f64;
+						let expected_max_distance = avg_window_range * mult * 2.0;  // Allow 2x for MA smoothing
+						
+						if direction == "long" {
+							let distance = low[i] - out[i];
+							prop_assert!(
+								distance >= 0.0 && distance <= expected_max_distance,
+								"Small range long stop distance {} exceeds expected max {} at index {}",
+								distance, expected_max_distance, i
+							);
+						} else {
+							let distance = out[i] - high[i];
+							prop_assert!(
+								distance >= 0.0 && distance <= expected_max_distance,
+								"Small range short stop distance {} exceeds expected max {} at index {}",
+								distance, expected_max_distance, i
+							);
+						}
+					}
+				}
+
+				// Property 7: Small multiplier test
+				// With very small multiplier, stops should be very close to price
+				let test_start = first_valid_idx + period;
+				if mult < 0.2 && out.len() > test_start + 5 {
+					for i in (test_start + 2)..(test_start + 5).min(out.len()) {
+						if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
+							continue;
+						}
+						
+						let max_distance = (high[i] - low[i]) * 2.0; // Generous bound
+						if direction == "long" {
+							let distance = low[i] - out[i];
+							prop_assert!(
+								distance <= max_distance,
+								"Small mult long stop too far at {}: distance {}",
+								i, distance
+							);
+						} else {
+							let distance = out[i] - high[i];
+							prop_assert!(
+								distance <= max_distance,
+								"Small mult short stop too far at {}: distance {}",
+								i, distance
+							);
+						}
+					}
+				}
+
+				// Property 8: Large multiplier test
+				// With very large multiplier, stops should still be reasonable (not infinite or extreme)
+				if mult > 3.0 && out.len() > test_start + 5 {
+					for i in (test_start + 2)..(test_start + 5).min(out.len()) {
+						if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
+							continue;
+						}
+						
+						// Even with large multiplier, stop distance shouldn't exceed
+						// a reasonable multiple of the price itself
+						let price = (high[i] + low[i]) / 2.0;
+						let max_reasonable_distance = price * 0.5; // Stop shouldn't be more than 50% away from price
+						
+						if direction == "long" {
+							let distance = low[i] - out[i];
+							prop_assert!(
+								distance < max_reasonable_distance,
+								"Large mult long stop unreasonably far at {}: distance {} ({}% of price {})",
+								i, distance, (distance / price * 100.0), price
+							);
+							// Also ensure stop doesn't go negative for long positions
+							prop_assert!(
+								out[i] > 0.0,
+								"Large mult long stop went negative at {}: {}",
+								i, out[i]
+							);
+						} else {
+							let distance = out[i] - high[i];
+							prop_assert!(
+								distance < max_reasonable_distance,
+								"Large mult short stop unreasonably far at {}: distance {} ({}% of price {})",
+								i, distance, (distance / price * 100.0), price
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
 	}
 }

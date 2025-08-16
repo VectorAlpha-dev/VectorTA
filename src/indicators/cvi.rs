@@ -47,6 +47,8 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 impl<'a> AsRef<[f64]> for CviInput<'a> {
 	#[inline(always)]
@@ -995,6 +997,9 @@ mod tests {
 		check_cvi_no_poison
 	);
 
+	#[cfg(feature = "proptest")]
+	generate_all_cvi_tests!(check_cvi_property);
+
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1099,6 +1104,272 @@ mod tests {
 	#[cfg(not(debug_assertions))]
 	fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		Ok(()) // No-op in release builds
+	}
+	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_cvi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic high/low data with varying volatility
+		let strat = (2usize..=50)  // CVI requires minimum period of 2
+			.prop_flat_map(|period| {
+				(
+					// Base price for the series
+					100.0f64..5000.0f64,
+					// Length of data (ensure we have enough for warmup)
+					(2 * period + 20)..400,
+					// Volatility factor (percentage of price)
+					0.001f64..0.1f64,
+					// Trend factor
+					-0.01f64..0.01f64,
+					// Period
+					Just(period),
+				)
+			})
+			.prop_map(|(base_price, data_len, volatility, trend, period)| {
+				// Generate realistic high/low data
+				let mut high_data = Vec::with_capacity(data_len);
+				let mut low_data = Vec::with_capacity(data_len);
+				let mut current_price = base_price;
+				
+				for i in 0..data_len {
+					// Apply trend
+					current_price *= 1.0 + trend;
+					current_price = current_price.max(10.0); // Minimum price floor
+					
+					// Generate volatility-based range
+					// Use a sinusoidal pattern to create varying volatility
+					let volatility_factor = volatility * (1.0 + (i as f64 * 0.1).sin() * 0.5);
+					let range = current_price * volatility_factor;
+					
+					// Ensure high >= low
+					let high = current_price + range * 0.5;
+					let low = (current_price - range * 0.5).max(1.0);
+					
+					high_data.push(high);
+					low_data.push(low);
+				}
+				
+				(high_data, low_data, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high_data, low_data, period)| {
+				let params = CviParams { period: Some(period) };
+				let input = CviInput::from_slices(&high_data, &low_data, params);
+
+				// Get outputs from different kernels
+				let out = cvi_with_kernel(&input, kernel)?;
+				let ref_out = cvi_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Test 1: Verify warmup period
+				// CVI fills NaN up to index (first_valid_idx + 2*period - 2)
+				// With first_valid_idx=0 (clean data), the first non-NaN is at index 2*period - 2
+				let expected_first_valid = 2 * period - 2;
+				let first_valid_idx = out.values.iter().position(|&v| !v.is_nan());
+				
+				if let Some(idx) = first_valid_idx {
+					prop_assert_eq!(
+						idx, expected_first_valid,
+						"[{}] First valid index mismatch: expected {}, got {}",
+						test_name, expected_first_valid, idx
+					);
+				}
+				
+				// Test 2: Verify all non-NaN values are finite and within reasonable bounds
+				for (i, &val) in out.values.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val.is_finite(),
+							"[{}] CVI value {} at index {} is not finite",
+							test_name, val, i
+						);
+						
+						// CVI is a percentage change, typically between -100% and high values
+						// during volatility spikes, but 1000% is a more realistic upper bound
+						prop_assert!(
+							val > -100.0 && val < 1000.0,
+							"[{}] CVI value {} at index {} outside reasonable bounds [-100%, 1000%]",
+							test_name, val, i
+						);
+					}
+				}
+				
+				// Test 3: Verify output length matches input
+				prop_assert_eq!(
+					out.values.len(), high_data.len(),
+					"[{}] Output length mismatch",
+					test_name
+				);
+				
+				// Test 4: Kernel consistency - all kernels should produce identical results
+				prop_assert_eq!(
+					out.values.len(), ref_out.values.len(),
+					"[{}] Output length mismatch between kernels",
+					test_name
+				);
+				
+				for (i, (&y, &r)) in out.values.iter().zip(ref_out.values.iter()).enumerate() {
+					if !y.is_finite() || !r.is_finite() {
+						prop_assert_eq!(
+							y.to_bits(), r.to_bits(),
+							"[{}] NaN/Inf mismatch at index {}: {} vs {}",
+							test_name, i, y, r
+						);
+						continue;
+					}
+					
+					// Allow small floating point differences
+					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+					prop_assert!(
+						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+						"[{}] Value mismatch at index {}: {} vs {} (ULP={})",
+						test_name, i, y, r, ulp_diff
+					);
+				}
+				
+				// Test 5: Edge case - minimum period (2)
+				if period == 2 {
+					// With period=2, first non-NaN should be at index 2*2-2 = 2
+					let warmup_count = out.values.iter().take_while(|&&v| v.is_nan()).count();
+					prop_assert_eq!(
+						warmup_count, 2,
+						"[{}] Period=2 should have warmup count of 2, got {}",
+						test_name, warmup_count
+					);
+				}
+				
+				// Test 6: Check that ranges affect CVI values
+				// Calculate actual ranges to verify CVI responds to volatility changes
+				let ranges: Vec<f64> = high_data.iter().zip(low_data.iter())
+					.map(|(&h, &l)| h - l)
+					.collect();
+				
+				// If we have enough valid CVI values, check for movement
+				let valid_cvi: Vec<f64> = out.values.iter()
+					.filter(|&&v| !v.is_nan())
+					.cloned()
+					.collect();
+				
+				if valid_cvi.len() > 10 {
+					// Check that CVI values vary (not all the same)
+					let min_cvi = valid_cvi.iter().cloned().fold(f64::INFINITY, f64::min);
+					let max_cvi = valid_cvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+					
+					// Unless volatility is extremely constant, we should see some variation
+					let range_variance = ranges.windows(period)
+						.map(|w| {
+							let mean = w.iter().sum::<f64>() / w.len() as f64;
+							w.iter().map(|&r| (r - mean).powi(2)).sum::<f64>() / w.len() as f64
+						})
+						.fold(0.0f64, f64::max);
+					
+					if range_variance > 1e-10 {
+						// CVI should show meaningful variation (at least 1%) when volatility changes
+						prop_assert!(
+							(max_cvi - min_cvi).abs() > 1.0,
+							"[{}] CVI should show meaningful variation (>1%) when volatility changes, got range: {}",
+							test_name, (max_cvi - min_cvi).abs()
+						);
+					}
+				}
+				
+				// Test 7: Zero or near-zero ranges should not cause infinity
+				let min_range = ranges.iter().cloned().fold(f64::INFINITY, f64::min);
+				if min_range < 1e-10 {
+					for &val in &out.values {
+						if !val.is_nan() {
+							prop_assert!(
+								val.is_finite(),
+								"[{}] CVI should remain finite even with tiny ranges",
+								test_name
+							);
+						}
+					}
+				}
+				
+				// Test 8: Constant volatility convergence
+				// If all ranges are nearly identical, CVI should converge towards 0
+				if ranges.len() > period * 3 {
+					let mean_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
+					let all_similar = ranges.iter()
+						.all(|&r| (r - mean_range).abs() < mean_range * 0.01); // Within 1% of mean
+					
+					if all_similar && mean_range > 1e-10 {
+						// Take the last quarter of valid CVI values
+						let last_quarter_start = valid_cvi.len() * 3 / 4;
+						if last_quarter_start < valid_cvi.len() {
+							let last_quarter: Vec<f64> = valid_cvi[last_quarter_start..].to_vec();
+							if !last_quarter.is_empty() {
+								let avg_abs_cvi = last_quarter.iter()
+									.map(|v| v.abs())
+									.sum::<f64>() / last_quarter.len() as f64;
+								
+								prop_assert!(
+									avg_abs_cvi < 5.0,
+									"[{}] CVI should converge near 0 for constant volatility, but average |CVI| = {}",
+									test_name, avg_abs_cvi
+								);
+							}
+						}
+					}
+				}
+				
+				// Test 9: Volatility spike test
+				// Check CVI response to sudden volatility changes
+				if ranges.len() > period * 2 {
+					// Find the maximum ratio between consecutive range averages
+					let mut max_volatility_change = 1.0;
+					let mut max_change_idx = 0;
+					
+					for i in period..ranges.len() - period {
+						let prev_avg = ranges[i - period..i].iter().sum::<f64>() / period as f64;
+						let next_avg = ranges[i..i + period].iter().sum::<f64>() / period as f64;
+						
+						if prev_avg > 1e-10 && next_avg > 1e-10 {
+							let ratio = (next_avg / prev_avg).max(prev_avg / next_avg);
+							if ratio > max_volatility_change {
+								max_volatility_change = ratio;
+								max_change_idx = i;
+							}
+						}
+					}
+					
+					// If there's a significant volatility change (>5x), CVI should respond strongly
+					if max_volatility_change > 5.0 {
+						// Look for CVI values around the spike
+						let spike_start = (max_change_idx + expected_first_valid).saturating_sub(period);
+						let spike_end = (max_change_idx + expected_first_valid + period * 2).min(out.values.len());
+						
+						if spike_end > spike_start {
+							let spike_region: Vec<f64> = out.values[spike_start..spike_end]
+								.iter()
+								.filter(|&&v| !v.is_nan())
+								.cloned()
+								.collect();
+							
+							if !spike_region.is_empty() {
+								let max_abs_cvi = spike_region.iter()
+									.map(|v| v.abs())
+									.fold(0.0f64, f64::max);
+								
+								prop_assert!(
+									max_abs_cvi > 10.0,
+									"[{}] CVI should spike (>10%) for {}x volatility change, but max |CVI| = {}",
+									test_name, max_volatility_change, max_abs_cvi
+								);
+							}
+						}
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
 	}
 }
 

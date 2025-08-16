@@ -1393,6 +1393,211 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_squeeze_momentum_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic OHLC data
+		let strat = (2usize..=50)
+			.prop_flat_map(|max_period| {
+				let data_len = max_period * 2 + 50; // Ensure sufficient data length
+				(
+					// Generate base price and variations for OHLC
+					prop::collection::vec(
+						(100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+						data_len,
+					),
+					// length_bb: 2 to max_period
+					2usize..=max_period.min(30),
+					// mult_bb: 0.5 to 3.0
+					0.5f64..3.0f64,
+					// length_kc: 2 to max_period
+					2usize..=max_period.min(30),
+					// mult_kc: 0.5 to 3.0
+					0.5f64..3.0f64,
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, length_bb, mult_bb, length_kc, mult_kc)| {
+				// Generate realistic OHLC data from base prices
+				let n = base_prices.len();
+				let mut high = Vec::with_capacity(n);
+				let mut low = Vec::with_capacity(n);
+				let mut close = Vec::with_capacity(n);
+				
+				// Check if all base prices are the same (flat market)
+				let is_flat = base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				for &base in &base_prices {
+					if is_flat {
+						// For flat markets, keep prices identical
+						high.push(base);
+						low.push(base);
+						close.push(base);
+					} else {
+						// Create realistic OHLC relationships
+						// Simple and realistic: high > close > low with consistent variation
+						let variation = base * 0.01; // 1% variation for more realistic daily moves
+						let h = base + variation;
+						let l = base - variation;
+						let c = base + variation * 0.2; // Close slightly above midpoint (bullish bias)
+						
+						high.push(h);
+						low.push(l);
+						close.push(c);
+					}
+				}
+
+				let params = SqueezeMomentumParams {
+					length_bb: Some(length_bb),
+					mult_bb: Some(mult_bb),
+					length_kc: Some(length_kc),
+					mult_kc: Some(mult_kc),
+				};
+				let input = SqueezeMomentumInput::from_slices(&high, &low, &close, params.clone());
+
+				// Get output from tested kernel
+				let output = squeeze_momentum_with_kernel(&input, kernel)?;
+				
+				// Get reference output from scalar kernel
+				let ref_output = squeeze_momentum_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Output length matches input length
+				prop_assert_eq!(output.squeeze.len(), n, "Squeeze length mismatch");
+				prop_assert_eq!(output.momentum.len(), n, "Momentum length mismatch");
+				prop_assert_eq!(output.momentum_signal.len(), n, "Momentum signal length mismatch");
+
+				// Property 2: Warmup period validation
+				// Different outputs have different warmup periods
+				let squeeze_warmup = length_bb.max(length_kc).saturating_sub(1);
+				let momentum_warmup = length_kc.saturating_sub(1);
+				let signal_warmup = length_kc.saturating_sub(1) + 1; // +1 for the lag
+				
+				// Check squeeze warmup
+				for i in 0..squeeze_warmup.min(n) {
+					prop_assert!(
+						output.squeeze[i].is_nan(),
+						"Expected NaN in squeeze warmup at index {}", i
+					);
+				}
+				
+				// Check momentum warmup
+				for i in 0..momentum_warmup.min(n) {
+					prop_assert!(
+						output.momentum[i].is_nan(),
+						"Expected NaN in momentum warmup at index {}", i
+					);
+				}
+				
+				// Check momentum_signal warmup
+				for i in 0..signal_warmup.min(n) {
+					prop_assert!(
+						output.momentum_signal[i].is_nan(),
+						"Expected NaN in momentum_signal warmup at index {}", i
+					);
+				}
+
+				// Property 3: Squeeze values are only -1.0, 0.0, or 1.0
+				for (i, &val) in output.squeeze.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val == -1.0 || val == 0.0 || val == 1.0,
+							"Invalid squeeze value {} at index {}", val, i
+						);
+					}
+				}
+
+				// Property 4: Momentum signal values are only -2.0, -1.0, 1.0, or 2.0 (or NaN)
+				for (i, &val) in output.momentum_signal.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val == -2.0 || val == -1.0 || val == 1.0 || val == 2.0,
+							"Invalid momentum_signal value {} at index {}", val, i
+						);
+					}
+				}
+
+				// Property 5: Kernel consistency - compare with scalar implementation
+				for i in 0..n {
+					// Check squeeze consistency
+					let sq = output.squeeze[i];
+					let ref_sq = ref_output.squeeze[i];
+					if sq.is_finite() && ref_sq.is_finite() {
+						prop_assert!(
+							(sq - ref_sq).abs() < 1e-9,
+							"Squeeze mismatch at index {}: {} vs {}", i, sq, ref_sq
+						);
+					} else {
+						prop_assert_eq!(sq.is_nan(), ref_sq.is_nan(), "NaN mismatch in squeeze at index {}", i);
+					}
+
+					// Check momentum consistency with ULP tolerance
+					let mom = output.momentum[i];
+					let ref_mom = ref_output.momentum[i];
+					if mom.is_finite() && ref_mom.is_finite() {
+						let mom_bits = mom.to_bits();
+						let ref_bits = ref_mom.to_bits();
+						let ulp_diff = mom_bits.abs_diff(ref_bits);
+						
+						prop_assert!(
+							(mom - ref_mom).abs() <= 1e-9 || ulp_diff <= 5,
+							"Momentum mismatch at index {}: {} vs {} (ULP={})", i, mom, ref_mom, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(mom.is_nan(), ref_mom.is_nan(), "NaN mismatch in momentum at index {}", i);
+					}
+
+					// Check momentum_signal consistency
+					let sig = output.momentum_signal[i];
+					let ref_sig = ref_output.momentum_signal[i];
+					if sig.is_finite() && ref_sig.is_finite() {
+						prop_assert!(
+							(sig - ref_sig).abs() < 1e-9,
+							"Momentum signal mismatch at index {}: {} vs {}", i, sig, ref_sig
+						);
+					} else {
+						prop_assert_eq!(sig.is_nan(), ref_sig.is_nan(), "NaN mismatch in momentum_signal at index {}", i);
+					}
+				}
+
+				// Property 6: Momentum reasonableness check
+				// Since momentum uses linear regression, it can extrapolate beyond the immediate price range
+				// We'll use a check based on the overall data range
+				let overall_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+				let overall_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
+				let overall_range = overall_max - overall_min;
+				
+				for i in momentum_warmup..n {
+					if output.momentum[i].is_finite() {
+						if overall_range > 1e-10 {
+							// Momentum should be within a reasonable multiple of the overall price range
+							// Linear regression can extrapolate but should remain reasonable
+							prop_assert!(
+								output.momentum[i].abs() <= overall_range * 5.0,
+								"Momentum {} exceeds reasonable bounds at index {} (overall range: {})",
+								output.momentum[i], i, overall_range
+							);
+						} else {
+							// For flat markets (range near zero), momentum should be very small
+							prop_assert!(
+								output.momentum[i].abs() < 1e-4,
+								"Momentum {} should be near zero for flat market at index {}",
+								output.momentum[i], i
+							);
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_smi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1428,6 +1633,9 @@ mod tests {
 		check_smi_minimum_data,
 		check_smi_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_smi_tests!(check_squeeze_momentum_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

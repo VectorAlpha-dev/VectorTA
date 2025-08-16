@@ -1392,6 +1392,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_rsmk_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1683,6 +1685,317 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_rsmk_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating test data
+		let strat = (1usize..=100, 1usize..=50, 1usize..=50)
+			.prop_flat_map(|(lookback, period, signal_period)| {
+				// Ensure we have enough data for all calculations
+				// Need: lookback + max(period, signal_period) + extra buffer
+				let min_len = lookback + period.max(signal_period) + 50;
+				(min_len..=500usize).prop_flat_map(move |len| {
+					(
+						// Generate main prices
+						prop::collection::vec(
+							(1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						// Generate compare prices
+						prop::collection::vec(
+							(1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							len,
+						),
+						Just(lookback),
+						Just(period),
+						Just(signal_period),
+					)
+				})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(main, compare, lookback, period, signal_period)| {
+				let params = RsmkParams {
+					lookback: Some(lookback),
+					period: Some(period),
+					signal_period: Some(signal_period),
+					matype: Some("ema".to_string()),
+					signal_matype: Some("ema".to_string()),
+				};
+				let input = RsmkInput::from_slices(&main, &compare, params.clone());
+
+				// Handle potential errors gracefully
+				let output = match rsmk_with_kernel(&input, kernel) {
+					Ok(out) => out,
+					Err(_) => {
+						// Some parameter combinations may legitimately fail
+						// Skip this test case
+						return Ok(());
+					}
+				};
+				
+				let ref_output = match rsmk_with_kernel(&input, Kernel::Scalar) {
+					Ok(out) => out,
+					Err(_) => {
+						// If scalar kernel fails, skip this test case
+						return Ok(());
+					}
+				};
+
+				// Property 1: Output length should match input length
+				prop_assert_eq!(output.indicator.len(), main.len());
+				prop_assert_eq!(output.signal.len(), main.len());
+
+				// Property 2: Warmup period validation
+				// The first lookback values must be NaN since momentum requires lookback points
+				// Exception: when main==compare for all values, result can be 0
+				let all_equal = main.iter().zip(compare.iter()).all(|(a, b)| (a - b).abs() < f64::EPSILON);
+				
+				// Check first lookback values more strictly
+				for i in 0..lookback.min(main.len()) {
+					if all_equal {
+						// When main==compare, 0 is valid
+						prop_assert!(
+							output.indicator[i].is_nan() || output.indicator[i].abs() < 1e-9,
+							"Expected NaN or 0 during warmup at index {} (before lookback {}), got {}",
+							i, lookback, output.indicator[i]
+						);
+					} else {
+						// Otherwise must be NaN during momentum warmup
+						prop_assert!(
+							output.indicator[i].is_nan(),
+							"Expected NaN during warmup at index {} (before lookback {}), got {}",
+							i, lookback, output.indicator[i]
+						);
+					}
+				}
+				
+				// Verify we eventually get non-NaN values after warmup
+				let full_warmup = lookback + period.max(signal_period);
+				if main.len() > full_warmup + 5 {
+					let has_valid = output.indicator[full_warmup..].iter().any(|&x| !x.is_nan());
+					prop_assert!(
+						has_valid,
+						"Expected some non-NaN values after full warmup period ({})",
+						full_warmup
+					);
+				}
+
+				// Property 3: When main == compare, log ratio should be 0, momentum should be near 0
+				// Test with identical inputs
+				let identical_params = RsmkParams {
+					lookback: Some(lookback),
+					period: Some(period),
+					signal_period: Some(signal_period),
+					matype: Some("ema".to_string()),
+					signal_matype: Some("ema".to_string()),
+				};
+				let identical_input = RsmkInput::from_slices(&main, &main, identical_params);
+				if let Ok(identical_output) = rsmk_with_kernel(&identical_input, kernel) {
+					// After warmup, indicator should be exactly 0 (momentum of ln(1) = 0)
+					let warmup = lookback.max(period).max(signal_period);
+					for i in warmup..main.len() {
+						if !identical_output.indicator[i].is_nan() {
+							prop_assert!(
+								identical_output.indicator[i].abs() < 1e-9,
+								"When main==compare, indicator should be 0 at index {}, got {}",
+								i, identical_output.indicator[i]
+							);
+						}
+					}
+				}
+
+				// Property 4: Constant ratio test
+				// If main = k * compare for constant k, momentum should approach 0
+				let const_ratio = 2.0;
+				let main_scaled: Vec<f64> = compare.iter().map(|&x| x * const_ratio).collect();
+				let const_params = RsmkParams {
+					lookback: Some(lookback),
+					period: Some(period),
+					signal_period: Some(signal_period),
+					matype: Some("ema".to_string()),
+					signal_matype: Some("ema".to_string()),
+				};
+				let const_input = RsmkInput::from_slices(&main_scaled, &compare, const_params);
+				if let Ok(const_output) = rsmk_with_kernel(&const_input, kernel) {
+					// After sufficient data points, momentum should be very close to 0
+					let warmup = lookback.max(period).max(signal_period);
+					let check_start = (warmup + 10).min(main.len());
+					for i in check_start..main.len() {
+						if !const_output.indicator[i].is_nan() {
+							prop_assert!(
+								const_output.indicator[i].abs() < 1e-6,
+								"For constant ratio, indicator should be near 0 at index {}, got {}",
+								i, const_output.indicator[i]
+							);
+						}
+					}
+				}
+
+				// Property 5: Period edge cases
+				if period == 1 {
+					// With period=1, the MA should have minimal smoothing effect
+					// Just verify it doesn't crash and produces valid output
+					prop_assert!(output.indicator.iter().any(|&x| !x.is_nan()));
+				}
+
+				// Property 6: Kernel consistency
+				// Compare with scalar kernel results (within ULP tolerance)
+				let warmup = lookback.max(period).max(signal_period);
+				for i in warmup..main.len() {
+					let ind = output.indicator[i];
+					let ref_ind = ref_output.indicator[i];
+					let sig = output.signal[i];
+					let ref_sig = ref_output.signal[i];
+
+					// Check indicator consistency
+					if !ind.is_nan() && !ref_ind.is_nan() {
+						let ind_bits = ind.to_bits();
+						let ref_ind_bits = ref_ind.to_bits();
+						let ulp_diff = ind_bits.abs_diff(ref_ind_bits);
+						
+						prop_assert!(
+							(ind - ref_ind).abs() <= 1e-9 || ulp_diff <= 10,
+							"Indicator mismatch at index {}: {} vs {} (ULP={})",
+							i, ind, ref_ind, ulp_diff
+						);
+					} else {
+						// Both should be NaN or both should be finite
+						prop_assert_eq!(ind.is_nan(), ref_ind.is_nan());
+					}
+
+					// Check signal consistency
+					if !sig.is_nan() && !ref_sig.is_nan() {
+						let sig_bits = sig.to_bits();
+						let ref_sig_bits = ref_sig.to_bits();
+						let ulp_diff = sig_bits.abs_diff(ref_sig_bits);
+						
+						prop_assert!(
+							(sig - ref_sig).abs() <= 1e-9 || ulp_diff <= 10,
+							"Signal mismatch at index {}: {} vs {} (ULP={})",
+							i, sig, ref_sig, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(sig.is_nan(), ref_sig.is_nan());
+					}
+				}
+
+				// Property 7: Signal smoothness (improved with variance calculation)
+				// Signal should be smoother than indicator (lower variance)
+				let indicator_diffs: Vec<f64> = output.indicator.windows(2)
+					.filter_map(|w| {
+						if !w[0].is_nan() && !w[1].is_nan() {
+							Some((w[1] - w[0]).abs())
+						} else {
+							None
+						}
+					})
+					.collect();
+				
+				let signal_diffs: Vec<f64> = output.signal.windows(2)
+					.filter_map(|w| {
+						if !w[0].is_nan() && !w[1].is_nan() {
+							Some((w[1] - w[0]).abs())
+						} else {
+							None
+						}
+					})
+					.collect();
+
+				if !indicator_diffs.is_empty() && !signal_diffs.is_empty() && indicator_diffs.len() > 10 {
+					// Calculate actual variance
+					let ind_mean = indicator_diffs.iter().sum::<f64>() / indicator_diffs.len() as f64;
+					let ind_var = indicator_diffs.iter()
+						.map(|x| (x - ind_mean).powi(2))
+						.sum::<f64>() / indicator_diffs.len() as f64;
+					
+					let sig_mean = signal_diffs.iter().sum::<f64>() / signal_diffs.len() as f64;
+					let sig_var = signal_diffs.iter()
+						.map(|x| (x - sig_mean).powi(2))
+						.sum::<f64>() / signal_diffs.len() as f64;
+					
+					// Signal should generally be smoother (lower variance)
+					if signal_period > 1 && ind_var > 1e-12 {
+						prop_assert!(
+							sig_var <= ind_var * 1.2 || sig_var < 1e-10,
+							"Signal should be smoother than indicator: sig_var={} ind_var={}",
+							sig_var, ind_var
+						);
+					}
+				}
+
+				// Property 8: Edge cases
+				// Test with compare containing zeros (should produce NaN)
+				let mut compare_with_zero = compare.clone();
+				if compare_with_zero.len() > lookback + 5 {
+					compare_with_zero[lookback + 2] = 0.0;
+					let zero_params = RsmkParams {
+						lookback: Some(lookback),
+						period: Some(period),
+						signal_period: Some(signal_period),
+						matype: Some("ema".to_string()),
+						signal_matype: Some("ema".to_string()),
+					};
+					let zero_input = RsmkInput::from_slices(&main, &compare_with_zero, zero_params);
+					if let Ok(zero_output) = rsmk_with_kernel(&zero_input, kernel) {
+						// Values influenced by the zero should be NaN
+						let affected_start = lookback + 2;
+						let affected_end = (affected_start + lookback).min(main.len());
+						for i in affected_start..affected_end {
+							prop_assert!(
+								zero_output.indicator[i].is_nan(),
+								"Expected NaN when compare=0 affects calculation at index {}, got {}",
+								i, zero_output.indicator[i]
+							);
+						}
+					}
+				}
+				
+				// Test extreme ratios
+				if main.len() > warmup + 10 {
+					// Test very large ratio
+					let large_ratio = 10000.0;
+					let main_large: Vec<f64> = compare.iter().map(|&x| x * large_ratio).collect();
+					let large_params = RsmkParams {
+						lookback: Some(lookback),
+						period: Some(period), 
+						signal_period: Some(signal_period),
+						matype: Some("ema".to_string()),
+						signal_matype: Some("ema".to_string()),
+					};
+					let large_input = RsmkInput::from_slices(&main_large, &compare, large_params);
+					if let Ok(large_output) = rsmk_with_kernel(&large_input, kernel) {
+						// Check that values are reasonable (not infinite)
+						for i in warmup..main.len() {
+							if !large_output.indicator[i].is_nan() {
+								prop_assert!(
+									large_output.indicator[i].is_finite(),
+									"Indicator should be finite for large ratios at index {}, got {}",
+									i, large_output.indicator[i]
+								);
+								// Momentum of constant large ratio should still be near 0
+								if i > warmup + 10 {
+									prop_assert!(
+										large_output.indicator[i].abs() < 1.0,
+										"Large constant ratio should still have near-zero momentum at index {}, got {}",
+										i, large_output.indicator[i]
+									);
+								}
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_rsmk_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1718,6 +2031,9 @@ mod tests {
 		check_rsmk_ma_error,
 		check_rsmk_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_rsmk_tests!(check_rsmk_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 

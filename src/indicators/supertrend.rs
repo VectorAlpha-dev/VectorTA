@@ -1980,6 +1980,206 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_supertrend_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic OHLC data
+		let strat = (2usize..=50)
+			.prop_flat_map(|period| {
+				let data_len = period * 2 + 50; // Ensure sufficient data length
+				(
+					// Base price generation
+					prop::collection::vec(
+						(100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
+						data_len,
+					),
+					Just(period),
+					0.5f64..5.0f64, // factor range
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(base_prices, period, factor)| {
+				// Generate more realistic OHLC data from base prices
+				let mut high = Vec::with_capacity(base_prices.len());
+				let mut low = Vec::with_capacity(base_prices.len());
+				let mut close = Vec::with_capacity(base_prices.len());
+				
+				// Use a simple RNG for variation
+				let mut rng_state = 42u64;
+				for &base in &base_prices {
+					// Simple LCG for pseudo-random numbers
+					rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+					let rand1 = ((rng_state >> 32) as f64) / (u32::MAX as f64);
+					rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+					let rand2 = ((rng_state >> 32) as f64) / (u32::MAX as f64);
+					
+					// Variable spread between 0.5% and 3%
+					let spread = base * (0.005 + rand1 * 0.025);
+					let h = base + spread;
+					let l = base - spread;
+					
+					// Close can be anywhere within high/low range
+					let c = l + (h - l) * rand2;
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+
+				let params = SuperTrendParams {
+					period: Some(period),
+					factor: Some(factor),
+				};
+				let input = SuperTrendInput::from_slices(&high, &low, &close, params);
+
+				// Test with specified kernel
+				let output = supertrend_with_kernel(&input, kernel).unwrap();
+				
+				// Also get reference output from scalar kernel for comparison
+				let ref_output = supertrend_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: Output length should match input
+				prop_assert_eq!(output.trend.len(), high.len(), 
+					"[{}] Trend length mismatch", test_name);
+				prop_assert_eq!(output.changed.len(), high.len(),
+					"[{}] Changed length mismatch", test_name);
+
+				// Property 2: Warmup period handling
+				let warmup_end = period - 1;
+				for i in 0..warmup_end {
+					prop_assert!(output.trend[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}", test_name, i);
+					prop_assert!(output.changed[i].is_nan(),
+						"[{}] Expected NaN in changed during warmup at index {}", test_name, i);
+				}
+
+				// Property 3: Trend values should be reasonable relative to price data
+				// SuperTrend uses ATR-based bands, so values should be within a reasonable
+				// multiple of the price range
+				for i in warmup_end..output.trend.len() {
+					let val = output.trend[i];
+					if !val.is_nan() {
+						// Get the entire data range to understand the scale
+						let global_high = high.iter().fold(f64::NEG_INFINITY, |a, &b| {
+							if b.is_finite() { a.max(b) } else { a }
+						});
+						let global_low = low.iter().fold(f64::INFINITY, |a, &b| {
+							if b.is_finite() { a.min(b) } else { a }
+						});
+						
+						// SuperTrend bands can legitimately be far from current price
+						// when there are large price movements in the ATR period
+						// Just verify the value is within the overall data scale
+						let global_range = global_high - global_low;
+						
+						// Allow trend to be within the global range plus some margin
+						// for ATR-based expansion
+						let margin = global_range * factor;
+						
+						prop_assert!(
+							val >= global_low - margin && val <= global_high + margin,
+							"[{}] Trend value {} at index {} outside global bounds [{}, {}]",
+							test_name, val, i, global_low - margin, global_high + margin
+						);
+					}
+				}
+
+				// Property 4: Changed values must be 0.0 or 1.0
+				for i in warmup_end..output.changed.len() {
+					let val = output.changed[i];
+					if !val.is_nan() {
+						prop_assert!(
+							val == 0.0 || val == 1.0,
+							"[{}] Changed value {} at index {} is not 0.0 or 1.0",
+							test_name, val, i
+						);
+					}
+				}
+
+				// Property 5: Kernel consistency
+				for i in 0..output.trend.len() {
+					let trend_val = output.trend[i];
+					let ref_trend_val = ref_output.trend[i];
+					let changed_val = output.changed[i];
+					let ref_changed_val = ref_output.changed[i];
+					
+					// Check trend consistency
+					if !trend_val.is_finite() || !ref_trend_val.is_finite() {
+						prop_assert_eq!(trend_val.to_bits(), ref_trend_val.to_bits(),
+							"[{}] NaN/Inf mismatch in trend at index {}", test_name, i);
+					} else {
+						let ulp_diff = trend_val.to_bits().abs_diff(ref_trend_val.to_bits());
+						prop_assert!(
+							(trend_val - ref_trend_val).abs() <= 1e-9 || ulp_diff <= 5,
+							"[{}] Kernel mismatch in trend at index {}: {} vs {} (ULP={})",
+							test_name, i, trend_val, ref_trend_val, ulp_diff
+						);
+					}
+					
+					// Check changed consistency (should be exact)
+					if !changed_val.is_nan() && !ref_changed_val.is_nan() {
+						prop_assert_eq!(changed_val, ref_changed_val,
+							"[{}] Kernel mismatch in changed at index {}: {} vs {}",
+							test_name, i, changed_val, ref_changed_val);
+					}
+				}
+
+				// Property 6: Special case - when all prices are identical
+				if base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
+					// After warmup, trend should stabilize
+					let stable_start = (period * 2).min(output.trend.len());
+					if stable_start < output.trend.len() {
+						let stable_trend = output.trend[stable_start];
+						for i in (stable_start + 1)..output.trend.len() {
+							if !output.trend[i].is_nan() && !stable_trend.is_nan() {
+								prop_assert!(
+									(output.trend[i] - stable_trend).abs() < 1e-9,
+									"[{}] Trend not stable for constant prices at index {}",
+									test_name, i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 7: Trend switching consistency
+				// When changed=1.0, verify trend actually switched from previous
+				// When changed=0.0, trend should maintain same band type
+				if output.trend.len() > warmup_end + 1 {
+					for i in (warmup_end + 1)..output.changed.len() {
+						let changed_val = output.changed[i];
+						if !changed_val.is_nan() {
+							let curr_trend = output.trend[i];
+							let prev_trend = output.trend[i - 1];
+							
+							if !curr_trend.is_nan() && !prev_trend.is_nan() {
+								if changed_val == 1.0 {
+									// Changed flag indicates a switch - trends should be different
+									// Allow for small numerical differences
+									prop_assert!(
+										(curr_trend - prev_trend).abs() > 1e-6,
+										"[{}] Changed=1.0 at index {} but trend didn't switch: {} vs {}",
+										test_name, i, prev_trend, curr_trend
+									);
+								}
+								// Note: We can't strictly enforce changed=0.0 means same value
+								// because the bands themselves can move even without switching
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_supertrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2016,6 +2216,9 @@ mod tests {
 		check_supertrend_streaming,
 		check_supertrend_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_supertrend_tests!(check_supertrend_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
 		skip_if_unsupported!(kernel, test);

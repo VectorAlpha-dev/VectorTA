@@ -1514,6 +1514,8 @@ mod tests {
 	use super::*;
 	use crate::utilities::data_loader::read_candles_from_csv;
 	use std::error::Error;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	macro_rules! skip_if_unsupported {
 		($kernel:expr, $test_name:expr) => {
@@ -1989,6 +1991,368 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_mab_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		use proptest::prelude::*;
+		skip_if_unsupported!(kernel, test_name);
+
+		// Generate test data with realistic parameters
+		let strat = (2usize..=50)
+			.prop_flat_map(|slow_period| {
+				(2usize..=slow_period)  // Changed to include equal periods
+					.prop_flat_map(move |fast_period| {
+						(
+							prop::collection::vec(
+								(1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+								slow_period..400,
+							),
+							Just(fast_period),
+							Just(slow_period),
+							0.5f64..3.0f64,  // devup
+							0.5f64..3.0f64,  // devdn
+							prop::bool::ANY, // fast_ma_type (true = ema, false = sma)
+							prop::bool::ANY, // slow_ma_type
+						)
+					})
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(data, fast_period, slow_period, devup, devdn, fast_is_ema, slow_is_ema)| {
+				let params = MabParams {
+					fast_period: Some(fast_period),
+					slow_period: Some(slow_period),
+					devup: Some(devup),
+					devdn: Some(devdn),
+					fast_ma_type: Some(if fast_is_ema { "ema" } else { "sma" }.to_string()),
+					slow_ma_type: Some(if slow_is_ema { "ema" } else { "sma" }.to_string()),
+				};
+				let input = MabInput::from_slice(&data, params.clone());
+
+				// Test with the specified kernel
+				let result = mab_with_kernel(&input, kernel).unwrap();
+				
+				// Also compute with scalar kernel for reference
+				let ref_params = params.clone();
+				let ref_input = MabInput::from_slice(&data, ref_params);
+				let ref_result = mab_with_kernel(&ref_input, Kernel::Scalar).unwrap();
+
+				// Property 1: Kernel consistency - all kernels should produce identical results
+				let first_valid_idx = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+				let warmup_period = first_valid_idx + fast_period.max(slow_period) - 1;
+
+				for i in 0..data.len() {
+					let upper = result.upperband[i];
+					let middle = result.middleband[i];
+					let lower = result.lowerband[i];
+					let ref_upper = ref_result.upperband[i];
+					let ref_middle = ref_result.middleband[i];
+					let ref_lower = ref_result.lowerband[i];
+
+					// Check NaN consistency
+					if upper.is_nan() {
+						prop_assert!(ref_upper.is_nan(), 
+							"[{}] NaN mismatch in upperband at idx {}: kernel={:?} has NaN but scalar doesn't",
+							test_name, i, kernel);
+					}
+					if middle.is_nan() {
+						prop_assert!(ref_middle.is_nan(),
+							"[{}] NaN mismatch in middleband at idx {}: kernel={:?} has NaN but scalar doesn't",
+							test_name, i, kernel);
+					}
+					if lower.is_nan() {
+						prop_assert!(ref_lower.is_nan(),
+							"[{}] NaN mismatch in lowerband at idx {}: kernel={:?} has NaN but scalar doesn't",
+							test_name, i, kernel);
+					}
+
+					// For finite values, check ULP difference
+					if upper.is_finite() && ref_upper.is_finite() {
+						let ulp_diff = upper.to_bits().abs_diff(ref_upper.to_bits());
+						prop_assert!(
+							(upper - ref_upper).abs() <= 1e-9 || ulp_diff <= 8,
+							"[{}] Upperband mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, upper, ref_upper, ulp_diff
+						);
+					}
+					if middle.is_finite() && ref_middle.is_finite() {
+						let ulp_diff = middle.to_bits().abs_diff(ref_middle.to_bits());
+						prop_assert!(
+							(middle - ref_middle).abs() <= 1e-9 || ulp_diff <= 8,
+							"[{}] Middleband mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, middle, ref_middle, ulp_diff
+						);
+					}
+					if lower.is_finite() && ref_lower.is_finite() {
+						let ulp_diff = lower.to_bits().abs_diff(ref_lower.to_bits());
+						prop_assert!(
+							(lower - ref_lower).abs() <= 1e-9 || ulp_diff <= 8,
+							"[{}] Lowerband mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, lower, ref_lower, ulp_diff
+						);
+					}
+				}
+
+				// Property 2: Warmup period validation - values should be NaN during warmup
+				for i in 0..warmup_period.min(data.len()) {
+					prop_assert!(
+						result.upperband[i].is_nan(),
+						"[{}] Expected NaN in upperband during warmup at idx {} (warmup={})",
+						test_name, i, warmup_period
+					);
+					prop_assert!(
+						result.middleband[i].is_nan(),
+						"[{}] Expected NaN in middleband during warmup at idx {} (warmup={})",
+						test_name, i, warmup_period
+					);
+					prop_assert!(
+						result.lowerband[i].is_nan(),
+						"[{}] Expected NaN in lowerband during warmup at idx {} (warmup={})",
+						test_name, i, warmup_period
+					);
+				}
+
+				// Property 3: Post-warmup finite values
+				// Need to account for the fact that we need fast_period values after warmup for std_dev
+				let first_valid_output = warmup_period + fast_period - 1;
+				if first_valid_output < data.len() {
+					for i in first_valid_output..data.len() {
+						prop_assert!(
+							result.upperband[i].is_finite(),
+							"[{}] Non-finite value in upperband at idx {} after warmup",
+							test_name, i
+						);
+						prop_assert!(
+							result.middleband[i].is_finite(),
+							"[{}] Non-finite value in middleband at idx {} after warmup",
+							test_name, i
+						);
+						prop_assert!(
+							result.lowerband[i].is_finite(),
+							"[{}] Non-finite value in lowerband at idx {} after warmup",
+							test_name, i
+						);
+					}
+				}
+
+				// Property 4: Band ordering - upper >= middle >= lower
+				for i in first_valid_output..data.len() {
+					let upper = result.upperband[i];
+					let middle = result.middleband[i];
+					let lower = result.lowerband[i];
+					
+					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
+						prop_assert!(
+							upper >= middle - 1e-10,
+							"[{}] Band ordering violated: upper {} < middle {} at idx {}",
+							test_name, upper, middle, i
+						);
+						prop_assert!(
+							middle >= lower - 1e-10,
+							"[{}] Band ordering violated: middle {} < lower {} at idx {}",
+							test_name, middle, lower, i
+						);
+					}
+				}
+
+				// Property 5: Constant data behavior
+				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > first_valid_output {
+					// For constant data, std_dev should be 0 and all bands should be equal
+					for i in first_valid_output..data.len() {
+						let upper = result.upperband[i];
+						let middle = result.middleband[i];
+						let lower = result.lowerband[i];
+						
+						if upper.is_finite() && middle.is_finite() && lower.is_finite() {
+							prop_assert!(
+								(upper - middle).abs() <= 1e-9,
+								"[{}] Constant data: upper {} != middle {} at idx {}",
+								test_name, upper, middle, i
+							);
+							prop_assert!(
+								(middle - lower).abs() <= 1e-9,
+								"[{}] Constant data: middle {} != lower {} at idx {}",
+								test_name, middle, lower, i
+							);
+						}
+					}
+				}
+
+				// Property 6: Deviation multiplier effects
+				// The spread between bands should be proportional to the deviation multipliers
+				for i in first_valid_output..data.len() {
+					let upper = result.upperband[i];
+					let middle = result.middleband[i];
+					let lower = result.lowerband[i];
+					
+					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
+						let upper_spread = upper - middle;
+						let lower_spread = middle - lower;
+						
+						// The ratio of spreads should approximately match the ratio of multipliers
+						if upper_spread > 1e-10 && lower_spread > 1e-10 {
+							let spread_ratio = upper_spread / lower_spread;
+							let multiplier_ratio = devup / devdn;
+							
+							prop_assert!(
+								(spread_ratio - multiplier_ratio).abs() <= multiplier_ratio * 0.05,
+								"[{}] Deviation multiplier ratio mismatch at idx {}: spread_ratio={} vs multiplier_ratio={}",
+								test_name, i, spread_ratio, multiplier_ratio
+							);
+						}
+					}
+				}
+
+				// Property 7: Middle band should equal fast MA
+				// The middle band is always the fast MA
+				use crate::indicators::sma::{sma, SmaInput, SmaParams};
+				use crate::indicators::ema::{ema, EmaInput, EmaParams};
+				
+				let fast_ma = if fast_is_ema {
+					let ema_params = EmaParams { period: Some(fast_period) };
+					let ema_input = EmaInput::from_slice(&data, ema_params);
+					ema(&ema_input).unwrap().values
+				} else {
+					let sma_params = SmaParams { period: Some(fast_period) };
+					let sma_input = SmaInput::from_slice(&data, sma_params);
+					sma(&sma_input).unwrap().values
+				};
+
+				for i in first_valid_output..data.len() {
+					if result.middleband[i].is_finite() && fast_ma[i].is_finite() {
+						prop_assert!(
+							(result.middleband[i] - fast_ma[i]).abs() <= 1e-9,
+							"[{}] Middle band != fast MA at idx {}: {} vs {}",
+							test_name, i, result.middleband[i], fast_ma[i]
+						);
+					}
+				}
+
+				// Property 8: Band spread bounds
+				// The spread should never be negative and should be bounded by reasonable values
+				for i in first_valid_output..data.len() {
+					let upper = result.upperband[i];
+					let middle = result.middleband[i];
+					let lower = result.lowerband[i];
+					
+					if upper.is_finite() && middle.is_finite() && lower.is_finite() {
+						let upper_spread = upper - middle;
+						let lower_spread = middle - lower;
+						
+						prop_assert!(
+							upper_spread >= -1e-10,
+							"[{}] Negative upper spread at idx {}: {}",
+							test_name, i, upper_spread
+						);
+						prop_assert!(
+							lower_spread >= -1e-10,
+							"[{}] Negative lower spread at idx {}: {}",
+							test_name, i, lower_spread
+						);
+						
+						// Spread should be reasonable relative to the data range
+						let data_range = data.iter()
+							.filter(|x| x.is_finite())
+							.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &x| {
+								(min.min(x), max.max(x))
+							});
+						let range_span = data_range.1 - data_range.0;
+						
+						// Spread should be reasonable - using a very generous bound
+						// to accommodate high volatility scenarios
+						if range_span > 0.0 {
+							prop_assert!(
+								upper_spread <= range_span * devup * 10.0,
+								"[{}] Upper spread unreasonably large at idx {}: {} (range_span={})",
+								test_name, i, upper_spread, range_span
+							);
+							prop_assert!(
+								lower_spread <= range_span * devdn * 10.0,
+								"[{}] Lower spread unreasonably large at idx {}: {} (range_span={})",
+								test_name, i, lower_spread, range_span
+							);
+						}
+					}
+				}
+
+				// Property 9: Parameter validation
+				// Test that invalid parameters are properly rejected
+				let invalid_params = vec![
+					MabParams {
+						fast_period: Some(0),
+						slow_period: Some(10),
+						..Default::default()
+					},
+					MabParams {
+						fast_period: Some(10),
+						slow_period: Some(0),
+						..Default::default()
+					},
+					MabParams {
+						fast_period: Some(data.len() + 1),
+						slow_period: Some(10),
+						..Default::default()
+					},
+				];
+
+				for invalid_param in invalid_params {
+					let invalid_input = MabInput::from_slice(&data, invalid_param);
+					let invalid_result = mab_with_kernel(&invalid_input, kernel);
+					prop_assert!(
+						invalid_result.is_err(),
+						"[{}] Expected error for invalid parameters but got Ok",
+						test_name
+					);
+				}
+
+				// Property 10: Edge case - equal fast and slow periods
+				// When fast_period == slow_period, the difference between MAs approaches zero,
+				// resulting in very small or zero standard deviation
+				if fast_period == slow_period && data.len() > first_valid_output {
+					// Test with equal periods
+					let equal_params = MabParams {
+						fast_period: Some(fast_period),
+						slow_period: Some(fast_period), // Same as fast
+						devup: Some(devup),
+						devdn: Some(devdn),
+						fast_ma_type: params.fast_ma_type.clone(),
+						slow_ma_type: params.slow_ma_type.clone(),
+					};
+					let equal_input = MabInput::from_slice(&data, equal_params);
+					let equal_result = mab_with_kernel(&equal_input, kernel).unwrap();
+					
+					// When periods are equal and MA types are the same, 
+					// the bands should be very close together
+					if params.fast_ma_type == params.slow_ma_type {
+						for i in first_valid_output..data.len().min(first_valid_output + 10) {
+							if equal_result.upperband[i].is_finite() && 
+							   equal_result.middleband[i].is_finite() && 
+							   equal_result.lowerband[i].is_finite() {
+								let upper_spread = equal_result.upperband[i] - equal_result.middleband[i];
+								let lower_spread = equal_result.middleband[i] - equal_result.lowerband[i];
+								
+								// Spreads should be very small when periods are equal
+								prop_assert!(
+									upper_spread <= 1e-6 || upper_spread <= equal_result.middleband[i].abs() * 1e-6,
+									"[{}] Equal periods: upper spread too large at idx {}: {}",
+									test_name, i, upper_spread
+								);
+								prop_assert!(
+									lower_spread <= 1e-6 || lower_spread <= equal_result.middleband[i].abs() * 1e-6,
+									"[{}] Equal periods: lower spread too large at idx {}: {}",
+									test_name, i, lower_spread
+								);
+							}
+						}
+					}
+				}
+
+				Ok(())
+			})?;
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_mab_tests {
 		($($test_fn:ident),*) => {
 			paste::paste! {
@@ -2035,5 +2399,9 @@ mod tests {
 	}
 
 	generate_all_mab_tests!(check_mab_no_poison);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_mab_tests!(check_mab_property);
+	
 	gen_batch_tests!(check_batch_no_poison);
 }

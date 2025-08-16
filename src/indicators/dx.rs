@@ -44,6 +44,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
+
 #[derive(Debug, Clone)]
 pub enum DxData<'a> {
 	Candles {
@@ -1022,6 +1025,244 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_dx_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy generates realistic OHLC data
+		let strat = (2usize..=50)  // DX requires minimum period of 2
+			.prop_flat_map(|period| {
+				(
+					100.0f64..5000.0f64,  // Base price
+					(period + 20)..400,    // Data length
+					0.001f64..0.05f64,     // Volatility factor
+					-0.01f64..0.01f64,     // Trend factor
+					Just(period),
+				)
+			})
+			.prop_map(|(base_price, data_len, volatility, trend, period)| {
+				// Generate synthetic OHLC data
+				let mut high = Vec::with_capacity(data_len);
+				let mut low = Vec::with_capacity(data_len);
+				let mut close = Vec::with_capacity(data_len);
+				
+				let mut price = base_price;
+				for i in 0..data_len {
+					// Add trend and random volatility
+					let trend_component = trend * i as f64;
+					let random_component = ((i * 7 + 13) % 17) as f64 / 17.0 - 0.5;
+					price = base_price + trend_component + random_component * volatility * base_price;
+					
+					// Generate OHLC with realistic constraints
+					let daily_volatility = volatility * price;
+					let h = price + daily_volatility * (0.5 + ((i * 3) % 7) as f64 / 14.0);
+					let l = price - daily_volatility * (0.5 + ((i * 5) % 7) as f64 / 14.0);
+					let c = l + (h - l) * (0.3 + ((i * 11) % 7) as f64 / 10.0);
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+				}
+				
+				(high, low, close, period)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(high, low, close, period)| {
+				let params = DxParams { period: Some(period) };
+				let input = DxInput::from_hlc_slices(&high, &low, &close, params.clone());
+
+				let DxOutput { values: out } = dx_with_kernel(&input, kernel).unwrap();
+				let DxOutput { values: ref_out } = dx_with_kernel(&input, Kernel::Scalar).unwrap();
+
+				// Property 1: DX values should be between 0 and 100
+				for (i, &val) in out.iter().enumerate() {
+					if !val.is_nan() {
+						prop_assert!(
+							val >= -1e-9 && val <= 100.0 + 1e-9,
+							"[{}] DX value {} at index {} is outside [0, 100] range",
+							test_name, val, i
+						);
+					}
+				}
+
+				// Property 2: Warmup period should be respected
+				// Note: Since synthetic data has no NaN values, first_valid_idx = 0
+				// Therefore warmup = 0 + period - 1 = period - 1
+				let warmup = period - 1;
+				for i in 0..warmup {
+					prop_assert!(
+						out[i].is_nan(),
+						"[{}] Expected NaN during warmup at index {}, got {}",
+						test_name, i, out[i]
+					);
+				}
+
+				// Property 3: After warmup, values should not be NaN (unless input has NaN)
+				if out.len() > warmup + 10 {
+					for i in (warmup + 10)..out.len() {
+						prop_assert!(
+							!out[i].is_nan(),
+							"[{}] Unexpected NaN after warmup at index {}",
+							test_name, i
+						);
+					}
+				}
+
+				// Property 4: Kernel consistency - all kernels should produce same results
+				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
+					if val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					
+					let diff = (val - ref_val).abs();
+					prop_assert!(
+						diff < 1e-9,
+						"[{}] Kernel mismatch at index {}: {} vs {} (diff: {})",
+						test_name, i, val, ref_val, diff
+					);
+				}
+
+				// Property 5: Special case - constant prices
+				let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if all_same_high && all_same_low && all_same_close {
+					// With no directional movement, DX should be near 0
+					if out.len() > warmup + 10 {
+						let stable_vals = &out[warmup + 10..];
+						for (i, &val) in stable_vals.iter().enumerate() {
+							if !val.is_nan() {
+								prop_assert!(
+									val < 1.0,  // Tightened threshold - no movement means DX near 0
+									"[{}] With constant prices, expected DX < 1.0, got {} at index {}",
+									test_name, val, warmup + 10 + i
+								);
+							}
+						}
+					}
+				}
+
+				// Property 6: Improved trend detection (for longer series)
+				if period <= 20 && out.len() > 100 {
+					// Calculate actual trend in the data
+					let mid = out.len() / 2;
+					let first_half_avg_price = close[..mid].iter().sum::<f64>() / mid as f64;
+					let second_half_avg_price = close[mid..].iter().sum::<f64>() / (out.len() - mid) as f64;
+					let price_change = ((second_half_avg_price - first_half_avg_price) / first_half_avg_price).abs();
+					
+					// For significant price changes, DX should reflect trend strength
+					if price_change > 0.05 {
+						// Compare average DX in second half vs first half
+						let first_half_dx = &out[warmup..mid];
+						let second_half_dx = &out[mid..];
+						
+						let first_avg = first_half_dx.iter()
+							.filter(|v| !v.is_nan())
+							.sum::<f64>() / first_half_dx.len() as f64;
+						let second_avg = second_half_dx.iter()
+							.filter(|v| !v.is_nan())
+							.sum::<f64>() / second_half_dx.len() as f64;
+						
+						// In trending markets, average DX should be meaningful (> 20)
+						prop_assert!(
+							second_avg > 20.0 || first_avg > 20.0,
+							"[{}] Expected higher average DX in trending market. First half avg: {}, Second half avg: {}",
+							test_name, first_avg, second_avg
+						);
+					}
+				}
+
+				// Property 7: Perfect trend test
+				// Generate a perfect uptrend or downtrend and verify high DX
+				if period <= 14 && out.len() > 50 {
+					// Use the first close price as base for perfect trend
+					let trend_base = close[0];
+					let perfect_trend = (0..50)
+						.map(|i| {
+							let price = trend_base + (i as f64 * trend_base * 0.01); // 1% per period
+							let h = price * 1.005;  // Small high-low range
+							let l = price * 0.995;
+							let c = price;
+							(h, l, c)
+						})
+						.collect::<Vec<_>>();
+					
+					let perfect_high: Vec<f64> = perfect_trend.iter().map(|&(h, _, _)| h).collect();
+					let perfect_low: Vec<f64> = perfect_trend.iter().map(|&(_, l, _)| l).collect();
+					let perfect_close: Vec<f64> = perfect_trend.iter().map(|&(_, _, c)| c).collect();
+					
+					let perfect_input = DxInput::from_hlc_slices(&perfect_high, &perfect_low, &perfect_close, params.clone());
+					let DxOutput { values: perfect_out } = dx_with_kernel(&perfect_input, kernel).unwrap();
+					
+					// In a perfect trend, DX should be high after stabilization
+					if perfect_out.len() > warmup + 10 {
+						let stable_dx = &perfect_out[warmup + 10..];
+						let avg_dx = stable_dx.iter()
+							.filter(|v| !v.is_nan())
+							.sum::<f64>() / stable_dx.len() as f64;
+						
+						prop_assert!(
+							avg_dx > 50.0,  // Strong trend should show DX > 50
+							"[{}] Expected high DX (>50) in perfect trend, got avg {}",
+							test_name, avg_dx
+						);
+					}
+				}
+
+				// Property 8: Ranging market test
+				// Generate oscillating prices and verify low DX
+				if period <= 14 && out.len() > 50 {
+					// Use the first close price as base for ranging market
+					let range_base = close[0];
+					let ranging_data = (0..50)
+						.map(|i| {
+							// Oscillate between two price levels
+							let price = if i % 4 < 2 {
+								range_base * 1.01
+							} else {
+								range_base * 0.99
+							};
+							let h = price * 1.002;
+							let l = price * 0.998;
+							let c = price;
+							(h, l, c)
+						})
+						.collect::<Vec<_>>();
+					
+					let ranging_high: Vec<f64> = ranging_data.iter().map(|&(h, _, _)| h).collect();
+					let ranging_low: Vec<f64> = ranging_data.iter().map(|&(_, l, _)| l).collect();
+					let ranging_close: Vec<f64> = ranging_data.iter().map(|&(_, _, c)| c).collect();
+					
+					let ranging_input = DxInput::from_hlc_slices(&ranging_high, &ranging_low, &ranging_close, params.clone());
+					let DxOutput { values: ranging_out } = dx_with_kernel(&ranging_input, kernel).unwrap();
+					
+					// In a ranging market, DX should be low after stabilization
+					if ranging_out.len() > warmup + 10 {
+						let stable_dx = &ranging_out[warmup + 10..];
+						let avg_dx = stable_dx.iter()
+							.filter(|v| !v.is_nan())
+							.sum::<f64>() / stable_dx.len() as f64;
+						
+						// Note: Even small oscillations can produce moderate DX values
+						// since DX measures absolute directional movement
+						prop_assert!(
+							avg_dx < 65.0,  // More realistic threshold for oscillating markets
+							"[{}] Expected moderate DX (<65) in ranging market, got avg {}",
+							test_name, avg_dx
+						);
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	generate_all_dx_tests!(
 		check_dx_partial_params,
 		check_dx_accuracy,
@@ -1034,6 +1275,9 @@ mod tests {
 		check_dx_streaming,
 		check_dx_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_dx_tests!(check_dx_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

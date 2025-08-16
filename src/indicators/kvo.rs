@@ -982,6 +982,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_kvo_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test_name);
@@ -1296,6 +1298,293 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_kvo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+
+		// Strategy for generating realistic OHLCV data
+		let strat = (2usize..=10, 5usize..=20)  // (short_period, long_period)
+			.prop_flat_map(|(short, long)| {
+				(
+					// Generate data length between 50 and 500 points
+					prop::collection::vec(
+						(
+							// Generate realistic OHLC prices
+							(100.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+							0.01f64..0.1f64,  // volatility factor
+							// Volume between 100 and 1M
+							(100.0f64..1_000_000.0f64).prop_filter("positive", |x| *x > 0.0 && x.is_finite()),
+						),
+						50..=500,
+					),
+					Just(short),
+					Just(long.max(short)),  // Ensure long >= short
+				)
+			});
+
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |(price_data, short_period, long_period)| {
+				// Generate OHLCV data from price seeds
+				let mut high = Vec::with_capacity(price_data.len());
+				let mut low = Vec::with_capacity(price_data.len());
+				let mut close = Vec::with_capacity(price_data.len());
+				let mut volume = Vec::with_capacity(price_data.len());
+				
+				for (base_price, volatility, vol) in &price_data {
+					let range = base_price * volatility;
+					let h = base_price + range * 0.5;
+					let l = base_price - range * 0.5;
+					let c = l + (h - l) * 0.6;  // Close slightly above middle
+					
+					high.push(h);
+					low.push(l);
+					close.push(c);
+					volume.push(*vol);
+				}
+
+				// Create input
+				let params = KvoParams {
+					short_period: Some(short_period),
+					long_period: Some(long_period),
+				};
+				let input = KvoInput::from_slices(&high, &low, &close, &volume, params.clone());
+
+				// Calculate with specified kernel and scalar reference
+				let result = kvo_with_kernel(&input, kernel)?;
+				let reference = kvo_with_kernel(&input, Kernel::Scalar)?;
+
+				// Property 1: Kernel consistency - results should match between kernels
+				for i in 0..result.values.len() {
+					let val = result.values[i];
+					let ref_val = reference.values[i];
+					
+					if val.is_nan() && ref_val.is_nan() {
+						continue;
+					}
+					
+					if val.is_finite() && ref_val.is_finite() {
+						let ulp_diff = val.to_bits().abs_diff(ref_val.to_bits());
+						prop_assert!(
+							(val - ref_val).abs() <= 1e-9 || ulp_diff <= 8,
+							"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							test_name, i, val, ref_val, ulp_diff
+						);
+					} else {
+						prop_assert_eq!(
+							val.is_finite(), ref_val.is_finite(),
+							"[{}] Finite mismatch at idx {}: {} vs {}",
+							test_name, i, val, ref_val
+						);
+					}
+				}
+
+				// Find first valid index (all inputs are non-NaN)
+				let first_valid_idx = high
+					.iter()
+					.zip(low.iter())
+					.zip(close.iter())
+					.zip(volume.iter())
+					.position(|(((h, l), c), v)| !h.is_nan() && !l.is_nan() && !c.is_nan() && !v.is_nan())
+					.unwrap_or(0);
+
+				// Property 2: Warmup period - NaN values only before first_valid_idx + 1
+				// KVO needs at least 2 data points to start calculating (outputs start at first_valid_idx + 1)
+				for i in 0..result.values.len() {
+					if i < first_valid_idx + 1 {
+						prop_assert!(
+							result.values[i].is_nan(),
+							"[{}] Expected NaN during warmup at idx {}, got {}",
+							test_name, i, result.values[i]
+						);
+					}
+				}
+				
+				// Property 3: After warmup, all values should be finite (no NaN)
+				if result.values.len() > first_valid_idx + 1 {
+					for i in (first_valid_idx + 1)..result.values.len() {
+						prop_assert!(
+							result.values[i].is_finite(),
+							"[{}] Expected finite value after warmup at idx {}, got {}",
+							test_name, i, result.values[i]
+						);
+					}
+				}
+
+				// Property 4: For constant prices and volumes, oscillator should converge to near zero
+				let all_same_price = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+									 low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
+									 close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				let all_same_volume = volume.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
+				
+				if all_same_price && all_same_volume && result.values.len() > 100 {
+					// After sufficient data points, oscillator should be near zero
+					let last_values = &result.values[result.values.len()-10..];
+					for val in last_values {
+						if val.is_finite() {
+							prop_assert!(
+								val.abs() < 0.1,
+								"[{}] Constant data should produce near-zero oscillator, got {}",
+								test_name, val
+							);
+						}
+					}
+				}
+
+				// Property 5: Short EMA period effect - shorter period = more responsive
+				// When short_period is very small (1-2), oscillator should be more volatile
+				if short_period <= 2 && result.values.len() > first_valid_idx + 20 {
+					let valid_values: Vec<f64> = result.values[(first_valid_idx + 2)..]
+						.iter()
+						.filter(|v| v.is_finite())
+						.copied()
+						.collect();
+					
+					if valid_values.len() > 10 {
+						// Calculate standard deviation of changes
+						let changes: Vec<f64> = valid_values.windows(2)
+							.map(|w| (w[1] - w[0]).abs())
+							.collect();
+						
+						let avg_change = changes.iter().sum::<f64>() / changes.len() as f64;
+						
+						// With very short period, expect some movement (not stuck at zero)
+						if !all_same_price {
+							prop_assert!(
+								avg_change > 1e-12,
+								"[{}] Short period {} should produce some oscillator movement",
+								test_name, short_period
+							);
+						}
+					}
+				}
+
+				// Property 6: Trend detection - verify clear trends affect oscillator direction
+				// Check if we have a clear uptrend or downtrend in the data
+				if result.values.len() > first_valid_idx + 20 {
+					// Calculate HLC trend over the last 20 points (if available)
+					let trend_start = result.values.len().saturating_sub(20);
+					let trend_end = result.values.len();
+					
+					if trend_start > first_valid_idx + 1 {
+						let mut hlc_values = Vec::new();
+						for i in trend_start..trend_end {
+							hlc_values.push(high[i] + low[i] + close[i]);
+						}
+						
+						// Check if we have a clear trend (most values increasing or decreasing)
+						let mut up_moves = 0;
+						let mut down_moves = 0;
+						for window in hlc_values.windows(2) {
+							if window[1] > window[0] * 1.001 {  // 0.1% threshold
+								up_moves += 1;
+							} else if window[1] < window[0] * 0.999 {
+								down_moves += 1;
+							}
+						}
+						
+						// If we have a strong trend with good volume, check oscillator direction
+						let avg_volume = volume[trend_start..trend_end].iter().sum::<f64>() / 20.0;
+						if avg_volume > 1000.0 {
+							// Get the last few oscillator values
+							let last_oscillator_values = &result.values[trend_end.saturating_sub(5)..trend_end];
+							let avg_oscillator = last_oscillator_values.iter()
+								.filter(|v| v.is_finite())
+								.sum::<f64>() / last_oscillator_values.len() as f64;
+							
+							// Strong uptrend should produce positive oscillator (eventually)
+							if up_moves > 15 && down_moves < 3 {
+								prop_assert!(
+									avg_oscillator > -100.0,  // Very loose - just shouldn't be strongly negative
+									"[{}] Strong uptrend should not produce strongly negative oscillator: {}",
+									test_name, avg_oscillator
+								);
+							}
+							// Strong downtrend should produce negative oscillator (eventually)
+							else if down_moves > 15 && up_moves < 3 {
+								prop_assert!(
+									avg_oscillator < 100.0,  // Very loose - just shouldn't be strongly positive
+									"[{}] Strong downtrend should not produce strongly positive oscillator: {}",
+									test_name, avg_oscillator
+								);
+							}
+						}
+					}
+				}
+
+				// Property 7: Parameter relationship - long_period >= short_period
+				prop_assert!(
+					long_period >= short_period,
+					"[{}] Long period {} should be >= short period {}",
+					test_name, long_period, short_period
+				);
+
+				// Property 8: Volume impact - zero or very small volume should produce smaller oscillator values
+				// Create a test case with very small volume
+				let mut small_vol = volume.clone();
+				for v in &mut small_vol {
+					*v *= 1e-10;  // Make volume extremely small
+				}
+				
+				let small_vol_input = KvoInput::from_slices(&high, &low, &close, &small_vol, params.clone());
+				if let Ok(small_vol_result) = kvo_with_kernel(&small_vol_input, kernel) {
+					// Compare magnitudes - small volume should produce smaller oscillator values
+					for i in (first_valid_idx + 1)..result.values.len() {
+						if result.values[i].is_finite() && small_vol_result.values[i].is_finite() {
+							// Small volume oscillator should be much smaller in magnitude
+							prop_assert!(
+								small_vol_result.values[i].abs() <= result.values[i].abs() * 1e-8 + 1e-10,
+								"[{}] Small volume should produce smaller oscillator at idx {}: {} vs {}",
+								test_name, i, small_vol_result.values[i], result.values[i]
+							);
+						}
+					}
+				}
+
+				// Property 9: Volume Force calculation bounds
+				// The volume force formula includes (dm/cm * 2.0 - 1.0).abs() which should be bounded
+				// When cm > 0, this expression should be in range [0, 1] after abs()
+				if result.values.len() > first_valid_idx + 10 {
+					// Manually check a few volume force calculations
+					let mut cm = 0.0;
+					let mut trend = -1;
+					let mut prev_hlc = high[first_valid_idx] + low[first_valid_idx] + close[first_valid_idx];
+					
+					for i in (first_valid_idx + 1)..(first_valid_idx + 10).min(high.len()) {
+						let hlc = high[i] + low[i] + close[i];
+						let dm = high[i] - low[i];
+						
+						// Update trend and cm as in the actual implementation
+						if hlc > prev_hlc && trend != 1 {
+							trend = 1;
+							cm = high[i - 1] - low[i - 1];
+						} else if hlc < prev_hlc && trend != 0 {
+							trend = 0;
+							cm = high[i - 1] - low[i - 1];
+						}
+						cm += dm;
+						
+						// Check the volume force component bounds
+						if cm > 1e-10 {  // Avoid division by very small numbers
+							let vf_component = (dm / cm * 2.0 - 1.0).abs();
+							prop_assert!(
+								vf_component <= 1.0 + 1e-9,  // Allow small numerical error
+								"[{}] Volume force component out of bounds at idx {}: {} (dm={}, cm={})",
+								test_name, i, vf_component, dm, cm
+							);
+						}
+						
+						prev_hlc = hlc;
+					}
+				}
+
+				Ok(())
+			})
+			.unwrap();
+
+		Ok(())
+	}
+
 	macro_rules! generate_all_kvo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1332,6 +1621,9 @@ mod tests {
 		check_kvo_streaming,
 		check_kvo_no_poison
 	);
+
+	#[cfg(feature = "proptest")]
+	generate_all_kvo_tests!(check_kvo_property);
 
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);

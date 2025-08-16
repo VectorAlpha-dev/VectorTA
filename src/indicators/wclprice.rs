@@ -748,6 +748,8 @@ mod tests {
 	use super::*;
 	use crate::skip_if_unsupported;
 	use crate::utilities::data_loader::read_candles_from_csv;
+	#[cfg(feature = "proptest")]
+	use proptest::prelude::*;
 
 	fn check_wclprice_slices(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
@@ -915,6 +917,132 @@ mod tests {
 		Ok(()) // No-op in release builds
 	}
 	
+	#[cfg(feature = "proptest")]
+	#[allow(clippy::float_cmp)]
+	fn check_wclprice_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
+		skip_if_unsupported!(kernel, test_name);
+		
+		// Generate realistic price data with proper OHLC constraints
+		let strat = (2usize..=400).prop_flat_map(|len| {
+			prop::collection::vec(
+				// Generate low first, then high >= low, then close within [low, high]
+				// This ensures valid OHLC data where close is always between low and high
+				(0.0f64..1e6f64)
+					.prop_filter("finite non-negative price", |x| x.is_finite() && *x >= 0.0)
+					.prop_flat_map(|low| {
+						(0.0f64..10000.0f64) // Allow larger spreads for more realistic volatility
+							.prop_filter("finite diff", |x| x.is_finite())
+							.prop_flat_map(move |high_diff| {
+								let high = low + high_diff;
+								(
+									Just(low),
+									Just(high),
+									(low..=high).prop_filter("finite close", |x| x.is_finite()),
+								)
+							})
+					}),
+				len,
+			)
+		});
+		
+		proptest::test_runner::TestRunner::default()
+			.run(&strat, |price_data| {
+				// Extract high, low, close arrays from generated data
+				let mut high = Vec::with_capacity(price_data.len());
+				let mut low = Vec::with_capacity(price_data.len());
+				let mut close = Vec::with_capacity(price_data.len());
+				
+				for (l, h, c) in price_data.iter() {
+					low.push(*l);
+					high.push(*h);
+					close.push(*c);
+				}
+				
+				// Create input and compute output
+				let input = WclpriceInput::from_slices(&high, &low, &close);
+				let WclpriceOutput { values: out } = wclprice_with_kernel(&input, kernel)?;
+				
+				// Also compute with scalar kernel for reference
+				let WclpriceOutput { values: ref_out } = wclprice_with_kernel(&input, Kernel::Scalar)?;
+				
+				// Verify properties for each output value
+				for i in 0..price_data.len() {
+					let h = high[i];
+					let l = low[i];
+					let c = close[i];
+					let y = out[i];
+					let r = ref_out[i];
+					
+					// Property 1: Formula correctness
+					// WCLPRICE = (high + low + 2*close) / 4
+					if h.is_finite() && l.is_finite() && c.is_finite() {
+						let expected = (h + l + 2.0 * c) / 4.0;
+						prop_assert!(
+							(y - expected).abs() <= 1e-9,
+							"Formula mismatch at idx {}: got {} expected {} (h={}, l={}, c={})",
+							i, y, expected, h, l, c
+						);
+					} else {
+						// If any input is NaN/infinite, output should be NaN
+						prop_assert!(
+							y.is_nan(),
+							"Expected NaN at idx {} when input has non-finite values, got {}",
+							i, y
+						);
+					}
+					
+					// Property 2: Output bounds
+					// WCLPRICE should be within the range of input values
+					if h.is_finite() && l.is_finite() && c.is_finite() {
+						let min_val = h.min(l).min(c);
+						let max_val = h.max(l).max(c);
+						prop_assert!(
+							y >= min_val - 1e-9 && y <= max_val + 1e-9,
+							"Output {} at idx {} outside bounds [{}, {}]",
+							y, i, min_val, max_val
+						);
+					}
+					
+					// Property 3: Kernel consistency
+					// All kernels should produce identical results
+					let y_bits = y.to_bits();
+					let r_bits = r.to_bits();
+					
+					if !y.is_finite() || !r.is_finite() {
+						// For NaN/infinite values, bit patterns should match exactly
+						prop_assert!(
+							y_bits == r_bits,
+							"NaN/infinite mismatch at idx {}: {} vs {} (bits: {:016x} vs {:016x})",
+							i, y, r, y_bits, r_bits
+						);
+					} else {
+						// For finite values, allow small ULP difference
+						let ulp_diff: u64 = y_bits.abs_diff(r_bits);
+						prop_assert!(
+							(y - r).abs() <= 1e-9 || ulp_diff <= 4,
+							"Kernel mismatch at idx {}: {} vs {} (ULP={})",
+							i, y, r, ulp_diff
+						);
+					}
+					
+					// Property 4: Special cases
+					// When all prices are equal, WCLPRICE should equal that price
+					if (h - l).abs() < f64::EPSILON && (h - c).abs() < f64::EPSILON {
+						prop_assert!(
+							(y - h).abs() <= 1e-9,
+							"When all prices equal {}, WCLPRICE should be {}, got {}",
+							h, h, y
+						);
+					}
+				}
+				
+				Ok(())
+			})
+			.unwrap();
+		
+		Ok(())
+	}
+	
 	macro_rules! generate_all_wclprice_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -933,6 +1061,9 @@ mod tests {
 		check_wclprice_partial_nan,
 		check_wclprice_no_poison
 	);
+	
+	#[cfg(feature = "proptest")]
+	generate_all_wclprice_tests!(check_wclprice_property);
 	fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
 		skip_if_unsupported!(kernel, test);
 		let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
